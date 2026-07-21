@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Component manifest for the anvil per-host sandbox orchestrator.
+# Component manifest for the blaze per-host sandbox orchestrator.
 
 [component]
-name = "anvil"
+name = "blaze"
 version = "0.2.0"
 layer = "runtime"
-domain = "anvil"
+domain = "blaze"
 description = "Per-host sandbox orchestrator — multi-backend lifecycle management, kernel coordination"
 
 [build]
@@ -15,14 +15,14 @@ targets = ["release"]
 [build.toolchain]
 rust = ">=1.88.0"
 
-# Binary installation handled by dist/anvil.spec (RPM). Not in main build system while in Labs.
+# Binary installation handled by dist/blaze.spec (RPM). Not in main build system while in Labs.
 
 [packaging]
-rpm_name = "anvil"
-service_name = "anvil.service"
-config_dir = "/etc/anolisa/anvil"
-state_dir = "/var/lib/anvil"
-runtime_dir = "/run/anvil"
+rpm_name = "blaze"
+service_name = "blazed.service"
+config_dir = "/etc/anolisa/blaze"
+state_dir = "/var/lib/blaze"
+runtime_dir = "/run/blaze"
 tcp_port = 14159
 
 [environment]

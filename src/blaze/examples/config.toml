@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# Example anvil daemon configuration.
+# Example blaze daemon configuration.
 #
-# Production deployments install this file at /etc/anolisa/anvil/config.toml.
+# Production deployments install this file at /etc/anolisa/blaze/config.toml.
 # All fields shown below include their default values; you only need to
 # specify values that differ from the defaults.
 
@@ -15,13 +15,13 @@ log_level = "info"
 
 # Root directory for persistent daemon state (instance metadata, templates,
 # images). The daemon creates subdirectories automatically on first startup.
-# Default: "/var/lib/anvil".
-state_dir = "/var/lib/anvil"
+# Default: "/var/lib/blaze".
+state_dir = "/var/lib/blaze"
 
 # Path to the Unix domain socket for local API access.
 # Clients connect via: curl --unix-socket <path> http://localhost/v1/...
-# Default: "/run/anvil/api.sock".
-socket = "/run/anvil/api.sock"
+# Default: "/run/blaze/api.sock".
+socket = "/run/blaze/api.sock"
 
 # ---------------------------------------------------------------------------
 # Optional TCP listener for remote API access.
@@ -59,8 +59,8 @@ bubblewrap = "/usr/bin/bwrap"
 # ---------------------------------------------------------------------------
 [policy]
 # Directory containing policy TOML files. The daemon loads all *.toml files
-# in this directory at startup.  Default: "/etc/anolisa/anvil/policies".
-dir = "/etc/anolisa/anvil/policies"
+# in this directory at startup.  Default: "/etc/anolisa/blaze/policies".
+dir = "/etc/anolisa/blaze/policies"
 
 # Behavior when a policy file fails to parse or validate.
 # Options: "fail" (abort daemon startup), "warn" (log and skip the file).
@@ -73,8 +73,8 @@ on_load_error = "fail"
 [storage]
 # Primary directory for vmlinux kernels, rootfs base images, and memfile
 # bases. All runtime image files are resolved relative to this path.
-# Default: "/var/lib/anvil/images".
-images_dir = "/var/lib/anvil/images"
+# Default: "/var/lib/blaze/images".
+images_dir = "/var/lib/blaze/images"
 
 # ---------------------------------------------------------------------------
 # Instance pool settings (global defaults for warm-pool recycling).
@@ -94,8 +94,8 @@ gc_interval = "5m"
 # ---------------------------------------------------------------------------
 [template]
 # Directory where the daemon stores template snapshots.
-# Default: "/var/lib/anvil/templates".
-dir = "/var/lib/anvil/templates"
+# Default: "/var/lib/blaze/templates".
+dir = "/var/lib/blaze/templates"
 
 # How often the template GC runs to evict unused templates.
 # Format: duration string.  Default: "10m".
@@ -111,5 +111,5 @@ idle_ttl = "1h"
 [metrics]
 # Path to the Unix domain socket serving Prometheus metrics.
 # A Prometheus scraper can connect here to pull /metrics.
-# Default: "/run/anvil/metrics.sock".
-prometheus_socket = "/run/anvil/metrics.sock"
+# Default: "/run/blaze/metrics.sock".
+prometheus_socket = "/run/blaze/metrics.sock"

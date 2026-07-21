@@ -1,10 +1,10 @@
-# ANOLISA Anvil
+# ANOLISA Blaze
 
 Per-host sandbox daemon that manages sandbox instance lifecycles via HTTP API.
 
 ## Overview
 
-Anvil is an API-only daemon that allocates, monitors, and destroys
+Blaze is an API-only daemon that allocates, monitors, and destroys
 sandboxed execution environments on a single host. It supports multiple backends
 (Firecracker microVM, bubblewrap/bwrap) with policy-driven selection, and is
 designed to be called by upper-layer platforms such as Substrate or E2B-style
@@ -12,7 +12,7 @@ orchestrators.
 
 ## Features
 
-- **HTTP API** — Unix domain socket (`/run/anvil/api.sock`) + TCP (`:14159`)
+- **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **Policy-driven backend selection** — workload class → backend priority list
 - **Lifecycle state machine** — 8 states (Pending → Creating → Running → Paused → Checkpointed → Reset → Warm → Destroyed)
 - **Warm pool management** — pre-warmed instances with TTL-based GC
@@ -25,39 +25,39 @@ orchestrators.
 
 ```bash
 # Build
-cd src/anvil
+cd src/blaze
 cargo build --release
 
 # Run daemon (dev: override policy.dir to use local examples)
-sudo ./target/release/anvil daemon start --config examples/config.toml
-# Note: the default config sets policy.dir = /etc/anolisa/anvil/policies.
+sudo ./target/release/blazed daemon start --config examples/config.toml
+# Note: the default config sets policy.dir = /etc/anolisa/blaze/policies.
 # For source-checkout testing, create a symlink or override:
-#   sudo mkdir -p /etc/anolisa/anvil
-#   sudo ln -s $(pwd)/examples/policies /etc/anolisa/anvil/policies
+#   sudo mkdir -p /etc/anolisa/blaze
+#   sudo ln -s $(pwd)/examples/policies /etc/anolisa/blaze/policies
 
 # Health check
-curl --unix-socket /run/anvil/api.sock http://localhost/v1/health
+curl --unix-socket /run/blaze/api.sock http://localhost/v1/health
 
 # Create a sandbox
-curl -X POST --unix-socket /run/anvil/api.sock http://localhost/v1/instances \
+curl -X POST --unix-socket /run/blaze/api.sock http://localhost/v1/instances \
   -H 'Content-Type: application/json' \
   -d '{"workload_class":"agent-rl","image_digest":"sha256:..."}'
 ```
 
 ## Configuration
 
-The daemon reads a TOML config file (default: `/etc/anolisa/anvil/config.toml`)
+The daemon reads a TOML config file (default: `/etc/anolisa/blaze/config.toml`)
 and a policies directory containing per-workload-class policy files.
 
 ```
-/etc/anolisa/anvil/
+/etc/anolisa/blaze/
 ├── config.toml
 └── policies/
     ├── agent-rl.toml
     └── agent-tool.toml
 ```
 
-See `src/anvil/examples/` for annotated sample configurations.
+See `src/blaze/examples/` for annotated sample configurations.
 
 ## API Endpoints
 
@@ -85,18 +85,18 @@ See `src/anvil/examples/` for annotated sample configurations.
 ## Project Layout
 
 ```
-src/anvil/
+src/blaze/
 ├── crates/
-│   ├── anvil-core/   # Library: policy, lifecycle, pool, template, kernel, config
-│   └── anvil/        # Binary: daemon, API server, spawners, metrics
+│   ├── blaze-core/   # Library: policy, lifecycle, pool, template, kernel, config
+│   └── blazed/       # Binary: daemon, API server, spawners, metrics
 ├── examples/         # config.toml, policies/
-├── dist/             # anvil.service, anvil.spec, tmpfiles
+├── dist/             # blazed.service, blaze.spec, tmpfiles
 └── manifests/        # Component metadata
 ```
 
 ## Requirements
 
-- Rust 1.88+ (see `src/anvil/rust-toolchain.toml`)
+- Rust 1.88+ (see `src/blaze/rust-toolchain.toml`)
 - Linux host with root privileges for sandbox backends
 
 ## License
