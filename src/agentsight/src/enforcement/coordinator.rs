@@ -1,5 +1,6 @@
 //! Desired-state coordinator between AgentSight, SQLite, and the enforcer.
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -130,6 +131,7 @@ pub struct EnforcementCoordinator {
     client: EnforcementClient,
     store: EnforcementStore,
     ingestion_readiness: IngestionReadiness,
+    lifecycle: Arc<Mutex<()>>,
 }
 
 impl EnforcementCoordinator {
@@ -139,6 +141,7 @@ impl EnforcementCoordinator {
             client,
             store,
             ingestion_readiness: IngestionReadiness::new(),
+            lifecycle: Arc::new(Mutex::new(())),
         }
     }
 
@@ -150,16 +153,31 @@ impl EnforcementCoordinator {
     /// sanitized failed state. Returns [`EnforcementCoordinatorError::IngestionUnavailable`]
     /// before persisting when no violation subscription is acknowledged.
     pub fn apply(&self, request: ApplyPolicy) -> Result<Binding, EnforcementCoordinatorError> {
+        let _lifecycle = self.lifecycle();
         // A disconnect can still race this check; durable replay is required to close that gap.
         if !self.ingestion_readiness.is_ready() {
             return Err(EnforcementCoordinatorError::IngestionUnavailable);
         }
-        self.store.upsert_binding(&Binding {
+        let pending = Binding {
             request: request.clone(),
             state: BindingState::Pending,
             message: None,
             domain_id: None,
-        })?;
+        };
+        if let Err(error) = self.store.upsert_binding(&pending) {
+            return match error {
+                EnforcementStoreError::BindingConflict(binding_id) => {
+                    Err(EnforcementError::Remote {
+                        code: "binding_conflict".into(),
+                        message: format!(
+                            "binding {binding_id} conflicts with persisted desired state"
+                        ),
+                    }
+                    .into())
+                }
+                error => Err(error.into()),
+            };
+        }
         match self.client.apply(request.clone()) {
             Ok(binding) => {
                 self.store.upsert_binding(&binding)?;
@@ -183,6 +201,7 @@ impl EnforcementCoordinator {
     ///
     /// Returns a missing-binding, persistence, or enforcer error.
     pub fn detach(&self, binding_id: Uuid) -> Result<(), EnforcementCoordinatorError> {
+        let _lifecycle = self.lifecycle();
         let mut binding = self
             .store
             .binding(binding_id)?
@@ -197,7 +216,6 @@ impl EnforcementCoordinator {
                 Ok(())
             }
             Err(error) => {
-                binding.state = BindingState::Degraded;
                 binding.message = Some(error.to_string());
                 self.store.upsert_binding(&binding)?;
                 Err(error.into())
@@ -250,11 +268,12 @@ impl EnforcementCoordinator {
         let client = self.client.clone();
         let store = self.store.clone();
         let ingestion_readiness = self.ingestion_readiness.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
         let worker_token = Arc::clone(&worker);
         let (activate, activation) = mpsc::sync_channel(0);
         let task = Box::new(move || {
             if activation.recv().is_ok() {
-                ingest_loop(client, store, ingestion_readiness, worker_token);
+                ingest_loop(client, store, ingestion_readiness, lifecycle, worker_token);
             }
         });
         let handle = spawn(task)?;
@@ -292,12 +311,19 @@ impl EnforcementCoordinator {
         }
         Ok(health)
     }
+
+    fn lifecycle(&self) -> MutexGuard<'_, ()> {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 fn ingest_loop(
     client: EnforcementClient,
     store: EnforcementStore,
     ingestion_readiness: IngestionReadiness,
+    lifecycle: Arc<Mutex<()>>,
     worker: Arc<WorkerToken>,
 ) {
     let mut backoff = Duration::from_millis(100);
@@ -305,8 +331,34 @@ fn ingest_loop(
         ingestion_readiness.mark_not_ready(&worker);
         match client.subscribe() {
             Ok(mut subscription) => {
-                if !ingestion_readiness.mark_ready(&worker) {
+                if !ingestion_readiness.is_current(&worker) {
                     break;
+                }
+                let reconciliation = {
+                    let _lifecycle = lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !ingestion_readiness.is_current(&worker) {
+                        break;
+                    }
+                    match reconcile_desired_state(&client, &store) {
+                        Ok(()) if ingestion_readiness.mark_ready(&worker) => Ok(()),
+                        Ok(()) => break,
+                        Err(error) => Err(error),
+                    }
+                };
+                if let Err(error) = reconciliation {
+                    if ingestion_readiness.is_current(&worker) {
+                        let message = format!("enforcement reconciliation failed: {error}");
+                        if let Err(store_error) = store.mark_active_degraded(&message) {
+                            eprintln!(
+                                "AgentSight could not persist enforcement degradation: {store_error}"
+                            );
+                        }
+                    }
+                    sleep_until_superseded(&ingestion_readiness, &worker, backoff);
+                    backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
+                    continue;
                 }
                 backoff = Duration::from_millis(100);
                 while ingestion_readiness.is_current(&worker) {
@@ -355,6 +407,55 @@ fn ingest_loop(
         backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
     }
     ingestion_readiness.mark_not_ready(&worker);
+}
+
+fn reconcile_desired_state(
+    client: &EnforcementClient,
+    store: &EnforcementStore,
+) -> Result<(), EnforcementCoordinatorError> {
+    let desired = store.bindings()?;
+    let actual = client.bindings()?;
+    let desired_by_id: HashMap<_, _> = desired
+        .iter()
+        .map(|binding| (binding.request.binding_id, binding))
+        .collect();
+    let mut retained_actual = HashMap::new();
+
+    for binding in actual {
+        let binding_id = binding.request.binding_id;
+        let matches_active_desired = desired_by_id.get(&binding_id).is_some_and(|desired| {
+            is_active_desired(desired.state) && desired.request == binding.request
+        });
+        if matches_active_desired {
+            retained_actual.insert(binding_id, binding);
+        } else {
+            client.detach(binding_id)?;
+        }
+    }
+
+    for mut binding in desired {
+        let binding_id = binding.request.binding_id;
+        if is_active_desired(binding.state) {
+            let acknowledged = match retained_actual.remove(&binding_id) {
+                Some(actual) => actual,
+                None => client.apply(binding.request.clone())?,
+            };
+            store.upsert_binding(&acknowledged)?;
+        } else if binding.state == BindingState::Detaching {
+            binding.state = BindingState::Detached;
+            binding.message = None;
+            binding.domain_id = None;
+            store.upsert_binding(&binding)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_active_desired(state: BindingState) -> bool {
+    matches!(
+        state,
+        BindingState::Pending | BindingState::Enforced | BindingState::Degraded
+    )
 }
 
 fn sleep_until_superseded(

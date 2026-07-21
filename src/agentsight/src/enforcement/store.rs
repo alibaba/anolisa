@@ -29,6 +29,9 @@ pub enum EnforcementStoreError {
     /// A requested binding is not persisted.
     #[error("binding {0} is not persisted")]
     MissingBinding(Uuid),
+    /// A stable idempotency key names a different desired request.
+    #[error("binding conflict for {0}")]
+    BindingConflict(Uuid),
 }
 
 /// Thread-safe local enforcement state.
@@ -79,10 +82,26 @@ impl EnforcementStore {
     ///
     /// # Errors
     ///
-    /// Returns a mutex, serialization, or SQLite error.
+    /// Returns a mutex, serialization, SQLite, or immutable-request conflict error.
     pub fn upsert_binding(&self, binding: &Binding) -> Result<(), EnforcementStoreError> {
         let json = serde_json::to_string(binding)?;
-        self.connection()?.execute(
+        let connection = self.connection()?;
+        let existing_json: Option<String> = connection
+            .query_row(
+                "SELECT desired_json FROM enforcement_bindings WHERE binding_id = ?1",
+                params![binding.request.binding_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing_json) = existing_json {
+            let existing: Binding = serde_json::from_str(&existing_json)?;
+            if existing.request != binding.request {
+                return Err(EnforcementStoreError::BindingConflict(
+                    binding.request.binding_id,
+                ));
+            }
+        }
+        connection.execute(
             "INSERT INTO enforcement_bindings
                (binding_id, desired_json, state, message, domain_id, updated_at_ns)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -190,7 +209,7 @@ impl EnforcementStore {
         for binding in &mut bindings {
             if matches!(
                 binding.state,
-                BindingState::Pending | BindingState::Enforced | BindingState::Detaching
+                BindingState::Pending | BindingState::Enforced | BindingState::Degraded
             ) {
                 binding.state = BindingState::Degraded;
                 binding.message = Some(message.to_string());
