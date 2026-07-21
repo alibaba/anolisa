@@ -344,6 +344,8 @@ impl BackendSpawner for FirecrackerSpawner {
         // serial_log is enabled, persist it to serial.log for debugging.
         if fc_cfg.serial_log {
             let serial_log = instance_dir.join("serial.log");
+            rotate_serial_log_if_needed(&serial_log)
+                .map_err(|source| BlazeError::IoError { source })?;
             let file = std::fs::File::create(&serial_log)
                 .map_err(|source| BlazeError::IoError { source })?;
             cmd.stdout(file);
@@ -475,6 +477,19 @@ impl BackendSpawner for MockSpawner {
     async fn probe(&self, _binary_path: &Path) -> Result<bool, BlazeError> {
         Ok(true)
     }
+}
+
+/// Rotate serial log if it exceeds the size limit.
+/// Keeps at most one backup (.1) to preserve crash context.
+fn rotate_serial_log_if_needed(path: &Path) -> std::io::Result<()> {
+    const MAX_SERIAL_LOG_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > MAX_SERIAL_LOG_BYTES
+    {
+        let backup = path.with_extension("log.1");
+        let _ = std::fs::rename(path, &backup); // best-effort rotate
+    }
+    Ok(())
 }
 
 #[cfg(test)]

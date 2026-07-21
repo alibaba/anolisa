@@ -118,7 +118,7 @@ memory = "4G"
 [backend.firecracker]
 boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
 enable_vsock = true   # parsed but not yet wired (Phase 2+)
-serial_log = true
+serial_log = false
 
 # ---------------------------------------------------------------------------
 # Lifecycle hook sequences (Phase 3 — not yet active in v0.1).
