@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  createFileBinding,
+  createCredentialBinding,
   detachEnforcementBinding,
   fetchEnforcementBindings,
   fetchEnforcementHealth,
@@ -8,6 +8,7 @@ import {
   type EnforcementBinding,
   type EnforcementHealth,
   type EnforcementViolation,
+  type EnforcementPolicyMode,
 } from '../utils/apiClient';
 
 const timestampFormatter = new Intl.DateTimeFormat('zh-CN', {
@@ -22,10 +23,23 @@ function errorMessage(error: unknown): string {
 function policyFilePath(policyDsl: string): string {
   const matches = policyDsl
     .split(/\r?\n/)
-    .map((line) => line.match(/^\s*block open file "([^"]+)" if AGENT\s*$/))
+    .map((line) => line.match(/^\s*source [A-Z_][A-Z0-9_]* = file "([^"]+)"\s*$/)
+      ?? line.match(/^\s*block open file "([^"]+)" if AGENT\s*$/))
     .filter((match): match is RegExpMatchArray => match !== null);
   return matches.length === 1 ? matches[0][1] : '—';
 }
+
+function bindingMode(policyDsl: string): EnforcementPolicyMode {
+  if (/\bblock connect endpoint\b/.test(policyDsl) || /\bblock open file\b/.test(policyDsl)) return 'enforce';
+  if (/\bnotify connect endpoint\b/.test(policyDsl)) return 'audit';
+  return 'observe';
+}
+
+const modeLabels: Record<EnforcementPolicyMode, string> = {
+  observe: '观察',
+  audit: '审计',
+  enforce: '拦截',
+};
 
 function formatTimestamp(timestampNs: number): string {
   return timestampFormatter.format(timestampNs / 1_000_000);
@@ -67,6 +81,8 @@ export const RiskEnforcementPage: React.FC = () => {
   const [rootPid, setRootPid] = useState('');
   const [path, setPath] = useState('');
   const [sessionId, setSessionId] = useState('');
+  const [mode, setMode] = useState<EnforcementPolicyMode>('audit');
+  const [trustedEndpoint, setTrustedEndpoint] = useState('');
   const loadEpoch = useRef(0);
 
   const loadAll = useCallback(async () => {
@@ -121,16 +137,21 @@ export const RiskEnforcementPage: React.FC = () => {
     setSubmitting(true);
     setOperationResult('');
     try {
-      await createFileBinding({
+      await createCredentialBinding({
         agent_id: agentId.trim(),
         root_pid: parsedPid,
-        path: path.trim(),
+        source_path: path.trim(),
         session_id: sessionId.trim() || undefined,
+        trusted_endpoint: trustedEndpoint.trim() || undefined,
+        revision: Math.floor(Date.now() / 1000),
+        mode,
+        taint_ttl_secs: 900,
       });
       setAgentId('');
       setRootPid('');
       setPath('');
       setSessionId('');
+      setTrustedEndpoint('');
       setOperationResult('策略已生效');
       await loadAll();
     } catch (error) {
@@ -171,7 +192,7 @@ export const RiskEnforcementPage: React.FC = () => {
             </span>
           </div>
           <p className="mt-1 text-sm text-gray-500">
-            为 Agent 进程树下发敏感文件访问策略，并追踪实际拦截记录。
+            以敏感文件为数据源，通过 taint 传播关联网络外发，并按观察、审计、拦截渐进生效。
           </p>
         </div>
         <button
@@ -207,13 +228,14 @@ export const RiskEnforcementPage: React.FC = () => {
                 <tr>
                   <th className="px-4 py-3">Agent / PID</th>
                   <th className="px-4 py-3">敏感文件</th>
+                  <th className="px-4 py-3">模式 / 版本</th>
                   <th className="px-4 py-3">状态</th>
                   <th className="px-4 py-3">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {bindings.length === 0 ? (
-                  <tr><td colSpan={4} className="px-4 py-10 text-center text-gray-400">暂无策略绑定</td></tr>
+                  <tr><td colSpan={5} className="px-4 py-10 text-center text-gray-400">暂无策略绑定</td></tr>
                 ) : bindings.map((binding) => (
                   <tr key={binding.request.binding_id}>
                     <td className="px-4 py-3">
@@ -225,6 +247,10 @@ export const RiskEnforcementPage: React.FC = () => {
                       className="max-w-xs break-all px-4 py-3 font-mono text-xs text-gray-700"
                     >
                       {policyFilePath(binding.request.policy_dsl)}
+                    </td>
+                    <td className="px-4 py-3 text-gray-700">
+                      <div>{modeLabels[bindingMode(binding.request.policy_dsl)]}</div>
+                      <div className="text-xs text-gray-500">修订 #{binding.request.policy_revision}</div>
                     </td>
                     <td className="px-4 py-3 text-gray-700">{bindingStateLabels[binding.state]}</td>
                     <td className="px-4 py-3">
@@ -246,8 +272,8 @@ export const RiskEnforcementPage: React.FC = () => {
         </div>
 
         <form onSubmit={handleCreate} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="font-semibold text-gray-900">下发文件策略</h2>
-          <p className="mt-1 text-xs text-gray-500">目标必须是现存的绝对文件路径和存活的根进程。</p>
+          <h2 className="font-semibold text-gray-900">下发敏感数据外发策略</h2>
+          <p className="mt-1 text-xs text-gray-500">先在审计模式验证命中质量，再升级为内核拦截。</p>
           <div className="mt-4 space-y-4">
             <label className="block text-sm font-medium text-gray-700">
               Agent ID
@@ -279,6 +305,27 @@ export const RiskEnforcementPage: React.FC = () => {
               />
             </label>
             <label className="block text-sm font-medium text-gray-700">
+              策略模式
+              <select
+                value={mode}
+                onChange={(event) => setMode(event.target.value as EnforcementPolicyMode)}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 font-normal"
+              >
+                <option value="observe">观察：建立证据链，不影响操作</option>
+                <option value="audit">审计（推荐）：规则判定并记录，不阻断</option>
+                <option value="enforce">拦截：命中后内核拒绝外发</option>
+              </select>
+            </label>
+            <label className="block text-sm font-medium text-gray-700">
+              可信目标（可选）
+              <input
+                value={trustedEndpoint}
+                onChange={(event) => setTrustedEndpoint(event.target.value)}
+                placeholder="10.0.0.8"
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 font-normal"
+              />
+            </label>
+            <label className="block text-sm font-medium text-gray-700">
               Session ID（可选）
               <input
                 value={sessionId}
@@ -300,7 +347,10 @@ export const RiskEnforcementPage: React.FC = () => {
 
       <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
         <div className="border-b border-gray-200 px-5 py-4">
-          <h2 className="font-semibold text-gray-900">拦截记录</h2>
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="font-semibold text-gray-900">策略命中记录</h2>
+            <a href="#/audit" className="text-sm font-medium text-blue-600">进入系统审计查看证据链</a>
+          </div>
           {violationsError && <p className="mt-1 text-sm text-red-600">{violationsError}</p>}
         </div>
         <div className="overflow-x-auto">

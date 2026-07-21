@@ -58,7 +58,7 @@ export const EventDetailDrawer: React.FC<{
             <div className="space-y-5">
               {(event.redacted || detail.state === 'redacted') && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                  敏感字段已由 agent-sec daemon 脱敏。
+                  敏感字段已由本地安全采集链路脱敏。
                 </div>
               )}
               {(event.truncated || detail.state === 'truncated') && (

@@ -34,6 +34,7 @@ import {
   fetchEnforcementBindings,
   fetchEnforcementViolations,
   createFileBinding,
+  createCredentialBinding,
   detachEnforcementBinding,
 } from '../utils/apiClient';
 
@@ -529,6 +530,29 @@ describe('apiClient', () => {
             root_pid: 45231,
             path: '/root/.ssh/id_rsa',
           }),
+        }),
+      );
+    });
+
+    it('creates a progressive credential exfiltration binding', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ state: 'enforced' }));
+      const input = {
+        agent_id: 'qoder',
+        session_id: 'session-1',
+        root_pid: 45231,
+        source_path: '/root/.ssh/id_rsa',
+        trusted_endpoint: '10.0.0.8',
+        revision: 3,
+        mode: 'audit' as const,
+        taint_ttl_secs: 900,
+      };
+      await createCredentialBinding(input);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/enforcement/credential-bindings'),
+        expect.objectContaining({
+          method: 'POST',
+          credentials: 'same-origin',
+          body: JSON.stringify(input),
         }),
       );
     });

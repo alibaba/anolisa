@@ -59,20 +59,20 @@ export const StatusPanel: React.FC<{
 
   if (!status) return null;
 
-  if (status.state === 'daemon_reachable') {
+  if (status.state === 'local_ready' || status.state === 'daemon_reachable') {
     return null;
   }
 
   return (
     <div className={`rounded-lg border p-5 ${
-      status.state === 'daemon_reachable'
+      status.state === 'local_ready' || status.state === 'daemon_reachable'
         ? 'border-green-200 bg-green-50'
         : 'border-amber-200 bg-amber-50'
     }`}>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold text-gray-900">agent-sec daemon</p>
+            <p className="text-sm font-semibold text-gray-900">安全事件采集链路</p>
             <StatePill state={status.state} />
           </div>
           {status.message && <p className="mt-1 text-sm text-gray-600">{status.message}</p>}

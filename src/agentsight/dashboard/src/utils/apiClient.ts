@@ -140,6 +140,19 @@ export interface FileBindingInput {
   path: string;
 }
 
+export type EnforcementPolicyMode = 'observe' | 'audit' | 'enforce';
+
+export interface CredentialBindingInput {
+  agent_id: string;
+  session_id?: string;
+  root_pid: number;
+  source_path: string;
+  trusted_endpoint?: string;
+  revision: number;
+  mode: EnforcementPolicyMode;
+  taint_ttl_secs?: number;
+}
+
 export class EnforcementApiError extends Error {
   constructor(
     public readonly status: number,
@@ -200,6 +213,13 @@ export const fetchEnforcementViolations = (limit = 100) =>
 
 export const createFileBinding = (input: FileBindingInput) =>
   enforcementRequest<EnforcementBinding>('/api/enforcement/file-bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+export const createCredentialBinding = (input: CredentialBindingInput) =>
+  enforcementRequest<EnforcementBinding>('/api/enforcement/credential-bindings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -681,6 +701,7 @@ export async function restartAgentHealth(pid: number): Promise<{ ok: boolean; ne
 // ─── Security Observability API ──────────────────────────────────────────────
 
 export type SecurityApiState =
+  | 'local_ready'
   | 'daemon_reachable'
   | 'disabled'
   | 'daemon_unreachable'
@@ -884,6 +905,48 @@ export interface SecurityTimelineResponse {
   [key: string]: unknown;
 }
 
+export type SecurityReviewStatus =
+  | 'open'
+  | 'confirmed'
+  | 'false_positive'
+  | 'accepted_risk'
+  | 'resolved';
+
+export type SecurityRiskSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface SecurityRiskCase {
+  case_id: string;
+  policy_id: string;
+  policy_revision: number;
+  agent_id: string;
+  session_id?: string | null;
+  severity: SecurityRiskSeverity;
+  risk_score: number;
+  status: SecurityReviewStatus;
+  blocked: boolean;
+  opened_at_ns: number;
+  updated_at_ns: number;
+  summary: string;
+}
+
+export interface SecurityEvidenceEvent {
+  event_id: string;
+  event_type: string;
+  occurred_at_ns: number;
+  identity: {
+    pid: number;
+    session_id?: string | null;
+    tool_call_id?: string | null;
+    [key: string]: unknown;
+  };
+  event: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface SecurityRiskCaseDetail extends SecurityRiskCase {
+  evidence: SecurityEvidenceEvent[];
+}
+
 export type SecurityQueryValue = string | number | boolean | null | undefined;
 
 export interface SecurityTimeRangeParams {
@@ -1062,6 +1125,49 @@ export async function fetchSecurityTimeline(
       run_id,
     })}`
   );
+}
+
+export async function fetchSecurityCases(
+  params?: { limit?: number; offset?: number },
+): Promise<SecurityApiResponse<SecurityPaginated<SecurityRiskCase>>> {
+  return securityFetch<SecurityPaginated<SecurityRiskCase>>(
+    `${API_BASE}/api/audit/cases${buildQuery(params)}`,
+  );
+}
+
+export async function fetchSecurityCase(
+  caseId: string,
+): Promise<SecurityApiResponse<SecurityRiskCaseDetail>> {
+  return securityFetch<SecurityRiskCaseDetail>(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}`,
+  );
+}
+
+export async function reviewSecurityCase(
+  caseId: string,
+  status: Exclude<SecurityReviewStatus, 'open'>,
+): Promise<SecurityApiResponse<SecurityRiskCase>> {
+  const response = await fetch(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/review`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    },
+  );
+  const body = await response.json().catch(() => null) as SecurityApiResponse<SecurityRiskCase> | {
+    error?: SecurityRestError;
+  } | null;
+  if (!response.ok || !body || !('state' in body)) {
+    const error = body && 'error' in body ? body.error : undefined;
+    throw new SecurityApiClientError(response.status, error ?? {
+      code: 'security_review_failed',
+      message: response.statusText || 'Risk case review failed',
+      retryable: false,
+    });
+  }
+  return body;
 }
 
 // ─── Skill Metrics types ──────────────────────────────────────────────────────

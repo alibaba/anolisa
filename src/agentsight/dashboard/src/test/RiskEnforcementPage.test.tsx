@@ -9,14 +9,14 @@ vi.mock('../utils/apiClient', async (importOriginal) => {
     fetchEnforcementHealth: vi.fn(),
     fetchEnforcementBindings: vi.fn(),
     fetchEnforcementViolations: vi.fn(),
-    createFileBinding: vi.fn(),
+    createCredentialBinding: vi.fn(),
     detachEnforcementBinding: vi.fn(),
   };
 });
 
 import {
   EnforcementApiError,
-  createFileBinding,
+  createCredentialBinding,
   detachEnforcementBinding,
   fetchEnforcementBindings,
   fetchEnforcementHealth,
@@ -30,7 +30,7 @@ import { RiskEnforcementPage } from '../pages/RiskEnforcementPage';
 const mockFetchEnforcementHealth = vi.mocked(fetchEnforcementHealth);
 const mockFetchEnforcementBindings = vi.mocked(fetchEnforcementBindings);
 const mockFetchEnforcementViolations = vi.mocked(fetchEnforcementViolations);
-const mockCreateFileBinding = vi.mocked(createFileBinding);
+const mockCreateCredentialBinding = vi.mocked(createCredentialBinding);
 const mockDetachEnforcementBinding = vi.mocked(detachEnforcementBinding);
 
 function deferred<T>() {
@@ -89,7 +89,7 @@ beforeEach(() => {
   mockFetchEnforcementHealth.mockReset();
   mockFetchEnforcementBindings.mockReset();
   mockFetchEnforcementViolations.mockReset();
-  mockCreateFileBinding.mockReset();
+  mockCreateCredentialBinding.mockReset();
   mockDetachEnforcementBinding.mockReset();
 
   mockFetchEnforcementHealth.mockResolvedValue({
@@ -99,7 +99,7 @@ beforeEach(() => {
   });
   mockFetchEnforcementBindings.mockResolvedValue({ bindings: [binding] });
   mockFetchEnforcementViolations.mockResolvedValue({ violations: [violation] });
-  mockCreateFileBinding.mockResolvedValue(binding);
+  mockCreateCredentialBinding.mockResolvedValue(binding);
   mockDetachEnforcementBinding.mockResolvedValue(undefined);
 });
 
@@ -156,11 +156,15 @@ describe('RiskEnforcementPage', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: '下发策略' }));
 
-    await waitFor(() => expect(mockCreateFileBinding).toHaveBeenCalledWith({
+    await waitFor(() => expect(mockCreateCredentialBinding).toHaveBeenCalledWith({
       agent_id: 'qoder',
       root_pid: 45231,
-      path: '/root/.ssh/id_rsa',
+      source_path: '/root/.ssh/id_rsa',
       session_id: undefined,
+      trusted_endpoint: undefined,
+      revision: expect.any(Number),
+      mode: 'audit',
+      taint_ttl_secs: 900,
     }));
     expect(await screen.findByText('策略已生效')).toBeInTheDocument();
     expect(mockFetchEnforcementHealth).toHaveBeenCalledTimes(2);
@@ -168,7 +172,7 @@ describe('RiskEnforcementPage', () => {
   });
 
   it('preserves form values when binding creation fails', async () => {
-    mockCreateFileBinding.mockRejectedValueOnce(
+    mockCreateCredentialBinding.mockRejectedValueOnce(
       new EnforcementApiError(400, 'invalid_file_binding', 'path must exist', false),
     );
     render(<RiskEnforcementPage />);

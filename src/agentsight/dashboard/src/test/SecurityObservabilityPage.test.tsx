@@ -76,9 +76,8 @@ const defaultSecurityCountItems = (groupBy: string) => {
 beforeEach(() => {
   vi.clearAllMocks();
   mockFetchSecurityStatus.mockResolvedValue({
-    state: 'daemon_reachable',
+    state: 'local_ready',
     data: {
-      socket_path: '/tmp/agent-sec.sock',
       stores: {
         security_db: { ready: true, path: '/tmp/security-events.db' },
         observability_db: { ready: true, path: '/tmp/observability.db' },
@@ -189,7 +188,7 @@ describe('SecurityObservabilityPage', () => {
     expect(mockFetchSecurityEvents).not.toHaveBeenCalled();
   });
 
-  it('loads overview data when daemon status is reachable', async () => {
+  it('loads overview data when the local security pipeline is ready', async () => {
     render(<SecurityObservabilityPage />);
 
     await waitFor(() => expect(mockFetchSecuritySummary).toHaveBeenCalled());

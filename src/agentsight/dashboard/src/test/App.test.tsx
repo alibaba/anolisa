@@ -19,6 +19,9 @@ vi.mock('../pages/SecurityObservabilityPage', () => ({
 vi.mock('../pages/RiskEnforcementPage', () => ({
   RiskEnforcementPage: () => <div data-testid="page-enforcement">RiskEnforcementPage</div>,
 }));
+vi.mock('../pages/SystemAuditPage', () => ({
+  SystemAuditPage: () => <div data-testid="page-system-audit">SystemAuditPage</div>,
+}));
 vi.mock('../components/AgentHealthSidebar', () => ({
   AgentHealthSidebar: () => <div data-testid="sidebar">Sidebar</div>,
 }));
@@ -57,5 +60,11 @@ describe('App', () => {
     window.location.hash = '#/enforcement';
     render(<App />);
     expect(await screen.findByTestId('page-enforcement')).toBeInTheDocument();
+  });
+
+  it('renders SystemAuditPage on audit path', async () => {
+    window.location.hash = '#/audit';
+    render(<App />);
+    expect(await screen.findByTestId('page-system-audit')).toBeInTheDocument();
   });
 });

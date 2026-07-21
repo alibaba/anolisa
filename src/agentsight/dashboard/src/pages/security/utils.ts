@@ -281,6 +281,7 @@ export function fmtPercent(numerator: number, denominator: number): string {
 
 export function stateLabel(state: string): string {
   const labels: Record<string, string> = {
+    local_ready: '本地链路就绪',
     daemon_reachable: 'daemon 可达',
     disabled: '已禁用',
     daemon_unreachable: 'daemon 不可达',
@@ -296,7 +297,7 @@ export function stateLabel(state: string): string {
 }
 
 export function stateClasses(state: string): string {
-  if (state === 'daemon_reachable' || state === 'ok' || state === 'found') {
+  if (state === 'local_ready' || state === 'daemon_reachable' || state === 'ok' || state === 'found') {
     return 'bg-green-100 text-green-700 border-green-200';
   }
   if (state === 'empty' || state === 'disabled' || state === 'not_found') {
