@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use agentsight::enforcement::{
     EnforcementClient, EnforcementCoordinator, EnforcementCoordinatorError, EnforcementError,
-    EnforcementStore,
+    EnforcementStore, EnforcementStoreError,
 };
 use agentsight_enforcement_protocol::{
     ApplyPolicy, Binding, BindingState, Command, Effect, HealthStatus, RemoteError, Request,
@@ -293,6 +293,14 @@ impl ControlledEnforcer {
             .apply_attempts
     }
 
+    fn detach_attempts(&self) -> usize {
+        self.state
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .detach_attempts
+    }
+
     fn wait_for_detach_attempts(&self, expected: usize) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         let (state, changed) = &*self.state;
@@ -439,10 +447,18 @@ fn handle_controlled_connection(
                     message: "fixture detach failed".into(),
                 })
             } else {
+                let original_len = state.bindings.len();
                 state
                     .bindings
                     .retain(|binding| binding.request.binding_id != binding_id);
-                Ok(ResponseBody::Detached)
+                if state.bindings.len() == original_len {
+                    Err(RemoteError {
+                        code: "missing_binding".into(),
+                        message: format!("binding {binding_id} is not active"),
+                    })
+                } else {
+                    Ok(ResponseBody::Detached)
+                }
             }
         }
         Command::SubscribeViolations => {
@@ -527,6 +543,50 @@ fn poll_until(mut condition: impl FnMut() -> bool) -> bool {
         thread::sleep(Duration::from_millis(10));
     }
     condition()
+}
+
+fn drop_violation_table(path: &Path) {
+    rusqlite::Connection::open(path)
+        .expect("fixture database should open")
+        .execute_batch("DROP TABLE enforcement_violations;")
+        .expect("fixture violation table should drop");
+}
+
+fn recreate_violation_table(path: &Path) {
+    rusqlite::Connection::open(path)
+        .expect("fixture database should open")
+        .execute_batch(
+            "CREATE TABLE enforcement_violations (
+                event_id TEXT PRIMARY KEY,
+                binding_id TEXT NOT NULL,
+                occurred_at_ns INTEGER NOT NULL,
+                event_json TEXT NOT NULL
+             );
+             CREATE INDEX idx_enforcement_violations_time
+                ON enforcement_violations(occurred_at_ns DESC);",
+        )
+        .expect("fixture violation table should be recreated");
+}
+
+fn reject_detached_state_updates(path: &Path) {
+    rusqlite::Connection::open(path)
+        .expect("fixture database should open")
+        .execute_batch(
+            "CREATE TRIGGER reject_detached_state
+             BEFORE UPDATE OF state ON enforcement_bindings
+             WHEN NEW.state = 'detached'
+             BEGIN
+                 SELECT RAISE(ABORT, 'fixture detached persistence failure');
+             END;",
+        )
+        .expect("fixture trigger should install");
+}
+
+fn allow_detached_state_updates(path: &Path) {
+    rusqlite::Connection::open(path)
+        .expect("fixture database should open")
+        .execute_batch("DROP TRIGGER reject_detached_state;")
+        .expect("fixture trigger should drop");
 }
 
 #[test]
@@ -972,4 +1032,255 @@ fn failed_detach_is_retried_as_removal_without_reapplying() {
     assert_eq!(fixture.apply_attempts(), 1);
     assert_eq!(persisted[0].state, BindingState::Detached);
     assert!(actual.is_empty());
+}
+
+#[test]
+fn identical_apply_preserves_detaching_and_detached_intent() {
+    let fixture = ControlledEnforcer::start();
+    let store = EnforcementStore::open(&fixture.database_path)
+        .expect("temporary enforcement store should open");
+    let coordinator =
+        EnforcementCoordinator::new(EnforcementClient::new(&fixture.socket_path), store);
+    let ingestion = coordinator
+        .start_ingestion()
+        .expect("ingestion should start");
+    assert!(fixture.wait_for_subscribe_attempt());
+    fixture.acknowledge_subscription();
+    assert!(poll_until(|| coordinator
+        .health()
+        .is_ok_and(|health| health.ready)));
+    let request = fixture.apply_request();
+    coordinator
+        .apply(request.clone())
+        .expect("binding should apply");
+    fixture.fail_next_detach();
+    coordinator
+        .detach(request.binding_id)
+        .expect_err("first detach should fail");
+
+    let detaching = coordinator
+        .apply(request.clone())
+        .expect("identical apply should return desired state");
+    assert_eq!(detaching.state, BindingState::Detaching);
+    assert_eq!(fixture.apply_attempts(), 1);
+
+    coordinator
+        .detach(request.binding_id)
+        .expect("detach retry should succeed");
+    let detached = coordinator
+        .apply(request)
+        .expect("identical apply should return terminal state");
+    coordinator.stop_ingestion();
+    ingestion.join().expect("ingestion should stop");
+
+    assert_eq!(detached.state, BindingState::Detached);
+    assert_eq!(fixture.apply_attempts(), 1);
+}
+
+#[test]
+fn repeated_detach_is_idempotent_but_never_persisted_id_is_missing() {
+    let fixture = ControlledEnforcer::start();
+    let store = EnforcementStore::open(&fixture.database_path)
+        .expect("temporary enforcement store should open");
+    let coordinator =
+        EnforcementCoordinator::new(EnforcementClient::new(&fixture.socket_path), store);
+    let ingestion = coordinator
+        .start_ingestion()
+        .expect("ingestion should start");
+    assert!(fixture.wait_for_subscribe_attempt());
+    fixture.acknowledge_subscription();
+    assert!(poll_until(|| coordinator
+        .health()
+        .is_ok_and(|health| health.ready)));
+    let binding = coordinator
+        .apply(fixture.apply_request())
+        .expect("binding should apply");
+    coordinator
+        .detach(binding.request.binding_id)
+        .expect("first detach should succeed");
+
+    coordinator
+        .detach(binding.request.binding_id)
+        .expect("detached binding should remain a successful no-op");
+    let missing = coordinator
+        .detach(Uuid::new_v4())
+        .expect_err("never-persisted binding should remain missing");
+    coordinator.stop_ingestion();
+    ingestion.join().expect("ingestion should stop");
+
+    assert_eq!(fixture.detach_attempts(), 1);
+    assert!(matches!(
+        missing,
+        EnforcementCoordinatorError::Store(EnforcementStoreError::MissingBinding(_))
+    ));
+}
+
+#[test]
+fn violation_persistence_failure_is_unready_until_same_event_is_stored() {
+    let fixture = TestEnforcer::start();
+    let store = EnforcementStore::open(&fixture.database_path)
+        .expect("temporary enforcement store should open");
+    let coordinator =
+        EnforcementCoordinator::new(EnforcementClient::new(&fixture.socket_path), store);
+    let ingestion = coordinator
+        .start_ingestion()
+        .expect("ingestion should start");
+    assert!(poll_until(|| coordinator
+        .health()
+        .is_ok_and(|health| health.ready)));
+    let request = fixture.apply_request();
+    coordinator
+        .apply(request.clone())
+        .expect("binding should apply");
+    let event = fixture.violation(&request);
+    drop_violation_table(&fixture.database_path);
+
+    fixture
+        .backend
+        .publish_violation(event.clone())
+        .expect("violation should publish");
+    let mut failure_message = None;
+    let became_unready = poll_until(|| {
+        coordinator.health().is_ok_and(|health| {
+            if !health.ready {
+                failure_message = health.message;
+                true
+            } else {
+                false
+            }
+        })
+    });
+    recreate_violation_table(&fixture.database_path);
+    let recovered = poll_until(|| {
+        coordinator.health().is_ok_and(|health| health.ready)
+            && coordinator
+                .violations(10)
+                .is_ok_and(|violations| violations == vec![event.clone()])
+    });
+    coordinator.stop_ingestion();
+    ingestion.join().expect("ingestion should stop");
+
+    assert!(became_unready);
+    assert!(
+        failure_message
+            .as_deref()
+            .is_some_and(|message| message.contains("violation persistence failed"))
+    );
+    assert!(recovered);
+}
+
+#[test]
+fn stop_interrupts_violation_persistence_retry() {
+    let fixture = TestEnforcer::start();
+    let store = EnforcementStore::open(&fixture.database_path)
+        .expect("temporary enforcement store should open");
+    let coordinator =
+        EnforcementCoordinator::new(EnforcementClient::new(&fixture.socket_path), store);
+    let ingestion = coordinator
+        .start_ingestion()
+        .expect("ingestion should start");
+    assert!(poll_until(|| coordinator
+        .health()
+        .is_ok_and(|health| health.ready)));
+    let request = fixture.apply_request();
+    coordinator
+        .apply(request.clone())
+        .expect("binding should apply");
+    drop_violation_table(&fixture.database_path);
+    fixture
+        .backend
+        .publish_violation(fixture.violation(&request))
+        .expect("violation should publish");
+    let became_unready = poll_until(|| coordinator.health().is_ok_and(|health| !health.ready));
+
+    coordinator.stop_ingestion();
+    let (stopped, result) = mpsc::channel();
+    thread::spawn(move || {
+        stopped
+            .send(ingestion.join().is_ok())
+            .expect("test receiver should remain");
+    });
+    let stopped_promptly = result
+        .recv_timeout(Duration::from_secs(1))
+        .expect("retry should stop after worker is superseded");
+
+    assert!(became_unready);
+    assert!(stopped_promptly);
+}
+
+#[test]
+fn missing_backend_binding_completes_detach_after_ack_persistence_failed() {
+    let fixture = ControlledEnforcer::start();
+    let store = EnforcementStore::open(&fixture.database_path)
+        .expect("temporary enforcement store should open");
+    let coordinator =
+        EnforcementCoordinator::new(EnforcementClient::new(&fixture.socket_path), store);
+    let ingestion = coordinator
+        .start_ingestion()
+        .expect("ingestion should start");
+    assert!(fixture.wait_for_subscribe_attempt());
+    fixture.acknowledge_subscription();
+    assert!(poll_until(|| coordinator
+        .health()
+        .is_ok_and(|health| health.ready)));
+    let binding = coordinator
+        .apply(fixture.apply_request())
+        .expect("binding should apply");
+    reject_detached_state_updates(&fixture.database_path);
+
+    let first = coordinator.detach(binding.request.binding_id);
+    assert!(matches!(first, Err(EnforcementCoordinatorError::Store(_))));
+    assert_eq!(
+        coordinator
+            .bindings()
+            .expect("detaching binding should load")[0]
+            .state,
+        BindingState::Detaching
+    );
+    assert!(fixture.bindings().is_empty());
+    allow_detached_state_updates(&fixture.database_path);
+
+    coordinator
+        .detach(binding.request.binding_id)
+        .expect("missing backend binding should acknowledge prior detach");
+    let persisted = coordinator
+        .bindings()
+        .expect("detached binding should load");
+    coordinator.stop_ingestion();
+    ingestion.join().expect("ingestion should stop");
+
+    assert_eq!(fixture.detach_attempts(), 2);
+    assert_eq!(persisted[0].state, BindingState::Detached);
+    assert!(persisted[0].message.is_none());
+    assert!(persisted[0].domain_id.is_none());
+}
+
+#[test]
+fn first_detach_succeeds_when_persisted_binding_is_already_absent_from_backend() {
+    let fixture = ControlledEnforcer::start();
+    let store = EnforcementStore::open(&fixture.database_path)
+        .expect("temporary enforcement store should open");
+    let request = fixture.apply_request();
+    store
+        .upsert_binding(&Binding {
+            request: request.clone(),
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: Some(1),
+        })
+        .expect("enforced binding should seed");
+    let coordinator =
+        EnforcementCoordinator::new(EnforcementClient::new(&fixture.socket_path), store);
+
+    coordinator
+        .detach(request.binding_id)
+        .expect("absent backend target should satisfy detach");
+    let persisted = coordinator
+        .bindings()
+        .expect("detached binding should load");
+
+    assert_eq!(fixture.detach_attempts(), 1);
+    assert_eq!(persisted[0].state, BindingState::Detached);
+    assert!(persisted[0].message.is_none());
+    assert!(persisted[0].domain_id.is_none());
 }
