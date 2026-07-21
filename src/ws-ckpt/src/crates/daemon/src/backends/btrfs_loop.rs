@@ -13,7 +13,7 @@ use ws_ckpt_common::{DaemonConfig, DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
 
 use super::btrfs_common;
 use crate::util::{is_mounted, run_command, run_command_checked};
-use btrfs_common::{backup_path_for, resolve_symlink_path};
+use btrfs_common::{backup_path_for, recover_orphan_backup, resolve_symlink_path};
 
 pub struct BtrfsLoopBackend {
     pub mount_path: PathBuf,
@@ -57,12 +57,10 @@ impl BtrfsLoopBackend {
         let orig_gid = orig_meta.gid();
 
         let backup_path = backup_path_for(original_path);
-        if tokio::fs::symlink_metadata(&backup_path).await.is_ok() {
-            anyhow::bail!(
-                "refusing to overwrite pre-existing backup {:?}; remove it manually first",
-                backup_path
-            );
-        }
+        // Recover orphan `.pre-init-bak` from an interrupted prior init before
+        // proceeding with Step 3 (rename). See btrfs_common::recover_orphan_backup.
+        recover_orphan_backup(original_path, subvol_path).await?;
+
         tokio::fs::rename(original_path, &backup_path)
             .await
             .context("failed to rename original directory to backup")?;
@@ -324,6 +322,18 @@ impl StorageBackend for BtrfsLoopBackend {
         // 5. Remove snapshots/{ws_id} directory
         if let Err(e) = tokio::fs::remove_dir_all(&snap_base).await {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
+        }
+
+        // 6. Clean orphan `.pre-init-bak` if it still exists (prior interrupted
+        //    init). Safe to remove at this point — subvol is gone, original_path
+        //    has been restored as a normal directory in steps above.
+        let backup_path = backup_path_for(original_path);
+        if tokio::fs::symlink_metadata(&backup_path).await.is_ok() {
+            if let Err(e) = tokio::fs::remove_dir_all(&backup_path).await {
+                warn!("failed to clean orphan backup {:?}: {:#}", backup_path, e);
+            } else {
+                info!("cleaned orphan backup {:?} during recover", backup_path);
+            }
         }
 
         Ok(())
