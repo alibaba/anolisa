@@ -3,7 +3,7 @@
 #   1. Chinese docs must use the `_zh.md` suffix (no _CN/_cn/-CN/.zh variants).
 #   2. docs/user-guide en/ and zh/ trees must mirror each other.
 #
-# Files awaiting translation may be listed in scripts/docs-lint-exemptions.txt
+# Files awaiting translation may be listed in .github/docs-lint-exemptions.txt
 # (paths relative to docs/user-guide/<lang>/, one per line, `#` for comments).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -21,7 +21,7 @@ else
 fi
 
 # --- 2. en/zh tree parity for docs/user-guide --------------------------------
-exemptions_file="scripts/docs-lint-exemptions.txt"
+exemptions_file=".github/docs-lint-exemptions.txt"
 exemptions=$(grep -v '^\s*#' "$exemptions_file" 2>/dev/null | grep -v '^\s*$' || true)
 
 list_tree() {

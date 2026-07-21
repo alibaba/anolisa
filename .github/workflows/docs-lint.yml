@@ -15,7 +15,7 @@ on:
       - 'docs/**'
       - '**/*.md'
       - 'scripts/docs-lint.sh'
-      - 'scripts/docs-lint-exemptions.txt'
+      - '.github/docs-lint-exemptions.txt'
       - 'scripts/docs-link-check.py'
       - '.github/workflows/docs-lint.yml'
 
