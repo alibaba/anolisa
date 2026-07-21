@@ -1,6 +1,7 @@
 pub(crate) mod builder;
 pub(crate) mod collectors;
 pub(crate) mod context;
+pub(crate) mod env_collectors;
 pub(crate) mod model;
 pub(crate) mod recommendation;
 pub(crate) mod rules;
@@ -17,6 +18,7 @@ pub(crate) use collectors::{
     HealthCommandError, HealthCommandOutput, KernelSignalFacts, MemoryFacts, ServiceStatusFact,
 };
 pub(crate) use context::health_context_hint;
+pub(crate) use env_collectors::run_env_collectors;
 pub(crate) use model::{
     HealthCollector, HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue,
     HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport, HealthSeverity,
