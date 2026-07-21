@@ -72,6 +72,7 @@
       {"rule": ["*node*", "*cosh*"], "agent_name": "Cosh"},
       {"rule": ["*node*", "*/bin/co*"], "agent_name": "Cosh"},
       {"rule": ["*node*", "*os-copilot*"], "agent_name": "Cosh"},
+      {"rule": ["*cosh-core*"], "agent_name": "Cosh"},
       {"rule": ["*openclaw-gatewa*"], "agent_name": "OpenClaw"},
       {"rule": ["node*", "*openclaw*"], "agent_name": "OpenClaw"},
       {"rule": ["*node*", "*openclaw*", "gatewa*"], "agent_name": "OpenClaw"},
