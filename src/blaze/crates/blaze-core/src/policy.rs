@@ -167,6 +167,9 @@ impl PolicyFile {
             )?;
         }
 
+        // Validate Firecracker vCPU upper bound (Firecracker limits to 1..=32).
+        validate_firecracker_vcpus(self)?;
+
         // Validate [quota].cpu_shares is at least 1.
         // cgroup v1 cpu.shares has no hard upper bound, so only reject 0 / negative values.
         if let Some(quota) = self.quota.as_ref()
@@ -214,6 +217,35 @@ fn validate_vm_resource(
     {
         return Err(BlazeError::PolicyEvalError {
             reason: format!("policy \"{policy_name}\": {field}.vcpus must be ≥ 1, got 0"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate that the *resolved* Firecracker vCPU count is within 1..=32.
+/// The resolution priority mirrors the spawner fallback chain:
+/// `backend.firecracker.vcpus` > `[vm].vcpus` > code default (1).
+fn validate_firecracker_vcpus(policy: &PolicyFile) -> Result<()> {
+    if !policy
+        .select
+        .backend_priority
+        .contains(&BackendKind::Firecracker)
+    {
+        return Ok(());
+    }
+    let resolved = policy
+        .backend
+        .firecracker
+        .as_ref()
+        .and_then(|fc| fc.vcpus)
+        .or(policy.vm.as_ref().map(|vm| vm.vcpus))
+        .unwrap_or(1);
+    if resolved > FIRECRACKER_MAX_VCPUS {
+        return Err(BlazeError::PolicyEvalError {
+            reason: format!(
+                "policy \"{}\": Firecracker vCPU count must be 1..={}, got {}",
+                policy.policy_name, FIRECRACKER_MAX_VCPUS, resolved
+            ),
         });
     }
     Ok(())
@@ -402,6 +434,10 @@ fn default_vm_memory() -> String {
 }
 
 const MIB: u64 = 1 << 20;
+
+/// Firecracker hard upper bound for vCPU count.
+/// See: https://github.com/firecracker-microvm/firecracker/blob/main/src/firecracker/swagger/firecracker.yaml
+const FIRECRACKER_MAX_VCPUS: u32 = 32;
 
 fn validate_memory_size(s: &str) -> std::result::Result<(), String> {
     parse_memory_value(s).map_err(|e| format!("invalid memory size \"{s}\": {e}"))?;
@@ -1054,6 +1090,81 @@ warm_ttl = "300"
 "#;
         let pf: PolicyFile = toml::from_str(raw).expect("parse");
         assert!(pf.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_firecracker_vcpus_above_32() {
+        let raw = r#"
+manifest_version = 1
+policy_name = "test-fc-vcpu-limit"
+
+[match]
+workload_class = "agent-rl"
+
+[select]
+backend_priority = ["firecracker"]
+
+[vm]
+vcpus = 33
+memory = "4G"
+"#;
+        let pf: PolicyFile = toml::from_str(raw).expect("parse");
+        let err = pf.validate().expect_err("should reject vcpus > 32");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("1..=32") && msg.contains("33"),
+            "error should mention the limit and actual value: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_firecracker_vcpus_at_boundary() {
+        let raw = r#"
+manifest_version = 1
+policy_name = "test-fc-vcpu-ok"
+
+[match]
+workload_class = "agent-rl"
+
+[select]
+backend_priority = ["firecracker"]
+
+[vm]
+vcpus = 32
+memory = "4G"
+"#;
+        let pf: PolicyFile = toml::from_str(raw).expect("parse");
+        pf.validate().expect("vcpus=32 should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_firecracker_override_vcpus_above_32() {
+        let raw = r#"
+manifest_version = 1
+policy_name = "test-fc-override"
+
+[match]
+workload_class = "agent-rl"
+
+[select]
+backend_priority = ["firecracker"]
+
+[vm]
+vcpus = 4
+memory = "4G"
+
+[backend.firecracker]
+vcpus = 64
+"#;
+        let pf: PolicyFile = toml::from_str(raw).expect("parse");
+        let err = pf
+            .validate()
+            .expect_err("should reject override vcpus > 32");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("1..=32") && msg.contains("64"),
+            "error should mention the limit and actual value: {msg}"
+        );
     }
 
     #[test]
