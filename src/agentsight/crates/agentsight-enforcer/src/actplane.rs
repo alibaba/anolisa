@@ -95,9 +95,14 @@ impl ActPlaneBackend {
         engine
             .protect_pid(std::process::id() as i32)
             .map_err(|error| kernel_error("protect enforcer pid", error))?;
-        reload
-            .clear_runtime_state()
-            .map_err(|error| kernel_error("clear stale runtime state", error))?;
+        let _ = prepare_runtime(
+            || {
+                reload
+                    .clear_runtime_state()
+                    .map_err(|error| kernel_error("clear stale runtime state", error))
+            },
+            || Ok(0),
+        )?;
 
         let state = Arc::new(RuntimeState::new());
         let stop = Arc::new(AtomicBool::new(false));
@@ -276,6 +281,14 @@ impl EnforcementBackend for ActPlaneBackend {
     fn subscribe(&self) -> Receiver<ViolationEvent> {
         self.state.events.subscribe()
     }
+}
+
+fn prepare_runtime(
+    clear: impl FnOnce() -> Result<(), BackendError>,
+    drain: impl FnOnce() -> Result<usize, BackendError>,
+) -> Result<usize, BackendError> {
+    clear()?;
+    drain()
 }
 
 impl Drop for ActPlaneBackend {
@@ -475,6 +488,8 @@ fn kernel_error_with_cleanup(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+
     use agentsight_enforcement_protocol::{
         ApplyPolicy, Binding, BindingState, Effect, ViolationEvent,
     };
@@ -532,6 +547,45 @@ mod tests {
             .expect("fixture UUID should parse");
         assert_eq!(domain_id(id), domain_id(id));
         assert_ne!(domain_id(id), 0);
+    }
+
+    #[test]
+    fn prepare_runtime_clears_stale_state_before_draining_events() {
+        let operations = RefCell::new(Vec::new());
+
+        let drained = prepare_runtime(
+            || {
+                operations.borrow_mut().push("clear");
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("drain");
+                Ok(3)
+            },
+        )
+        .expect("runtime preparation should succeed");
+
+        assert_eq!(drained, 3);
+        assert_eq!(operations.into_inner(), ["clear", "drain"]);
+    }
+
+    #[test]
+    fn prepare_runtime_skips_drain_when_cleanup_fails() {
+        let drain_called = Cell::new(false);
+
+        let result = prepare_runtime(
+            || Err(BackendError::KernelFailure("clear failed".into())),
+            || {
+                drain_called.set(true);
+                Ok(0)
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(BackendError::KernelFailure(message)) if message == "clear failed"
+        ));
+        assert!(!drain_called.get());
     }
 
     #[test]
