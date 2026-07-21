@@ -417,6 +417,32 @@ impl SecurityStore {
         Ok(RiskCaseDetail { case, evidence })
     }
 
+    /// Updates the human review state without changing immutable policy provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecurityStoreError::MissingCase`] when absent, or a typed
+    /// database, timestamp, stored-data, or lock error.
+    pub fn review_case(
+        &self,
+        case_id: Uuid,
+        status: RiskCaseStatus,
+        updated_at_ns: u64,
+    ) -> Result<RiskCase, SecurityStoreError> {
+        let changed = self.connection()?.execute(
+            "UPDATE risk_cases SET status = ?1, updated_at_ns = ?2 WHERE case_id = ?3",
+            params![
+                risk_status(status),
+                sqlite_time(updated_at_ns)?,
+                case_id.to_string(),
+            ],
+        )?;
+        if changed == 0 {
+            return Err(SecurityStoreError::MissingCase(case_id));
+        }
+        Ok(self.case_detail(case_id)?.case)
+    }
+
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, SecurityStoreError> {
         self.conn.lock().map_err(|_| SecurityStoreError::Poisoned)
     }

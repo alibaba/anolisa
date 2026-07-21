@@ -936,6 +936,7 @@ mod tests {
             interruption_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
             enforcement: None,
+            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: crate::server::SecurityObservabilityConfig::default(),
             auth: Arc::new(crate::server::auth::DashboardAuth::init(
                 &crate::config::ServerAuthConfig { enabled: false },
