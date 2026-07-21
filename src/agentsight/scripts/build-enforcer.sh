@@ -5,17 +5,22 @@ set -eu
 ACTPLANE_REPOSITORY="https://github.com/eunomia-bpf/ActPlane.git"
 ACTPLANE_REVISION="a62e5d9d96f91101cda019519053e950d532380a"
 ACTPLANE_BASE_BPF_LIB_BLOB="9bcefcdca83b89635788beaf8de15f33252427bb"
-ACTPLANE_PREVIOUS_PATCHED_BPF_LIB_BLOB="f4c0598596a5134725cc1e2fd27da4a5f6a16cdd"
-ACTPLANE_PATCHED_BPF_LIB_BLOB="b45756c17b78566162794e6520146165c12e196a"
+ACTPLANE_POST_0003_BPF_LIB_BLOB="f4c0598596a5134725cc1e2fd27da4a5f6a16cdd"
+ACTPLANE_POST_0004_BPF_LIB_BLOB="b45756c17b78566162794e6520146165c12e196a"
+ACTPLANE_PATCHED_BPF_LIB_BLOB="2d3c79b85602fffe7b83481228424e3a35d7eb1c"
 ACTPLANE_PREBUILT_BPF_BLOB="0ef15841f84be784774024ad844e70bc6124a753"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 AGENTSIGHT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 PATCH_DIR="$AGENTSIGHT_ROOT/patches/actplane"
-LATEST_PATCH_FILE="$PATCH_DIR/0004-drain-stale-pinned-events.patch"
+PATCH_0004_FILE="$PATCH_DIR/0004-drain-stale-pinned-events.patch"
+LATEST_PATCH_FILE="$PATCH_DIR/0005-document-pinned-drain-ownership.patch"
 PATCH_FILES="$PATCH_DIR/0001-add-file-enforcement-profile.patch
 $PATCH_DIR/0002-validate-file-enforcement-profile.patch
 $PATCH_DIR/0003-pin-profile-metadata.patch
+$PATCH_0004_FILE
+$LATEST_PATCH_FILE"
+POST_0003_PATCH_FILES="$PATCH_0004_FILE
 $LATEST_PATCH_FILE"
 CARGO=${CARGO:-cargo}
 
@@ -94,7 +99,12 @@ if [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_BASE_BPF_LIB_BLOB" ]; then
         git -C "$SOURCE_DIR" apply --check "$patch_file"
         git -C "$SOURCE_DIR" apply "$patch_file"
     done
-elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_PREVIOUS_PATCHED_BPF_LIB_BLOB" ]; then
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0003_BPF_LIB_BLOB" ]; then
+    for patch_file in $POST_0003_PATCH_FILES; do
+        git -C "$SOURCE_DIR" apply --check "$patch_file"
+        git -C "$SOURCE_DIR" apply "$patch_file"
+    done
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0004_BPF_LIB_BLOB" ]; then
     git -C "$SOURCE_DIR" apply --check "$LATEST_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$LATEST_PATCH_FILE"
 elif [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ]; then
