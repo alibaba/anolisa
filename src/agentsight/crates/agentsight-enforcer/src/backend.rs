@@ -2,7 +2,9 @@
 
 use std::sync::mpsc::Receiver;
 
-use agentsight_enforcement_protocol::{ApplyPolicy, Binding, HealthStatus, ViolationEvent};
+use agentsight_enforcement_protocol::{
+    ApplyPolicy, Binding, HealthStatus, SecurityEvent, ViolationEvent,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -62,4 +64,7 @@ pub trait EnforcementBackend: Send + Sync + 'static {
 
     /// Creates an independent bounded violation subscription.
     fn subscribe(&self) -> Receiver<ViolationEvent>;
+
+    /// Creates an independent bounded normalized security-event subscription.
+    fn subscribe_security_events(&self) -> Receiver<SecurityEvent>;
 }

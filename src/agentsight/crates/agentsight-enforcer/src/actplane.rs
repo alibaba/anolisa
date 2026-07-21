@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use actplane_ifc_compiler::compile_str;
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, Effect, HealthStatus, ViolationEvent,
+    ApplyPolicy, Binding, BindingState, Effect, HealthStatus, SecurityEvent, ViolationEvent,
 };
 use ebpf_ifc_engine::capability::{
     AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE, AUTH_NARROW_SCOPE,
@@ -21,6 +21,7 @@ use ebpf_ifc_engine::{GLOBAL_ACTIVE_DOMAIN_ID, PinnedEngine, ReloadHandle, Viola
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub};
 
 /// Exact official upstream revision compiled into this adapter.
@@ -36,6 +37,7 @@ struct ActiveBinding {
 struct RuntimeState {
     bindings: Mutex<HashMap<u32, ActiveBinding>>,
     events: EventHub,
+    security_events: SecurityEventHub,
     runtime_error: Mutex<Option<String>>,
 }
 
@@ -44,6 +46,7 @@ impl RuntimeState {
         Self {
             bindings: Mutex::new(HashMap::new()),
             events: EventHub::default(),
+            security_events: SecurityEventHub::default(),
             runtime_error: Mutex::new(None),
         }
     }
@@ -148,11 +151,12 @@ impl ActPlaneBackend {
 impl EnforcementBackend for ActPlaneBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
         let runtime_error = self.state.runtime_error().clone();
-        Ok(self.state.events.reflect_delivery_loss(HealthStatus {
+        let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
             message: runtime_error,
-        }))
+        });
+        Ok(self.state.security_events.reflect_delivery_loss(health))
     }
 
     fn apply(&self, request: ApplyPolicy) -> Result<Binding, BackendError> {
@@ -285,6 +289,10 @@ impl EnforcementBackend for ActPlaneBackend {
 
     fn subscribe(&self) -> Receiver<ViolationEvent> {
         self.state.events.subscribe()
+    }
+
+    fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
+        self.state.security_events.subscribe()
     }
 }
 

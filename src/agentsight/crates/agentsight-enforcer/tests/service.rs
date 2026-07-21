@@ -209,13 +209,10 @@ fn uds_service_dispatches_lifecycle_and_streams_violations() {
 }
 
 #[test]
-fn security_subscription_is_explicitly_unavailable_until_backend_support_exists() {
+fn security_subscription_is_acknowledged_when_backend_support_exists() {
     let fixture = ServiceFixture::start();
 
     let response = fixture.call(Command::SubscribeSecurityEvents);
 
-    let Err(error) = response.result else {
-        panic!("unfinished security subscription must not acknowledge success");
-    };
-    assert_eq!(error.code, "unsupported_command");
+    assert!(matches!(response.result, Ok(ResponseBody::Subscribed)));
 }

@@ -3,18 +3,23 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
+    ApplyPolicy, Binding, BindingState, DestinationClass, Effect, EventIdentity, FileAction,
+    HealthStatus, NetworkAction, NetworkDirection, PolicyDecision, PolicyMode, SecurityEvent,
+    SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
 };
 use uuid::Uuid;
 
+use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub};
 
 /// In-memory single-binding backend that performs no kernel operations.
 pub struct MockBackend {
     bindings: Mutex<HashMap<Uuid, Binding>>,
     events: EventHub,
+    security_events: SecurityEventHub,
 }
 
 impl Default for MockBackend {
@@ -29,6 +34,7 @@ impl MockBackend {
         Self {
             bindings: Mutex::new(HashMap::new()),
             events: EventHub::default(),
+            security_events: SecurityEventHub::default(),
         }
     }
 
@@ -37,6 +43,7 @@ impl MockBackend {
         Self {
             bindings: Mutex::new(HashMap::new()),
             events: EventHub::new(capacity),
+            security_events: SecurityEventHub::new(capacity),
         }
     }
 
@@ -54,6 +61,110 @@ impl MockBackend {
         Ok(())
     }
 
+    /// Emits a deterministic source, taint, sink, and decision chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError::MissingBinding`] when `binding_id` is unknown.
+    pub fn emit_credential_exfiltration(
+        &self,
+        binding_id: Uuid,
+        source_path: &str,
+        destination: &str,
+    ) -> Result<(), BackendError> {
+        let binding = self
+            .bindings()
+            .get(&binding_id)
+            .cloned()
+            .ok_or(BackendError::MissingBinding(binding_id))?;
+        let revision = binding.request.policy_revision.parse().unwrap_or(1);
+        let mode = mock_policy_mode(&binding.request.policy_dsl);
+        let identity = event_identity(&binding);
+        let base_time = unix_epoch_ns();
+        let source_event_id = Uuid::new_v4();
+        let sink_event_id = Uuid::new_v4();
+
+        let events = [
+            SecurityEvent {
+                event_id: source_event_id,
+                occurred_at_ns: base_time,
+                observed_at_ns: base_time,
+                identity: identity.clone(),
+                kind: SecurityEventKind::FileAction(FileAction {
+                    policy_id: binding.request.policy_id.clone(),
+                    policy_revision: revision,
+                    operation: "read".into(),
+                    path: redact_home_path(source_path),
+                    resource_class: "credential".into(),
+                    succeeded: true,
+                    errno: None,
+                    rule_id: Some("credential-source".into()),
+                }),
+            },
+            SecurityEvent {
+                event_id: Uuid::new_v4(),
+                occurred_at_ns: base_time.saturating_add(1),
+                observed_at_ns: base_time.saturating_add(1),
+                identity: identity.clone(),
+                kind: SecurityEventKind::TaintTransition(TaintTransition {
+                    policy_id: binding.request.policy_id.clone(),
+                    policy_revision: revision,
+                    label: "credential".into(),
+                    transition: TaintTransitionKind::Add,
+                    source_pid: binding.request.root_pid,
+                    source_process_start_time: binding.request.process_start_time,
+                    target_pid: binding.request.root_pid,
+                    target_process_start_time: binding.request.process_start_time,
+                    reason: "sensitive credential source read".into(),
+                }),
+            },
+            SecurityEvent {
+                event_id: sink_event_id,
+                occurred_at_ns: base_time.saturating_add(2),
+                observed_at_ns: base_time.saturating_add(2),
+                identity: identity.clone(),
+                kind: SecurityEventKind::NetworkAction(NetworkAction {
+                    policy_id: binding.request.policy_id.clone(),
+                    policy_revision: revision,
+                    direction: NetworkDirection::Outbound,
+                    destination: destination.into(),
+                    destination_class: DestinationClass::Public,
+                    protocol: "tcp".into(),
+                    succeeded: mode != PolicyMode::Enforce,
+                    errno: (mode == PolicyMode::Enforce).then_some(libc::EPERM),
+                    rule_id: Some("credential-public-sink".into()),
+                }),
+            },
+            SecurityEvent {
+                event_id: Uuid::new_v4(),
+                occurred_at_ns: base_time.saturating_add(3),
+                observed_at_ns: base_time.saturating_add(3),
+                identity,
+                kind: SecurityEventKind::PolicyDecision(PolicyDecision {
+                    policy_id: binding.request.policy_id,
+                    policy_revision: revision,
+                    source_event_id,
+                    sink_event_id,
+                    mode,
+                    requested_effect: if mode == PolicyMode::Enforce {
+                        Effect::Block
+                    } else {
+                        Effect::Notify
+                    },
+                    blocked: mode == PolicyMode::Enforce,
+                    killed: false,
+                    errno: (mode == PolicyMode::Enforce).then_some(libc::EPERM),
+                    risk_score: 85,
+                    reason: "credential taint reached unknown public endpoint".into(),
+                }),
+            },
+        ];
+        for event in events {
+            self.security_events.publish(event);
+        }
+        Ok(())
+    }
+
     fn bindings(&self) -> MutexGuard<'_, HashMap<Uuid, Binding>> {
         self.bindings
             .lock()
@@ -63,11 +174,12 @@ impl MockBackend {
 
 impl EnforcementBackend for MockBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
-        Ok(self.events.reflect_delivery_loss(HealthStatus {
+        let health = self.events.reflect_delivery_loss(HealthStatus {
             ready: true,
             backend: "mock".into(),
             message: Some("mock backend does not enforce kernel operations".into()),
-        }))
+        });
+        Ok(self.security_events.reflect_delivery_loss(health))
     }
 
     fn apply(&self, request: ApplyPolicy) -> Result<Binding, BackendError> {
@@ -110,6 +222,59 @@ impl EnforcementBackend for MockBackend {
     fn subscribe(&self) -> Receiver<ViolationEvent> {
         self.events.subscribe()
     }
+
+    fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
+        self.security_events.subscribe()
+    }
+}
+
+fn event_identity(binding: &Binding) -> EventIdentity {
+    EventIdentity {
+        binding_id: binding.request.binding_id,
+        agent_id: binding.request.agent_id.clone(),
+        agent_name: Some("mock-agent".into()),
+        session_id: binding.request.session_id.clone(),
+        conversation_id: None,
+        tool_call_id: None,
+        pid: binding.request.root_pid,
+        process_start_time: binding.request.process_start_time,
+        ppid: None,
+        cgroup_id: None,
+        protocol_version: agentsight_enforcement_protocol::PROTOCOL_VERSION,
+        enforcer_version: env!("CARGO_PKG_VERSION").into(),
+        actplane_revision: "mock".into(),
+    }
+}
+
+fn mock_policy_mode(policy_dsl: &str) -> PolicyMode {
+    if policy_dsl.split_whitespace().any(|word| word == "enforce") {
+        PolicyMode::Enforce
+    } else if policy_dsl.split_whitespace().any(|word| word == "observe") {
+        PolicyMode::Observe
+    } else {
+        PolicyMode::Audit
+    }
+}
+
+fn redact_home_path(path: &str) -> String {
+    if let Some(relative) = path.strip_prefix("/root/") {
+        return format!("~/{relative}");
+    }
+    let Some(home_relative) = path.strip_prefix("/home/") else {
+        return path.into();
+    };
+    let Some((_, relative)) = home_relative.split_once('/') else {
+        return path.into();
+    };
+    format!("~/{relative}")
+}
+
+fn unix_epoch_ns() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    nanos.min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
