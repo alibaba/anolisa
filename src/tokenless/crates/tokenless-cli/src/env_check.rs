@@ -1199,7 +1199,14 @@ pub fn run(
         let spec = specs.get(tool_name).unwrap();
         let result = check_tool(tool_name, spec);
 
-        // Collect missing and version-low deps for auto-fix
+        // Collect missing deps for reporting, but auto-fix only required deps.
+        let fixable_deps: Vec<DepEntry> = result
+            .required_results
+            .iter()
+            .filter(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
+            .map(|(d, _)| d.clone())
+            .collect();
+
         let missing_deps: Vec<DepEntry> = result
             .required_results
             .iter()
@@ -1208,19 +1215,20 @@ pub fn run(
             .map(|(d, _)| d.clone())
             .collect();
 
+        let fixable_names: Vec<String> = fixable_deps.iter().map(|d| d.binary.clone()).collect();
         let missing_names: Vec<String> = missing_deps.iter().map(|d| d.binary.clone()).collect();
 
-        if fix && !missing_deps.is_empty() {
+        if fix && !fixable_deps.is_empty() {
             if !json {
                 println!(
                     "{}: {} (fixing: {})",
                     tool_name,
                     format_status(&result.status),
-                    missing_names.join(", ")
+                    fixable_names.join(", ")
                 );
                 println!("  Attempting auto-fix...");
             }
-            let fix_output = auto_fix(&missing_deps).map_err(|e| (e, 1))?;
+            let fix_output = auto_fix(&fixable_deps).map_err(|e| (e, 1))?;
             if !json {
                 for line in fix_output.lines() {
                     println!("  {}", line);
@@ -1237,7 +1245,7 @@ pub fn run(
                 .map(|(d, _)| d.binary.clone())
                 .collect();
 
-            let fixed: Vec<String> = missing_names
+            let fixed: Vec<String> = fixable_names
                 .iter()
                 .filter(|n| !post_missing.contains(n))
                 .cloned()
@@ -1298,14 +1306,22 @@ pub fn run(
                 println!("  network: {} — {}", net, if *ok { "✓" } else { "missing" });
             }
 
-            if !missing_deps.is_empty() {
+            if !fixable_deps.is_empty() {
                 println!(
-                    "  Hint: run with --fix to auto-install missing deps: {}",
-                    missing_deps
+                    "  Hint: run with --fix to auto-install missing required deps: {}",
+                    fixable_deps
                         .iter()
                         .map(|d| d.binary.clone())
                         .collect::<Vec<_>>()
                         .join(", ")
+                );
+            } else if result
+                .recommended_results
+                .iter()
+                .any(|(_, s)| matches!(s, DepStatus::Missing | DepStatus::VersionLow { .. }))
+            {
+                println!(
+                    "  Note: missing recommended deps are optional and are not auto-installed."
                 );
             }
         }

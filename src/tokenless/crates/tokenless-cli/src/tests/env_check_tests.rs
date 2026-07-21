@@ -1153,6 +1153,57 @@ fn run_unknown_tool_json_output() {
     assert!(run(Some("UnknownTool"), false, false, false, true).is_ok());
 }
 
+#[cfg(unix)]
+#[test]
+fn run_fix_skips_recommended_only_missing_deps() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_spec = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
+    let prev_fix = std::env::var_os("TOKENLESS_ENV_FIX_SCRIPT");
+
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = dir.path().join("recommended-only-spec.json");
+    let marker_path = dir.path().join("fix-called");
+    let fix_script_path = dir.path().join("env-fix.sh");
+    let spec = json!({
+        "Shell": {
+            "required": ["sh"],
+            "recommended": ["nonexistent_recommended_binary_xyz_99"],
+            "config_files": [],
+            "permissions": [],
+            "network": [],
+            "aliases": ["Bash"]
+        }
+    });
+    std::fs::write(&spec_path, serde_json::to_string(&spec).unwrap()).unwrap();
+    std::fs::write(
+        &fix_script_path,
+        format!("#!/bin/sh\ntouch '{}'\n", marker_path.display()),
+    )
+    .unwrap();
+    chmod_file(&fix_script_path, 0o755);
+
+    unsafe {
+        std::env::set_var("TOKENLESS_TOOL_READY_SPEC", &spec_path);
+        std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", &fix_script_path);
+    }
+
+    let result = run(Some("Shell"), false, true, false, true);
+
+    unsafe {
+        match prev_spec {
+            Some(v) => std::env::set_var("TOKENLESS_TOOL_READY_SPEC", v),
+            None => std::env::remove_var("TOKENLESS_TOOL_READY_SPEC"),
+        }
+        match prev_fix {
+            Some(v) => std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", v),
+            None => std::env::remove_var("TOKENLESS_ENV_FIX_SCRIPT"),
+        }
+    }
+
+    assert!(result.is_ok());
+    assert!(!marker_path.exists(), "recommended deps must not trigger auto-fix");
+}
+
 #[test]
 fn run_no_tool_no_all_errors() {
     let dir = tempfile::tempdir().unwrap();

@@ -247,7 +247,11 @@ def main() -> None:
     if status == "UNKNOWN":
         _skip()
 
-    # === Phase 2: FIX (auto-install missing dependencies) ===
+    if status == "PARTIAL":
+        print(_build_response(tool_name, status, missing, "allow"))
+        return
+
+    # === Phase 2: FIX (auto-install missing required dependencies) ===
     _warn(f"{tool_name}: {status}, attempting auto-fix"
           + (f" (missing: {', '.join(missing)})" if missing else ""))
 

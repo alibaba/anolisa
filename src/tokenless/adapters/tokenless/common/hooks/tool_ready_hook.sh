@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tokenless-hook-version: 9
+# tokenless-hook-version: 10
 # Token-Less Tool Ready environment pre-check.
 #
 # Hook event: PreToolUse (matcher: "" — matches all tools)
@@ -194,6 +194,37 @@ REQUIRED=$(normalize_deps "$(jq -c --arg key "$SPEC_KEY" '.[$key].required // []
 RECOMMENDED=$(normalize_deps "$(jq -c --arg key "$SPEC_KEY" '.[$key].recommended // []' "$SPEC_FILE")")
 PERMISSIONS=$(jq -r --arg key "$SPEC_KEY" '.[$key].permissions[] // empty' "$SPEC_FILE" 2>/dev/null || echo '')
 
+SHELL_COMMAND=$(echo "$INPUT" | jq -r '
+  .tool_input.command //
+  .tool_input.cmd //
+  .input.command //
+  .parameters.command //
+  .arguments.command //
+  empty
+' 2>/dev/null || echo '')
+
+command_uses_binary() {
+  local command_text="$1"
+  local binary="$2"
+  [ -n "$command_text" ] || return 1
+  echo "$command_text" | grep -Eq "(^|[[:space:];|&()<>])(/[^[:space:];|&()<>]*/)?${binary}([[:space:];|&()<>]|$)"
+}
+
+if [ "$SPEC_KEY" = "Shell" ] && [ -n "$SHELL_COMMAND" ]; then
+  FILTERED_RECOMMENDED="[]"
+  rec_filter_count=$(echo "$RECOMMENDED" | jq 'length')
+  if [ "$rec_filter_count" -gt 0 ]; then
+    for i in $(seq 0 $((rec_filter_count - 1))); do
+      dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
+      binary=$(echo "$dep_json" | jq -r '.binary')
+      if command_uses_binary "$SHELL_COMMAND" "$binary"; then
+        FILTERED_RECOMMENDED=$(echo "$FILTERED_RECOMMENDED" | jq -c ". + [$dep_json]")
+      fi
+    done
+  fi
+  RECOMMENDED="$FILTERED_RECOMMENDED"
+fi
+
 # --- Version comparison helper ---
 # Handles prefixed versions (v22.1.0), build suffixes (1.2.3-rc1), and
 # arbitrary segment counts (1.2, 1.2.3, 1.2.3.4, etc.).
@@ -291,19 +322,21 @@ PERM_MISSING=$(check_permissions)
 
 # Check required deps
 req_count=$(echo "$REQUIRED" | jq 'length')
-for i in $(seq 0 $((req_count - 1))); do
-  dep_json=$(echo "$REQUIRED" | jq -c ".[$i]")
-  status=$(check_dep "$dep_json")
-  case "$status" in
-    missing)
-      HAS_REQUIRED_MISSING=true
-      MISSING_DEP_JSONS=$(echo "$MISSING_DEP_JSONS" | jq -c ". + [$dep_json]")
-      ;;
-    version_low:*)
-      HAS_VERSION_LOW=true
-      ;;
-  esac
-done
+if [ "$req_count" -gt 0 ]; then
+  for i in $(seq 0 $((req_count - 1))); do
+    dep_json=$(echo "$REQUIRED" | jq -c ".[$i]")
+    status=$(check_dep "$dep_json")
+    case "$status" in
+      missing)
+        HAS_REQUIRED_MISSING=true
+        MISSING_DEP_JSONS=$(echo "$MISSING_DEP_JSONS" | jq -c ". + [$dep_json]")
+        ;;
+      version_low:*)
+        HAS_VERSION_LOW=true
+        ;;
+    esac
+  done
+fi
 
 REQUIRED_MISSING_COUNT=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
 
@@ -311,18 +344,19 @@ REQUIRED_MISSING_COUNT=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || 
 rec_count=$(echo "$RECOMMENDED" | jq 'length')
 missing_count_rec=0
 RECOMMENDED_MISSING_LIST=""
-for i in $(seq 0 $((rec_count - 1))); do
-  dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
-  status=$(check_dep "$dep_json")
-  case "$status" in
-    missing)
-      MISSING_DEP_JSONS=$(echo "$MISSING_DEP_JSONS" | jq -c ". + [$dep_json]")
-      binary=$(echo "$dep_json" | jq -r '.binary')
-      RECOMMENDED_MISSING_LIST="${RECOMMENDED_MISSING_LIST} ${binary}"
-      missing_count_rec=$((missing_count_rec + 1))
-      ;;
-  esac
-done
+if [ "$rec_count" -gt 0 ]; then
+  for i in $(seq 0 $((rec_count - 1))); do
+    dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
+    status=$(check_dep "$dep_json")
+    case "$status" in
+      missing)
+        binary=$(echo "$dep_json" | jq -r '.binary')
+        RECOMMENDED_MISSING_LIST="${RECOMMENDED_MISSING_LIST} ${binary}"
+        missing_count_rec=$((missing_count_rec + 1))
+        ;;
+    esac
+  done
+fi
 
 # --- Determine readiness ---
 IS_READY=true
@@ -373,30 +407,34 @@ if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; t
 
     # Re-check version_low entries after fix
     HAS_VERSION_LOW=false
-    for i in $(seq 0 $((req_count - 1))); do
-        dep_json=$(echo "$REQUIRED" | jq -c ".[$i]")
-        status=$(check_dep "$dep_json")
-        case "$status" in
-            version_low:*)
-                HAS_VERSION_LOW=true
-                ;;
-        esac
-    done
+    if [ "$req_count" -gt 0 ]; then
+        for i in $(seq 0 $((req_count - 1))); do
+            dep_json=$(echo "$REQUIRED" | jq -c ".[$i]")
+            status=$(check_dep "$dep_json")
+            case "$status" in
+                version_low:*)
+                    HAS_VERSION_LOW=true
+                    ;;
+            esac
+        done
+    fi
 
     # Re-scan recommended deps after fix
     RECOMMENDED_MISSING_LIST=""
     missing_count_rec=0
-    for i in $(seq 0 $((rec_count - 1))); do
-        dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
-        status=$(check_dep "$dep_json")
-        case "$status" in
-            missing)
-                binary=$(echo "$dep_json" | jq -r '.binary')
-                RECOMMENDED_MISSING_LIST="${RECOMMENDED_MISSING_LIST} ${binary}"
-                missing_count_rec=$((missing_count_rec + 1))
-                ;;
-        esac
-    done
+    if [ "$rec_count" -gt 0 ]; then
+        for i in $(seq 0 $((rec_count - 1))); do
+            dep_json=$(echo "$RECOMMENDED" | jq -c ".[$i]")
+            status=$(check_dep "$dep_json")
+            case "$status" in
+                missing)
+                    binary=$(echo "$dep_json" | jq -r '.binary')
+                    RECOMMENDED_MISSING_LIST="${RECOMMENDED_MISSING_LIST} ${binary}"
+                    missing_count_rec=$((missing_count_rec + 1))
+                    ;;
+            esac
+        done
+    fi
 
     if [ -z "$STILL_MISSING" ] && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
         exit 0
@@ -438,10 +476,12 @@ fi
 
 # NOT_READY: required deps or permissions missing → block with "Skip retry"
 MISSING_LIST=""
-for i in $(seq 0 $((missing_count - 1))); do
-    binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
-    MISSING_LIST="${MISSING_LIST} ${binary}"
-done
+if [ "$missing_count" -gt 0 ]; then
+    for i in $(seq 0 $((missing_count - 1))); do
+        binary=$(echo "$MISSING_DEP_JSONS" | jq -r ".[$i].binary")
+        MISSING_LIST="${MISSING_LIST} ${binary}"
+    done
+fi
 
 DIAG_PARTS=""
 [ -n "$MISSING_LIST" ]  && DIAG_PARTS="${DIAG_PARTS} missing:${MISSING_LIST};"
