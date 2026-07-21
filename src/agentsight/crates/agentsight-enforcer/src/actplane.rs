@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -11,7 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use actplane_ifc_compiler::compile_str;
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, Effect, HealthStatus, SecurityEvent, ViolationEvent,
+    ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationClass, Effect,
+    EventIdentity, FileAction, HealthStatus, NetworkAction, NetworkDirection, PolicyDecision,
+    PolicyMode, SecurityEvent, SecurityEventKind, TaintTransition, TaintTransitionKind,
+    ViolationEvent, PROTOCOL_VERSION,
 };
 use ebpf_ifc_engine::capability::{
     AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE, AUTH_NARROW_SCOPE,
@@ -32,6 +36,7 @@ struct ActiveBinding {
     binding: Binding,
     reasons: Vec<String>,
     rule_names: Vec<String>,
+    label_names: HashMap<u64, String>,
 }
 
 struct RuntimeState {
@@ -253,6 +258,11 @@ impl EnforcementBackend for ActPlaneBackend {
                 binding: binding.clone(),
                 reasons: compiled.reasons,
                 rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
+                label_names: compiled
+                    .labels
+                    .into_iter()
+                    .map(|(name, mask)| (mask, name))
+                    .collect(),
             },
         );
         Ok(binding)
@@ -332,7 +342,30 @@ fn spawn_poller(
             if let Some(active) = active {
                 callback_state
                     .events
-                    .publish(convert_violation(raw, &active));
+                    .publish(convert_violation(raw.clone(), &active));
+                if raw.op == 3 && raw.provenance.is_some() {
+                    let label = active
+                        .label_names
+                        .get(&raw.matched_label)
+                        .cloned()
+                        .unwrap_or_else(|| format!("label-0x{:x}", raw.matched_label));
+                    let mode = if raw.effect == 0 {
+                        PolicyMode::Audit
+                    } else {
+                        PolicyMode::Enforce
+                    };
+                    match convert_security_events(raw, &active, &label, mode) {
+                        Ok(events) => {
+                            for event in events {
+                                callback_state.security_events.publish(event);
+                            }
+                        }
+                        Err(error) => {
+                            *callback_state.runtime_error() =
+                                Some(format!("normalize ActPlane evidence: {error}"));
+                        }
+                    }
+                }
             }
         }) {
             *state.runtime_error() = Some(format!("violation poller stopped: {error}"));
@@ -379,6 +412,299 @@ fn read_process_start_time(pid: i32) -> Result<u64, BackendError> {
         .map_err(|error| BackendError::KernelFailure(format!("read /proc/{pid}/stat: {error}")))?;
     parse_process_start_time(&stat)
         .map_err(|error| BackendError::KernelFailure(format!("parse /proc/{pid}/stat: {error}")))
+}
+
+/// Translates the stable credential-exfiltration model into pinned ActPlane DSL.
+///
+/// The current ActPlane endpoint-condition ABI can represent one trusted target
+/// per rule. Multiple trusted targets are rejected instead of silently
+/// weakening or over-constraining enforcement.
+///
+/// # Errors
+///
+/// Returns a compile failure for invalid policy fields, unsafe DSL literals,
+/// unsupported multiple trusted targets, or pinned compiler rejection.
+pub fn compile_credential_exfiltration_policy(
+    policy: &CredentialExfiltrationPolicy,
+) -> Result<String, BackendError> {
+    policy
+        .validate()
+        .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
+    validate_label(&policy.taint_label)?;
+
+    let mut sources = policy.source_patterns.clone();
+    sources.sort();
+    sources.dedup();
+    for source in &sources {
+        validate_literal("source pattern", source)?;
+    }
+
+    let mut trusted = policy.trusted_endpoints.clone();
+    trusted.sort();
+    trusted.dedup();
+    for endpoint in &trusted {
+        validate_literal("trusted endpoint", endpoint)?;
+    }
+    if trusted.len() > 1 {
+        return Err(BackendError::CompileFailure(
+            "the pinned ActPlane ABI supports one trusted endpoint exception per rule".into(),
+        ));
+    }
+
+    let mut dsl = String::new();
+    for source in sources {
+        dsl.push_str(&format!(
+            "source {} = file \"{}\"\n",
+            policy.taint_label, source
+        ));
+    }
+    let action = match policy.mode {
+        PolicyMode::Observe | PolicyMode::Audit => "notify",
+        PolicyMode::Enforce => "block",
+    };
+    dsl.push_str("rule agentsight-credential-exfiltration:\n  ");
+    dsl.push_str(action);
+    dsl.push_str(" connect endpoint \"*\" if ");
+    dsl.push_str(&policy.taint_label);
+    if let Some(endpoint) = trusted.first() {
+        dsl.push_str(" unless target \"");
+        dsl.push_str(endpoint);
+        dsl.push('"');
+    }
+    dsl.push_str("\n  because \"credential-derived data reached an untrusted network target\"\n");
+
+    compile_str(&dsl).map_err(BackendError::CompileFailure)?;
+    Ok(dsl)
+}
+
+fn validate_label(label: &str) -> Result<(), BackendError> {
+    let valid = label
+        .chars()
+        .enumerate()
+        .all(|(index, character)| {
+            character == '_'
+                || character.is_ascii_uppercase()
+                || (index > 0 && character.is_ascii_digit())
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(BackendError::CompileFailure(
+            "taint label must use uppercase ASCII letters, digits, or underscore".into(),
+        ))
+    }
+}
+
+fn validate_literal(kind: &str, value: &str) -> Result<(), BackendError> {
+    if value.is_empty()
+        || value.len() >= 127
+        || value
+            .chars()
+            .any(|character| {
+                character == '"' || character == '\\' || character.is_control()
+            })
+    {
+        return Err(BackendError::CompileFailure(format!(
+            "{kind} contains unsupported DSL characters or exceeds 126 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn convert_security_events(
+    raw: Violation,
+    active: &ActiveBinding,
+    taint_label: &str,
+    mode: PolicyMode,
+) -> Result<Vec<SecurityEvent>, BackendError> {
+    convert_security_events_at(raw, active, taint_label, mode, now_ns(), monotonic_now_ns())
+}
+
+fn convert_security_events_at(
+    raw: Violation,
+    active: &ActiveBinding,
+    taint_label: &str,
+    mode: PolicyMode,
+    observed_at_ns: u64,
+    monotonic_now_ns: Option<u64>,
+) -> Result<Vec<SecurityEvent>, BackendError> {
+    let provenance = raw.provenance.as_ref().ok_or_else(|| {
+        BackendError::KernelFailure("ActPlane connect violation lacks source provenance".into())
+    })?;
+    let policy_revision = active
+        .binding
+        .request
+        .policy_revision
+        .parse::<u64>()
+        .map_err(|_| {
+            BackendError::CompileFailure(format!(
+                "policy revision '{}' is not numeric",
+                active.binding.request.policy_revision
+            ))
+        })?;
+    let rule_id = active
+        .rule_names
+        .get(raw.rule_id as usize)
+        .cloned()
+        .or_else(|| Some(raw.rule_id.to_string()));
+    let reason = active
+        .reasons
+        .get(raw.rule_id as usize)
+        .cloned()
+        .unwrap_or_else(|| "credential taint reached an untrusted network target".into());
+    let sink_time = monotonic_now_ns
+        .map(|now| monotonic_to_epoch_ns(raw.timestamp_ns, now, observed_at_ns))
+        .unwrap_or(observed_at_ns);
+    let source_time = monotonic_now_ns
+        .map(|now| monotonic_to_epoch_ns(provenance.timestamp_ns, now, observed_at_ns))
+        .unwrap_or(observed_at_ns);
+    let source_start = process_start_time(active, provenance.pid);
+    let target_start = process_start_time(active, raw.pid);
+    let source_identity = event_identity(active, provenance.pid, None, source_start);
+    let sink_identity = event_identity(active, raw.pid, Some(raw.ppid), target_start);
+    let source_event_id = Uuid::new_v4();
+    let taint_event_id = Uuid::new_v4();
+    let sink_event_id = Uuid::new_v4();
+    let decision_event_id = Uuid::new_v4();
+    let policy_id = active.binding.request.policy_id.clone();
+    let source_path = redact_home_path(&provenance.target);
+    let destination = raw.target.clone();
+
+    Ok(vec![
+        SecurityEvent {
+            event_id: source_event_id,
+            occurred_at_ns: source_time,
+            observed_at_ns,
+            identity: source_identity,
+            kind: SecurityEventKind::FileAction(FileAction {
+                policy_id: policy_id.clone(),
+                policy_revision,
+                operation: operation_name(provenance.op).into(),
+                path: source_path,
+                resource_class: "credential".into(),
+                succeeded: true,
+                errno: None,
+                rule_id: rule_id.clone(),
+            }),
+        },
+        SecurityEvent {
+            event_id: taint_event_id,
+            occurred_at_ns: source_time,
+            observed_at_ns,
+            identity: sink_identity.clone(),
+            kind: SecurityEventKind::TaintTransition(TaintTransition {
+                policy_id: policy_id.clone(),
+                policy_revision,
+                label: taint_label.into(),
+                transition: if provenance.pid == raw.pid {
+                    TaintTransitionKind::Add
+                } else {
+                    TaintTransitionKind::Inherit
+                },
+                source_pid: provenance.pid,
+                source_process_start_time: source_start,
+                target_pid: raw.pid,
+                target_process_start_time: target_start,
+                reason: "ActPlane reported the first source provenance for the matched label"
+                    .into(),
+            }),
+        },
+        SecurityEvent {
+            event_id: sink_event_id,
+            occurred_at_ns: sink_time,
+            observed_at_ns,
+            identity: sink_identity.clone(),
+            kind: SecurityEventKind::NetworkAction(NetworkAction {
+                policy_id: policy_id.clone(),
+                policy_revision,
+                direction: NetworkDirection::Outbound,
+                destination: destination.clone(),
+                destination_class: classify_destination(&destination),
+                protocol: "tcp".into(),
+                succeeded: !raw.blocked,
+                errno: raw.blocked.then_some(libc::EPERM),
+                rule_id: rule_id.clone(),
+            }),
+        },
+        SecurityEvent {
+            event_id: decision_event_id,
+            occurred_at_ns: sink_time,
+            observed_at_ns,
+            identity: sink_identity,
+            kind: SecurityEventKind::PolicyDecision(PolicyDecision {
+                policy_id,
+                policy_revision,
+                source_event_id,
+                sink_event_id,
+                mode,
+                requested_effect: effect(raw.effect),
+                blocked: raw.blocked,
+                killed: raw.killed,
+                errno: raw.blocked.then_some(libc::EPERM),
+                risk_score: if raw.blocked { 95 } else { 85 },
+                reason,
+            }),
+        },
+    ])
+}
+
+fn process_start_time(active: &ActiveBinding, pid: i32) -> u64 {
+    if pid == active.binding.request.root_pid {
+        active.binding.request.process_start_time
+    } else {
+        read_process_start_time(pid).unwrap_or(0)
+    }
+}
+
+fn event_identity(
+    active: &ActiveBinding,
+    pid: i32,
+    ppid: Option<i32>,
+    process_start_time: u64,
+) -> EventIdentity {
+    EventIdentity {
+        binding_id: active.binding.request.binding_id,
+        agent_id: active.binding.request.agent_id.clone(),
+        agent_name: None,
+        session_id: active.binding.request.session_id.clone(),
+        conversation_id: None,
+        tool_call_id: None,
+        pid,
+        process_start_time,
+        ppid,
+        cgroup_id: None,
+        protocol_version: PROTOCOL_VERSION,
+        enforcer_version: env!("CARGO_PKG_VERSION").into(),
+        actplane_revision: ACTPLANE_REVISION.into(),
+    }
+}
+
+fn redact_home_path(path: &str) -> String {
+    if let Some(relative) = path.strip_prefix("/root/") {
+        return format!("~/{relative}");
+    }
+    if let Some(relative) = path.strip_prefix("/home/")
+        && let Some((_, remainder)) = relative.split_once('/')
+    {
+        return format!("~/{remainder}");
+    }
+    path.into()
+}
+
+fn classify_destination(destination: &str) -> DestinationClass {
+    let Ok(address) = destination.parse::<IpAddr>() else {
+        return DestinationClass::Unknown;
+    };
+    if address.is_loopback() {
+        DestinationClass::Local
+    } else if match address {
+        IpAddr::V4(address) => address.is_private() || address.is_link_local(),
+        IpAddr::V6(address) => address.is_unique_local() || address.is_unicast_link_local(),
+    } {
+        DestinationClass::Private
+    } else {
+        DestinationClass::Public
+    }
 }
 
 fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
@@ -504,9 +830,10 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use agentsight_enforcement_protocol::{
-        ApplyPolicy, Binding, BindingState, Effect, ViolationEvent,
+        ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, Effect, PolicyMode,
+        SecurityEventKind, ViolationEvent,
     };
-    use ebpf_ifc_engine::Violation;
+    use ebpf_ifc_engine::{Provenance, Violation};
     use uuid::Uuid;
 
     use super::*;
@@ -532,6 +859,7 @@ mod tests {
             },
             reasons: vec!["credential reached an external sink".into()],
             rule_names: vec!["block-exfiltration".into()],
+            label_names: HashMap::from([(1, "CREDENTIAL".into())]),
         }
     }
 
@@ -554,6 +882,139 @@ mod tests {
             provenance: None,
             timestamp_ns,
         }
+    }
+
+    fn credential_policy() -> CredentialExfiltrationPolicy {
+        CredentialExfiltrationPolicy {
+            policy_id: "credential-exfiltration".into(),
+            revision: 3,
+            source_patterns: vec!["/root/.ssh/id_rsa".into(), "/root/.aws/credentials".into()],
+            trusted_endpoints: vec!["10.0.0.8".into()],
+            taint_label: "CREDENTIAL".into(),
+            taint_ttl_secs: 900,
+            mode: PolicyMode::Enforce,
+        }
+    }
+
+    #[test]
+    fn credential_policy_compiles_deterministically_with_trusted_exception() {
+        let dsl = compile_credential_exfiltration_policy(&credential_policy())
+            .expect("fixture policy should compile");
+
+        assert!(dsl.contains("source CREDENTIAL = file \"/root/.aws/credentials\""));
+        assert!(dsl.contains("source CREDENTIAL = file \"/root/.ssh/id_rsa\""));
+        assert!(dsl.contains("block connect endpoint \"*\" if CREDENTIAL"));
+        assert!(dsl.contains("unless target \"10.0.0.8\""));
+        assert!(compile_str(&dsl).is_ok());
+    }
+
+    #[test]
+    fn credential_policy_rejects_dsl_injection() {
+        let mut policy = credential_policy();
+        policy.source_patterns = vec!["/safe\"\nrule injected:".into()];
+
+        assert!(compile_credential_exfiltration_policy(&policy).is_err());
+    }
+
+    #[test]
+    fn checked_in_policy_fixture_compiles_in_audit_mode() {
+        let policy: CredentialExfiltrationPolicy = serde_json::from_str(include_str!(
+            "../../../integration-tests/fixtures/credential-exfiltration-policy.json"
+        ))
+        .expect("checked-in policy fixture should decode");
+
+        let dsl = compile_credential_exfiltration_policy(&policy)
+            .expect("checked-in policy fixture should compile");
+        assert!(dsl.contains("notify connect endpoint"));
+    }
+
+    #[test]
+    fn multiple_trusted_endpoints_fail_closed() {
+        let mut policy = credential_policy();
+        policy.trusted_endpoints = vec!["10.0.0.8".into(), "10.0.0.9".into()];
+
+        let error = compile_credential_exfiltration_policy(&policy)
+            .expect_err("unsupported exception union must fail");
+        assert!(error.to_string().contains("one trusted endpoint"));
+    }
+
+    #[test]
+    fn raw_block_violation_becomes_ordered_security_evidence() {
+        let mut raw = raw_violation(270_000_000_000);
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: 269_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.ssh/id_rsa".into(),
+        });
+
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let events = convert_security_events_at(
+            raw,
+            &active,
+            "CREDENTIAL",
+            PolicyMode::Enforce,
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+        )
+        .expect("fixture violation should convert");
+
+        let SecurityEventKind::FileAction(source) = &events[0].kind else {
+            panic!("first evidence must be a file action");
+        };
+        assert_eq!(source.path, "~/.ssh/id_rsa");
+        let SecurityEventKind::TaintTransition(taint) = &events[1].kind else {
+            panic!("second evidence must be a taint transition");
+        };
+        assert_eq!(taint.label, "CREDENTIAL");
+        assert!(matches!(events[2].kind, SecurityEventKind::NetworkAction(_)));
+        let SecurityEventKind::PolicyDecision(decision) = &events[3].kind else {
+            panic!("last evidence must be a policy decision");
+        };
+        assert!(decision.blocked);
+        assert_eq!(decision.errno, Some(libc::EPERM));
+        assert_eq!(decision.source_event_id, events[0].event_id);
+        assert_eq!(decision.sink_event_id, events[2].event_id);
+    }
+
+    #[test]
+    fn raw_notify_violation_preserves_audit_allow_outcome() {
+        let mut raw = raw_violation(270_000_000_000);
+        raw.effect = 0;
+        raw.blocked = false;
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: 269_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.aws/credentials".into(),
+        });
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+
+        let events = convert_security_events_at(
+            raw,
+            &active,
+            "CREDENTIAL",
+            PolicyMode::Audit,
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+        )
+        .expect("audit violation should convert");
+
+        let SecurityEventKind::NetworkAction(network) = &events[2].kind else {
+            panic!("third evidence must be a network action");
+        };
+        assert!(network.succeeded);
+        assert_eq!(network.errno, None);
+        let SecurityEventKind::PolicyDecision(decision) = &events[3].kind else {
+            panic!("last evidence must be a policy decision");
+        };
+        assert_eq!(decision.mode, PolicyMode::Audit);
+        assert!(!decision.blocked);
+        assert_eq!(decision.errno, None);
     }
 
     #[test]
