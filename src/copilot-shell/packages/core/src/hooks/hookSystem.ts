@@ -112,6 +112,7 @@ export class HookSystem {
     toolInput: Record<string, unknown>,
     skillContext?: import('./types.js').SkillToolContext,
     toolUseId?: string,
+    signal?: AbortSignal,
   ): Promise<PreToolUseHookOutput | undefined> {
     debugLogger.info(
       `[Hook Debug] hookSystem.firePreToolUseEvent: entering facade, tool=${toolName}`,
@@ -121,6 +122,7 @@ export class HookSystem {
       toolInput,
       skillContext,
       toolUseId,
+      signal,
     );
     const output = result.finalOutput
       ? (createHookOutput(
@@ -185,6 +187,7 @@ export class HookSystem {
     mcpContext?: McpToolContext,
     originalRequestName?: string,
     toolUseId?: string,
+    signal?: AbortSignal,
   ): Promise<PostToolUseHookOutput | undefined> {
     debugLogger.info(
       `[Hook Debug] hookSystem.firePostToolUseEvent: entering facade, tool=${toolName}`,
@@ -196,6 +199,7 @@ export class HookSystem {
       mcpContext,
       originalRequestName,
       toolUseId,
+      signal,
     );
     const output = result.finalOutput
       ? (createHookOutput(
