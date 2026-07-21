@@ -16,7 +16,7 @@ use crate::skill::SkillManager;
 use crate::sls;
 use crate::tool::ToolRegistry;
 
-pub async fn run(args: &CliArgs, mut config: CoreConfig) {
+pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
     apply_cli_overrides(args, &mut config);
 
     let stdout = io::stdout();
@@ -25,7 +25,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
         Ok(session) => session,
         Err(error) => {
             emit_session_error(&mut writer, args.resume.as_deref(), &error);
-            return;
+            return 0;
         }
     };
 
@@ -109,6 +109,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
                     is_error: false,
                     result: Some("completed".to_string()),
                     errors: None,
+                    error_code: None,
                     session_error_code: None,
                     session_error_phase: None,
                     session_id: Some(engine.session_id.clone()),
@@ -123,12 +124,12 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
                 engine.emit(&mut writer, &err_msg);
             }
         }
-        return;
+        return 0;
     }
 
     // Replay any lines that were buffered during the auth wait
     for buffered_line in buffered_lines {
-        if !process_input_line(
+        match process_input_line(
             &buffered_line,
             &mut engine,
             &mut lines,
@@ -138,7 +139,9 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
         )
         .await
         {
-            return;
+            InputLineResult::Continue => {}
+            InputLineResult::Shutdown => return 0,
+            InputLineResult::InvalidJson => return 1,
         }
     }
 
@@ -148,7 +151,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
             continue;
         }
 
-        if !process_input_line(
+        match process_input_line(
             &line,
             &mut engine,
             &mut lines,
@@ -158,12 +161,21 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
         )
         .await
         {
-            break;
+            InputLineResult::Continue => {}
+            InputLineResult::Shutdown => return 0,
+            InputLineResult::InvalidJson => return 1,
         }
     }
+    0
 }
 
-/// Process a single input line. Returns `false` if the session should shut down.
+enum InputLineResult {
+    Continue,
+    Shutdown,
+    InvalidJson,
+}
+
+/// Processes a single JSONL input line.
 async fn process_input_line<W, R>(
     line: &str,
     engine: &mut CoshCore,
@@ -171,7 +183,7 @@ async fn process_input_line<W, R>(
     writer: &mut W,
     enable_shell_evidence_tool: bool,
     session: &mut SessionRuntime,
-) -> bool
+) -> InputLineResult
 where
     W: io::Write,
     R: AsyncBufReadExt + Unpin,
@@ -179,8 +191,17 @@ where
     let msg: InputMessage = match serde_json::from_str(line) {
         Ok(m) => m,
         Err(e) => {
-            tracing::debug!("failed to parse input: {e}");
-            return true;
+            const ERROR: &str = "failed to parse stdin line as JSON";
+            tracing::debug!("{ERROR}: {e}");
+            engine.emit(
+                writer,
+                &OutputMessage::result_error_with_code(
+                    &engine.session_id,
+                    ERROR,
+                    Some("InvalidJsonlInput"),
+                ),
+            );
+            return InputLineResult::InvalidJson;
         }
     };
 
@@ -230,7 +251,7 @@ where
             ShellControlRequest::Interrupt => {
                 engine.provider.cancel();
             }
-            ShellControlRequest::Shutdown => return false,
+            ShellControlRequest::Shutdown => return InputLineResult::Shutdown,
             ShellControlRequest::SwitchModel { model } => {
                 engine.model = model.clone();
                 engine.emit(
@@ -273,7 +294,7 @@ where
                         writer,
                         &OutputMessage::result_error(&engine.session_id, &error),
                     );
-                    return true;
+                    return InputLineResult::Continue;
                 }
             }
             if let Some(ctx) = shell_context {
@@ -297,6 +318,7 @@ where
                         is_error: false,
                         result: Some("completed".to_string()),
                         errors: None,
+                        error_code: None,
                         session_error_code: None,
                         session_error_phase: None,
                         session_id: Some(engine.session_id.clone()),
@@ -318,7 +340,7 @@ where
             // Registry requests are handled in registry mode, ignore here
         }
     }
-    true
+    InputLineResult::Continue
 }
 
 struct SessionRuntime {

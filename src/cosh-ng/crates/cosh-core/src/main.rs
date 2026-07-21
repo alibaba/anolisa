@@ -114,7 +114,10 @@ async fn main() {
     if args.is_registry() {
         registry::run(&args, config).await;
     } else if args.is_headless() {
-        headless::run(&args, config).await;
+        let exit_code = headless::run(&args, config).await;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
     } else {
         interactive::run(&args, config).await;
     }

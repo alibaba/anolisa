@@ -207,6 +207,8 @@ pub enum OutputMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         errors: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         session_error_code: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_error_phase: Option<String>,
@@ -513,6 +515,7 @@ impl OutputMessage {
             is_error: false,
             result: Some(result.to_string()),
             errors: None,
+            error_code: None,
             session_error_code: None,
             session_error_phase: None,
             session_id: Some(session_id.to_string()),
@@ -522,11 +525,17 @@ impl OutputMessage {
     }
 
     pub fn result_error(session_id: &str, error: &str) -> Self {
+        Self::result_error_with_code(session_id, error, None)
+    }
+
+    /// Builds an error result with a stable code for machine consumers.
+    pub fn result_error_with_code(session_id: &str, error: &str, error_code: Option<&str>) -> Self {
         Self::Result {
             subtype: Some("error".to_string()),
             is_error: true,
             result: Some(error.to_string()),
             errors: Some(vec![error.to_string()]),
+            error_code: error_code.map(str::to_string),
             session_error_code: None,
             session_error_phase: None,
             session_id: Some(session_id.to_string()),
@@ -546,6 +555,7 @@ impl OutputMessage {
             is_error: true,
             result: Some(error.to_string()),
             errors: Some(vec![error.to_string()]),
+            error_code: None,
             session_error_code: Some(session_error_code.to_string()),
             session_error_phase: Some(session_error_phase.to_string()),
             session_id: Some(session_id.to_string()),

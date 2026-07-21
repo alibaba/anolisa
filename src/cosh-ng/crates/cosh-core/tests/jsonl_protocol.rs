@@ -164,3 +164,39 @@ fn output_format_matches_cosh_shell_expectations() {
     assert_eq!(init.get("type").unwrap().as_str().unwrap(), "system");
     assert_eq!(init.get("subtype").unwrap().as_str().unwrap(), "init");
 }
+
+#[test]
+fn invalid_jsonl_input_returns_error_and_fails() {
+    let bin = binary_path();
+    let home = tempfile::tempdir().expect("temp home");
+    let mut child = Command::new(&bin)
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cosh-core");
+
+    const SECRET_INPUT: &str = "token=must-not-echo";
+    writeln!(child.stdin.as_mut().expect("stdin"), "{SECRET_INPUT}").expect("write invalid input");
+    let output = child.wait_with_output().expect("wait for cosh-core");
+    assert!(!output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(SECRET_INPUT),
+        "invalid input must not be echoed"
+    );
+    let messages = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("valid JSONL output"))
+        .collect::<Vec<_>>();
+    let error = messages
+        .iter()
+        .find(|message| message["type"] == "result" && message["is_error"] == true)
+        .expect("invalid input error result");
+    assert_eq!(error["subtype"], "error");
+    assert_eq!(error["error_code"], "InvalidJsonlInput");
+    assert_eq!(error["errors"][0], "failed to parse stdin line as JSON");
+}

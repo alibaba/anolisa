@@ -220,7 +220,11 @@ pub async fn wait_for_auth_response<R: AsyncBufReadExt + Unpin>(
             }
             let msg: InputMessage = match serde_json::from_str(&line) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(_) => {
+                    // Let the headless input loop emit the protocol error.
+                    buffered_lines.push(line);
+                    continue;
+                }
             };
             match msg {
                 InputMessage::ControlResponse { response } => {
@@ -287,6 +291,33 @@ pub fn is_auth_error(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn buffers_invalid_jsonl_during_auth_wait() {
+        let (mut input, output) = tokio::io::duplex(1024);
+        input
+            .write_all(b"token=must-not-echo\n")
+            .await
+            .expect("write invalid JSONL");
+        input
+            .write_all(
+                br#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-init","response":{"provider_id":"dashscope","values":{"api_key":"test-key"},"persist":false}}}"#,
+            )
+            .await
+            .expect("write auth response");
+        input
+            .write_all(b"\n")
+            .await
+            .expect("terminate auth response");
+        drop(input);
+
+        let mut lines = tokio::io::BufReader::new(output).lines();
+        let result = wait_for_auth_response("auth-init", &mut lines).await;
+
+        assert_eq!(result.buffered_lines, vec!["token=must-not-echo"]);
+        assert!(result.response.is_some(), "expected auth response");
+    }
 
     #[test]
     fn builtin_providers_have_correct_ids() {
