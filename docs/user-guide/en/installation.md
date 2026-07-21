@@ -164,5 +164,5 @@ anolisa update --all
 ## Next Steps
 
 - [anolisa CLI Reference](user-entrypoint/anolisa-cli.md)
-- [Copilot Shell](user-entrypoint/copilot-shell.md)
+- [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md)
 - [Troubleshooting](troubleshooting.md)

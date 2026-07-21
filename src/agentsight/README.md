@@ -1,6 +1,6 @@
 # AgentSight
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 eBPF-based observability tool for AI Agents on Linux, providing zero-intrusion monitoring of LLM API calls, token consumption, process behavior, and SSL/TLS traffic. AgentSight is an observability component of [ANOLISA](../../README.md).
 

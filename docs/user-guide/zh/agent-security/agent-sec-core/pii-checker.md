@@ -1,6 +1,6 @@
 # PII Checker 用户使用指南
 
-[English](PII_CHECKER_USER_GUIDE.md)
+[English](../../../en/agent-security/agent-sec-core/pii-checker.md)
 
 PII Checker 用于检测 Agent 输入和输出中的个人数据与凭据。它返回结构化 verdict，生成安全的
 evidence 和可选脱敏文本，并记录经过清理的 Security Event，供审计和 Observability 关联使用。

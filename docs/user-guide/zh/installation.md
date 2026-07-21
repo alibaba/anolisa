@@ -164,5 +164,5 @@ anolisa update --all
 ## 下一步
 
 - [anolisa CLI 参考](user-entrypoint/anolisa-cli.md)
-- [Copilot Shell](user-entrypoint/copilot-shell.md)
+- [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md)
 - [故障排查](troubleshooting.md)

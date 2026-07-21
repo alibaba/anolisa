@@ -1,6 +1,6 @@
 # PII Checker User Guide
 
-[中文版](PII_CHECKER_USER_GUIDE_zh.md)
+[中文版](../../../zh/agent-security/agent-sec-core/pii-checker.md)
 
 PII Checker detects personal data and credentials in Agent inputs and outputs. It returns a
 structured verdict, produces safe evidence and optional redacted text, and records sanitized

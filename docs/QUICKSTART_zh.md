@@ -119,17 +119,17 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ### 用户入口点
 
 - [anolisa CLI 命令参考](user-guide/zh/user-entrypoint/anolisa-cli.md)
-- [Copilot Shell](user-guide/zh/user-entrypoint/copilot-shell.md)
+- [Copilot Shell](user-guide/zh/user-entrypoint/copilot-shell/QUICKSTART.md)
 - [OS 技能库](user-guide/zh/user-entrypoint/os-skills.md)
 
 ### 运行时与 Token 节省
 
 - [工作区快照](user-guide/zh/runtime/ws-ckpt.md)
 - [技能文件系统](user-guide/zh/runtime/skillfs.md)
-- [Token 优化](user-guide/zh/token-saving/tokenless.md)
-- [Agent 记忆](user-guide/zh/token-saving/agent-memory.md)
+- [Token 优化](user-guide/zh/token-saving/tokenless/QUICKSTART.md)
+- [Agent 记忆](user-guide/zh/token-saving/agent-memory/QUICKSTART.md)
 
 ### 可观测性与安全
 
 - [AgentSight](user-guide/zh/agent-observability/agentsight.md)
-- [AgentSecCore](user-guide/zh/agent-security/agent-sec-core.md)
+- [AgentSecCore](user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md)

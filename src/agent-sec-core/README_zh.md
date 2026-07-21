@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-**面向 AI Agent 的 OS 级安全内核。** 提供系统加固、资产完整性校验与安全决策的完整防护链，作为所有业务 skill 之上的安全监督层运行，适用于 [ANOLISA](../../README_CN.md)、OpenClaw 等 AI Agent 运行平台。
+**面向 AI Agent 的 OS 级安全内核。** 提供系统加固、资产完整性校验与安全决策的完整防护链，作为所有业务 skill 之上的安全监督层运行，适用于 [ANOLISA](../../README_zh.md)、OpenClaw 等 AI Agent 运行平台。
 
 ## 背景
 
@@ -130,7 +130,7 @@ agent-sec-core/
 ├── Makefile
 ├── agent-sec-core.spec        # RPM 打包 spec
 ├── README.md
-└── README_CN.md
+└── README_zh.md
 ```
 
 ## 快速开始
@@ -237,7 +237,7 @@ tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
 agent-sec-cli verify
 ```
 
-完整指南（手动密钥管理、自定义 skill、CI/CD、问题排查）请参见 **[Skill 签名指南](tools/SIGNING_GUIDE_CN.md)**。
+完整指南（手动密钥管理、自定义 skill、CI/CD、问题排查）请参见 **[Skill 签名指南](tools/SIGNING_GUIDE_zh.md)**。
 
 ## Skill Ledger
 
@@ -287,7 +287,7 @@ Skill，随后执行只读的 `skill-ledger check`，并按
 `SKILL_LEDGER_HOOK_POLICY=ask|debug|warn|block`（默认 `ask`）处理结果。每次
 检查都会把 Qoder trace 标识写入安全审计日志。
 
-设计文档：[`docs/design/SKILL_LEDGER_CN.md`](docs/design/SKILL_LEDGER_CN.md) · 用户指南：[`docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md`](docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md)
+设计文档：[`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · 用户指南：[Skill Ledger 用户手册](../../docs/user-guide/zh/agent-security/agent-sec-core/skill-ledger.md)
 
 ## 审计日志
 

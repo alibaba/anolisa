@@ -1,6 +1,6 @@
 # Skill Signing Guide
 
-[中文版](SIGNING_GUIDE_CN.md)
+[中文版](SIGNING_GUIDE_zh.md)
 
 When you build and deploy ANOLISA from source, the deployed skills are **unsigned** by default. Phase 2 of the agent-sec-core security workflow requires valid GPG signatures — skill integrity checks will fail until every skill directory contains a signed `.skill-meta/Manifest.json`.
 

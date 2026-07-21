@@ -185,7 +185,7 @@ cargo clippy --workspace -- -D warnings
 
 ## 文档
 
-- [使用文档](docs/ws-ckpt-usage.md)
+- [使用文档](../../docs/user-guide/zh/runtime/ws-ckpt.md)
 - [RPM 打包](docs/RPM-PACKAGING.md)
 
 ## License

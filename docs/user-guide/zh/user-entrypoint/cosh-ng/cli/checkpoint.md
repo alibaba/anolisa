@@ -92,7 +92,7 @@ cosh-cli checkpoint status
 ## IPC 协议
 
 checkpoint 命令通过 Unix socket 与 ws-ckpt 守护进程通信，使用 bincode 序列化 +
-4 字节小端长度前缀帧格式。详见开发者文档 [IPC 协议](../../developers/ipc-protocol.md)。
+4 字节小端长度前缀帧格式。详见开发者文档 [IPC 协议](../../../../../developer-guide/zh/cosh-ng/ipc-protocol.md)。
 
 ## 典型 Agent 工作流
 

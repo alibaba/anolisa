@@ -130,9 +130,9 @@ fi
 ln -sf %{_libexecdir}/anolisa/tokenless/rtk %{buildroot}%{_bindir}/rtk
 ln -sf %{_libexecdir}/anolisa/tokenless/toon %{buildroot}%{_bindir}/toon
 
-# Install documentation
-install -m 0644 docs/tokenless-user-manual-en.md %{buildroot}%{_docdir}/tokenless/
-install -m 0644 docs/tokenless-user-manual-zh.md %{buildroot}%{_docdir}/tokenless/
+# Install documentation. The bilingual user manual moved to the
+# repository-level docs/user-guide tree and is published with the ANOLISA
+# documentation, not packaged per-component.
 install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
@@ -228,8 +228,6 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_libexecdir}/anolisa/tokenless/toon
 %doc %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
-%doc %{_docdir}/tokenless/tokenless-user-manual-en.md
-%doc %{_docdir}/tokenless/tokenless-user-manual-zh.md
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/components
 %dir %{_datadir}/anolisa/components/tokenless

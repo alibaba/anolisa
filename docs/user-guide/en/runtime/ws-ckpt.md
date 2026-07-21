@@ -60,6 +60,8 @@ ws-ckpt plugin install --runtime hermes
 ws-ckpt plugin uninstall --runtime openclaw
 ```
 
+`plugin install` first runs a detect script to verify prerequisites (exit 2 = missing prerequisite, abort; exit 1 = not installed but installable, continue), then runs the install script. Scripts live under `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`.
+
 ---
 
 ## CLI Commands
@@ -110,6 +112,17 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
 
+### diff Output Markers
+
+| Marker | Meaning | Color |
+|--------|---------|-------|
+| `+` | File/directory added | Green |
+| `-` | File/directory deleted | Red |
+| `M` | Content modified | Yellow |
+| `R` | Renamed | Cyan |
+
+> diff ships a smart resolver that maps btrfs low-level transient inode references (such as `o261-118-0`) to real file paths and dedupes multiple operations on the same file. Rollback previews (`rollback --preview`) use the same marker semantics.
+
 ---
 
 ## Configuration
@@ -137,6 +150,8 @@ hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
 ```
 
 ### CLI-Based Configuration
+
+Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (per-workspace `policy.toml` overrides). Running `ws-ckpt config` without a scope prints a read-only overview; `-g` views/edits the global config; `-w` can only override `auto_cleanup` and `auto_cleanup_keep` — the remaining fields (interval / image / health check) are daemon-wide and can only be set via `-g`; `-w <workspace> --reset` removes the workspace override and falls back to the global config.
 
 ```bash
 # Enable auto-cleanup, keep checkpoints for 7 days

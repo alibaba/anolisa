@@ -114,14 +114,11 @@ install -p -m 0644 config/systemd/anolisa-memory@.service %{buildroot}%{_useruni
 install -d -m 0755 %{buildroot}%{_tmpfilesdir}
 install -p -m 0644 config/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
 
-# Install documentation (CHANGELOG + user manual EN/ZH).
-# The v2 design doc and the standalone agent-memory-user-manual.md from
-# the openclaw branch are dropped in favour of the consolidated bilingual
-# user_manual.md / user_manual.zh.md introduced in the v0.1.0 rewrite.
+# Install documentation (CHANGELOG only). The bilingual user manual moved
+# to the repository-level docs/user-guide tree and is published with the
+# ANOLISA documentation, not packaged per-component.
 install -d -m 0755 %{buildroot}%{_docdir}/%{name}
 install -p -m 0644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
-install -p -m 0644 docs/user_manual.md %{buildroot}%{_docdir}/%{name}/user_manual.md
-install -p -m 0644 docs/user_manual.zh.md %{buildroot}%{_docdir}/%{name}/user_manual.zh.md
 
 # Install adapter bundle per FHS spec.
 # anolisa-adapter-ctl scans %{_datadir}/anolisa/adapters/*/manifest.json.
@@ -163,8 +160,6 @@ install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_data
 %{_userunitdir}/anolisa-memory@.service
 %{_tmpfilesdir}/anolisa-memory.conf
 %doc %{_docdir}/%{name}/CHANGELOG.md
-%doc %{_docdir}/%{name}/user_manual.md
-%doc %{_docdir}/%{name}/user_manual.zh.md
 # Adapter bundle (anolisa-adapter-ctl auto-discovery)
 %dir %{_datadir}/anolisa/adapters
 %dir %{_datadir}/anolisa/adapters/agent-memory

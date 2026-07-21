@@ -1,6 +1,6 @@
 # Agent Sec Core
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 **OS-level security kernel for AI Agents.** Provides a full defense chain of system hardening, asset integrity verification, and security decision-making. Runs as a security supervision layer above all business skills, applicable to Agent OS platforms such as [ANOLISA](../../README.md) and OpenClaw.
 
@@ -130,7 +130,7 @@ agent-sec-core/
 ├── Makefile
 ├── agent-sec-core.spec        # RPM packaging spec
 ├── README.md
-└── README_CN.md
+└── README_zh.md
 ```
 
 ## Quick Start
@@ -287,7 +287,7 @@ from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and applies 
 `SKILL_LEDGER_HOOK_POLICY=ask|debug|warn|block` policy (default: `ask`). Each
 check carries Qoder trace identifiers into the security audit log.
 
-Design doc: [`docs/design/SKILL_LEDGER_CN.md`](docs/design/SKILL_LEDGER_CN.md) · User guide: [`docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md`](docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md)
+Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md)
 
 ## Audit Log
 

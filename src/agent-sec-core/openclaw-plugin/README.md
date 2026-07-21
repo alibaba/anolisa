@@ -26,7 +26,7 @@ The installable package declares the OpenClaw compatibility boundary in `package
 
 Package entrypoints follow the current OpenClaw plugin contract: `openclaw.extensions` points at the TypeScript source entry for checkout development, and `openclaw.runtimeExtensions` points at the built JavaScript entry used by installed packages. `openclaw.plugin.json` keeps its legacy `extensions` declaration pointed at the same built runtime entry for older manifest readers.
 
-中文部署与升级指南：[docs/guide/OPENCLAW_COMPAT_DEPLOY_UPGRADE_CN.md](../docs/guide/OPENCLAW_COMPAT_DEPLOY_UPGRADE_CN.md)。
+Deployment & upgrade guide: [OpenClaw Compatibility Deployment & Upgrade Guide](../../../docs/user-guide/en/agent-security/agent-sec-core/openclaw-deploy.md) ([中文版](../../../docs/user-guide/zh/agent-security/agent-sec-core/openclaw-deploy.md)).
 
 ---
 

@@ -123,17 +123,17 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ### User Entry Points
 
 - [anolisa CLI Reference](user-guide/en/user-entrypoint/anolisa-cli.md)
-- [Copilot Shell](user-guide/en/user-entrypoint/copilot-shell.md)
+- [Copilot Shell](user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md)
 - [OS Skills](user-guide/en/user-entrypoint/os-skills.md)
 
 ### Runtime & Token Saving
 
 - [Workspace Checkpoints](user-guide/en/runtime/ws-ckpt.md)
 - [Skill Filesystem](user-guide/en/runtime/skillfs.md)
-- [Token Optimization](user-guide/en/token-saving/tokenless.md)
-- [Agent Memory](user-guide/en/token-saving/agent-memory.md)
+- [Token Optimization](user-guide/en/token-saving/tokenless/QUICKSTART.md)
+- [Agent Memory](user-guide/en/token-saving/agent-memory/QUICKSTART.md)
 
 ### Observability & Security
 
 - [AgentSight](user-guide/en/agent-observability/agentsight.md)
-- [AgentSecCore](user-guide/en/agent-security/agent-sec-core.md)
+- [AgentSecCore](user-guide/en/agent-security/agent-sec-core/QUICKSTART.md)

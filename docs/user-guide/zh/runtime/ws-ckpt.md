@@ -60,6 +60,8 @@ ws-ckpt plugin install --runtime hermes
 ws-ckpt plugin uninstall --runtime openclaw
 ```
 
+`plugin install` 会先执行 detect 脚本检查前置条件（exit 2 = 缺前置依赖，中止；exit 1 = 未安装但可安装，继续），通过后再执行 install 脚本。脚本位于 `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`。
+
 ---
 
 ## CLI 命令
@@ -110,6 +112,17 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
 
+### diff 输出标记
+
+| 标记 | 含义 | 颜色 |
+|------|------|------|
+| `+` | 新增文件/目录（Added） | 绿色 |
+| `-` | 删除文件/目录（Deleted） | 红色 |
+| `M` | 内容修改（Modified） | 黄色 |
+| `R` | 重命名（Renamed） | 青色 |
+
+> diff 内置智能解析器，自动将 btrfs 底层的临时 inode 引用（如 `o261-118-0`）解析为真实文件路径，并对同一文件的多个操作去重合并。预览回滚（`rollback --preview`）使用相同的标记含义。
+
 ---
 
 ## 配置
@@ -137,6 +150,8 @@ hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
 ```
 
 ### CLI 配置
+
+配置分两层：**全局**（`/etc/ws-ckpt/config.toml`，daemon-wide 默认值）与**局部**（per-workspace `policy.toml` 覆盖）。`ws-ckpt config` 不带 scope 时打印只读概览；`-g` 查看/修改全局；`-w` 仅可覆盖 `auto_cleanup` 与 `auto_cleanup_keep`，其余字段（interval / image / health check）为 daemon-wide，只能通过 `-g` 设置；`-w <workspace> --reset` 删除该工作区的覆盖，回退到沿用全局。
 
 ```bash
 # 启用自动清理，保留 7 天内的检查点

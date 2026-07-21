@@ -1,6 +1,6 @@
 # ANOLISA CLI Build Guide
 
-> 中文版: [BUILD_cn.md](BUILD_cn.md)
+> 中文版: [BUILD_zh.md](BUILD_zh.md)
 
 ## Prerequisites
 
