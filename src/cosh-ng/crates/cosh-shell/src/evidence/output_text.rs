@@ -68,30 +68,132 @@ pub(super) fn redact_sensitive_output_with_policy(text: &str) -> (String, bool, 
     (redacted, home_changed || secret_changed, secret_changed)
 }
 
-pub(super) fn clean_terminal_control_sequences(text: &str) -> String {
+/// Canonicalizes untrusted terminal output for display and redaction.
+///
+/// Removes, as *complete sequences* (never just the introducer):
+/// - CSI (`ESC [` and C1 `U+009B`) up to and including the final byte;
+/// - OSC (`ESC ]` / C1 `U+009D`) up to BEL or ST;
+/// - DCS / SOS / PM / APC (`ESC P`/`X`/`^`/`_` and C1 `U+0090`/`U+0098`/
+///   `U+009E`/`U+009F`) up to ST — their payload never reaches the output;
+/// - `\r`, bare ESC, and every other control character except `\n`/`\t`;
+/// - invisible Unicode format / default-ignorable characters (zero-width
+///   characters, bidi controls, variation selectors, tags), which can
+///   visually spoof output or split sensitive keywords so redaction never
+///   sees their canonical form.
+///
+/// Callers that feed the result into secret redaction must run this FIRST:
+/// removing invisible characters after redaction lets an attacker split a
+/// sensitive key (`api_\0key=...`, `api_\u{200B}key=...`) so the patterns
+/// never match while the terminal still shows an ordinary assignment.
+pub(crate) fn clean_terminal_control_sequences(text: &str) -> String {
     let mut output = String::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
+        match ch {
+            '\x1b' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    consume_csi_body(&mut chars);
                 }
+                Some(']') => {
+                    chars.next();
+                    consume_string_sequence_body(&mut chars, true);
+                }
+                Some('P') | Some('X') | Some('^') | Some('_') => {
+                    chars.next();
+                    consume_string_sequence_body(&mut chars, false);
+                }
+                // Bare ESC (or a two-byte escape): drop the introducer; any
+                // remaining byte is either consumed by later rules or plain
+                // printable text.
+                _ => {}
+            },
+            // C1 forms of the same introducers.
+            '\u{9b}' => consume_csi_body(&mut chars),
+            '\u{9d}' => consume_string_sequence_body(&mut chars, true),
+            '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
+                consume_string_sequence_body(&mut chars, false)
             }
-            continue;
+            '\r' => {}
+            _ if ch.is_control() && !matches!(ch, '\n' | '\t') => {}
+            _ if is_invisible_format_char(ch) => {}
+            _ => output.push(ch),
         }
-        if ch == '\r' {
-            continue;
-        }
-        if ch.is_control() && !matches!(ch, '\n' | '\t') {
-            continue;
-        }
-        output.push(ch);
     }
     output
+}
+
+/// Consumes a CSI body: everything up to and including the final byte in
+/// `@..=~`. An unterminated sequence consumes to the end (fail closed).
+fn consume_csi_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for next in chars.by_ref() {
+        if ('@'..='~').contains(&next) {
+            break;
+        }
+    }
+}
+
+/// Consumes an OSC/DCS/SOS/PM/APC payload up to its terminator.
+///
+/// ST (`ESC \` or C1 `U+009C`) always terminates; OSC additionally accepts
+/// BEL. A bare ESC that is NOT part of ST stays inside the payload and
+/// consumption continues — releasing the string early would let the rest of
+/// a malformed payload flow into the output. Unterminated payloads consume
+/// to the end (fail closed) so they can never leak.
+fn consume_string_sequence_body(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    bel_terminates: bool,
+) {
+    while let Some(next) = chars.next() {
+        match next {
+            '\u{7}' if bel_terminates => break,
+            '\u{9c}' => break,
+            '\x1b' if chars.peek() == Some(&'\\') => {
+                chars.next();
+                break;
+            }
+            // A bare ESC that is not ST belongs to the (malformed) payload;
+            // keep consuming until a real terminator or the end of input.
+            _ => {}
+        }
+    }
+}
+
+/// Whether the character is an invisible Unicode format / default-ignorable
+/// code point that is security-relevant for terminal display.
+///
+/// Mirrors the normative `Default_Ignorable_Code_Point` ranges from Unicode
+/// `DerivedCoreProperties.txt` (including the reserved code points inside
+/// them, e.g. `U+2065`, `U+FFF0..=U+FFF8`, and the unassigned parts of the
+/// plane-14 tag/variation-selector block), plus the `Cf` interlinear
+/// annotation controls. Dropping them may cosmetically alter rare legitimate
+/// content (e.g. ZWJ emoji families) — an accepted trade-off for untrusted
+/// subprocess output, where the same characters spoof what the user believes
+/// they are reading or split sensitive keywords past redaction.
+fn is_invisible_format_char(ch: char) -> bool {
+    matches!(ch,
+        '\u{00AD}' // soft hyphen
+        | '\u{034F}' // combining grapheme joiner
+        | '\u{061C}' // arabic letter mark
+        | '\u{115F}' | '\u{1160}' // hangul fillers
+        | '\u{17B4}' | '\u{17B5}'
+        | '\u{180B}'..='\u{180F}' // mongolian selectors + vowel separator
+        | '\u{200B}'..='\u{200F}' // zero-width space/joiners, LRM/RLM
+        | '\u{202A}'..='\u{202E}' // bidi embedding/override
+        | '\u{2060}'..='\u{206F}' // word joiner, invisible operators,
+                                  // reserved U+2065, bidi isolates,
+                                  // deprecated format
+        | '\u{3164}' | '\u{FFA0}' // hangul filler compatibility forms
+        | '\u{FE00}'..='\u{FE0F}' // variation selectors
+        | '\u{FEFF}' // zero-width no-break space / BOM
+        | '\u{FFF0}'..='\u{FFFB}' // reserved FFF0..FFF8 + interlinear
+                                  // annotation
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}' // musical format controls
+        | '\u{E0000}'..='\u{E0FFF}' // whole plane-14 default-ignorable
+                                    // block: tags, variation selectors
+                                    // supplement, and reserved gaps
+    )
 }
 
 fn redact_home_path(text: &str) -> (String, bool) {

@@ -18,6 +18,8 @@ mod animation;
 mod approval;
 #[path = "raw_cli/cancellation.rs"]
 mod cancellation;
+#[path = "raw_cli/compaction.rs"]
+mod compaction;
 #[path = "raw_cli/config.rs"]
 mod config;
 #[path = "raw_cli/cosh_core/mod.rs"]

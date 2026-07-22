@@ -1,10 +1,16 @@
 mod command;
+mod compact;
 mod panel;
 mod state;
 #[cfg(test)]
 mod tests;
 
 use self::command::{parse_session_command, SessionCommand};
+pub(crate) use self::compact::{
+    compaction_active, compaction_pending_or_active, note_compaction_recommendation,
+    poll_background_compaction, render_agent_queue_full_notice, render_compaction_paused_notice,
+    render_control_queue_full_notice,
+};
 use self::panel::{
     close_session_panel, core_adapter, partition_protected, redraw_session_panel,
     render_current_session_panel, render_not_ready, render_session_error, render_unavailable,
@@ -45,6 +51,10 @@ pub(crate) fn render_session_command<W: Write>(
         }
         SessionCommand::Clear(requested) => {
             begin_explicit_clear(requested, blocks, adapter, state, output)
+        }
+        SessionCommand::Compact(subcommand) => {
+            compact::render_session_compact_command(subcommand, blocks, adapter, state, output)?;
+            Ok(true)
         }
         SessionCommand::Usage => {
             render_usage(state, output)?;

@@ -143,6 +143,8 @@ pub struct SessionConfig {
     pub auto_persist: bool,
     #[serde(default = "default_persist_dir")]
     pub persist_dir: String,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 impl Default for SessionConfig {
@@ -150,8 +152,122 @@ impl Default for SessionConfig {
         Self {
             auto_persist: true,
             persist_dir: default_persist_dir(),
+            compaction: CompactionConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+/// Model-aware session context compaction policy (`[session.compaction]`).
+pub struct CompactionConfig {
+    /// Master switch for manual and automatic compaction.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Whether idle-boundary automatic compaction may trigger.
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// Optional absolute trigger bound; always clamped to the model budget.
+    #[serde(default)]
+    pub auto_compact_token_limit: Option<u64>,
+    /// Fraction of the usable history budget that triggers normal compaction.
+    #[serde(default = "default_trigger_ratio")]
+    pub trigger_ratio: f64,
+    /// Fraction of the usable history budget that arms emergency protection.
+    #[serde(default = "default_emergency_ratio")]
+    pub emergency_ratio: f64,
+    /// Best-effort post-compaction fraction of the usable history budget.
+    #[serde(default = "default_target_ratio")]
+    pub target_ratio: f64,
+    /// Minimum number of recent complete Agent runs kept verbatim.
+    #[serde(default = "default_preserve_recent_runs")]
+    pub preserve_recent_runs: usize,
+    /// Explicit user override for the model context window, in tokens.
+    #[serde(default)]
+    pub model_context_window: Option<u64>,
+    /// Explicit user override for the maximum model output reserve, in tokens.
+    #[serde(default)]
+    pub model_max_output_tokens: Option<u64>,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto: true,
+            auto_compact_token_limit: None,
+            trigger_ratio: default_trigger_ratio(),
+            emergency_ratio: default_emergency_ratio(),
+            target_ratio: default_target_ratio(),
+            preserve_recent_runs: default_preserve_recent_runs(),
+            model_context_window: None,
+            model_max_output_tokens: None,
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Replaces unusable ratio overrides with the compiled-in defaults.
+    ///
+    /// TOML happily deserializes `nan`, `inf`, and `-inf` into `f64`, and
+    /// `f64::clamp` panics when a bound is NaN — a project-level
+    /// `.copilot-shell/config.toml` must never be able to crash every Agent
+    /// turn. Non-finite or out-of-range fields fall back individually; a
+    /// combination that cannot satisfy `target <= trigger <= emergency` falls
+    /// back as a whole group so the documented 70/90/30 semantics hold.
+    pub(crate) fn sanitize_ratios(&mut self) {
+        fn sanitize_field(name: &str, value: &mut f64, default: f64) {
+            if value.is_finite() && (0.0..=1.0).contains(value) {
+                return;
+            }
+            eprintln!(
+                "[cosh-core] Warning: [session.compaction] {name} = {value} is not a \
+                 finite ratio in [0, 1]; using default {default}"
+            );
+            *value = default;
+        }
+        sanitize_field(
+            "trigger_ratio",
+            &mut self.trigger_ratio,
+            DEFAULT_TRIGGER_RATIO,
+        );
+        sanitize_field(
+            "emergency_ratio",
+            &mut self.emergency_ratio,
+            DEFAULT_EMERGENCY_RATIO,
+        );
+        sanitize_field("target_ratio", &mut self.target_ratio, DEFAULT_TARGET_RATIO);
+        if !(self.target_ratio <= self.trigger_ratio && self.trigger_ratio <= self.emergency_ratio)
+        {
+            eprintln!(
+                "[cosh-core] Warning: [session.compaction] ratios cannot satisfy \
+                 target <= trigger <= emergency ({} / {} / {}); using default policy",
+                self.target_ratio, self.trigger_ratio, self.emergency_ratio
+            );
+            self.trigger_ratio = DEFAULT_TRIGGER_RATIO;
+            self.emergency_ratio = DEFAULT_EMERGENCY_RATIO;
+            self.target_ratio = DEFAULT_TARGET_RATIO;
+        }
+    }
+}
+
+/// Default normal automatic trigger fraction of the usable history budget.
+pub(crate) const DEFAULT_TRIGGER_RATIO: f64 = 0.70;
+/// Default emergency protection fraction of the usable history budget.
+pub(crate) const DEFAULT_EMERGENCY_RATIO: f64 = 0.90;
+/// Default best-effort post-compaction fraction of the usable history budget.
+pub(crate) const DEFAULT_TARGET_RATIO: f64 = 0.30;
+
+fn default_trigger_ratio() -> f64 {
+    DEFAULT_TRIGGER_RATIO
+}
+fn default_emergency_ratio() -> f64 {
+    DEFAULT_EMERGENCY_RATIO
+}
+fn default_target_ratio() -> f64 {
+    DEFAULT_TARGET_RATIO
+}
+fn default_preserve_recent_runs() -> usize {
+    2
 }
 
 fn default_true() -> bool {
@@ -245,6 +361,7 @@ struct PartialSkillsConfig {
 struct PartialSessionConfig {
     auto_persist: Option<bool>,
     persist_dir: Option<String>,
+    compaction: Option<CompactionConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -427,6 +544,11 @@ fn apply_session_layer(config: &mut SessionConfig, layer: &PartialSessionConfig)
     if let Some(ref value) = layer.persist_dir {
         config.persist_dir = value.clone();
     }
+    // The compaction table is replaced wholesale; omitted keys fall back to
+    // serde defaults, matching how hook definition lists are layered.
+    if let Some(ref value) = layer.compaction {
+        config.compaction = value.clone();
+    }
 }
 
 fn apply_logging_layer(config: &mut LoggingConfig, layer: &PartialLoggingConfig) {
@@ -504,6 +626,10 @@ impl CoreConfig {
             }
         }
 
+        // Any layer (including an untrusted project config) may have written
+        // non-finite or contradictory compaction ratios; validate once after
+        // all layers so every consumer sees a policy that can never panic.
+        config.session.compaction.sanitize_ratios();
         config
     }
 
@@ -781,6 +907,75 @@ max_tool_calls_per_turn = 20
 
         assert_eq!(config.agent.approval_mode, "trust");
         assert_eq!(config.agent.max_turns, 50);
+    }
+
+    #[test]
+    fn non_finite_compaction_ratios_from_toml_fall_back_to_defaults() {
+        // A project `.copilot-shell/config.toml` is untrusted input: TOML
+        // `nan`/`inf`/`-inf` deserialize into f64 and previously panicked the
+        // budget clamp on every Agent turn. The load layer must fall back.
+        for bad in ["nan", "inf", "-inf", "7.5", "-0.5"] {
+            for field in ["trigger_ratio", "emergency_ratio", "target_ratio"] {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let project_path = tmp.path().join("config.toml");
+                std::fs::write(
+                    &project_path,
+                    format!("[session.compaction]\n{field} = {bad}\n"),
+                )
+                .unwrap();
+                let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+                let compaction = &config.session.compaction;
+                assert!(
+                    compaction.trigger_ratio.is_finite()
+                        && compaction.emergency_ratio.is_finite()
+                        && compaction.target_ratio.is_finite(),
+                    "{field}={bad} left a non-finite ratio"
+                );
+                assert!(
+                    compaction.target_ratio <= compaction.trigger_ratio
+                        && compaction.trigger_ratio <= compaction.emergency_ratio,
+                    "{field}={bad} broke threshold ordering"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legal_compaction_ratio_overrides_survive_sanitization() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &project_path,
+            "[session.compaction]\ntrigger_ratio = 0.5\nemergency_ratio = 0.8\ntarget_ratio = 0.2\n",
+        )
+        .unwrap();
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        assert_eq!(config.session.compaction.trigger_ratio, 0.5);
+        assert_eq!(config.session.compaction.emergency_ratio, 0.8);
+        assert_eq!(config.session.compaction.target_ratio, 0.2);
+    }
+
+    #[test]
+    fn contradictory_compaction_ratios_fall_back_as_a_group() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_path = tmp.path().join("config.toml");
+        // Individually in range, but the trio cannot satisfy
+        // target <= trigger <= emergency.
+        std::fs::write(
+            &project_path,
+            "[session.compaction]\ntrigger_ratio = 0.9\nemergency_ratio = 0.2\ntarget_ratio = 0.95\n",
+        )
+        .unwrap();
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        assert_eq!(
+            config.session.compaction.trigger_ratio,
+            DEFAULT_TRIGGER_RATIO
+        );
+        assert_eq!(
+            config.session.compaction.emergency_ratio,
+            DEFAULT_EMERGENCY_RATIO
+        );
+        assert_eq!(config.session.compaction.target_ratio, DEFAULT_TARGET_RATIO);
     }
 
     #[test]

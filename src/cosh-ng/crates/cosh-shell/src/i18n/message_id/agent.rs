@@ -80,3 +80,14 @@ macro_rules! agent_queue_ids {
         );
     };
 }
+
+macro_rules! compaction_queue_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentQueueFullTitle,
+            AgentControlQueueFullBody,
+        );
+    };
+}

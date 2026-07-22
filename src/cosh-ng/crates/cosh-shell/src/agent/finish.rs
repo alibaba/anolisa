@@ -6,7 +6,8 @@ use crate::agent::events::{
     render_held_events_into_active_run, state_has_pending_interaction,
 };
 use crate::agent::run::{
-    has_queued_run_before_held_text, start_agent_run_with_origin, ActiveAgentRun,
+    has_queued_run_before_held_text, start_agent_run_with_origin, start_pending_agent_run,
+    ActiveAgentRun, PendingRequestClass,
 };
 use crate::recommendation::personal_integration::record_finished_agent_run;
 use crate::runtime::evidence_requests::{
@@ -47,9 +48,11 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     if let Some((fallback, origin)) = resume_fallback {
         render_recovery_context_before_notice(state, &active_run, output, adapter)?;
         render_fresh_turn_recovery_notice(state, output)?;
+        // Provider-timeout resume is an internal fallback continuation.
         start_agent_run_with_origin(
             &fallback,
             origin,
+            AgentStartIntent::InternalBestEffort,
             adapter,
             state,
             output,
@@ -135,19 +138,38 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     }
     output.flush()?;
 
-    for (request, origin) in evidence_requests.auto_requests {
-        start_agent_run_with_origin(&request, origin, adapter, state, output, None)?;
+    // A recommended automatic compaction has top priority at the idle
+    // boundary: do not start any internal continuation or dequeue a run, since
+    // that would keep `agent_run.active` set and postpone the compaction
+    // indefinitely. Drop stale internal continuations (their captured context
+    // is about to be rewritten by the compactor) and hold explicit user
+    // requests in the queue so they resume in FIFO order after compaction.
+    if state.control.session().compaction().has_pending_auto() {
+        state
+            .agent_run
+            .queued_requests
+            .retain(|pending| pending.intent == AgentStartIntent::UserInitiated);
+        return Ok(());
     }
 
-    if let Some(pending) = state.agent_run.queued_requests.pop_front() {
+    for (request, origin) in evidence_requests.auto_requests {
+        // Evidence auto-follow-ups are internal best-effort continuations; the
+        // gate drops them while a compaction is pending or active.
         start_agent_run_with_origin(
-            &pending.request,
-            pending.origin,
+            &request,
+            origin,
+            AgentStartIntent::InternalBestEffort,
             adapter,
             state,
             output,
-            pending.selectable_after_event_index,
+            None,
         )?;
+    }
+
+    if let Some(pending) = state.agent_run.queued_requests.pop_front() {
+        // Restart with the stored admission class so a control response that
+        // gets re-queued (e.g. behind a fresh compaction) keeps its class.
+        start_pending_agent_run(pending, adapter, state, output)?;
     }
 
     Ok(())
@@ -206,15 +228,130 @@ fn governed_event_is_provider_timeout(event: &GovernedEvent) -> bool {
     )
 }
 
+/// Sheds queue backlog after a provider timeout without ever dropping a
+/// control-protocol response.
+///
+/// Retained (in original FIFO order, so replay order stays deterministic):
+/// - every [`PendingRequestClass::ControlResponse`] entry — its question or
+///   approval state was already consumed and the user cannot re-issue it;
+/// - the oldest normal request, so the user's next intent survives.
+///
+/// Every other normal request is dropped; the returned count covers exactly
+/// those, which is what the user-visible notice reports.
 fn trim_queued_requests_after_provider_timeout(state: &mut InlineState) -> usize {
-    if state.agent_run.queued_requests.len() <= 1 {
-        return 0;
+    let before = state.agent_run.queued_requests.len();
+    let mut kept_normal = false;
+    state
+        .agent_run
+        .queued_requests
+        .retain(|pending| match pending.class {
+            PendingRequestClass::ControlResponse => true,
+            PendingRequestClass::Normal => {
+                if kept_normal {
+                    false
+                } else {
+                    kept_normal = true;
+                    true
+                }
+            }
+        });
+    before - state.agent_run.queued_requests.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::run::{PendingAgentRequest, PendingRequestClass};
+    use crate::runtime::state::InlineState;
+    use crate::types::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
+
+    fn request(id: &str) -> AgentRequest {
+        AgentRequest {
+            id: id.to_string(),
+            session_id: "shell-session".to_string(),
+            command_block: CommandBlock {
+                id: format!("cmd-{id}"),
+                session_id: "shell-session".to_string(),
+                command: "echo hi".to_string(),
+                origin: Default::default(),
+                cwd: "/repo".to_string(),
+                end_cwd: "/repo".to_string(),
+                started_at_ms: 1,
+                ended_at_ms: 2,
+                duration_ms: 1,
+                exit_code: 0,
+                status: CommandStatus::Completed,
+                output: OutputRefs {
+                    terminal_output_ref: None,
+                    terminal_output_bytes: 0,
+                },
+                shell_environment_generation: None,
+            },
+            context_blocks: Vec::new(),
+            context_hints: Vec::new(),
+            user_input: Some("queued".to_string()),
+            findings: Vec::new(),
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
+        }
     }
-    let keep = state.agent_run.queued_requests.pop_front();
-    let dropped = state.agent_run.queued_requests.len();
-    state.agent_run.queued_requests.clear();
-    if let Some(keep) = keep {
-        state.agent_run.queued_requests.push_back(keep);
+
+    fn pending(id: &str, class: PendingRequestClass) -> PendingAgentRequest {
+        PendingAgentRequest {
+            request: request(id),
+            origin: AgentRunOrigin::Standard,
+            intent: AgentStartIntent::UserInitiated,
+            class,
+            selectable_after_event_index: None,
+            before_held_text: false,
+        }
     }
-    dropped
+
+    #[test]
+    fn provider_timeout_trim_keeps_control_responses_and_oldest_normal_in_order() {
+        let mut state = InlineState::default();
+        for (id, class) in [
+            ("normal-a", PendingRequestClass::Normal),
+            ("control-b", PendingRequestClass::ControlResponse),
+            ("normal-c", PendingRequestClass::Normal),
+            ("control-d", PendingRequestClass::ControlResponse),
+            ("normal-e", PendingRequestClass::Normal),
+        ] {
+            state
+                .agent_run
+                .queued_requests
+                .push_back(pending(id, class));
+        }
+
+        let dropped = trim_queued_requests_after_provider_timeout(&mut state);
+
+        // Only the surplus normal requests were dropped and counted; every
+        // control response survives, and FIFO order is untouched.
+        assert_eq!(dropped, 2);
+        let ids: Vec<&str> = state
+            .agent_run
+            .queued_requests
+            .iter()
+            .map(|pending| pending.request.id.as_str())
+            .collect();
+        assert_eq!(ids, ["normal-a", "control-b", "control-d"]);
+    }
+
+    #[test]
+    fn provider_timeout_trim_drops_nothing_without_surplus_normals() {
+        let mut state = InlineState::default();
+        state
+            .agent_run
+            .queued_requests
+            .push_back(pending("control-a", PendingRequestClass::ControlResponse));
+        state
+            .agent_run
+            .queued_requests
+            .push_back(pending("normal-b", PendingRequestClass::Normal));
+
+        assert_eq!(trim_queued_requests_after_provider_timeout(&mut state), 0);
+        assert_eq!(state.agent_run.queued_requests.len(), 2);
+    }
 }

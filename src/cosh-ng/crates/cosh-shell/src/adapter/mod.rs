@@ -41,7 +41,7 @@ pub(crate) use process::{
     agent_event_is_provider_progress, record_cancellation_pending_session,
     run_provider_process_loop, spawn_provider_child, terminate_and_reap_process,
     terminate_process_group, ProviderLineProgress, ProviderPromptArgMode, ProviderRunOutcome,
-    ProviderStdinMode,
+    ProviderStdinMode, StderrTail,
 };
 pub use prompt::{
     prompt_from_request, prompt_from_request_with_evidence_access,

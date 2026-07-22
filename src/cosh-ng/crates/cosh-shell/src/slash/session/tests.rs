@@ -3,7 +3,8 @@ use crate::agent::run::{ActiveAgentRun, AgentRunOrigin};
 use crate::evidence::stream::CoshRequestStreamFilter;
 
 const SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
-const SESSION_USAGE: &str = "Usage: /session [status|list|resume <id>|clear <id>...|clear --all]";
+const SESSION_USAGE: &str =
+    "Usage: /session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]";
 const SESSION_UNAVAILABLE: &str = "Session recovery requires the cosh-core backend.";
 
 #[test]
@@ -14,6 +15,7 @@ fn malformed_session_commands_render_usage_instead_of_selecting() {
         "--all",
         "resume 00000000-0000-4000-8000-000000000000 extra",
         "clear",
+        "compact status extra",
         "-reserved",
     ] {
         let rendered = render_session_arguments(arguments);

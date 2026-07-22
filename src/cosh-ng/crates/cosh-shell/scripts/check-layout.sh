@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
 set -u
 
+# Force a stable locale so `wc -l` emits the ASCII "total" line the parsers
+# below filter on. Under a localized locale the total line ("总计") slips past
+# the `$2 != "total"` guard and is mis-counted as an unregistered large file.
+export LC_ALL=C
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 crate_dir="$(cd "$script_dir/.." && pwd)"
 repo_root="$(cd "$crate_dir/../.." && pwd)"
+
+# Resolve the monorepo root that owns specs/ from version control so the audit
+# depends only on files inside the current git checkout — never on a
+# machine-specific absolute path or a sibling tree outside the repository.
+if monorepo_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  monorepo_root="$(cd "$repo_root/../.." && pwd)"
+fi
+specs_root="$monorepo_root/specs"
 
 cd "$repo_root" || exit 2
 
@@ -80,7 +95,7 @@ else
 fi
 
 section "Self-crate public paths"
-self_crate_inventory="$repo_root/../../../specs/cosh-ng-code-organization/self-crate-path-inventory.md"
+self_crate_inventory="$specs_root/cosh-ng-code-organization/self-crate-path-inventory.md"
 registered_self_crate_counts=""
 if [ -f "$self_crate_inventory" ]; then
   registered_self_crate_counts="$(
@@ -136,7 +151,7 @@ EOF
 fi
 
 section "Forbidden dependency direction candidates"
-forbidden_inventory="$repo_root/../../../specs/cosh-ng-code-organization/forbidden-dependency-inventory.md"
+forbidden_inventory="$specs_root/cosh-ng-code-organization/forbidden-dependency-inventory.md"
 registered_forbidden_counts=""
 if [ -f "$forbidden_inventory" ]; then
   registered_forbidden_counts="$(
@@ -208,7 +223,7 @@ else
 fi
 
 section "Large production files"
-large_file_inventory="$repo_root/../../../specs/cosh-ng-code-organization/large-file-inventory.md"
+large_file_inventory="$specs_root/cosh-ng-code-organization/large-file-inventory.md"
 registered_large_paths=""
 if [ -f "$large_file_inventory" ]; then
   registered_large_paths="$(
@@ -280,7 +295,7 @@ if [ -n "$heavy_src_tests" ]; then
   echo "violation: src tests must not spawn the cosh-shell binary"
   record_failure
 fi
-source_heavy_inventory="$repo_root/../../../specs/shell-test-organization/source-heavy-test-inventory.md"
+source_heavy_inventory="$specs_root/shell-test-organization/source-heavy-test-inventory.md"
 registered_source_heavy_counts=""
 if [ -f "$source_heavy_inventory" ]; then
   registered_source_heavy_counts="$(

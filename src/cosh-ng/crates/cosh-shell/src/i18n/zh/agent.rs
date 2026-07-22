@@ -69,6 +69,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentQueuedBodyCommand => "已捕获失败命令: {command}",
         MessageId::AgentQueuedBodyActive => "当前 Agent 运行仍在流式输出。",
         MessageId::AgentQueuedFooter => "当前 Agent 完成后会分析这次失败。",
+        MessageId::AgentQueueFullTitle => "智能体队列已满",
+        MessageId::AgentControlQueueFullBody => {
+            "当前排队请求过多，暂时无法接受该响应。卡片仍保持待处理，请稍后重试。"
+        }
         _ => return None,
     })
 }

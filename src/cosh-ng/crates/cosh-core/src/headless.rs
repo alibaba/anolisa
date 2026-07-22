@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::auth::{apply_auth_credentials, builtin_auth_providers, wait_for_auth_response};
 use crate::cli::CliArgs;
+use crate::compaction::{ContextBudget, ModelCapability};
 use crate::config::{self, CoreConfig};
 use crate::core::CoshCore;
 use crate::extension::ExtensionManager;
@@ -83,6 +84,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     engine.extra_params = extra_params;
     engine.session_id = session.record.session_id.to_string();
     engine.messages = session.record.messages.clone();
+    engine.compaction = session.record.compaction.clone();
     if !session.record.model.is_empty() {
         engine.model = session.record.model.clone();
     }
@@ -126,6 +128,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
                     duration_ms: Some(duration.as_millis() as u64),
                 };
                 engine.emit(&mut writer, &result_msg);
+                session.recommend_auto_compaction(&mut engine, &mut writer);
             }
             Err(failure) => {
                 sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
@@ -259,6 +262,10 @@ where
                             "[Hook context] {ctx}"
                         )));
                 }
+
+                // A resumed session may already exceed the soft threshold;
+                // surface the same background-compaction recommendation here.
+                session.recommend_auto_compaction(engine, writer);
             }
             ShellControlRequest::Interrupt => {
                 engine.provider.cancel();
@@ -338,6 +345,11 @@ where
                         duration_ms: Some(duration.as_millis() as u64),
                     };
                     engine.emit(writer, &result_msg);
+                    // Idle boundary: the Agent run finished and its transcript
+                    // was persisted, so background compaction is safe now. The
+                    // shell owns the compactor process so its prompt returns
+                    // immediately; this process only reports the pressure.
+                    session.recommend_auto_compaction(engine, writer);
                 }
                 Err(failure) => {
                     sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
@@ -426,11 +438,63 @@ impl SessionRuntime {
         }
         self.record.messages = engine.messages.clone();
         self.record.model = engine.model.clone();
+        // Emergency in-run compaction updates the projection in memory; it
+        // commits together with the transcript it belongs to.
+        self.record.compaction = engine.compaction.clone();
         store.persist(&mut self.record)
     }
 
     fn resumable(&self) -> bool {
         self.auto_persist && self.store.is_some()
+    }
+
+    /// Runs idle-boundary automatic compaction when the soft threshold is
+    /// crossed, with per-context-revision failure suppression.
+    /// Emits a background-compaction recommendation when the soft threshold
+    /// is crossed at an idle boundary.
+    ///
+    /// The recommendation is a cheap synchronous status line; the shell owns
+    /// the actual compactor process (`cosh-core --compact`) so this process
+    /// can exit and the user gets the normal shell prompt back immediately.
+    /// The payload carries the context revision (generation + projection
+    /// revision) so the shell can suppress retrigger loops per revision.
+    fn recommend_auto_compaction<W: io::Write>(&self, engine: &mut CoshCore, writer: &mut W) {
+        let policy = &engine.config.session.compaction;
+        if !policy.enabled || !policy.auto || !self.resumable() {
+            return;
+        }
+        let capability = ModelCapability::resolve(
+            policy,
+            engine.config.agent.session_token_limit,
+            &engine.model,
+        );
+        let prefix_tokens = engine.estimate_prefix_tokens();
+        let budget = ContextBudget::compute(capability, prefix_tokens, policy);
+        let history_tokens = engine.effective_history_tokens(prefix_tokens);
+        if !budget.over_trigger(history_tokens) {
+            return;
+        }
+        let projection_revision = self
+            .record
+            .compaction
+            .as_ref()
+            .map(|state| state.revision)
+            .unwrap_or(0);
+        // Versioned protocol: the shell must be able to bind the recommendation
+        // to the exact session and context revision it was emitted for, and
+        // reject anything malformed. Field order is fixed:
+        //   compaction_recommended_v1:<session-id>:<generation>:<revision>:<history>:<usable>
+        engine.emit(
+            writer,
+            &OutputMessage::system_status(&format!(
+                "compaction_recommended_v1:{}:{}:{}:{}:{}",
+                self.record.session_id,
+                self.record.generation,
+                projection_revision,
+                history_tokens,
+                budget.usable_history
+            )),
+        );
     }
 }
 

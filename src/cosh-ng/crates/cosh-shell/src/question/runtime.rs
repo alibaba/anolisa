@@ -77,6 +77,18 @@ pub(crate) fn render_question_answer_actions<W: Write>(
             continue;
         }
 
+        // Reserve a control-queue slot BEFORE consuming the pending question,
+        // but only when answering would actually enqueue a fallback Agent
+        // continuation. Direct delivery to the active provider owner (and
+        // paths that stop the run and start immediately) must never be gated
+        // on queue capacity: the provider is waiting for exactly this answer,
+        // and rejecting it would deadlock until the provider times out.
+        if question_answer_needs_queue_slot(state) && !control_queue_has_capacity(state) {
+            crate::slash::session::render_control_queue_full_notice(state, output)?;
+            output.flush()?;
+            continue;
+        }
+
         let Some(answer_run) =
             agent_request_from_pending_question_answer(event, event_index, state)
         else {
@@ -107,7 +119,11 @@ pub(crate) fn render_question_answer_actions<W: Write>(
                 stop_active_agent_run_without_rendering(state, output)?;
             }
         }
-        start_agent_run_with_origin(
+        // The pending question was already consumed above (answer set, panel
+        // cleared); a queue-full rejection here would strand a response the
+        // user can no longer re-issue, so this control-protocol continuation is
+        // guaranteed a queue slot.
+        start_agent_run_control_response(
             &answer_run.request,
             answer_run.origin,
             adapter,
@@ -127,6 +143,43 @@ enum ProviderQuestionResponse {
     Responded,
     OwnerUnavailable,
     DeliveryFailed,
+}
+
+/// Whether answering the pending question would consume a control-queue slot.
+///
+/// Mirrors the delivery plan in [`render_question_answer_actions`]: a pending
+/// or running compaction holds every continuation in the queue; with no
+/// active run the continuation starts immediately; a provider-backed question
+/// owned by the active run is answered directly through the owner's handle
+/// (a delivery failure stops that run, so its fallback also starts
+/// immediately), and a non-provider question stops the run before continuing.
+/// Only an owner mismatch / missing owner keeps the active run alive and
+/// forces the continuation into the queue.
+fn question_answer_needs_queue_slot(state: &InlineState) -> bool {
+    if crate::slash::session::compaction_pending_or_active(state) {
+        return true;
+    }
+    let Some(active_run) = state.agent_run.active.as_ref() else {
+        return false;
+    };
+    let Some(question_id) = state.questions.pending_id.as_ref() else {
+        return false;
+    };
+    let Some(question) = state
+        .questions
+        .items
+        .iter()
+        .find(|question| question.id == *question_id && question.answer.is_none())
+    else {
+        return false;
+    };
+    if question.provider_request_id.is_none() {
+        // NotProviderBacked stops the active run before continuing.
+        return false;
+    }
+    // Provider-backed: direct delivery needs the active run to own the
+    // question; anything else ends OwnerUnavailable with the run kept alive.
+    question.provider_owner_request_id.as_deref() != Some(active_run.request.id.as_str())
 }
 
 fn respond_question_answer_to_provider(

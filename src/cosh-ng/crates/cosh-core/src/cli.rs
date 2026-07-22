@@ -34,6 +34,43 @@ pub struct CliArgs {
     #[arg(long, value_name = "SESSION_ID")]
     pub resume: Option<String>,
 
+    /// Compact the resumed session's model context and exit
+    #[arg(long)]
+    pub compact: bool,
+
+    /// Marks a `--compact` run as automatically triggered (idle-boundary
+    /// recommendation) rather than a manual `/session compact`. Affects the
+    /// reported trigger and enables revision preflight validation.
+    ///
+    /// Only valid with `--compact`, and must always carry both
+    /// `--expect-generation` and `--expect-revision` (clap enforces this as a
+    /// first fail-closed layer, before any provider work).
+    #[arg(
+        long,
+        hide = true,
+        requires = "compact",
+        requires = "expect_generation",
+        requires = "expect_revision"
+    )]
+    pub auto_compact: bool,
+
+    /// Expected session generation for an automatic compaction. When set with
+    /// `--expect-revision`, the compactor fails closed (no provider call) if
+    /// the session moved since the recommendation was emitted.
+    ///
+    /// Only valid on an automatic compaction; requires `--auto-compact` (which
+    /// in turn requires `--compact`), so it can never appear on a manual run.
+    #[arg(long, value_name = "N", hide = true, requires = "auto_compact")]
+    pub expect_generation: Option<u64>,
+
+    /// Expected projection revision for an automatic compaction; paired with
+    /// `--expect-generation` to bind the attempt to one exact context.
+    ///
+    /// Only valid on an automatic compaction; requires `--auto-compact` (which
+    /// in turn requires `--compact`), so it can never appear on a manual run.
+    #[arg(long, value_name = "N", hide = true, requires = "auto_compact")]
+    pub expect_revision: Option<u64>,
+
     /// Override the workspace scope used for session persistence
     #[arg(long, value_name = "PATH", hide = true)]
     pub workspace: Option<String>,
@@ -79,6 +116,72 @@ impl CliArgs {
 
     pub fn is_session_control(&self) -> bool {
         self.session_control
+    }
+
+    pub fn is_compact(&self) -> bool {
+        self.compact
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<CliArgs, clap::Error> {
+        let mut full = vec!["cosh-core"];
+        full.extend_from_slice(args);
+        CliArgs::try_parse_from(full)
+    }
+
+    #[test]
+    fn hidden_compaction_flags_require_compact() {
+        // The three hidden compaction flags are meaningless without --compact
+        // and must be rejected at the clap layer, before any runtime work.
+        assert!(parse(&[
+            "--auto-compact",
+            "--expect-generation",
+            "1",
+            "--expect-revision",
+            "0"
+        ])
+        .is_err());
+        assert!(parse(&["--expect-generation", "1"]).is_err());
+        assert!(parse(&["--expect-revision", "0"]).is_err());
+    }
+
+    #[test]
+    fn auto_compact_requires_both_expected_bounds() {
+        assert!(parse(&["--compact", "--auto-compact"]).is_err());
+        assert!(parse(&["--compact", "--auto-compact", "--expect-generation", "1"]).is_err());
+        assert!(parse(&["--compact", "--auto-compact", "--expect-revision", "0"]).is_err());
+    }
+
+    #[test]
+    fn expected_bounds_are_rejected_on_manual_compact() {
+        // generation/revision may only accompany an automatic compaction.
+        assert!(parse(&[
+            "--compact",
+            "--expect-generation",
+            "1",
+            "--expect-revision",
+            "0"
+        ])
+        .is_err());
+        assert!(parse(&["--compact", "--expect-generation", "1"]).is_err());
+    }
+
+    #[test]
+    fn valid_manual_and_auto_combinations_parse() {
+        assert!(parse(&["--compact"]).is_ok());
+        assert!(parse(&[
+            "--compact",
+            "--auto-compact",
+            "--expect-generation",
+            "1",
+            "--expect-revision",
+            "0",
+        ])
+        .is_ok());
     }
 }
 

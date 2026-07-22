@@ -306,7 +306,22 @@ pub(super) fn render_usage<W: Write>(state: &InlineState, output: &mut W) -> std
     )
 }
 
+/// Gate for session mutations (`clear`, `resume`, `delete`, starting a new
+/// compaction): idle only when no interaction is pending *and* no part of the
+/// compaction lifecycle — running compactor, finished-but-unrendered
+/// completion, or recommended automatic attempt — could be invalidated by the
+/// mutation.
 pub(super) fn session_management_idle(state: &InlineState) -> bool {
+    session_interaction_idle(state) && !crate::slash::session::compaction_pending_or_active(state)
+}
+
+/// Interaction-only idle check shared by [`session_management_idle`] and the
+/// automatic compaction starter.
+///
+/// Deliberately excludes compaction state: the auto-start path must not be
+/// blocked by its *own* pending recommendation, so it layers its own
+/// active/pending-completion checks on top of this.
+pub(super) fn session_interaction_idle(state: &InlineState) -> bool {
     state.agent_run.active.is_none()
         && !state
             .approvals

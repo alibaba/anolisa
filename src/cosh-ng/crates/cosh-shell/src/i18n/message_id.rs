@@ -76,4 +76,6 @@ collect_message_ids!([
     help_session_ids,
     session_ids,
     help_registry_ids,
+    session_compaction_ids,
+    compaction_queue_ids,
 ],);

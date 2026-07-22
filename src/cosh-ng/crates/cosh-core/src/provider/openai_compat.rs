@@ -51,7 +51,11 @@ impl OpenAICompatProvider {
             body["temperature"] = serde_json::json!(temp);
         }
 
-        if config.include_usage {
+        // Only request usage telemetry from backends that accept the field.
+        // A generic OpenAI-compatible endpoint may reject unknown
+        // `stream_options` and fail the entire turn, so usage stays an
+        // enhancement layered on top of the always-present local estimate.
+        if config.include_usage && self.profile.supports_stream_usage() {
             body["stream_options"] = serde_json::json!({"include_usage": true});
         }
 
@@ -120,13 +124,19 @@ impl ContentGenerator for OpenAICompatProvider {
 
         let cancelled = Arc::clone(&self.cancelled);
         let thinking_field: Option<String> = self.profile.thinking_field().map(|s| s.to_string());
+        // With usage reporting enabled, OpenAI-compatible backends deliver the
+        // usage payload in a chunk after finish_reason. Defer MessageEnd to
+        // [DONE]/stream end so consumers never break before seeing Usage. Only
+        // defer when usage was actually requested (a supporting profile);
+        // otherwise no usage chunk is coming and MessageEnd must not wait.
+        let defer_message_end = config.include_usage && self.profile.supports_stream_usage();
         let byte_stream = response.bytes_stream();
         let buffer = String::new();
         let event_queue: Vec<GenerateEvent> = Vec::new();
 
         let event_stream = futures::stream::unfold(
             (byte_stream, buffer, cancelled, event_queue, thinking_field),
-            |(mut stream, mut buf, cancelled, mut pending, thinking_field)| async move {
+            move |(mut stream, mut buf, cancelled, mut pending, thinking_field)| async move {
                 let tf = thinking_field.as_deref();
                 loop {
                     if let Some(event) = pending.pop() {
@@ -153,7 +163,9 @@ impl ContentGenerator for OpenAICompatProvider {
                                 ));
                             }
                             if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                if let Some(mut events) = parse_sse_chunk(&chunk, tf) {
+                                if let Some(mut events) =
+                                    parse_sse_chunk(&chunk, tf, defer_message_end)
+                                {
                                     if !events.is_empty() {
                                         let first = events.remove(0);
                                         events.reverse();
@@ -186,7 +198,9 @@ impl ContentGenerator for OpenAICompatProvider {
                                 if let Some(data) = line.strip_prefix("data: ") {
                                     if data.trim() != "[DONE]" {
                                         if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                            if let Some(mut events) = parse_sse_chunk(&chunk, tf) {
+                                            if let Some(mut events) =
+                                                parse_sse_chunk(&chunk, tf, defer_message_end)
+                                            {
                                                 if !events.is_empty() {
                                                     let first = events.remove(0);
                                                     events.reverse();
@@ -225,7 +239,11 @@ impl ContentGenerator for OpenAICompatProvider {
     }
 }
 
-fn parse_sse_chunk(chunk: &Value, thinking_field: Option<&str>) -> Option<Vec<GenerateEvent>> {
+fn parse_sse_chunk(
+    chunk: &Value,
+    thinking_field: Option<&str>,
+    defer_message_end: bool,
+) -> Option<Vec<GenerateEvent>> {
     let mut events = Vec::new();
 
     if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
@@ -276,7 +294,7 @@ fn parse_sse_chunk(chunk: &Value, thinking_field: Option<&str>) -> Option<Vec<Ge
                 }
 
                 if let Some(finish) = choice.get("finish_reason").and_then(|f| f.as_str()) {
-                    if finish == "stop" || finish == "tool_calls" {
+                    if (finish == "stop" || finish == "tool_calls") && !defer_message_end {
                         events.push(GenerateEvent::MessageEnd);
                     }
                 }
@@ -297,11 +315,20 @@ fn parse_sse_chunk(chunk: &Value, thinking_field: Option<&str>) -> Option<Vec<Ge
             .get("total_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
-        events.push(GenerateEvent::Usage {
+        let usage_event = GenerateEvent::Usage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
-        });
+        };
+        // Usage must precede MessageEnd; consumers stop reading at the end
+        // marker and would otherwise drop the usage payload.
+        match events
+            .iter()
+            .position(|event| matches!(event, GenerateEvent::MessageEnd))
+        {
+            Some(index) => events.insert(index, usage_event),
+            None => events.push(usage_event),
+        }
     }
 
     if events.is_empty() {
@@ -324,7 +351,7 @@ mod tests {
                 "finish_reason": null
             }]
         });
-        let events = parse_sse_chunk(&chunk, None).unwrap();
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], GenerateEvent::TextDelta(t) if t == "Hello"));
     }
@@ -347,7 +374,7 @@ mod tests {
                 "finish_reason": null
             }]
         });
-        let events = parse_sse_chunk(&chunk, None).unwrap();
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
         assert!(!events.is_empty());
         assert!(
             matches!(&events[0], GenerateEvent::ToolCallStart { name, id, .. } if name == "shell" && id == "call_1")
@@ -370,7 +397,7 @@ mod tests {
                 "finish_reason": null
             }]
         });
-        let events = parse_sse_chunk(&chunk, None).unwrap();
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
         assert_eq!(events.len(), 1);
         assert!(
             matches!(&events[0], GenerateEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta == "{\"command\":")
@@ -386,7 +413,7 @@ mod tests {
                 "finish_reason": "stop"
             }]
         });
-        let events = parse_sse_chunk(&chunk, None).unwrap();
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
         assert!(matches!(&events[0], GenerateEvent::MessageEnd));
     }
 
@@ -402,7 +429,7 @@ mod tests {
                 "finish_reason": null
             }]
         });
-        let events = parse_sse_chunk(&chunk, Some("reasoning_content")).unwrap();
+        let events = parse_sse_chunk(&chunk, Some("reasoning_content"), false).unwrap();
         assert_eq!(events.len(), 1);
         assert!(
             matches!(&events[0], GenerateEvent::ThinkingDelta(t) if t == "Let me think step by step...")
@@ -421,7 +448,7 @@ mod tests {
                 "finish_reason": null
             }]
         });
-        let events = parse_sse_chunk(&chunk, None).unwrap();
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], GenerateEvent::TextDelta(t) if t == "visible"));
     }
@@ -436,7 +463,7 @@ mod tests {
                 "total_tokens": 150
             }
         });
-        let events = parse_sse_chunk(&chunk, None).unwrap();
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
@@ -446,6 +473,45 @@ mod tests {
                 total_tokens: 150
             }
         ));
+    }
+
+    #[test]
+    fn usage_precedes_message_end_in_combined_chunk() {
+        let chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
+        assert!(matches!(&events[0], GenerateEvent::Usage { .. }));
+        assert!(matches!(&events[1], GenerateEvent::MessageEnd));
+    }
+
+    #[test]
+    fn finish_reason_defers_message_end_when_usage_enabled() {
+        let chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        });
+        // With include_usage the usage chunk arrives after finish_reason;
+        // MessageEnd must wait for [DONE] so usage is never dropped.
+        assert!(parse_sse_chunk(&chunk, None, true).is_none());
+        let usage_chunk = serde_json::json!({
+            "choices": [],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        });
+        let events = parse_sse_chunk(&usage_chunk, None, true).unwrap();
+        assert!(matches!(&events[0], GenerateEvent::Usage { .. }));
     }
 
     #[test]
@@ -484,7 +550,12 @@ mod tests {
 
     #[test]
     fn build_request_with_include_usage() {
-        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        // A profile that supports usage telemetry receives stream_options.
+        let provider = OpenAICompatProvider::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            Box::new(super::super::profile::OpenAIProfile),
+        );
         let config = GenerateConfig {
             model: "test".to_string(),
             max_tokens: 4096,
@@ -493,6 +564,26 @@ mod tests {
         };
         let body = provider.build_request_body(&[], &[], &config);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn generic_profile_omits_stream_options_even_with_include_usage() {
+        // Regression: the compaction feature enables include_usage on every
+        // agent turn. A generic OpenAI-compatible endpoint must not be forced
+        // to accept stream_options it may reject; usage degrades to the local
+        // estimate instead of breaking the model conversation.
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        let config = GenerateConfig {
+            model: "test".to_string(),
+            max_tokens: 4096,
+            include_usage: true,
+            ..Default::default()
+        };
+        let body = provider.build_request_body(&[], &[], &config);
+        assert!(
+            body.get("stream_options").is_none(),
+            "generic endpoints must not receive stream_options: {body}"
+        );
     }
 
     #[test]

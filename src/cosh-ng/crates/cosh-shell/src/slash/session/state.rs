@@ -6,6 +6,8 @@ use std::collections::HashSet;
 
 use crate::adapter::SessionSummary;
 
+use super::compact::CompactionRuntime;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionLaunchRequest {
     Picker,
@@ -39,9 +41,19 @@ pub(crate) struct SessionControlState {
     handled_actions: HashSet<String>,
     pending_launch: Option<SessionLaunchRequest>,
     panel_sequence: usize,
+    // Background compaction runtime; independent of the recovery machine.
+    compaction: CompactionRuntime,
 }
 
 impl SessionControlState {
+    pub(crate) fn compaction(&self) -> &CompactionRuntime {
+        &self.compaction
+    }
+
+    pub(crate) fn compaction_mut(&mut self) -> &mut CompactionRuntime {
+        &mut self.compaction
+    }
+
     pub(crate) fn set_pending_panel(&mut self, panel: RuntimeSessionPanel) {
         self.pending_panel = Some(panel);
     }

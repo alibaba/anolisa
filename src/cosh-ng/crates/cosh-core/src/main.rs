@@ -3,6 +3,7 @@
 
 mod auth;
 mod cli;
+mod compaction;
 mod compression;
 mod config;
 mod context;
@@ -46,6 +47,12 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     if resolved.provider_type == "mock" {
         if resolved.model == "mock-partial-error" {
             return Box::new(provider::mock::MockProvider::partial_error());
+        }
+        if resolved.model == "mock-compact-summary" {
+            // Deterministic bounded output for compaction lifecycle tests.
+            return Box::new(provider::mock::MockProvider::repeat_text(
+                "## Objective and constraints\n- deterministic mock summary",
+            ));
         }
         return Box::new(provider::mock::MockProvider::history_echo());
     }
@@ -146,6 +153,8 @@ async fn run() {
 
     if args.is_registry() {
         registry::run(&args, config).await;
+    } else if args.is_compact() {
+        std::process::exit(compaction::run_compact_cli(&args, config).await);
     } else if args.is_headless() {
         match headless::run(&args, config).await {
             Ok(0) => {}

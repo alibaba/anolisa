@@ -17,7 +17,7 @@ use crate::agent::{
     failed_command::{
         start_agent_for_block, FailedCommandAgentStartOptions, FailedCommandAnalysisTrigger,
     },
-    run::start_agent_run,
+    run::{start_agent_run, AgentStartIntent},
 };
 use crate::hooks::aggregate::{
     apply_memory_pressure_severity_upgrade, combined_hook_finding,
@@ -649,7 +649,15 @@ pub(crate) fn start_agent_for_hook_consultation<W: Write>(
     request.hook_finding = consultation.hook_finding.clone();
     request.recommended_skill = consultation.recommended_skill.clone();
     state.agent_run.needs_prompt_after_run = true;
-    start_agent_run(&request, adapter, state, output, None)
+    // Hook consultation is an internal best-effort continuation.
+    start_agent_run(
+        &request,
+        AgentStartIntent::InternalBestEffort,
+        adapter,
+        state,
+        output,
+        None,
+    )
 }
 
 fn related_command_ids_for_consultation(
