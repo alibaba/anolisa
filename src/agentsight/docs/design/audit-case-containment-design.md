@@ -39,9 +39,10 @@ Containment is one case-level backend operation. The Dashboard must not independ
 binding and review APIs because partial frontend orchestration could create an active policy
 without updating the case, or update the case without attaching the policy.
 
-The backend derives the enforcement policy from the reviewed case and an approved policy
-template. It persists the desired response action before crossing the enforcer boundary, then
-reconciles the acknowledgement into the action state.
+The backend derives the enforcement policy from the reviewed case, its persisted original
+binding, and an approved policy template. Evidence paths are display-redacted and must never be
+expanded or guessed for enforcement. It persists the desired response action before crossing the
+enforcer boundary, then reconciles the acknowledgement into the action state.
 
 ### Review state and containment state remain separate
 
@@ -118,7 +119,7 @@ GET /api/audit/cases/{case_id}/containment-plan
 The response contains:
 
 - Case and approved policy-template identifiers.
-- Sensitive source path.
+- Canonical sensitive source path recovered from the persisted original binding.
 - Original binding and root process identity.
 - Whether the original process identity is currently valid.
 - Eligible live Agent processes when replacement is required.
@@ -142,7 +143,8 @@ Content-Type: application/json
 The server performs these steps:
 
 1. Load the case and reject cases marked false positive, accepted risk, or resolved.
-2. Derive the credential-exfiltration enforce policy from the approved template.
+2. Recover the canonical source path from the persisted original binding and derive the
+   credential-exfiltration enforce policy from the approved template.
 3. Validate the selected PID and read its current start time.
 4. Persist an idempotent pending containment action and binding identifier.
 5. Submit the desired binding through the existing enforcement coordinator.
@@ -174,9 +176,12 @@ without duplicating bindings.
 
 ## Event Correlation
 
-The security coordinator matches normalized enforcement events by `binding_id`. The first event
-with `blocked=true` sets `blocked_at_ns` idempotently. Duplicate DNS attempts and repeated kernel
-events remain immutable evidence but do not create additional containment actions or cases.
+The security coordinator matches normalized enforcement events by `binding_id`. When the binding
+belongs to a containment action, its file, taint, network, and decision evidence is appended to
+the action's source audit case instead of opening a second case. The first event with
+`blocked=true` sets `blocked_at_ns`, upgrades the source case to critical and blocked, and raises
+its risk score to the enforce decision score. Duplicate DNS attempts and repeated kernel events
+remain immutable evidence but do not create additional containment actions or cases.
 
 The case detail displays four product states:
 
@@ -200,16 +205,19 @@ cases. Its confirmation dialog shows:
 - A selected 15-minute temporary duration.
 - An explicit option for persistent enforcement.
 
-If the original PID is stale or its original binding is unavailable, the dialog replaces it with
-a required live-Agent selector backed by AgentSight discovery and health data while preserving
-the case, path, and policy context. The case page then shows the binding state, countdown,
-response history, first blocked target and errno, expiry, and failures. Until Dashboard
-authentication has named users, response history attributes actions to `dashboard-token` rather
-than claiming a human identity that AgentSight cannot prove.
+If the original PID is stale, the dialog replaces it with a required live-Agent selector backed
+by AgentSight discovery and health data while preserving the case, path, and policy context. If
+the original binding is unavailable, containment is ineligible because the redacted evidence
+path is not safe policy input. The case page then shows the binding state, countdown, response
+history, first blocked target and errno, expiry, and failures. Until Dashboard authentication has
+named users, response history attributes actions to `dashboard-token` rather than claiming a
+human identity that AgentSight cannot prove.
 
 ## Failure Handling
 
 - A stale process before submission returns `root_process_stale` with eligible replacements.
+- A missing original binding returns `source_policy_unavailable`; AgentSight never expands a
+  redacted evidence path into an enforcement target.
 - A process that exits during attachment leaves the action failed and the case unchanged.
 - An unavailable enforcer returns service unavailable and does not confirm the case.
 - A lost acknowledgement is reconciled through the persisted binding ID and `ListBindings`.
