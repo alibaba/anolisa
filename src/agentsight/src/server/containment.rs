@@ -386,3 +386,11 @@ fn error_response(status: StatusCode, code: &str, message: &str, retryable: bool
         "error": { "code": code, "message": message, "retryable": retryable }
     }))
 }
+
+#[cfg(test)]
+#[path = "containment_error_tests.rs"]
+mod error_tests;
+
+#[cfg(test)]
+#[path = "containment_tests.rs"]
+mod tests;
