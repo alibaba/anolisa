@@ -1,5 +1,7 @@
 //! Case-level orchestration for upgrading audit evidence to enforcement.
 
+pub(super) mod enforcer;
+mod pending;
 mod policy;
 mod reconciler;
 mod worker;
@@ -7,11 +9,12 @@ mod worker;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentsight_enforcement_protocol::{ApplyCredentialPolicy, Binding};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use self::enforcer::{ContainmentEnforcer, ContainmentEnforcerError};
+use self::pending::{record_attach_failed, record_direct_pending_unavailable};
 use self::policy::{
     ResolvedPolicy, acknowledgement_matches, enforce_request, existing_action, live_candidates,
     live_lifecycle, resolve_policy, sanitize_failure, select_candidate, validate_duration,
@@ -22,90 +25,12 @@ use super::{
     ContainmentFailureStage, ContainmentLifecycle, RiskCaseDetail, RiskCaseStatus, SecurityStore,
     SecurityStoreError,
 };
-use crate::enforcement::{
-    EnforcementCoordinator, EnforcementCoordinatorError, EnforcementError, read_process_start_time,
-};
+use crate::enforcement::read_process_start_time;
 
 const DEFAULT_DURATION_SECS: u64 = 900;
 const MIN_DURATION_SECS: u64 = 60;
 const MAX_DURATION_SECS: u64 = 86_400;
 const CLEANUP_RETRY_DELAY_NS: u64 = 1_000_000_000;
-
-/// Typed failures returned by the containment enforcement boundary.
-#[derive(Debug, Error)]
-pub enum ContainmentEnforcerError {
-    /// Readiness, transport, or local enforcement state is temporarily unavailable.
-    #[error("{0}")]
-    Unavailable(String),
-    /// The enforcement boundary rejected or contradicted the durable request.
-    #[error("{0}")]
-    Rejected(String),
-}
-
-/// Enforcement operations required by containment orchestration.
-pub trait ContainmentEnforcer: Send + Sync {
-    /// Compiles and applies one product-level credential policy.
-    fn apply_credential_policy(
-        &self,
-        request: ApplyCredentialPolicy,
-    ) -> Result<Binding, ContainmentEnforcerError>;
-    /// Detaches a previously applied binding.
-    fn detach(&self, binding_id: Uuid) -> Result<(), String>;
-    /// Lists persisted enforcement bindings.
-    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError>;
-}
-
-impl ContainmentEnforcer for EnforcementCoordinator {
-    fn apply_credential_policy(
-        &self,
-        request: ApplyCredentialPolicy,
-    ) -> Result<Binding, ContainmentEnforcerError> {
-        require_containment_ingestion(self)?;
-        EnforcementCoordinator::apply_credential_policy(self, request)
-            .map_err(containment_enforcer_error)
-    }
-
-    fn detach(&self, binding_id: Uuid) -> Result<(), String> {
-        EnforcementCoordinator::detach(self, binding_id).map_err(|error| error.to_string())
-    }
-
-    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError> {
-        require_containment_ingestion(self)?;
-        let bindings =
-            EnforcementCoordinator::bindings(self).map_err(containment_enforcer_error)?;
-        require_containment_ingestion(self)?;
-        Ok(bindings)
-    }
-}
-
-fn require_containment_ingestion(
-    coordinator: &EnforcementCoordinator,
-) -> Result<(), ContainmentEnforcerError> {
-    if coordinator.is_ingestion_ready() {
-        return Ok(());
-    }
-    Err(containment_enforcer_error(
-        EnforcementCoordinatorError::IngestionUnavailable,
-    ))
-}
-
-fn containment_enforcer_error(error: EnforcementCoordinatorError) -> ContainmentEnforcerError {
-    let unavailable = matches!(
-        &error,
-        EnforcementCoordinatorError::IngestionUnavailable
-            | EnforcementCoordinatorError::Store(_)
-            | EnforcementCoordinatorError::Thread(_)
-            | EnforcementCoordinatorError::Client(
-                EnforcementError::Io(_) | EnforcementError::Disconnected
-            )
-    );
-    let message = error.to_string();
-    if unavailable {
-        ContainmentEnforcerError::Unavailable(message)
-    } else {
-        ContainmentEnforcerError::Rejected(message)
-    }
-}
 
 /// User-selected process and duration for one containment request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,10 +294,16 @@ impl ContainmentCoordinator {
             }
         }
 
-        let acknowledgement = match self.enforcer.apply_credential_policy(apply.clone()) {
-            Ok(binding) => binding,
-            Err(error) => return self.attach_failed(action, &error.to_string()),
+        let stamped = match self.enforcer.apply_credential_policy(apply.clone()) {
+            Ok(stamped) => stamped,
+            Err(ContainmentEnforcerError::Unavailable(message)) => {
+                return record_direct_pending_unavailable(&self.store, action, now_ns(), &message);
+            }
+            Err(ContainmentEnforcerError::Rejected(message)) => {
+                return record_attach_failed(&self.store, action, now_ns(), &message);
+            }
         };
+        let (acknowledgement, readiness_stamp) = stamped.into_parts();
         if !acknowledgement_matches(&acknowledgement, &apply) {
             let message = "enforcer returned an invalid binding acknowledgement";
             self.detach_and_fail(&mut action, ContainmentFailureStage::Attach, message)?;
@@ -381,11 +312,24 @@ impl ContainmentCoordinator {
 
         let claimed_at_ns = action.updated_at_ns;
         let activated_at_ns = now_ns().max(claimed_at_ns.saturating_add(1));
-        match self.store.activate_containment_action(
+        let lease = match self.enforcer.lease_ready(readiness_stamp) {
+            Ok(lease) => lease,
+            Err(error) => {
+                return record_direct_pending_unavailable(
+                    &self.store,
+                    action,
+                    now_ns(),
+                    &error.to_string(),
+                );
+            }
+        };
+        let activation = self.store.activate_containment_action(
             action.action_id,
             claimed_at_ns,
             activated_at_ns,
-        ) {
+        );
+        drop(lease);
+        match activation {
             Ok(ContainmentActivationResult::Activated) => {
                 action.lifecycle_state = ContainmentLifecycle::Active;
                 action.next_retry_at_ns = None;
@@ -444,27 +388,12 @@ impl ContainmentCoordinator {
         detail: RiskCaseDetail,
     ) -> Result<ResolvedPolicy, ContainmentError> {
         let case_id = detail.case.case_id;
-        let bindings = self
+        let snapshot = self
             .enforcer
             .bindings()
             .map_err(|error| ContainmentError::Enforcer(sanitize_failure(&error.to_string())))?;
+        let (bindings, _) = snapshot.into_parts();
         resolve_policy(detail, bindings).ok_or(ContainmentError::SourcePolicyUnavailable(case_id))
-    }
-
-    fn attach_failed(
-        &self,
-        mut action: ContainmentAction,
-        message: &str,
-    ) -> Result<ContainmentAction, ContainmentError> {
-        let message = sanitize_failure(message);
-        let claimed_at_ns = action.updated_at_ns;
-        action.lifecycle_state = ContainmentLifecycle::Failed;
-        action.failure_stage = Some(ContainmentFailureStage::Attach);
-        action.failure_reason = Some(message.clone());
-        action.next_retry_at_ns = None;
-        action.updated_at_ns = now_ns().max(claimed_at_ns.saturating_add(1));
-        self.finish_direct_claim(&action, ContainmentLifecycle::Pending, claimed_at_ns)?;
-        Err(ContainmentError::Enforcer(message))
     }
 
     fn detach_and_fail(

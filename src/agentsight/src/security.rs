@@ -5,9 +5,13 @@ mod coordinator;
 mod query;
 mod store;
 
+pub use containment::enforcer::{
+    ContainmentEnforcer, ContainmentEnforcerError, ContainmentReadinessLease, StampedBinding,
+    StampedBindings, stable_readiness_lease,
+};
 pub use containment::{
-    ContainmentCandidate, ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError,
-    ContainmentError, ContainmentPlan, ContainmentRequest,
+    ContainmentCandidate, ContainmentCoordinator, ContainmentError, ContainmentPlan,
+    ContainmentRequest,
 };
 pub use coordinator::{SecurityCoordinator, SecurityCoordinatorError};
 pub use query::{

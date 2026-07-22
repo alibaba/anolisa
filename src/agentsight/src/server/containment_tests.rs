@@ -17,13 +17,15 @@ use uuid::Uuid;
 use super::super::auth::{AuthMiddleware, DashboardAuth};
 use super::super::{AppState, SecurityObservabilityConfig, configure_routes};
 use super::{start_reconciler, stop_reconciler, trusted_candidates};
+use crate::ReadinessStamp;
 use crate::config::ServerAuthConfig;
 use crate::enforcement::ApplyPolicy;
 use crate::grader::EvaluationStore;
 use crate::health::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore};
 use crate::security::{
     ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError, ContainmentError,
-    RiskCase, RiskCaseStatus, RiskSeverity, SecurityStore,
+    ContainmentReadinessLease, RiskCase, RiskCaseStatus, RiskSeverity, SecurityStore,
+    StampedBinding, StampedBindings, stable_readiness_lease,
 };
 
 #[derive(Default)]
@@ -36,7 +38,7 @@ impl ContainmentEnforcer for FakeEnforcer {
     fn apply_credential_policy(
         &self,
         request: ApplyCredentialPolicy,
-    ) -> Result<Binding, ContainmentEnforcerError> {
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
         self.apply_count.fetch_add(1, Ordering::AcqRel);
         let source = request
             .policy
@@ -44,7 +46,7 @@ impl ContainmentEnforcer for FakeEnforcer {
             .first()
             .cloned()
             .unwrap_or_default();
-        Ok(Binding {
+        Ok(StampedBinding::stable(Binding {
             request: ApplyPolicy {
                 binding_id: request.binding_id,
                 agent_id: request.agent_id,
@@ -58,19 +60,27 @@ impl ContainmentEnforcer for FakeEnforcer {
             state: BindingState::Enforced,
             message: None,
             domain_id: Some(1),
-        })
+        }))
     }
 
     fn detach(&self, _: Uuid) -> Result<(), String> {
         Ok(())
     }
 
-    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError> {
-        Ok(self
-            .bindings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone())
+    fn bindings(&self) -> Result<StampedBindings, ContainmentEnforcerError> {
+        Ok(StampedBindings::stable(
+            self.bindings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        ))
+    }
+
+    fn lease_ready(
+        &self,
+        _: ReadinessStamp,
+    ) -> Result<Box<dyn ContainmentReadinessLease + '_>, ContainmentEnforcerError> {
+        Ok(stable_readiness_lease())
     }
 }
 

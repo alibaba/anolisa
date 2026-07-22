@@ -31,6 +31,22 @@ impl fmt::Display for IngestionReadinessError {
 
 impl std::error::Error for IngestionReadinessError {}
 
+/// Opaque identity of one acknowledged ingestion-worker generation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ReadinessStamp(u128);
+
+impl fmt::Debug for ReadinessStamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReadinessStamp(..)")
+    }
+}
+
+impl ReadinessStamp {
+    pub(crate) const fn stable() -> Self {
+        Self(0)
+    }
+}
+
 pub(crate) struct GenerationToken {
     _identity: (),
 }
@@ -38,6 +54,10 @@ pub(crate) struct GenerationToken {
 pub(crate) struct GenerationGuard {
     readiness: GenerationReadiness,
     worker: Arc<GenerationToken>,
+}
+
+pub(crate) struct ReadinessLease<'a> {
+    _state: MutexGuard<'a, ReadinessState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +91,7 @@ struct ReadinessInner {
 #[derive(Default)]
 struct ReadinessState {
     current: Option<Arc<GenerationToken>>,
+    generation: u128,
     ready: bool,
     message: Option<String>,
 }
@@ -141,6 +162,7 @@ impl GenerationReadiness {
     pub(crate) fn mark_not_ready(&self, worker: &Arc<GenerationToken>) {
         let mut state = self.state();
         if is_worker(&state, worker) {
+            state.generation = state.generation.wrapping_add(1);
             state.ready = false;
             state.message = Some(self.inner.unavailable_message.into());
             self.inner.changed.notify_all();
@@ -150,6 +172,7 @@ impl GenerationReadiness {
     pub(crate) fn mark_unavailable(&self, worker: &Arc<GenerationToken>, message: String) {
         let mut state = self.state();
         if is_worker(&state, worker) {
+            state.generation = state.generation.wrapping_add(1);
             state.ready = false;
             state.message = Some(message);
             self.inner.changed.notify_all();
@@ -255,6 +278,17 @@ impl GenerationReadiness {
         self.state().ready
     }
 
+    pub(crate) fn ready_stamp(&self) -> Option<ReadinessStamp> {
+        let state = self.state();
+        state.ready.then_some(ReadinessStamp(state.generation))
+    }
+
+    pub(crate) fn lease_ready(&self, stamp: ReadinessStamp) -> Option<ReadinessLease<'_>> {
+        let state = self.state();
+        (state.ready && ReadinessStamp(state.generation) == stamp)
+            .then_some(ReadinessLease { _state: state })
+    }
+
     pub(crate) fn status(&self) -> (bool, Option<String>) {
         let state = self.state();
         (state.ready, state.message.clone())
@@ -265,6 +299,7 @@ impl GenerationReadiness {
     }
 
     fn set_unready(&self, state: &mut ReadinessState, worker: Option<Arc<GenerationToken>>) {
+        state.generation = state.generation.wrapping_add(1);
         state.current = worker;
         state.ready = false;
         state.message = Some(self.inner.unavailable_message.into());

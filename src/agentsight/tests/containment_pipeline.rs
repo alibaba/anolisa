@@ -4,10 +4,12 @@ use std::time::Duration;
 
 use agentsight::enforcement::{ApplyPolicy, Binding, BindingState};
 use agentsight::security::{
-    ContainmentAction, ContainmentCandidate, ContainmentCoordinator, ContainmentEnforcer,
-    ContainmentEnforcerError, ContainmentError, ContainmentFailureStage, ContainmentLifecycle,
-    ContainmentRequest, RiskCase, RiskCaseStatus, RiskSeverity, SecurityStore,
+    stable_readiness_lease, ContainmentAction, ContainmentCandidate, ContainmentCoordinator,
+    ContainmentEnforcer, ContainmentEnforcerError, ContainmentError, ContainmentFailureStage,
+    ContainmentLifecycle, ContainmentReadinessLease, ContainmentRequest, RiskCase, RiskCaseStatus,
+    RiskSeverity, SecurityStore, StampedBinding, StampedBindings,
 };
+use agentsight::ReadinessStamp;
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, EventIdentity, FileAction, PolicyMode, SecurityEvent, SecurityEventKind,
 };
@@ -112,7 +114,7 @@ impl ContainmentEnforcer for FakeEnforcer {
     fn apply_credential_policy(
         &self,
         request: ApplyCredentialPolicy,
-    ) -> Result<Binding, ContainmentEnforcerError> {
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
         self.apply_calls.fetch_add(1, Ordering::AcqRel);
         if let Some(message) = self.failure.lock().expect("failure should lock").take() {
             return Err(ContainmentEnforcerError::Unavailable(message));
@@ -148,7 +150,7 @@ impl ContainmentEnforcer for FakeEnforcer {
         } else {
             "block"
         };
-        Ok(Binding {
+        Ok(StampedBinding::stable(Binding {
             request: ApplyPolicy {
                 binding_id: request.binding_id,
                 agent_id: request.agent_id,
@@ -162,7 +164,7 @@ impl ContainmentEnforcer for FakeEnforcer {
             state,
             message: None,
             domain_id: Some(7),
-        })
+        }))
     }
 
     fn detach(&self, binding_id: Uuid) -> Result<(), String> {
@@ -181,7 +183,7 @@ impl ContainmentEnforcer for FakeEnforcer {
         }
     }
 
-    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError> {
+    fn bindings(&self) -> Result<StampedBindings, ContainmentEnforcerError> {
         assert!(
             !self.panic_bindings.swap(false, Ordering::AcqRel),
             "test-only bindings panic"
@@ -203,7 +205,16 @@ impl ContainmentEnforcer for FakeEnforcer {
             pause.entered.wait();
             pause.resume.wait();
         }
-        Ok(self.bindings.lock().expect("bindings should lock").clone())
+        Ok(StampedBindings::stable(
+            self.bindings.lock().expect("bindings should lock").clone(),
+        ))
+    }
+
+    fn lease_ready(
+        &self,
+        _: ReadinessStamp,
+    ) -> Result<Box<dyn ContainmentReadinessLease + '_>, ContainmentEnforcerError> {
+        Ok(stable_readiness_lease())
     }
 }
 
@@ -658,12 +669,10 @@ fn pending_restart_fails_safely_without_original_binding_provenance() {
         stored.failure_stage,
         Some(ContainmentFailureStage::Reconcile)
     );
-    assert!(
-        stored
-            .failure_reason
-            .as_deref()
-            .is_some_and(|reason| !reason.chars().any(char::is_control))
-    );
+    assert!(stored
+        .failure_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.chars().any(char::is_control)));
     assert_eq!(fixture.enforcer.apply_calls(), 0);
 }
 
@@ -762,12 +771,10 @@ fn detach_failures_schedule_five_backoffs_before_terminal_retry() {
             stored.next_retry_at_ns,
             Some(due_at + delay_secs * SECOND_NS)
         );
-        assert!(
-            stored
-                .failure_reason
-                .as_deref()
-                .is_some_and(|reason| !reason.chars().any(char::is_control))
-        );
+        assert!(stored
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.chars().any(char::is_control)));
         due_at += delay_secs * SECOND_NS;
     }
 
@@ -918,12 +925,10 @@ fn corrupt_due_row_does_not_block_valid_reconciliation() {
         quarantined.failure_stage,
         Some(ContainmentFailureStage::Reconcile)
     );
-    assert!(
-        quarantined
-            .failure_reason
-            .as_deref()
-            .is_some_and(|reason| !reason.chars().any(char::is_control))
-    );
+    assert!(quarantined
+        .failure_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.chars().any(char::is_control)));
     assert_eq!(reconciled.lifecycle_state, ContainmentLifecycle::Expired);
     assert_eq!(fixture.enforcer.detached(), [valid.binding_id]);
 
@@ -1320,12 +1325,10 @@ mod linux {
         assert_eq!(action.failure_stage, Some(ContainmentFailureStage::Detach));
         assert_eq!(action.attempt_count, 1);
         assert!(action.next_retry_at_ns.is_some());
-        assert!(
-            action
-                .failure_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("detach adapter unavailable"))
-        );
+        assert!(action
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("detach adapter unavailable")));
         assert!(matches!(
             fixture.contain(Some(900)),
             Err(ContainmentError::ContainmentExpiring(id)) if id == action.action_id
@@ -1520,12 +1523,10 @@ mod linux {
             action.failure_stage,
             Some(ContainmentFailureStage::Reconcile)
         );
-        assert!(
-            action
-                .failure_reason
-                .as_deref()
-                .is_some_and(|reason| !reason.chars().any(char::is_control))
-        );
+        assert!(action
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.chars().any(char::is_control)));
         assert_eq!(fixture.enforcer.detached(), [action.binding_id]);
         assert_eq!(fixture.status(), RiskCaseStatus::FalsePositive);
     }

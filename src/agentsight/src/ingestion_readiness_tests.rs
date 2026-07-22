@@ -123,3 +123,73 @@ fn joint_wait_revalidates_a_revoked_generation_before_returning() {
     assert_eq!(started_rx.recv(), Ok(()));
     assert_eq!(gate.join().expect("gate should stop"), Ok(()));
 }
+
+#[test]
+fn readiness_lease_blocks_generation_replacement_until_drop() {
+    let readiness = GenerationReadiness::new("ingestion unavailable");
+    let current = readiness.candidate();
+    readiness.install(current.clone());
+    assert!(readiness.mark_ready(&current));
+    let stamp = readiness
+        .ready_stamp()
+        .expect("ready generation should stamp");
+    let lease = readiness
+        .lease_ready(stamp)
+        .expect("current ready generation should lease");
+    let replacement = readiness.candidate();
+    let replacing = readiness.clone();
+    let (replaced_tx, replaced_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        replacing.install(replacement);
+        replaced_tx.send(()).expect("replacement should report");
+    });
+
+    assert!(replaced_rx.try_recv().is_err());
+    drop(lease);
+    assert_eq!(replaced_rx.recv(), Ok(()));
+    worker.join().expect("replacement should stop");
+}
+
+#[test]
+fn reinstalling_a_worker_token_uses_a_new_readiness_stamp() {
+    let readiness = GenerationReadiness::new("ingestion unavailable");
+    let worker = readiness.candidate();
+    readiness.install(worker.clone());
+    assert!(readiness.mark_ready(&worker));
+    let first = readiness
+        .ready_stamp()
+        .expect("first generation should stamp");
+
+    readiness.stop();
+    readiness.install(worker.clone());
+    assert!(readiness.mark_ready(&worker));
+    let second = readiness
+        .ready_stamp()
+        .expect("replacement generation should stamp");
+
+    assert_ne!(first, second);
+    assert!(readiness.lease_ready(first).is_none());
+    assert!(readiness.lease_ready(second).is_some());
+}
+
+#[test]
+fn reconnecting_the_same_worker_does_not_reuse_its_revoked_stamp() {
+    let readiness = GenerationReadiness::new("ingestion unavailable");
+    let worker = readiness.candidate();
+    readiness.install(worker.clone());
+    assert!(readiness.mark_ready(&worker));
+    let first = readiness
+        .ready_stamp()
+        .expect("first generation should stamp");
+
+    readiness.mark_not_ready(&worker);
+    assert!(readiness.lease_ready(first).is_none());
+    assert!(readiness.mark_ready(&worker));
+    let second = readiness
+        .ready_stamp()
+        .expect("reconnected generation should stamp");
+
+    assert_ne!(first, second);
+    assert!(readiness.lease_ready(first).is_none());
+    assert!(readiness.lease_ready(second).is_some());
+}

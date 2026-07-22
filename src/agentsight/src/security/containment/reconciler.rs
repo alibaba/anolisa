@@ -4,6 +4,7 @@ use agentsight_enforcement_protocol::Binding;
 
 use crate::security::store::DueContainmentAction;
 
+use super::pending::{record_pending_unavailable, retry_delay_ns};
 use super::{
     ContainmentAction, ContainmentActivationResult, ContainmentCoordinator, ContainmentEnforcer,
     ContainmentEnforcerError, ContainmentError, ContainmentFailureStage, ContainmentLifecycle,
@@ -13,7 +14,6 @@ use super::{
 
 const DUE_BATCH_LIMIT: usize = 100;
 const DETACH_MAX_RETRIES: u32 = 5;
-const SECOND_NS: u64 = 1_000_000_000;
 
 impl ContainmentCoordinator {
     /// Reconciles at most one bounded batch of due persisted actions.
@@ -112,8 +112,8 @@ impl Reconciler<'_> {
         current_time_ns: u64,
     ) -> Result<(), ContainmentError> {
         let claimed_at_ns = action.updated_at_ns;
-        let bindings = match self.enforcer.bindings() {
-            Ok(bindings) => bindings,
+        let snapshot = match self.enforcer.bindings() {
+            Ok(snapshot) => snapshot,
             Err(ContainmentEnforcerError::Unavailable(message)) => {
                 return self.record_pending_unavailable(
                     &mut action,
@@ -126,6 +126,7 @@ impl Reconciler<'_> {
                 return self.fail_pending(action, claimed_at_ns, &message, false, current_time_ns);
             }
         };
+        let (bindings, snapshot_stamp) = snapshot.into_parts();
         let exact = exact_binding(&bindings, action.binding_id);
         if exact.is_err() {
             return self.fail_pending(
@@ -198,8 +199,10 @@ impl Reconciler<'_> {
             );
         };
 
-        let acknowledgement = match exact {
-            Some(binding) if acknowledgement_matches(&binding, &request) => binding,
+        let (acknowledgement, activation_stamp) = match exact {
+            Some(binding) if acknowledgement_matches(&binding, &request) => {
+                (binding, snapshot_stamp)
+            }
             Some(_) => {
                 return self.fail_pending(
                     action,
@@ -220,7 +223,7 @@ impl Reconciler<'_> {
                     );
                 }
                 match self.enforcer.apply_credential_policy(request.clone()) {
-                    Ok(binding) => binding,
+                    Ok(stamped) => stamped.into_parts(),
                     Err(ContainmentEnforcerError::Unavailable(message)) => {
                         return self.record_pending_unavailable(
                             &mut action,
@@ -250,11 +253,24 @@ impl Reconciler<'_> {
                 current_time_ns,
             );
         }
-        match self.store.activate_containment_action(
+        let lease = match self.enforcer.lease_ready(activation_stamp) {
+            Ok(lease) => lease,
+            Err(error) => {
+                return self.record_pending_unavailable(
+                    &mut action,
+                    claimed_at_ns,
+                    current_time_ns,
+                    error.to_string(),
+                );
+            }
+        };
+        let activation = self.store.activate_containment_action(
             action.action_id,
             claimed_at_ns,
             current_time_ns.max(claimed_at_ns.saturating_add(1)),
-        ) {
+        );
+        drop(lease);
+        match activation {
             Ok(ContainmentActivationResult::Activated) => Ok(()),
             Ok(ContainmentActivationResult::CaseIneligible(_)) => self.fail_pending(
                 action,
@@ -280,14 +296,13 @@ impl Reconciler<'_> {
         current_time_ns: u64,
         reason: String,
     ) -> Result<(), ContainmentError> {
-        let reason = sanitize_failure(&reason);
-        action.lifecycle_state = ContainmentLifecycle::Pending;
-        action.failure_stage = Some(ContainmentFailureStage::Reconcile);
-        action.failure_reason = Some(reason.clone());
-        action.attempt_count = action.attempt_count.saturating_add(1);
-        action.next_retry_at_ns =
-            Some(current_time_ns.saturating_add(retry_delay_ns(action.attempt_count)));
-        self.finish_claimed(action, ContainmentLifecycle::Pending, claimed_at_ns)?;
+        let reason = record_pending_unavailable(
+            self.store,
+            action,
+            claimed_at_ns,
+            current_time_ns,
+            &reason,
+        )?;
         Err(ContainmentError::Enforcer(reason))
     }
 
@@ -463,9 +478,4 @@ fn exact_binding(bindings: &[Binding], binding_id: uuid::Uuid) -> Result<Option<
         return Err(());
     }
     Ok(first)
-}
-
-fn retry_delay_ns(attempt_count: u32) -> u64 {
-    let shift = attempt_count.saturating_sub(1).min(4);
-    SECOND_NS.saturating_mul(1_u64 << shift)
 }

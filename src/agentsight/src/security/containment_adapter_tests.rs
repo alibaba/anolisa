@@ -6,7 +6,9 @@ use agentsight_enforcement_protocol::{
 };
 
 use super::*;
-use crate::enforcement::{ApplyPolicy, BindingState, EnforcementClient, EnforcementStore};
+use crate::enforcement::{
+    ApplyPolicy, Binding, BindingState, EnforcementClient, EnforcementCoordinator, EnforcementStore,
+};
 use crate::security::{ContainmentLifecycle, RiskCase, RiskSeverity};
 
 const SECOND_NS: u64 = 1_000_000_000;
@@ -41,6 +43,8 @@ fn revoked_ingestion_keeps_an_exact_binding_pending_until_its_successor_is_ready
     assert_eq!(
         ContainmentEnforcer::bindings(enforcement.as_ref())
             .expect("ready snapshots should remain available")
+            .into_parts()
+            .0
             .len(),
         2
     );
