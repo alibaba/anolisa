@@ -169,14 +169,12 @@ fn ingest_event(
     if let Some(case_id) = containment_case {
         store.append_containment_evidence(
             case_id,
+            event.identity.binding_id,
             &evidence_ids,
             decision.risk_score,
             decision.blocked,
             event.occurred_at_ns,
         )?;
-        if decision.blocked {
-            store.mark_containment_blocked(event.identity.binding_id, event.occurred_at_ns)?;
-        }
         return Ok(());
     }
     let destination_class = match &sink.kind {

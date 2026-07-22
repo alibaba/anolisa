@@ -37,6 +37,7 @@ impl SecurityStore {
     pub fn append_containment_evidence(
         &self,
         case_id: Uuid,
+        binding_id: Uuid,
         evidence_ids: &[Uuid],
         risk_score: u8,
         blocked: bool,
@@ -45,6 +46,23 @@ impl SecurityStore {
         let occurred_at_ns = sqlite_time(occurred_at_ns)?;
         let mut conn = self.connection()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let action_case = transaction
+            .query_row(
+                "SELECT case_id FROM containment_actions WHERE binding_id = ?1",
+                [binding_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                SecurityStoreError::InvalidData(format!(
+                    "containment binding {binding_id} does not exist"
+                ))
+            })?;
+        if parse_uuid(&action_case)? != case_id {
+            return Err(SecurityStoreError::InvalidData(format!(
+                "containment binding {binding_id} does not belong to risk case {case_id}"
+            )));
+        }
         let changed = transaction.execute(
             "UPDATE risk_cases SET
                  severity = CASE WHEN ?1 THEN 'critical' ELSE severity END,
@@ -76,6 +94,23 @@ impl SecurityStore {
             )?;
             if inserted == 1 {
                 next_position += 1;
+            }
+        }
+        if blocked {
+            let changed = transaction.execute(
+                "UPDATE containment_actions
+                 SET blocked_at_ns = CASE
+                         WHEN blocked_at_ns IS NULL OR blocked_at_ns > ?1 THEN ?1
+                         ELSE blocked_at_ns
+                     END,
+                     updated_at_ns = MAX(updated_at_ns, ?1)
+                 WHERE binding_id = ?2 AND case_id = ?3",
+                params![occurred_at_ns, binding_id.to_string(), case_id.to_string()],
+            )?;
+            if changed != 1 {
+                return Err(SecurityStoreError::InvalidData(format!(
+                    "containment binding {binding_id} disappeared during correlation"
+                )));
             }
         }
         transaction.commit()?;

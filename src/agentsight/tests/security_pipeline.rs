@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use agentsight::enforcement::{ApplyPolicy, EnforcementClient};
 use agentsight::security::{
     ContainmentAction, ContainmentLifecycle, RiskCaseStatus, RiskSeverity, SecurityCoordinator,
-    SecurityStore,
+    SecurityStore, SecurityStoreError,
 };
 use agentsight_enforcement_protocol::{PolicyMode, SecurityEvent, SecurityEventKind};
 use agentsight_enforcer::{EnforcementBackend, EnforcerService, MockBackend};
@@ -258,6 +258,35 @@ fn allowed_containment_decision_appends_without_claiming_a_block() {
     assert_eq!(detail.case.risk_score, 91);
     assert_eq!(detail.evidence.len(), 5);
     assert_eq!(store.list_cases(10, 0).expect("cases should load").len(), 1);
+}
+
+#[test]
+fn containment_correlation_rolls_back_when_the_binding_is_missing() {
+    let (store, event_ids) = ingest_mock_chain(PolicyMode::Audit);
+    let case_id = store.list_cases(10, 0).expect("case list should load")[0].case_id;
+    let binding_id = Uuid::new_v4();
+    insert_containment_action(&store, case_id, binding_id);
+    let before = store.case_detail(case_id).expect("case should load");
+
+    let error = store
+        .append_containment_evidence(
+            case_id,
+            Uuid::new_v4(),
+            &[*event_ids.last().expect("decision id should exist")],
+            99,
+            true,
+            900,
+        )
+        .expect_err("a missing containment binding must abort the transaction");
+
+    assert!(matches!(error, SecurityStoreError::InvalidData(_)));
+    let after = store.case_detail(case_id).expect("case should load");
+    let action = store
+        .latest_containment_action(case_id)
+        .expect("action query should work")
+        .expect("action should exist");
+    assert_eq!(after, before);
+    assert_eq!(action.blocked_at_ns, None);
 }
 
 #[test]
