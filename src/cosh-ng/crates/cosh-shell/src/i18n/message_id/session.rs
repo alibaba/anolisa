@@ -1,0 +1,36 @@
+macro_rules! session_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            SessionTitle,
+            SessionUnavailableBody,
+            SessionBusyBody,
+            SessionEmptyBody,
+            SessionListFooter,
+            SessionStatusTitle,
+            SessionShellIdLine,
+            SessionProviderIdLine,
+            SessionWorkspaceLine,
+            SessionRecoveryLine,
+            SessionErrorLine,
+            SessionEvidenceNotRestoredBody,
+            SessionPickerFooter,
+            SessionClearConfirmTitle,
+            SessionClearConfirmCountLine,
+            SessionClearConfirmFooter,
+            SessionSelectedTitle,
+            SessionSelectedBody,
+            SessionErrorTitle,
+            SessionClearedTitle,
+            SessionClearedBody,
+            SessionSkippedBody,
+            SessionClearInterruptedBody,
+            SessionCancelledTitle,
+            SessionCancelledBody,
+            SessionUsageBody,
+            SessionNotReadyBody,
+            SessionProtectedBody,
+        );
+    };
+}

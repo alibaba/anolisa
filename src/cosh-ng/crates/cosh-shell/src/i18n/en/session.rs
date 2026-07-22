@@ -1,11 +1,7 @@
-//! English messages for interactive session recovery.
-
 use super::MessageId;
 
-pub(super) fn message(id: MessageId) -> &'static str {
-    match id {
-        MessageId::HelpGroupSessions => "Sessions",
-        MessageId::HelpSummarySession => "discover, resume, and clear Agent sessions",
+pub(super) fn message(id: MessageId) -> Option<&'static str> {
+    Some(match id {
         MessageId::SessionTitle => "Agent sessions",
         MessageId::SessionUnavailableBody => "Session recovery requires the cosh-core backend.",
         MessageId::SessionBusyBody => {
@@ -56,6 +52,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::SessionProtectedBody => {
             "Active or selected provider sessions are protected and were not cleared."
         }
-        _ => super::en_approval::message(id),
-    }
+        _ => return None,
+    })
 }

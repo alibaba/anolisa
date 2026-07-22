@@ -1,11 +1,7 @@
-//! Chinese messages for interactive session recovery.
-
 use super::MessageId;
 
-pub(super) fn message(id: MessageId) -> &'static str {
-    match id {
-        MessageId::HelpGroupSessions => "会话",
-        MessageId::HelpSummarySession => "查找、恢复和清理智能体会话",
+pub(super) fn message(id: MessageId) -> Option<&'static str> {
+    Some(match id {
         MessageId::SessionTitle => "智能体会话",
         MessageId::SessionUnavailableBody => "会话恢复需要使用 cosh-core 后端。",
         MessageId::SessionBusyBody => "请先结束当前智能体任务或交互面板，再管理会话。",
@@ -42,6 +38,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         }
         MessageId::SessionNotReadyBody => "会话 {id} 的状态为 {health}，无法恢复，但仍可清理。",
         MessageId::SessionProtectedBody => "活动中或已选择的模型会话受保护，未被清理。",
-        _ => super::en_session::message(id),
-    }
+        _ => return None,
+    })
 }

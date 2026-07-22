@@ -1,7 +1,7 @@
 use super::MessageId;
 
-pub(super) fn message(id: MessageId) -> &'static str {
-    match id {
+pub(super) fn message(id: MessageId) -> Option<&'static str> {
+    Some(match id {
         MessageId::ApprovalTitle => "Approval",
         MessageId::ApprovalRequiredTitle => "Approval required",
         MessageId::ApprovalResolutionApprovedTitle => "Approved",
@@ -121,6 +121,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
             "Provider-native shell tool allowed"
         }
         MessageId::ApprovalHookHeading => "Hook review",
-        _ => unreachable!("non-approval English message dispatched to approval catalog"),
-    }
+        _ => return None,
+    })
 }
