@@ -34,7 +34,7 @@ pub enum ContainmentActivationResult {
 }
 
 impl SecurityStore {
-    /// Inserts one containment action, returning false for a duplicate action ID.
+    /// Inserts one containment action, returning false when any constraint conflict is ignored.
     ///
     /// # Errors
     ///
@@ -224,11 +224,8 @@ impl SecurityStore {
         let mut statement = conn.prepare(&format!(
             "SELECT {ACTION_COLUMNS}
              FROM containment_actions
-             WHERE duration_secs IS NOT NULL
-               AND (
-                    (expires_at_ns IS NOT NULL AND expires_at_ns <= ?1)
-                 OR (next_retry_at_ns IS NOT NULL AND next_retry_at_ns <= ?1)
-               )
+             WHERE (duration_secs IS NOT NULL AND expires_at_ns IS NOT NULL AND expires_at_ns <= ?1)
+                OR (next_retry_at_ns IS NOT NULL AND next_retry_at_ns <= ?1)
              ORDER BY COALESCE(next_retry_at_ns, expires_at_ns, created_at_ns) ASC,
                       action_id ASC"
         ))?;

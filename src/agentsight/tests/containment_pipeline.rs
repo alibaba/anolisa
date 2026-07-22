@@ -31,6 +31,7 @@ struct FakeEnforcer {
     bindings: Mutex<Vec<Binding>>,
     applied: Mutex<Vec<ApplyCredentialPolicy>>,
     failure: Mutex<Option<String>>,
+    detach_failure: Mutex<Option<String>>,
     acknowledgement: Mutex<Option<AckMutation>>,
     pause: Mutex<Option<Arc<ApplyPause>>>,
     detached: Mutex<Vec<Uuid>>,
@@ -44,6 +45,13 @@ impl FakeEnforcer {
 
     fn fail_next_apply(&self, message: &str) {
         *self.failure.lock().expect("failure should lock") = Some(message.into());
+    }
+
+    fn fail_next_detach(&self, message: &str) {
+        *self
+            .detach_failure
+            .lock()
+            .expect("detach failure should lock") = Some(message.into());
     }
 
     fn mutate_ack(&self, mutation: AckMutation) {
@@ -131,7 +139,15 @@ impl ContainmentEnforcer for FakeEnforcer {
             .lock()
             .expect("detached should lock")
             .push(binding_id);
-        Ok(())
+        match self
+            .detach_failure
+            .lock()
+            .expect("detach failure should lock")
+            .take()
+        {
+            Some(message) => Err(message),
+            None => Ok(()),
+        }
     }
 
     fn bindings(&self) -> Result<Vec<Binding>, String> {
@@ -163,11 +179,47 @@ impl Fixture {
         Self::with_store(store, source_policy, root_pid, process_start_time)
     }
 
+    fn with_identities(
+        source_policy: Option<&str>,
+        root_pid: i32,
+        process_start_time: u64,
+        evidence_pid: i32,
+        evidence_start_time: u64,
+    ) -> Self {
+        let store = Arc::new(SecurityStore::open_in_memory().expect("fixture store should open"));
+        Self::with_store_and_evidence(
+            store,
+            source_policy,
+            root_pid,
+            process_start_time,
+            evidence_pid,
+            evidence_start_time,
+        )
+    }
+
     fn with_store(
         store: Arc<SecurityStore>,
         source_policy: Option<&str>,
         root_pid: i32,
         process_start_time: u64,
+    ) -> Self {
+        Self::with_store_and_evidence(
+            store,
+            source_policy,
+            root_pid,
+            process_start_time,
+            root_pid,
+            process_start_time,
+        )
+    }
+
+    fn with_store_and_evidence(
+        store: Arc<SecurityStore>,
+        source_policy: Option<&str>,
+        root_pid: i32,
+        process_start_time: u64,
+        evidence_pid: i32,
+        evidence_start_time: u64,
     ) -> Self {
         let enforcer = Arc::new(FakeEnforcer::default());
         let binding_id = Uuid::new_v4();
@@ -179,7 +231,7 @@ impl Fixture {
                 policy_dsl,
             )]);
         }
-        let event = evidence(binding_id, root_pid, process_start_time);
+        let event = evidence(binding_id, evidence_pid, evidence_start_time);
         store.insert_event(&event).expect("evidence should persist");
         let case_id = Uuid::new_v4();
         store
@@ -511,6 +563,57 @@ mod linux {
     }
 
     #[test]
+    fn root_binding_accepts_child_process_evidence() {
+        let root = LiveProcess::spawn();
+        let child = LiveProcess::spawn();
+        let fixture = Fixture::with_identities(
+            Some(&policy("/root/secret.txt")),
+            root.pid(),
+            root.start_time(),
+            child.pid(),
+            child.start_time(),
+        );
+
+        let plan = fixture
+            .coordinator
+            .plan(fixture.case_id, Vec::new())
+            .expect("root binding should authorize descendant evidence");
+
+        assert_eq!(
+            plan.original_target.expect("original target").root_pid,
+            root.pid()
+        );
+        assert!(plan.original_target_valid);
+    }
+
+    #[test]
+    fn plan_validates_live_original_without_candidates() {
+        let (_process, fixture) = live_fixture();
+
+        let plan = fixture
+            .coordinator
+            .plan(fixture.case_id, Vec::new())
+            .expect("plan should validate its original binding directly");
+
+        assert!(plan.candidates.is_empty());
+        assert!(plan.original_target_valid);
+        let root_pid = plan.original_target.expect("original target").root_pid;
+        let action = fixture
+            .coordinator
+            .contain(
+                fixture.case_id,
+                ContainmentRequest {
+                    root_pid,
+                    duration_secs: Some(900),
+                },
+                &[],
+                "principal:test-operator",
+            )
+            .expect("original binding should not require a replacement candidate");
+        assert_eq!(action.root_pid, root_pid);
+    }
+
+    #[test]
     fn contain_uses_original_policy_and_confirms_only_after_enforced_ack() {
         let (_process, fixture) = live_fixture();
         let candidate = fixture.candidate();
@@ -540,8 +643,12 @@ mod linux {
                 Err(ContainmentError::InvalidDuration)
             ));
         }
-        let mut stale = fixture.candidate();
-        stale.process_start_time = stale.process_start_time.saturating_add(1);
+        let stale = ContainmentCandidate {
+            agent_id: "hermes-test".into(),
+            root_pid: 999_999,
+            process_start_time: 1,
+            display_name: "stale replacement".into(),
+        };
         assert!(matches!(
             fixture.contain_as(
                 Some(900),
@@ -608,6 +715,47 @@ mod linux {
     }
 
     #[test]
+    fn detach_failure_keeps_the_claim_actionable() {
+        let (_process, fixture) = live_fixture();
+        fixture
+            .enforcer
+            .mutate_ack(AckMutation::State(BindingState::Pending));
+        fixture
+            .enforcer
+            .fail_next_detach("detach adapter unavailable");
+
+        let error = fixture
+            .contain(Some(900))
+            .expect_err("invalid acknowledgement must be detached");
+        assert!(matches!(
+            &error,
+            ContainmentError::CleanupRequired { reason, .. }
+                if reason.contains("detach adapter unavailable")
+        ));
+        let action = fixture.latest_action();
+        assert!(matches!(
+            error,
+            ContainmentError::CleanupRequired { action_id, binding_id, .. }
+                if action_id == action.action_id && binding_id == action.binding_id
+        ));
+        assert_eq!(action.lifecycle_state, ContainmentLifecycle::Expiring);
+        assert_eq!(action.failure_stage, Some(ContainmentFailureStage::Detach));
+        assert_eq!(action.attempt_count, 1);
+        assert!(action.next_retry_at_ns.is_some());
+        assert!(
+            action
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("detach adapter unavailable"))
+        );
+        assert!(matches!(
+            fixture.contain(Some(900)),
+            Err(ContainmentError::ContainmentExpiring(id)) if id == action.action_id
+        ));
+        assert_eq!(fixture.enforcer.apply_calls(), 1);
+    }
+
+    #[test]
     fn ineligible_case_states_never_apply() {
         for status in [
             RiskCaseStatus::FalsePositive,
@@ -646,8 +794,14 @@ mod linux {
 
     #[test]
     fn plan_returns_only_live_candidates_and_creates_no_post_authority() {
-        let (_process, fixture) = live_fixture();
-        let candidate = fixture.candidate();
+        let replacement = LiveProcess::spawn();
+        let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 1);
+        let candidate = ContainmentCandidate {
+            agent_id: "hermes-test".into(),
+            root_pid: replacement.pid(),
+            process_start_time: replacement.start_time(),
+            display_name: "replacement".into(),
+        };
         let stale = ContainmentCandidate {
             agent_id: "hermes-test".into(),
             root_pid: 999_999,
@@ -659,7 +813,7 @@ mod linux {
             .plan(fixture.case_id, vec![candidate.clone(), stale])
             .expect("plan should load");
         assert_eq!(plan.candidates, [candidate.clone()]);
-        assert!(plan.original_target_valid);
+        assert!(!plan.original_target_valid);
 
         assert!(matches!(
             fixture.coordinator.contain(

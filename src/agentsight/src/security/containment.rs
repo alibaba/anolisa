@@ -12,19 +12,21 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use self::policy::{
-    ResolvedPolicy, acknowledgement_matches, enforce_request, live_candidates, resolve_policy,
-    select_candidate,
+    ResolvedPolicy, acknowledgement_matches, enforce_request, existing_action, live_candidates,
+    live_lifecycle, resolve_policy, sanitize_failure, select_candidate, validate_duration,
+    validate_requested_by,
 };
 use super::{
     ContainmentAction, ContainmentActivationResult, ContainmentClaimResult,
     ContainmentFailureStage, ContainmentLifecycle, RiskCaseDetail, RiskCaseStatus, SecurityStore,
     SecurityStoreError,
 };
-use crate::enforcement::EnforcementCoordinator;
+use crate::enforcement::{EnforcementCoordinator, read_process_start_time};
 
 const DEFAULT_DURATION_SECS: u64 = 900;
 const MIN_DURATION_SECS: u64 = 60;
 const MAX_DURATION_SECS: u64 = 86_400;
+const CLEANUP_RETRY_DELAY_NS: u64 = 1_000_000_000;
 
 /// Enforcement operations required by containment orchestration.
 pub trait ContainmentEnforcer: Send + Sync {
@@ -142,6 +144,18 @@ pub enum ContainmentError {
         /// Review state observed by the activation transaction.
         status: RiskCaseStatus,
     },
+    /// Detachment failed, so the binding may still enforce until reconciliation succeeds.
+    #[error(
+        "containment action {action_id} requires cleanup; binding {binding_id} may remain attached: {reason}"
+    )]
+    CleanupRequired {
+        /// Action retaining the case-level uniqueness claim.
+        action_id: Uuid,
+        /// Binding whose attachment state is uncertain.
+        binding_id: Uuid,
+        /// Sanitized detachment failure detail.
+        reason: String,
+    },
     /// The privileged enforcement boundary failed or returned an invalid acknowledgement.
     #[error("enforcement unavailable: {0}")]
     Enforcer(String),
@@ -190,10 +204,8 @@ impl ContainmentCoordinator {
                 .find_map(|event| event.identity.agent_name.clone())
                 .unwrap_or_else(|| request.agent_id.clone()),
         };
-        let original_target_valid = candidates.iter().any(|candidate| {
-            candidate.root_pid == original_target.root_pid
-                && candidate.process_start_time == original_target.process_start_time
-        });
+        let original_target_valid = read_process_start_time(original_target.root_pid)
+            .is_ok_and(|actual| actual == original_target.process_start_time);
         Ok(ContainmentPlan {
             case_id,
             source_path: context.source_path,
@@ -223,23 +235,30 @@ impl ContainmentCoordinator {
         validate_duration(request.duration_secs)?;
         let requested_by = validate_requested_by(requested_by)?;
         let detail = self.case_detail(case_id)?;
-        let selected = select_candidate(&detail.case.agent_id, request.root_pid, candidates)?;
         if let Some(existing) = self.store.latest_containment_action(case_id)?
             && live_lifecycle(existing.lifecycle_state)
         {
-            return existing_action(existing, &request, selected.process_start_time);
+            if existing.root_pid != request.root_pid
+                || existing.duration_secs != request.duration_secs
+            {
+                return Err(ContainmentError::IncompatibleAction(existing.action_id));
+            }
+            let process_start_time =
+                validate_process_identity(existing.root_pid, existing.process_start_time)?;
+            return existing_action(existing, &request, process_start_time);
         }
         let context = self.context_from_detail(detail)?;
+        let process_start_time = if request.root_pid == context.binding.request.root_pid {
+            validate_process_identity(request.root_pid, context.binding.request.process_start_time)?
+        } else {
+            select_candidate(&context.detail.case.agent_id, request.root_pid, candidates)?
+                .process_start_time
+        };
 
         let now = now_ns();
         let binding_id = Uuid::new_v4();
-        let apply = enforce_request(
-            &context,
-            binding_id,
-            request.root_pid,
-            selected.process_start_time,
-        )
-        .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
+        let apply = enforce_request(&context, binding_id, request.root_pid, process_start_time)
+            .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
         let expires_at_ns = request
             .duration_secs
             .map(|duration| now.saturating_add(duration.saturating_mul(1_000_000_000)));
@@ -249,7 +268,7 @@ impl ContainmentCoordinator {
             binding_id,
             agent_id: context.detail.case.agent_id.clone(),
             root_pid: request.root_pid,
-            process_start_time: selected.process_start_time,
+            process_start_time,
             source_path: context.source_path,
             duration_secs: request.duration_secs,
             expires_at_ns,
@@ -266,7 +285,7 @@ impl ContainmentCoordinator {
         match self.store.claim_containment_action(&action)? {
             ContainmentClaimResult::Claimed => {}
             ContainmentClaimResult::Existing(existing) => {
-                return existing_action(*existing, &request, selected.process_start_time);
+                return existing_action(*existing, &request, process_start_time);
             }
             ContainmentClaimResult::CaseIneligible(status) => {
                 return Err(ContainmentError::IneligibleCase { case_id, status });
@@ -368,11 +387,18 @@ impl ContainmentCoordinator {
         stage: ContainmentFailureStage,
         message: &str,
     ) -> Result<(), ContainmentError> {
-        let reason = match self.enforcer.detach(action.binding_id) {
-            Ok(()) => sanitize_failure(message),
-            Err(error) => sanitize_failure(&format!("{message}; detach failed: {error}")),
-        };
-        self.persist_failed(action, stage, reason)
+        match self.enforcer.detach(action.binding_id) {
+            Ok(()) => self.persist_failed(action, stage, sanitize_failure(message)),
+            Err(error) => {
+                let reason = sanitize_failure(&format!("{message}; detach failed: {error}"));
+                self.persist_cleanup(action, reason.clone())?;
+                Err(ContainmentError::CleanupRequired {
+                    action_id: action.action_id,
+                    binding_id: action.binding_id,
+                    reason,
+                })
+            }
+        }
     }
 
     fn persist_failed(
@@ -394,6 +420,28 @@ impl ContainmentCoordinator {
         }
         Ok(())
     }
+
+    fn persist_cleanup(
+        &self,
+        action: &mut ContainmentAction,
+        reason: String,
+    ) -> Result<(), ContainmentError> {
+        let updated_at_ns = now_ns();
+        action.lifecycle_state = ContainmentLifecycle::Expiring;
+        action.failure_stage = Some(ContainmentFailureStage::Detach);
+        action.failure_reason = Some(reason);
+        action.attempt_count = action.attempt_count.saturating_add(1);
+        action.next_retry_at_ns = Some(updated_at_ns.saturating_add(CLEANUP_RETRY_DELAY_NS));
+        action.updated_at_ns = updated_at_ns;
+        if !self.store.update_containment_action(action)? {
+            return Err(SecurityStoreError::InvalidData(format!(
+                "containment action {} disappeared while recording cleanup",
+                action.action_id
+            ))
+            .into());
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ContainmentCoordinator {
@@ -402,69 +450,10 @@ impl Drop for ContainmentCoordinator {
     }
 }
 
-fn live_lifecycle(lifecycle: ContainmentLifecycle) -> bool {
-    matches!(
-        lifecycle,
-        ContainmentLifecycle::Pending
-            | ContainmentLifecycle::Active
-            | ContainmentLifecycle::Expiring
-    )
-}
-
-fn existing_action(
-    existing: ContainmentAction,
-    request: &ContainmentRequest,
-    process_start_time: u64,
-) -> Result<ContainmentAction, ContainmentError> {
-    if existing.root_pid != request.root_pid
-        || existing.process_start_time != process_start_time
-        || existing.duration_secs != request.duration_secs
-    {
-        return Err(ContainmentError::IncompatibleAction(existing.action_id));
-    }
-    match existing.lifecycle_state {
-        ContainmentLifecycle::Active => Ok(existing),
-        ContainmentLifecycle::Pending => {
-            Err(ContainmentError::ContainmentInProgress(existing.action_id))
-        }
-        ContainmentLifecycle::Expiring => {
-            Err(ContainmentError::ContainmentExpiring(existing.action_id))
-        }
-        ContainmentLifecycle::Expired | ContainmentLifecycle::Failed => {
-            Err(ContainmentError::IncompatibleAction(existing.action_id))
-        }
-    }
-}
-
-fn validate_duration(duration_secs: Option<u64>) -> Result<(), ContainmentError> {
-    if duration_secs.is_some_and(|value| !(MIN_DURATION_SECS..=MAX_DURATION_SECS).contains(&value))
-    {
-        return Err(ContainmentError::InvalidDuration);
-    }
-    Ok(())
-}
-
-fn validate_requested_by(requested_by: &str) -> Result<String, ContainmentError> {
-    if requested_by.len() > 128 || requested_by.chars().any(char::is_control) {
-        return Err(ContainmentError::InvalidRequestedBy);
-    }
-    let requested_by = requested_by.trim();
-    if requested_by.is_empty() {
-        return Err(ContainmentError::InvalidRequestedBy);
-    }
-    Ok(requested_by.to_string())
-}
-
-fn sanitize_failure(message: &str) -> String {
-    let sanitized: String = message
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(512)
-        .collect();
-    if sanitized.is_empty() {
-        "enforcer operation failed without detail".into()
-    } else {
-        sanitized
+fn validate_process_identity(pid: i32, expected_start_time: u64) -> Result<u64, ContainmentError> {
+    match read_process_start_time(pid) {
+        Ok(actual) if actual == expected_start_time => Ok(actual),
+        Ok(_) | Err(_) => Err(ContainmentError::RootProcessStale(pid)),
     }
 }
 

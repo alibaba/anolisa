@@ -8,7 +8,10 @@ use agentsight_enforcement_protocol::{
 };
 use uuid::Uuid;
 
-use super::{ContainmentCandidate, ContainmentError};
+use super::{
+    ContainmentAction, ContainmentCandidate, ContainmentError, ContainmentLifecycle,
+    ContainmentRequest, MAX_DURATION_SECS, MIN_DURATION_SECS,
+};
 use crate::enforcement::read_process_start_time;
 use crate::security::RiskCaseDetail;
 
@@ -46,8 +49,6 @@ pub(super) fn resolve_policy(
         || request.agent_id != evidence.identity.agent_id
         || request.session_id != detail.case.session_id
         || request.session_id != evidence.identity.session_id
-        || request.root_pid != evidence.identity.pid
-        || request.process_start_time != evidence.identity.process_start_time
         || request.policy_id != detail.case.policy_id
         || request.policy_id != file_action.policy_id
         || request.policy_revision != detail.case.policy_revision.to_string()
@@ -147,6 +148,72 @@ pub(super) fn acknowledgement_matches(binding: &Binding, expected: &ApplyCredent
         compiled.source_path == *expected_source
             && compiled.trusted_endpoints == expected.policy.trusted_endpoints
     })
+}
+
+pub(super) fn live_lifecycle(lifecycle: ContainmentLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        ContainmentLifecycle::Pending
+            | ContainmentLifecycle::Active
+            | ContainmentLifecycle::Expiring
+    )
+}
+
+pub(super) fn existing_action(
+    existing: ContainmentAction,
+    request: &ContainmentRequest,
+    process_start_time: u64,
+) -> Result<ContainmentAction, ContainmentError> {
+    if existing.root_pid != request.root_pid
+        || existing.process_start_time != process_start_time
+        || existing.duration_secs != request.duration_secs
+    {
+        return Err(ContainmentError::IncompatibleAction(existing.action_id));
+    }
+    match existing.lifecycle_state {
+        ContainmentLifecycle::Active => Ok(existing),
+        ContainmentLifecycle::Pending => {
+            Err(ContainmentError::ContainmentInProgress(existing.action_id))
+        }
+        ContainmentLifecycle::Expiring => {
+            Err(ContainmentError::ContainmentExpiring(existing.action_id))
+        }
+        ContainmentLifecycle::Expired | ContainmentLifecycle::Failed => {
+            Err(ContainmentError::IncompatibleAction(existing.action_id))
+        }
+    }
+}
+
+pub(super) fn validate_duration(duration_secs: Option<u64>) -> Result<(), ContainmentError> {
+    if duration_secs.is_some_and(|value| !(MIN_DURATION_SECS..=MAX_DURATION_SECS).contains(&value))
+    {
+        return Err(ContainmentError::InvalidDuration);
+    }
+    Ok(())
+}
+
+pub(super) fn validate_requested_by(requested_by: &str) -> Result<String, ContainmentError> {
+    if requested_by.len() > 128 || requested_by.chars().any(char::is_control) {
+        return Err(ContainmentError::InvalidRequestedBy);
+    }
+    let requested_by = requested_by.trim();
+    if requested_by.is_empty() {
+        return Err(ContainmentError::InvalidRequestedBy);
+    }
+    Ok(requested_by.to_string())
+}
+
+pub(super) fn sanitize_failure(message: &str) -> String {
+    let sanitized: String = message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(512)
+        .collect();
+    if sanitized.is_empty() {
+        "enforcer operation failed without detail".into()
+    } else {
+        sanitized
+    }
 }
 
 #[derive(Clone, Copy)]

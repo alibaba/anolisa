@@ -474,6 +474,10 @@ fn due_containment_actions_include_only_actionable_temporary_rows() {
     persistent.expires_at_ns = None;
     let mut due_retry = containment_action(ContainmentLifecycle::Expiring);
     due_retry.next_retry_at_ns = Some(500);
+    let mut persistent_retry = containment_action(ContainmentLifecycle::Expiring);
+    persistent_retry.duration_secs = None;
+    persistent_retry.expires_at_ns = None;
+    persistent_retry.next_retry_at_ns = Some(500);
     let mut future_retry = containment_action(ContainmentLifecycle::Expiring);
     future_retry.next_retry_at_ns = Some(501);
     let mut expired = containment_action(ContainmentLifecycle::Expired);
@@ -486,6 +490,7 @@ fn due_containment_actions_include_only_actionable_temporary_rows() {
         &future_active,
         &persistent,
         &due_retry,
+        &persistent_retry,
         &future_retry,
         &expired,
         &failed,
@@ -503,9 +508,10 @@ fn due_containment_actions_include_only_actionable_temporary_rows() {
         .map(|action| action.action_id)
         .collect::<std::collections::HashSet<_>>();
 
-    assert_eq!(due_ids.len(), 2);
+    assert_eq!(due_ids.len(), 3);
     assert!(due_ids.contains(&due_active.action_id));
     assert!(due_ids.contains(&due_retry.action_id));
+    assert!(due_ids.contains(&persistent_retry.action_id));
 }
 
 #[test]
