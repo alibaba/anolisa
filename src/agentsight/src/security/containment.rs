@@ -2,9 +2,9 @@
 
 mod policy;
 mod reconciler;
+mod worker;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentsight_enforcement_protocol::{ApplyCredentialPolicy, Binding};
@@ -15,7 +15,7 @@ use uuid::Uuid;
 use self::policy::{
     ResolvedPolicy, acknowledgement_matches, enforce_request, existing_action, live_candidates,
     live_lifecycle, resolve_policy, sanitize_failure, select_candidate, validate_duration,
-    validate_requested_by,
+    validate_process_identity, validate_requested_by,
 };
 use super::{
     ContainmentAction, ContainmentActivationResult, ContainmentClaimResult,
@@ -177,14 +177,22 @@ pub enum ContainmentError {
         /// Sanitized actionable failure detail.
         reason: String,
     },
+    /// Another worker replaced the lifecycle claim while an operation was in flight.
+    #[error("containment action {0} reconciliation claim was lost")]
+    ClaimLost(Uuid),
+    /// Malformed due rows were quarantined after valid rows continued.
+    #[error("quarantined {count} corrupt containment action(s)")]
+    CorruptActions {
+        /// Number of malformed rows quarantined from this bounded batch.
+        count: usize,
+    },
 }
 
 /// Coordinates provenance recovery, durable intent, and enforced acknowledgement.
 pub struct ContainmentCoordinator {
     store: Arc<SecurityStore>,
     enforcer: Arc<dyn ContainmentEnforcer>,
-    stop: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
+    worker: Arc<worker::ReconcilerControl>,
 }
 
 impl ContainmentCoordinator {
@@ -193,8 +201,7 @@ impl ContainmentCoordinator {
         Self {
             store,
             enforcer,
-            stop: Arc::new(AtomicBool::new(false)),
-            running: Arc::new(AtomicBool::new(false)),
+            worker: Arc::new(worker::ReconcilerControl::new()),
         }
     }
 
@@ -295,7 +302,7 @@ impl ContainmentCoordinator {
             failure_stage: None,
             failure_reason: None,
             attempt_count: 0,
-            next_retry_at_ns: None,
+            next_retry_at_ns: Some(now),
             created_at_ns: now,
             updated_at_ns: now,
         };
@@ -319,13 +326,17 @@ impl ContainmentCoordinator {
             return Err(ContainmentError::Enforcer(message.into()));
         }
 
-        action.updated_at_ns = now_ns();
-        match self
-            .store
-            .activate_containment_action(action.action_id, action.updated_at_ns)
-        {
+        let claimed_at_ns = action.updated_at_ns;
+        let activated_at_ns = now_ns().max(claimed_at_ns.saturating_add(1));
+        match self.store.activate_containment_action(
+            action.action_id,
+            claimed_at_ns,
+            activated_at_ns,
+        ) {
             Ok(ContainmentActivationResult::Activated) => {
                 action.lifecycle_state = ContainmentLifecycle::Active;
+                action.next_retry_at_ns = None;
+                action.updated_at_ns = activated_at_ns;
                 Ok(action)
             }
             Ok(ContainmentActivationResult::CaseIneligible(status)) => {
@@ -335,6 +346,9 @@ impl ContainmentCoordinator {
                     "case eligibility changed while enforcement was applying",
                 )?;
                 Err(ContainmentError::CaseEligibilityChanged { case_id, status })
+            }
+            Ok(ContainmentActivationResult::LostClaim) => {
+                Err(ContainmentError::ClaimLost(action.action_id))
             }
             Err(error) => {
                 self.detach_and_fail(
@@ -390,11 +404,13 @@ impl ContainmentCoordinator {
         message: &str,
     ) -> Result<ContainmentAction, ContainmentError> {
         let message = sanitize_failure(message);
-        self.persist_failed(
-            &mut action,
-            ContainmentFailureStage::Attach,
-            message.clone(),
-        )?;
+        let claimed_at_ns = action.updated_at_ns;
+        action.lifecycle_state = ContainmentLifecycle::Failed;
+        action.failure_stage = Some(ContainmentFailureStage::Attach);
+        action.failure_reason = Some(message.clone());
+        action.next_retry_at_ns = None;
+        action.updated_at_ns = now_ns().max(claimed_at_ns.saturating_add(1));
+        self.finish_direct_claim(&action, ContainmentLifecycle::Pending, claimed_at_ns)?;
         Err(ContainmentError::Enforcer(message))
     }
 
@@ -404,11 +420,48 @@ impl ContainmentCoordinator {
         stage: ContainmentFailureStage,
         message: &str,
     ) -> Result<(), ContainmentError> {
+        let reason = sanitize_failure(message);
+        let claimed_at_ns = action.updated_at_ns;
+        let current_time_ns = now_ns();
+        let Some(mut cleanup) = self.store.begin_containment_cleanup(
+            action,
+            ContainmentLifecycle::Pending,
+            claimed_at_ns,
+            current_time_ns,
+            reason.clone(),
+        )?
+        else {
+            return Err(ContainmentError::ClaimLost(action.action_id));
+        };
+        let cleanup_claim_ns = cleanup.updated_at_ns;
         match self.enforcer.detach(action.binding_id) {
-            Ok(()) => self.persist_failed(action, stage, sanitize_failure(message)),
+            Ok(()) => {
+                cleanup.lifecycle_state = ContainmentLifecycle::Failed;
+                cleanup.failure_stage = Some(stage);
+                cleanup.failure_reason = Some(reason);
+                cleanup.next_retry_at_ns = None;
+                cleanup.updated_at_ns = now_ns().max(cleanup_claim_ns.saturating_add(1));
+                self.finish_direct_claim(
+                    &cleanup,
+                    ContainmentLifecycle::Expiring,
+                    cleanup_claim_ns,
+                )?;
+                *action = cleanup;
+                Ok(())
+            }
             Err(error) => {
                 let reason = sanitize_failure(&format!("{message}; detach failed: {error}"));
-                self.persist_cleanup(action, reason.clone())?;
+                cleanup.failure_reason = Some(reason.clone());
+                cleanup.attempt_count = cleanup.attempt_count.saturating_add(1);
+                cleanup.next_retry_at_ns =
+                    Some(current_time_ns.saturating_add(CLEANUP_RETRY_DELAY_NS));
+                cleanup.updated_at_ns = now_ns().max(cleanup_claim_ns.saturating_add(1));
+                self.finish_direct_claim(
+                    &cleanup,
+                    ContainmentLifecycle::Expiring,
+                    cleanup_claim_ns,
+                )?;
+                *action = cleanup;
                 Err(ContainmentError::CleanupRequired {
                     action_id: action.action_id,
                     binding_id: action.binding_id,
@@ -418,59 +471,19 @@ impl ContainmentCoordinator {
         }
     }
 
-    fn persist_failed(
+    fn finish_direct_claim(
         &self,
-        action: &mut ContainmentAction,
-        stage: ContainmentFailureStage,
-        reason: String,
+        action: &ContainmentAction,
+        claimed_lifecycle: ContainmentLifecycle,
+        claimed_at_ns: u64,
     ) -> Result<(), ContainmentError> {
-        action.lifecycle_state = ContainmentLifecycle::Failed;
-        action.failure_stage = Some(stage);
-        action.failure_reason = Some(reason);
-        action.updated_at_ns = now_ns();
-        if !self.store.update_containment_action(action)? {
-            return Err(SecurityStoreError::InvalidData(format!(
-                "containment action {} disappeared while recording failure",
-                action.action_id
-            ))
-            .into());
+        if self
+            .store
+            .finish_containment_reconciliation(action, claimed_lifecycle, claimed_at_ns)?
+        {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    fn persist_cleanup(
-        &self,
-        action: &mut ContainmentAction,
-        reason: String,
-    ) -> Result<(), ContainmentError> {
-        let updated_at_ns = now_ns();
-        action.lifecycle_state = ContainmentLifecycle::Expiring;
-        action.failure_stage = Some(ContainmentFailureStage::Detach);
-        action.failure_reason = Some(reason);
-        action.attempt_count = action.attempt_count.saturating_add(1);
-        action.next_retry_at_ns = Some(updated_at_ns.saturating_add(CLEANUP_RETRY_DELAY_NS));
-        action.updated_at_ns = updated_at_ns;
-        if !self.store.update_containment_action(action)? {
-            return Err(SecurityStoreError::InvalidData(format!(
-                "containment action {} disappeared while recording cleanup",
-                action.action_id
-            ))
-            .into());
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ContainmentCoordinator {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
-fn validate_process_identity(pid: i32, expected_start_time: u64) -> Result<u64, ContainmentError> {
-    match read_process_start_time(pid) {
-        Ok(actual) if actual == expected_start_time => Ok(actual),
-        Ok(_) | Err(_) => Err(ContainmentError::RootProcessStale(pid)),
+        Err(ContainmentError::ClaimLost(action.action_id))
     }
 }
 

@@ -1,16 +1,13 @@
 //! Bounded restart recovery and expiry handling for containment actions.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
-
 use agentsight_enforcement_protocol::Binding;
 
+use crate::security::store::DueContainmentAction;
+
 use super::{
-    ContainmentAction, ContainmentActivationResult, ContainmentCoordinator, ContainmentError,
-    ContainmentFailureStage, ContainmentLifecycle, RiskCaseStatus, SecurityStoreError,
-    acknowledgement_matches, enforce_request, now_ns, resolve_policy, sanitize_failure,
+    ContainmentAction, ContainmentActivationResult, ContainmentCoordinator, ContainmentEnforcer,
+    ContainmentError, ContainmentFailureStage, ContainmentLifecycle, RiskCaseStatus, SecurityStore,
+    SecurityStoreError, acknowledgement_matches, enforce_request, resolve_policy, sanitize_failure,
     validate_process_identity,
 };
 
@@ -26,11 +23,46 @@ impl ContainmentCoordinator {
     /// Returns the first typed store, enforcer, or recovery failure after
     /// continuing to process the rest of the fetched batch.
     pub fn reconcile_once(&self, current_time_ns: u64) -> Result<(), ContainmentError> {
-        let actions = self
+        reconcile_batch(&self.store, self.enforcer.as_ref(), current_time_ns)
+    }
+}
+
+pub(super) fn reconcile_batch(
+    store: &SecurityStore,
+    enforcer: &dyn ContainmentEnforcer,
+    current_time_ns: u64,
+) -> Result<(), ContainmentError> {
+    Reconciler { store, enforcer }.reconcile_once(current_time_ns)
+}
+
+struct Reconciler<'a> {
+    store: &'a SecurityStore,
+    enforcer: &'a dyn ContainmentEnforcer,
+}
+
+impl Reconciler<'_> {
+    fn reconcile_once(&self, current_time_ns: u64) -> Result<(), ContainmentError> {
+        let candidates = self
             .store
-            .due_containment_actions(current_time_ns, DUE_BATCH_LIMIT)?;
+            .due_containment_candidates(current_time_ns, DUE_BATCH_LIMIT)?;
         let mut first_error = None;
-        for action in actions {
+        let mut corrupt_count = 0;
+        for candidate in candidates {
+            let action = match candidate {
+                DueContainmentAction::Valid(action) => action,
+                DueContainmentAction::Corrupt { action_key, reason } => {
+                    corrupt_count += 1;
+                    if let Err(error) = self.store.quarantine_containment_action(
+                        &action_key,
+                        &reason,
+                        current_time_ns,
+                    ) && first_error.is_none()
+                    {
+                        first_error = Some(error.into());
+                    }
+                    continue;
+                }
+            };
             let result = self
                 .store
                 .claim_containment_reconciliation(&action, current_time_ns)
@@ -45,58 +77,15 @@ impl ContainmentCoordinator {
                 first_error = Some(error);
             }
         }
+        if corrupt_count > 0 {
+            return Err(ContainmentError::CorruptActions {
+                count: corrupt_count,
+            });
+        }
         match first_error {
             Some(error) => Err(error),
             None => Ok(()),
         }
-    }
-
-    /// Starts one stoppable background reconciliation worker.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ContainmentError::AlreadyRunning`] for duplicate workers or
-    /// [`ContainmentError::ReconcilerThread`] when spawning the thread fails.
-    pub fn start_reconciler(&self, interval: Duration) -> Result<JoinHandle<()>, ContainmentError> {
-        if self
-            .running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(ContainmentError::AlreadyRunning);
-        }
-        self.stop.store(false, Ordering::Release);
-        let interval = interval.max(Duration::from_millis(10));
-        let store = Arc::clone(&self.store);
-        let enforcer = Arc::clone(&self.enforcer);
-        let stop = Arc::clone(&self.stop);
-        let running = Arc::clone(&self.running);
-        thread::Builder::new()
-            .name("agentsight-containment-reconciler".into())
-            .spawn(move || {
-                let coordinator = ContainmentCoordinator {
-                    store,
-                    enforcer,
-                    stop: Arc::clone(&stop),
-                    running: Arc::clone(&running),
-                };
-                while !stop.load(Ordering::Acquire) {
-                    if let Err(error) = coordinator.reconcile_once(now_ns()) {
-                        log::error!("containment reconciliation failed: {error}");
-                    }
-                    sleep_until_stopped(&stop, interval);
-                }
-                running.store(false, Ordering::Release);
-            })
-            .map_err(|error| {
-                self.running.store(false, Ordering::Release);
-                ContainmentError::ReconcilerThread(error)
-            })
-    }
-
-    /// Requests the background reconciliation worker to stop.
-    pub fn stop(&self) {
-        self.stop.store(true, Ordering::Release);
     }
 
     fn reconcile_claimed(
@@ -144,6 +133,19 @@ impl ContainmentCoordinator {
             );
         }
         let exact = exact.ok().flatten();
+        if action
+            .expires_at_ns
+            .is_some_and(|expires_at_ns| expires_at_ns <= current_time_ns)
+        {
+            if exact.is_some() {
+                return self.expire_pending_binding(action, claimed_at_ns, current_time_ns);
+            }
+            action.lifecycle_state = ContainmentLifecycle::Expired;
+            action.failure_stage = None;
+            action.failure_reason = None;
+            action.next_retry_at_ns = None;
+            return self.finish_claimed(&action, ContainmentLifecycle::Pending, claimed_at_ns);
+        }
         let detail = self.store.case_detail(action.case_id)?;
         if !matches!(
             detail.case.status,
@@ -236,10 +238,11 @@ impl ContainmentCoordinator {
                 current_time_ns,
             );
         }
-        match self
-            .store
-            .activate_containment_action(action.action_id, action.updated_at_ns)
-        {
+        match self.store.activate_containment_action(
+            action.action_id,
+            claimed_at_ns,
+            current_time_ns.max(claimed_at_ns.saturating_add(1)),
+        ) {
             Ok(ContainmentActivationResult::Activated) => Ok(()),
             Ok(ContainmentActivationResult::CaseIneligible(_)) => self.fail_pending(
                 action,
@@ -248,10 +251,48 @@ impl ContainmentCoordinator {
                 true,
                 current_time_ns,
             ),
+            Ok(ContainmentActivationResult::LostClaim) => {
+                Err(ContainmentError::ClaimLost(action.action_id))
+            }
             Err(error) => {
                 let reason = format!("transactional recovery activation failed: {error}");
                 self.fail_pending(action, claimed_at_ns, &reason, true, current_time_ns)
             }
+        }
+    }
+
+    fn expire_pending_binding(
+        &self,
+        action: ContainmentAction,
+        claimed_at_ns: u64,
+        current_time_ns: u64,
+    ) -> Result<(), ContainmentError> {
+        let Some(mut cleanup) = self.store.begin_containment_cleanup(
+            &action,
+            ContainmentLifecycle::Pending,
+            claimed_at_ns,
+            current_time_ns,
+            "expired pending containment binding requires detachment".into(),
+        )?
+        else {
+            return Err(ContainmentError::ClaimLost(action.action_id));
+        };
+        let cleanup_claim_ns = cleanup.updated_at_ns;
+        match self.enforcer.detach(action.binding_id) {
+            Ok(()) => {
+                cleanup.lifecycle_state = ContainmentLifecycle::Expired;
+                cleanup.failure_stage = None;
+                cleanup.failure_reason = None;
+                cleanup.next_retry_at_ns = None;
+                self.finish_claimed(&cleanup, ContainmentLifecycle::Expiring, cleanup_claim_ns)
+            }
+            Err(message) => self.record_detach_failure(
+                &mut cleanup,
+                ContainmentLifecycle::Expiring,
+                cleanup_claim_ns,
+                current_time_ns,
+                sanitize_failure(&message),
+            ),
         }
     }
 
@@ -265,15 +306,30 @@ impl ContainmentCoordinator {
     ) -> Result<(), ContainmentError> {
         let reason = sanitize_failure(reason);
         if cleanup_binding {
+            let Some(mut cleanup) = self.store.begin_containment_cleanup(
+                &action,
+                ContainmentLifecycle::Pending,
+                claimed_at_ns,
+                current_time_ns,
+                reason.clone(),
+            )?
+            else {
+                return Err(ContainmentError::ClaimLost(action.action_id));
+            };
+            let cleanup_claim_ns = cleanup.updated_at_ns;
             return match self.enforcer.detach(action.binding_id) {
                 Ok(()) => {
-                    action.lifecycle_state = ContainmentLifecycle::Failed;
-                    action.failure_stage = Some(ContainmentFailureStage::Reconcile);
-                    action.failure_reason = Some(reason.clone());
-                    action.next_retry_at_ns = None;
-                    self.finish_claimed(&action, ContainmentLifecycle::Pending, claimed_at_ns)?;
+                    cleanup.lifecycle_state = ContainmentLifecycle::Failed;
+                    cleanup.failure_stage = Some(ContainmentFailureStage::Reconcile);
+                    cleanup.failure_reason = Some(reason.clone());
+                    cleanup.next_retry_at_ns = None;
+                    self.finish_claimed(
+                        &cleanup,
+                        ContainmentLifecycle::Expiring,
+                        cleanup_claim_ns,
+                    )?;
                     Err(ContainmentError::RecoveryFailed {
-                        action_id: action.action_id,
+                        action_id: cleanup.action_id,
                         reason,
                     })
                 }
@@ -281,15 +337,15 @@ impl ContainmentCoordinator {
                     let detach_reason =
                         sanitize_failure(&format!("{reason}; detach failed: {message}"));
                     self.record_detach_failure(
-                        &mut action,
-                        ContainmentLifecycle::Pending,
-                        claimed_at_ns,
+                        &mut cleanup,
+                        ContainmentLifecycle::Expiring,
+                        cleanup_claim_ns,
                         current_time_ns,
                         detach_reason.clone(),
                     )?;
                     Err(ContainmentError::CleanupRequired {
-                        action_id: action.action_id,
-                        binding_id: action.binding_id,
+                        action_id: cleanup.action_id,
+                        binding_id: cleanup.binding_id,
                         reason: detach_reason,
                     })
                 }
@@ -364,11 +420,7 @@ impl ContainmentCoordinator {
         {
             return Ok(());
         }
-        Err(SecurityStoreError::InvalidData(format!(
-            "containment action {} changed while reconciliation was in progress",
-            action.action_id
-        ))
-        .into())
+        Err(ContainmentError::ClaimLost(action.action_id))
     }
 }
 
@@ -386,13 +438,4 @@ fn exact_binding(bindings: &[Binding], binding_id: uuid::Uuid) -> Result<Option<
 fn detach_retry_delay_ns(attempt_count: u32) -> u64 {
     let shift = attempt_count.saturating_sub(1).min(4);
     SECOND_NS.saturating_mul(1_u64 << shift)
-}
-
-fn sleep_until_stopped(stop: &std::sync::atomic::AtomicBool, duration: Duration) {
-    let mut remaining = duration;
-    while !stop.load(Ordering::Acquire) && !remaining.is_zero() {
-        let step = remaining.min(Duration::from_millis(50));
-        thread::sleep(step);
-        remaining = remaining.saturating_sub(step);
-    }
 }

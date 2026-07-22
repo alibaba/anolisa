@@ -3,6 +3,8 @@
 mod evidence;
 mod reconcile;
 
+pub(crate) use reconcile::DueContainmentAction;
+
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use uuid::Uuid;
 
@@ -34,6 +36,8 @@ pub enum ContainmentActivationResult {
     Activated,
     /// Human review made the case ineligible while enforcement was applying.
     CaseIneligible(RiskCaseStatus),
+    /// Another worker replaced the supplied lifecycle claim.
+    LostClaim,
 }
 
 impl SecurityStore {
@@ -104,17 +108,26 @@ impl SecurityStore {
     pub fn activate_containment_action(
         &self,
         action_id: Uuid,
+        claimed_at_ns: u64,
         updated_at_ns: u64,
     ) -> Result<ContainmentActivationResult, SecurityStoreError> {
+        let updated_at_ns = updated_at_ns.max(claimed_at_ns.saturating_add(1));
+        let claimed_at_ns = sqlite_time(claimed_at_ns)?;
         let updated_at_ns = sqlite_time(updated_at_ns)?;
         let mut conn = self.connection()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let action = transaction
             .query_row(
-                "SELECT case_id, lifecycle_state
+                "SELECT case_id, lifecycle_state, updated_at_ns
                  FROM containment_actions WHERE action_id = ?1",
                 [action_id.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| {
@@ -123,10 +136,10 @@ impl SecurityStore {
                 ))
             })?;
         let case_id = parse_uuid(&action.0)?;
-        if parse_lifecycle(&action.1)? != ContainmentLifecycle::Pending {
-            return Err(SecurityStoreError::InvalidData(format!(
-                "containment action {action_id} is not pending"
-            )));
+        if parse_lifecycle(&action.1)? != ContainmentLifecycle::Pending || action.2 != claimed_at_ns
+        {
+            transaction.commit()?;
+            return Ok(ContainmentActivationResult::LostClaim);
         }
         let status = transaction
             .query_row(
@@ -145,13 +158,12 @@ impl SecurityStore {
             "UPDATE containment_actions
              SET lifecycle_state = 'active', failure_stage = NULL, failure_reason = NULL,
                  next_retry_at_ns = NULL, updated_at_ns = ?1
-             WHERE action_id = ?2 AND lifecycle_state = 'pending'",
-            params![updated_at_ns, action_id.to_string()],
+             WHERE action_id = ?2 AND lifecycle_state = 'pending' AND updated_at_ns = ?3",
+            params![updated_at_ns, action_id.to_string(), claimed_at_ns],
         )?;
         if activated != 1 {
-            return Err(SecurityStoreError::InvalidData(format!(
-                "containment action {action_id} changed before activation"
-            )));
+            transaction.commit()?;
+            return Ok(ContainmentActivationResult::LostClaim);
         }
         if status == RiskCaseStatus::Open {
             let confirmed = transaction.execute(

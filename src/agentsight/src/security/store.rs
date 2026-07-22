@@ -2,6 +2,7 @@
 
 mod containment;
 
+pub(crate) use containment::DueContainmentAction;
 pub use containment::{ContainmentActivationResult, ContainmentClaimResult};
 
 use std::path::{Path, PathBuf};

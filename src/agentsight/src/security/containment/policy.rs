@@ -23,6 +23,16 @@ const TRUSTED: &str = " unless target \"";
 const REASON: &str = "  because \"credential-derived data reached an untrusted network target\"";
 const CREDENTIAL_TAINT_TTL_SECS: u64 = 900;
 
+pub(super) fn validate_process_identity(
+    pid: i32,
+    expected_start_time: u64,
+) -> Result<u64, ContainmentError> {
+    match read_process_start_time(pid) {
+        Ok(actual) if actual == expected_start_time => Ok(actual),
+        Ok(_) | Err(_) => Err(ContainmentError::RootProcessStale(pid)),
+    }
+}
+
 pub(super) struct ResolvedPolicy {
     pub(super) detail: RiskCaseDetail,
     pub(super) binding: Binding,

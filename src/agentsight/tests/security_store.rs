@@ -376,7 +376,7 @@ fn activation_confirms_case_in_the_same_store_operation() {
 
     assert_eq!(
         store
-            .activate_containment_action(action.action_id, 500)
+            .activate_containment_action(action.action_id, action.updated_at_ns, 500)
             .expect("activation should work"),
         ContainmentActivationResult::Activated
     );
@@ -414,7 +414,7 @@ fn activation_cas_preserves_a_concurrent_review() {
 
     assert_eq!(
         store
-            .activate_containment_action(action.action_id, 500)
+            .activate_containment_action(action.action_id, action.updated_at_ns, 500)
             .expect("activation should inspect case state"),
         ContainmentActivationResult::CaseIneligible(RiskCaseStatus::AcceptedRisk)
     );
