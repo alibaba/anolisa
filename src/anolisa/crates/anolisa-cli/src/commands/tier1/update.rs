@@ -25,7 +25,10 @@
 //!     and an older or non-orderable version refuses (U4).
 //!   * **Delegated managed/adopted** — U5: `dnf update` through the
 //!     delegated executor, then re-observe and refresh the cached
-//!     observation. dnf picks the target version.
+//!     observation. dnf picks the target version. After the record refresh
+//!     persisted, the package-owned contract snapshot is refreshed too
+//!     ([`complete_delegated_update`]); a refresh failure demotes the
+//!     operation to `partial` instead of overstating it as `ok`.
 //!   * **Delegated observed** — U6: refuses; management consent (`adopt`)
 //!     is required before native transactions.
 //!
@@ -64,7 +67,10 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
-use super::install::{RawReplayOps, RawResolution, resolve_raw, resolve_raw_inputs_for_component};
+use super::install::{
+    RawReplayOps, RawResolution, refresh_datadir_contract_snapshot, resolve_raw,
+    resolve_raw_inputs_for_component,
+};
 use super::recovery::LockedJournalGate;
 use super::rpm_install;
 use crate::color::Palette;
@@ -717,12 +723,19 @@ fn execute_planned_update(
         },
     })?;
 
+    // The record refresh was committed by the executor's sink; refresh the
+    // package-owned contract snapshot before the durable status is written,
+    // so `status`/`doctor`/adapter resolution read the new contract without
+    // waiting for a repair, and a refresh failure demotes the operation to
+    // `partial` instead of overstating it as `ok`.
+    let completion = complete_delegated_update(&layout, ctx, target, &package, &command);
+
     // Operation history is best-effort bookkeeping on top of the committed
     // record refresh.
     store.operations.push(OperationRecord {
         id: operation_id.clone(),
         command: command.clone(),
-        status: "ok".to_string(),
+        status: completion.operation_status.to_string(),
         started_at: now.clone(),
         finished_at: Some(now_iso8601()),
         parent_operation_id: None,
@@ -749,7 +762,17 @@ fn execute_planned_update(
         &now,
         &package,
         to_version.as_deref(),
+        completion.failure.as_deref(),
     );
+
+    if let Some(reason) = completion.failure {
+        return Err(CliError::Runtime {
+            command: command.clone(),
+            reason: format!(
+                "the update of '{target}' committed, but {reason}; run `anolisa repair {target}` to reconcile"
+            ),
+        });
+    }
 
     render_result(
         ctx,
@@ -890,6 +913,9 @@ fn update_owned(
         now,
         &package,
         Some(&to_version),
+        // Owned updates replace the manifest as part of the owned artifact;
+        // there is no datadir contract refresh to fail.
+        None,
     );
 
     render_result(
@@ -1128,7 +1154,63 @@ fn tooling_missing_err(command: &str, bin: &str, target: &str) -> CliError {
     }
 }
 
+/// Shared completion for a committed delegated update: contract snapshot
+/// refresh plus the durable operation status derived from it.
+///
+/// Both the single-component path and the merged `update all` members run
+/// this after their record refresh persisted, so `status`, `doctor`, and
+/// adapter resolution read the post-update contract without waiting for a
+/// later `repair` or `upgrade` reconciliation.
+pub(crate) struct DelegatedUpdateCompletion {
+    /// `ok`, or `partial` when the refresh genuinely failed — a durable
+    /// operation must never overstate what happened (upgrade/repair
+    /// semantics).
+    pub(crate) operation_status: &'static str,
+    /// Why the refresh did not complete, for the result and central log.
+    pub(crate) failure: Option<String>,
+}
+
+/// Refresh the package-owned contract snapshot after a delegated update
+/// committed and derive the final operation status.
+///
+/// Must run only after the component record was persisted, so a failed
+/// state commit never exposes a new contract. A package that publishes no
+/// contract stays a success without new warnings ([`ContractRefreshOutcome`]
+/// reports `NotApplicable`); an unreadable contract or a failed
+/// snapshot/provenance write demotes the operation to `partial`.
+///
+/// [`ContractRefreshOutcome`]: super::install::ContractRefreshOutcome
+pub(crate) fn complete_delegated_update(
+    layout: &FsLayout,
+    ctx: &CliContext,
+    target: &str,
+    package: &str,
+    command: &str,
+) -> DelegatedUpdateCompletion {
+    let refresh = refresh_datadir_contract_snapshot(layout, target, command);
+    if !ctx.quiet {
+        for warning in &refresh.warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+    match refresh.error_detail() {
+        Some(detail) => DelegatedUpdateCompletion {
+            operation_status: "partial",
+            failure: Some(format!(
+                "component manifest refresh for package '{package}' did not complete: {detail}"
+            )),
+        },
+        None => DelegatedUpdateCompletion {
+            operation_status: "ok",
+            failure: None,
+        },
+    }
+}
+
 /// Best-effort central-log record for a committed update.
+///
+/// A `completion_failure` (delegated contract refresh not completed) logs
+/// `Partial` so the durable history never overstates what happened.
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn append_update_log(
     layout: &FsLayout,
@@ -1139,8 +1221,13 @@ pub(crate) fn append_update_log(
     started_at: &str,
     package: &str,
     to_version: Option<&str>,
+    completion_failure: Option<&str>,
 ) {
     let log = CentralLog::open(layout.central_log.clone());
+    let base = match to_version {
+        Some(version) => format!("updated component {component} ({package}) to {version}"),
+        None => format!("updated component {component} ({package})"),
+    };
     let record = LogRecord {
         kind: LogKind::Operation,
         operation_id: Some(operation_id.to_string()),
@@ -1148,18 +1235,23 @@ pub(crate) fn append_update_log(
         source: "anolisa-cli".to_string(),
         component: Some(component.to_string()),
         severity: Severity::Info,
-        message: match to_version {
-            Some(version) => format!("updated component {component} ({package}) to {version}"),
-            None => format!("updated component {component} ({package})"),
+        message: match completion_failure {
+            Some(_) => format!("{base}, but the component manifest refresh did not complete"),
+            None => base,
         },
         actor: "cli".to_string(),
         install_mode: Some(ctx.install_mode.as_str().to_string()),
         started_at: started_at.to_string(),
         finished_at: Some(now_iso8601()),
-        status: Some(LogStatus::Ok),
+        status: Some(match completion_failure {
+            Some(_) => LogStatus::Partial,
+            None => LogStatus::Ok,
+        }),
         objects: vec![component.to_string()],
         backup_ids: Vec::new(),
-        warnings: Vec::new(),
+        warnings: completion_failure
+            .map(|failure| vec![failure.to_string()])
+            .unwrap_or_default(),
         details: serde_json::Value::Null,
     };
     if let Err(err) = log.append(&record) {
@@ -2516,6 +2608,169 @@ pub(crate) mod tests {
         assert_eq!(record.status, LifecycleStatus::Installed);
     }
 
+    /// Publish a package-owned contract in the FHS package datadir plus the
+    /// stale pre-update snapshot an earlier install left behind, as an RPM
+    /// upgrade of the package would leave them.
+    pub(crate) fn seed_package_contract_and_stale_snapshot(
+        c: &CliContext,
+        component: &str,
+    ) -> (PathBuf, PathBuf) {
+        let layout = common::resolve_layout(c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        std::fs::write(&source, "framework = \"new\"\n").expect("write package contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
+            .expect("mkdir snapshot");
+        std::fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+        (source, snapshot)
+    }
+
+    /// The durable status of the single recorded `update <component>`
+    /// operation.
+    fn update_operation_status(c: &CliContext, target: &str) -> String {
+        let command = format!("update {target}");
+        let store = load_store(c);
+        let ops: Vec<_> = store
+            .operations
+            .iter()
+            .filter(|op| op.command == command)
+            .collect();
+        assert_eq!(ops.len(), 1, "exactly one update operation recorded");
+        ops[0].status.clone()
+    }
+
+    /// A committed delegated update refreshes the contract snapshot and its
+    /// provenance directly — `status`/`doctor` read the new contract without
+    /// waiting for a later repair.
+    #[test]
+    fn rpm_update_refreshes_contract_snapshot_and_provenance() {
+        use anolisa_core::adapter::contract::{ContractSourceKind, read_snapshot_provenance};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                "1.0.0-1.al8",
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let (source, snapshot) = seed_package_contract_and_stale_snapshot(&c, "copilot-shell");
+        let rpm = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al8"), "x86_64")),
+        )
+        .upgrading_to(pkg_info("copilot-shell", "1.1.0", Some("1.al8"), "x86_64"));
+
+        update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
+
+        assert_eq!(
+            std::fs::read_to_string(&snapshot).expect("read snapshot"),
+            "framework = \"new\"\n",
+            "the snapshot must carry the post-update contract"
+        );
+        let provenance = read_snapshot_provenance(&snapshot).expect("snapshot provenance");
+        assert_eq!(provenance.source_kind, ContractSourceKind::Datadir);
+        assert_eq!(provenance.source_path, source);
+        assert_eq!(update_operation_status(&c, "copilot-shell"), "ok");
+    }
+
+    /// A package that publishes no contract stays a clean success
+    /// (`NotApplicable`): no snapshot write, no demotion.
+    #[test]
+    fn rpm_update_without_package_contract_stays_ok() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                "1.0.0-1.al8",
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        // A stale snapshot without a package-owned contract: nothing
+        // authoritative exists to refresh from, so it must stay untouched.
+        let layout = common::resolve_layout(&c);
+        let snapshot =
+            FsLayout::component_manifest_snapshot_path(&layout.state_dir, "copilot-shell");
+        std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
+            .expect("mkdir snapshot");
+        std::fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+        let rpm = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al8"), "x86_64")),
+        )
+        .upgrading_to(pkg_info("copilot-shell", "1.1.0", Some("1.al8"), "x86_64"));
+
+        update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
+
+        assert_eq!(
+            std::fs::read_to_string(&snapshot).expect("read snapshot"),
+            "framework = \"old\"\n",
+            "no package contract means no snapshot write"
+        );
+        assert_eq!(update_operation_status(&c, "copilot-shell"), "ok");
+    }
+
+    /// A contract refresh that cannot complete demotes the committed update
+    /// to `partial` and reports it — the durable operation never overstates
+    /// what happened, and the record still carries the refreshed EVR.
+    #[test]
+    fn rpm_update_contract_refresh_failure_is_partial() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                "1.0.0-1.al8",
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, "copilot-shell");
+        std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        std::fs::write(&source, "framework = \"new\"\n").expect("write package contract");
+        // A non-empty directory where the snapshot file belongs blocks the
+        // refresh's atomic replacement.
+        let snapshot =
+            FsLayout::component_manifest_snapshot_path(&layout.state_dir, "copilot-shell");
+        std::fs::create_dir_all(&snapshot).expect("create blocking snapshot directory");
+        std::fs::write(snapshot.join("keep"), b"x").expect("write blocking marker");
+        let rpm = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al8"), "x86_64")),
+        )
+        .upgrading_to(pkg_info("copilot-shell", "1.1.0", Some("1.al8"), "x86_64"));
+
+        let err = update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
+            .expect_err("a failed contract refresh must not report a clean success");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("committed") && err.reason().contains("repair"),
+            "reason must state the update committed and point at repair: {}",
+            err.reason()
+        );
+        assert_eq!(
+            observed_evr(&find_component(&c, "copilot-shell")).as_deref(),
+            Some("1.1.0-1.al8"),
+            "the committed record refresh must be kept"
+        );
+        assert_eq!(update_operation_status(&c, "copilot-shell"), "partial");
+    }
+
     /// U6 (breaking): an observed record carries no management consent, so
     /// update refuses and points at `adopt` — dnf never runs on a system RPM
     /// that was merely observed.
@@ -2583,7 +2838,7 @@ pub(crate) mod tests {
     }
 
     /// Dry-run previews the plan without running dnf, needing root, or writing
-    /// state — even for a non-root caller.
+    /// state or the contract snapshot — even for a non-root caller.
     #[test]
     fn dry_run_previews_without_dnf_or_state_write() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -2598,6 +2853,7 @@ pub(crate) mod tests {
                 ObjectStatus::Adopted,
             ),
         );
+        let (_, snapshot) = seed_package_contract_and_stale_snapshot(&c, "copilot-shell");
         let rpm = FakeRpm::new(
             "copilot-shell",
             Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
@@ -2611,6 +2867,11 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("op-prior"),
             "dry-run must not write state"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&snapshot).expect("read snapshot"),
+            "framework = \"old\"\n",
+            "dry-run must not touch the snapshot"
         );
     }
 
@@ -2750,7 +3011,7 @@ base_url = "https://repo.example/raw/v1"
     }
 
     /// `dnf update` failure surfaces as EXECUTION_FAILED with a repair pointer
-    /// and does not refresh state.
+    /// and does not refresh state or the contract snapshot.
     #[test]
     fn dnf_failure_surfaces_and_leaves_state_untouched() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -2765,6 +3026,7 @@ base_url = "https://repo.example/raw/v1"
                 ObjectStatus::Adopted,
             ),
         );
+        let (_, snapshot) = seed_package_contract_and_stale_snapshot(&c, "copilot-shell");
         let rpm = FakeRpm::new(
             "copilot-shell",
             Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
@@ -2785,6 +3047,11 @@ base_url = "https://repo.example/raw/v1"
                 .as_deref(),
             Some("op-prior"),
             "failed update must not refresh the record"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&snapshot).expect("read snapshot"),
+            "framework = \"old\"\n",
+            "a failed native transaction must not touch the snapshot"
         );
     }
 
@@ -3100,12 +3367,22 @@ sha256 = "{sha}"
     }
 
     /// Raw update resolves the latest published version, replaces the owned
-    /// files, preserves the owned authority, and records the operation.
+    /// files, preserves the owned authority, and records the operation. The
+    /// manifest is replaced as part of the owned artifact — the delegated
+    /// datadir-contract refresh must not run.
     #[test]
     fn raw_update_upgrades_to_latest_and_preserves_ownership() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
         seed_installed_raw(&c, "foo", "0.1.0", b"old v1 binary\n");
+        // A datadir contract that only the delegated refresh would consult;
+        // an owned update must never copy it over the owned manifest.
+        let layout = common::resolve_layout(&c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let contract = FsLayout::component_contract_path(&package_datadir, "foo");
+        std::fs::create_dir_all(contract.parent().expect("contract parent"))
+            .expect("mkdir contract");
+        std::fs::write(&contract, "framework = \"datadir\"\n").expect("write datadir contract");
         let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
         publish_raw_repo(
             &tmp.path().join("repo"),
@@ -3118,11 +3395,20 @@ sha256 = "{sha}"
 
         update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("raw update must succeed");
 
-        let layout = common::resolve_layout(&c);
         assert_eq!(
             std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
             new_body,
             "binary must be replaced with the v2 payload"
+        );
+        let manifest = FsLayout::component_manifest_snapshot_path(&layout.state_dir, "foo");
+        assert_eq!(
+            std::fs::read_to_string(&manifest).expect("read manifest"),
+            raw_manifest("foo", "0.2.0"),
+            "the manifest must be the owned artifact's, not the datadir contract"
+        );
+        assert!(
+            !FsLayout::provenance_path_for_snapshot(&manifest).exists(),
+            "an owned update must not publish contract provenance"
         );
         let record = find_component(&c, "foo");
         let artifact = owned_artifact(&record);

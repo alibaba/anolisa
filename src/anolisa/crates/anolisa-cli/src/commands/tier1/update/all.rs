@@ -42,8 +42,8 @@ use crate::response::{CliError, render_json, render_json_with_status};
 
 use super::{
     COMMAND, PlannedComponentUpdate, PlannedUpdateRoute, UpdateOutcome, append_update_log,
-    native_update_authorized, now_iso8601, plan_component_update, step_label, update_backends,
-    update_component_with_deps,
+    complete_delegated_update, native_update_authorized, now_iso8601, plan_component_update,
+    step_label, update_backends, update_component_with_deps,
 };
 
 const BATCH_COMMAND: &str = "update all";
@@ -574,11 +574,23 @@ fn execute_merged_updates_with_deps(
                 };
                 match result {
                     Ok(outcome) => {
+                        // Same completion semantics as the single-component
+                        // path: the member's record refresh persisted, so
+                        // refresh its contract snapshot. A refresh failure
+                        // only demotes this member (and the batch summary
+                        // below) — every other member keeps its own outcome.
+                        let completion = complete_delegated_update(
+                            &layout,
+                            ctx,
+                            &target,
+                            &item.package,
+                            BATCH_COMMAND,
+                        );
                         let command = format!("{COMMAND} {target}");
                         store.operations.push(OperationRecord {
                             id: operation_id.clone(),
                             command: command.clone(),
-                            status: "ok".to_string(),
+                            status: completion.operation_status.to_string(),
                             started_at: now.clone(),
                             finished_at: Some(now_iso8601()),
                             parent_operation_id: Some(batch_operation_id.clone()),
@@ -596,7 +608,17 @@ fn execute_merged_updates_with_deps(
                             &now,
                             &item.package,
                             to_version.as_deref(),
+                            completion.failure.as_deref(),
                         );
+                        if let Some(reason) = completion.failure {
+                            items.push(failed_item(
+                                &item.name,
+                                format!(
+                                    "the update of '{target}' committed, but {reason}; run `anolisa repair {target}` to reconcile"
+                                ),
+                            ));
+                            continue;
+                        }
                         let moved = match (&item.planned.native_from, &to_version) {
                             (Some(from), Some(to)) => from != to,
                             _ => true,
@@ -739,7 +761,9 @@ mod tests {
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
-    use super::super::tests::{ctx, load_store, pkg_info, rpm_object};
+    use super::super::tests::{
+        ctx, load_store, pkg_info, rpm_object, seed_package_contract_and_stale_snapshot,
+    };
     use crate::context::InstallMode;
 
     const NOW: &str = "2026-07-17T00:00:00Z";
@@ -1032,6 +1056,149 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    /// Every successful merged member refreshes its own contract snapshot,
+    /// exactly like the single-component path — repair no longer has to
+    /// reconcile a post-update drift.
+    #[test]
+    fn merged_updates_refresh_each_contract_snapshot() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        managed_pair(&c);
+        let (_, cosh_snapshot) = seed_package_contract_and_stale_snapshot(&c, "cosh");
+        let (_, sec_snapshot) = seed_package_contract_and_stale_snapshot(&c, "sec-core");
+        let host = FakeHost::new(
+            &[
+                (
+                    "copilot-shell",
+                    pkg_info("copilot-shell", "1.1.0", Some("1.al4"), "x86_64"),
+                ),
+                (
+                    "agent-sec-core",
+                    pkg_info("agent-sec-core", "1.1.0", Some("1.al4"), "x86_64"),
+                ),
+            ],
+            false,
+        );
+        let mut degrade = |name: &str| -> Result<UpdateOutcome, CliError> {
+            panic!("a committed merged transaction must not degrade ({name})");
+        };
+
+        let items = execute_merged_updates_with_deps(
+            vec![
+                u5_item("cosh", "copilot-shell", "1.0.0-1.al4"),
+                u5_item("sec-core", "agent-sec-core", "1.0.0-1.al4"),
+            ],
+            &c,
+            &host,
+            &host,
+            true,
+            &mut degrade,
+        );
+
+        assert_eq!(find(&items, "cosh").status, "updated");
+        assert_eq!(find(&items, "sec-core").status, "updated");
+        for snapshot in [&cosh_snapshot, &sec_snapshot] {
+            assert_eq!(
+                std::fs::read_to_string(snapshot).expect("read snapshot"),
+                "framework = \"new\"\n",
+                "each member must refresh its own snapshot"
+            );
+        }
+        let store = load_store(&c);
+        let parent = store
+            .operations
+            .iter()
+            .find(|op| op.command == BATCH_COMMAND)
+            .expect("parent batch operation");
+        assert_eq!(parent.status, "ok");
+    }
+
+    /// A member whose contract refresh cannot complete is demoted alone: its
+    /// item fails with a repair pointer and its operation reads `partial`,
+    /// while the other member keeps its refreshed snapshot and `ok` status;
+    /// the parent batch operation aggregates to `partial`.
+    #[test]
+    fn merged_member_contract_refresh_failure_only_demotes_that_member() {
+        use anolisa_platform::fs_layout::FsLayout;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        managed_pair(&c);
+        // cosh publishes a contract, but a non-empty directory blocks its
+        // snapshot slot; sec-core's refresh is healthy.
+        let layout = common::resolve_layout(&c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let cosh_contract = FsLayout::component_contract_path(&package_datadir, "cosh");
+        std::fs::create_dir_all(cosh_contract.parent().expect("contract parent"))
+            .expect("mkdir contract");
+        std::fs::write(&cosh_contract, "framework = \"new\"\n").expect("write cosh contract");
+        let cosh_snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, "cosh");
+        std::fs::create_dir_all(&cosh_snapshot).expect("create blocking snapshot directory");
+        std::fs::write(cosh_snapshot.join("keep"), b"x").expect("write blocking marker");
+        let (_, sec_snapshot) = seed_package_contract_and_stale_snapshot(&c, "sec-core");
+        let host = FakeHost::new(
+            &[
+                (
+                    "copilot-shell",
+                    pkg_info("copilot-shell", "1.1.0", Some("1.al4"), "x86_64"),
+                ),
+                (
+                    "agent-sec-core",
+                    pkg_info("agent-sec-core", "1.1.0", Some("1.al4"), "x86_64"),
+                ),
+            ],
+            false,
+        );
+        let mut degrade = |name: &str| -> Result<UpdateOutcome, CliError> {
+            panic!("a committed merged transaction must not degrade ({name})");
+        };
+
+        let items = execute_merged_updates_with_deps(
+            vec![
+                u5_item("cosh", "copilot-shell", "1.0.0-1.al4"),
+                u5_item("sec-core", "agent-sec-core", "1.0.0-1.al4"),
+            ],
+            &c,
+            &host,
+            &host,
+            true,
+            &mut degrade,
+        );
+
+        let cosh_item = find(&items, "cosh");
+        assert_eq!(cosh_item.status, "failed");
+        let reason = cosh_item.reason.as_deref().expect("failure reason");
+        assert!(
+            reason.contains("committed") && reason.contains("repair"),
+            "reason must state the update committed and point at repair: {reason}"
+        );
+        assert_eq!(find(&items, "sec-core").status, "updated");
+        assert_eq!(
+            std::fs::read_to_string(&sec_snapshot).expect("read snapshot"),
+            "framework = \"new\"\n",
+            "the healthy member must keep its refreshed snapshot"
+        );
+
+        let store = load_store(&c);
+        let parent = store
+            .operations
+            .iter()
+            .find(|op| op.command == BATCH_COMMAND)
+            .expect("parent batch operation");
+        assert_eq!(parent.status, "partial", "one demoted member is partial");
+        let member_status = |command: &str| {
+            store
+                .operations
+                .iter()
+                .find(|op| op.command == command)
+                .unwrap_or_else(|| panic!("no operation for {command}"))
+                .status
+                .clone()
+        };
+        assert_eq!(member_status("update cosh"), "partial");
+        assert_eq!(member_status("update sec-core"), "ok");
     }
 
     #[test]
