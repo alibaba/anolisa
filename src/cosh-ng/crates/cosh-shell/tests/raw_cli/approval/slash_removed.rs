@@ -31,14 +31,18 @@ fn raw_cli_allow_is_removed_and_does_not_record_recommendation_approval() {
 
 #[test]
 fn raw_cli_approve_slash_is_not_recommendation_or_governance_alias() {
-    let output = run_raw_cli_with_input(
+    let output = run_raw_cli_with_delayed_input(
         "fake",
-        "ls /path/that/does/not/exist\n\
-         /explain last error\n\
-         /approve 2\n\
-         /deny 2\n\
-         echo after-approve-slash\n\
-         exit\n",
+        vec![
+            (
+                b"ls /path/that/does/not/exist\n/explain last error\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (
+                b"/approve 2\n/deny 2\necho after-approve-slash\nexit\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+        ],
     );
 
     assert!(

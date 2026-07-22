@@ -26,6 +26,8 @@ mod cosh_core;
 mod diagnostics;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
+#[path = "raw_cli/external_hook.rs"]
+mod external_hook;
 #[path = "raw_cli/failed_command.rs"]
 mod failed_command;
 #[path = "raw_cli/heavy.rs"]

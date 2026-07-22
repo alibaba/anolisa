@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -117,6 +117,24 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input(
     )
 }
 
+pub(crate) fn run_raw_cli_with_args_env_and_delayed_input_after_start(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    chunks: Vec<(Vec<u8>, Duration)>,
+    session_started: mpsc::Sender<()>,
+) -> String {
+    run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
+        adapter,
+        extra_args,
+        envs,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        chunks,
+        RawCliRunMode::Shared,
+        Some(session_started),
+    )
+}
+
 pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input(
     adapter: &str,
     extra_args: &[&str],
@@ -130,6 +148,7 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input(
         Path::new(env!("CARGO_MANIFEST_DIR")),
         chunks,
         RawCliRunMode::Exclusive,
+        None,
     )
 }
 
@@ -147,6 +166,7 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
         current_dir,
         chunks,
         RawCliRunMode::Shared,
+        None,
     )
 }
 
@@ -157,6 +177,7 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     current_dir: &Path,
     chunks: Vec<(Vec<u8>, Duration)>,
     run_mode: RawCliRunMode,
+    session_started: Option<mpsc::Sender<()>>,
 ) -> String {
     let _run_guard = raw_cli_run_guard(run_mode);
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
@@ -172,6 +193,16 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     apply_raw_cli_envs(&mut command, envs);
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw");
+    // Large hook fixtures can fill the output pipe before delayed input is
+    // complete, so drain before signaling that this session has started.
+    let readers = session_started
+        .as_ref()
+        .map(|_| start_raw_cli_output_readers(&mut child));
+    if let Some(session_started) = session_started {
+        session_started
+            .send(())
+            .expect("signal raw CLI session start");
+    }
 
     {
         let mut stdin = child.stdin.take().expect("child stdin");
@@ -182,7 +213,10 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         }
     }
 
-    let output = wait_for_raw_cli_output(child);
+    let output = match readers {
+        Some(readers) => wait_for_raw_cli_output_with_readers(child, readers),
+        None => wait_for_raw_cli_output(child),
+    };
     assert!(
         output.status.success(),
         "status={:?}\nstdout={}\nstderr={}",
@@ -378,12 +412,23 @@ struct RawCliOutput {
 }
 
 fn wait_for_raw_cli_output(mut child: Child) -> RawCliOutput {
-    let pid = child.id();
+    let readers = start_raw_cli_output_readers(&mut child);
+    wait_for_raw_cli_output_with_readers(child, readers)
+}
+
+type RawCliOutputReaders = (JoinHandle<Vec<u8>>, JoinHandle<Vec<u8>>);
+
+fn start_raw_cli_output_readers(child: &mut Child) -> RawCliOutputReaders {
     let stdout = child.stdout.take().expect("child stdout");
     let stderr = child.stderr.take().expect("child stderr");
-    let stdout_reader = read_pipe(stdout);
-    let stderr_reader = read_pipe(stderr);
+    (read_pipe(stdout), read_pipe(stderr))
+}
 
+fn wait_for_raw_cli_output_with_readers(
+    mut child: Child,
+    (stdout_reader, stderr_reader): RawCliOutputReaders,
+) -> RawCliOutput {
+    let pid = child.id();
     let status = match child.wait_timeout(RAW_CLI_TIMEOUT).expect("wait raw cli") {
         Some(status) => status,
         None => {
