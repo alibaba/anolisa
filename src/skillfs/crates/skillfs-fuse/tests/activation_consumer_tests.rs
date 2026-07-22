@@ -16,6 +16,9 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(dead_code)]
 
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +52,18 @@ impl ActivationMount {
         S: FnOnce(&Path),
         R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
     {
+        Self::new_with_layout(seed, resolver_builder, None)
+    }
+
+    fn new_with_layout<S, R>(
+        seed: S,
+        resolver_builder: R,
+        skill_layout: Option<skillfs_fuse::SkillLayout>,
+    ) -> Self
+    where
+        S: FnOnce(&Path),
+        R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
+    {
         let source = tempfile::tempdir().expect("source tempdir");
         seed(source.path());
         let resolver = resolver_builder(source.path());
@@ -66,6 +81,7 @@ impl ActivationMount {
             false,
             MountConfig {
                 active_resolver: resolver,
+                skill_layout,
                 ..MountConfig::default()
             },
         )
@@ -129,6 +145,25 @@ fn write_snapshot(source: &Path, skill: &str, version: &str, skill_md: &str) -> 
     std::fs::create_dir_all(&dir).expect("create snapshot dir");
     std::fs::write(dir.join("SKILL.md"), skill_md).expect("write snapshot SKILL.md");
     dir
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .expect("set fixture permissions");
+}
+
+fn access_errno(path: &Path, mask: i32) -> Option<i32> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).expect("path contains no NUL");
+    let result = unsafe { libc::access(c_path.as_ptr(), mask) };
+    if result == 0 {
+        None
+    } else {
+        Some(
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+        )
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +252,125 @@ fn valid_snapshot_activation_reads_snapshot_skill_md() {
 
     assert!(mount.skill_dir("demo-weather").exists());
     assert!(mount.skill_md("demo-weather").exists());
+}
+
+#[test]
+fn snapshot_access_uses_visible_flat_permissions() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = ActivationMount::new(
+        |src| {
+            create_skill_dir(src, "access-check");
+            let live = src.join("access-check");
+            std::fs::write(live.join("tool.sh"), "UNTRUSTED-LIVE\n").unwrap();
+            std::fs::write(live.join("payload.txt"), "UNTRUSTED-LIVE\n").unwrap();
+            set_mode(&live.join("SKILL.md"), 0o700);
+            set_mode(&live.join("tool.sh"), 0o700);
+            set_mode(&live.join("payload.txt"), 0o200);
+
+            let snapshot = write_snapshot(
+                src,
+                "access-check",
+                "v000001.snapshot",
+                "---\nname: access-check\ndescription: snapshot\n---\n",
+            );
+            std::fs::write(snapshot.join("tool.sh"), "TRUSTED-SNAPSHOT\n").unwrap();
+            std::fs::write(snapshot.join("payload.txt"), "TRUSTED-SNAPSHOT\n").unwrap();
+            std::fs::write(snapshot.join("snapshot-only.txt"), "SNAPSHOT-ONLY\n").unwrap();
+            set_mode(&snapshot.join("SKILL.md"), 0o600);
+            set_mode(&snapshot.join("tool.sh"), 0o600);
+            set_mode(&snapshot.join("payload.txt"), 0o400);
+            set_mode(&snapshot.join("snapshot-only.txt"), 0o400);
+            write_activation(
+                src,
+                "access-check",
+                r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+            );
+        },
+        |src_root| {
+            let resolver = ActiveSkillResolver::new(src_root);
+            bootstrap_activation(src_root, &["access-check".to_string()], &resolver);
+            Some(Arc::new(resolver))
+        },
+    );
+
+    let skill = mount.skill_dir("access-check");
+    let skill_md = skill.join("SKILL.md");
+    let tool = skill.join("tool.sh");
+    let payload = skill.join("payload.txt");
+    let snapshot_only = skill.join("snapshot-only.txt");
+
+    assert_eq!(
+        std::fs::metadata(&tool).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read_to_string(&payload).unwrap(),
+        "TRUSTED-SNAPSHOT\n"
+    );
+    assert_eq!(access_errno(&skill_md, libc::X_OK), Some(libc::EACCES));
+    assert_eq!(access_errno(&tool, libc::X_OK), Some(libc::EACCES));
+    assert_eq!(access_errno(&payload, libc::R_OK), None);
+    assert_eq!(access_errno(&payload, libc::W_OK), None);
+    assert_eq!(access_errno(&payload, libc::R_OK | libc::W_OK), None);
+    assert_eq!(access_errno(&snapshot_only, libc::F_OK), None);
+}
+
+#[test]
+fn snapshot_access_uses_visible_hermes_permissions() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = ActivationMount::new_with_layout(
+        |src| {
+            let live = src.join("category/nested");
+            std::fs::create_dir_all(&live).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---\nname: nested\ndescription: live\n---\n",
+            )
+            .unwrap();
+            std::fs::write(live.join("tool.sh"), "UNTRUSTED-LIVE\n").unwrap();
+            set_mode(&live.join("tool.sh"), 0o700);
+
+            let snapshot = write_snapshot(
+                src,
+                "category/nested",
+                "v000001.snapshot",
+                "---\nname: nested\ndescription: snapshot\n---\n",
+            );
+            std::fs::write(snapshot.join("tool.sh"), "TRUSTED-SNAPSHOT\n").unwrap();
+            set_mode(&snapshot.join("tool.sh"), 0o600);
+            write_activation(
+                src,
+                "category/nested",
+                r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+            );
+        },
+        |src_root| {
+            let resolver = ActiveSkillResolver::new(src_root);
+            let ids = enumerate_hermes_skill_ids(src_root);
+            bootstrap_activation(src_root, &ids, &resolver);
+            Some(Arc::new(resolver))
+        },
+        Some(skillfs_fuse::SkillLayout::Hermes),
+    );
+
+    let tool = mount.skill_dir("category/nested").join("tool.sh");
+    assert_eq!(
+        std::fs::read_to_string(&tool).unwrap(),
+        "TRUSTED-SNAPSHOT\n"
+    );
+    assert_eq!(
+        std::fs::metadata(&tool).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(access_errno(&tool, libc::X_OK), Some(libc::EACCES));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
