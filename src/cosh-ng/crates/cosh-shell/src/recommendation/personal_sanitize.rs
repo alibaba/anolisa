@@ -205,7 +205,9 @@ fn encoded_credential_pattern() -> &'static Regex {
 fn curl_user_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        Regex::new(r#"(?i)(?P<prefix>\bcurl\b[^\n;]*?\s(?:-u|--user)(?:=|\s+)["']?)[^\s;"']+"#)
+        Regex::new(
+            r#"(?i)(?P<prefix>\bcurl\b[^\n;]*?\s(?:-u|--user)(?:=|\s+))(?:"(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|'[^']*(?:'|$)|\\(?:\r?\n|[^\r\n])|[^\s;&|()<>"'\\])+"#,
+        )
             .expect("static curl credential regex")
     })
 }
@@ -213,15 +215,19 @@ fn curl_user_pattern() -> &'static Regex {
 fn mysql_password_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        Regex::new(r"(?i)(?P<prefix>\b(?:mysql|mariadb)\b[^\n;]*?\s-p)[^\s;]+")
-            .expect("static mysql credential regex")
+        Regex::new(
+            r#"(?i)(?P<prefix>\b(?:mysql|mariadb)\b[^\n;]*?\s-p)(?:"(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|'[^']*(?:'|$)|\\(?:\r?\n|[^\r\n])|[^\s;&|()<>"'\\])+"#,
+        )
+        .expect("static mysql credential regex")
     })
 }
 
 fn docker_password_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        Regex::new(r#"(?i)(?P<prefix>\bdocker\s+login\b[^\n;]*?\s(?:-p|--password)(?:=|\s+)["']?)[^\s;"']+"#)
+        Regex::new(
+            r#"(?i)(?P<prefix>\bdocker\s+login\b[^\n;]*?\s(?:-p|--password)(?:=|\s+))(?:"(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|'[^']*(?:'|$)|\\(?:\r?\n|[^\r\n])|[^\s;&|()<>"'\\])+"#,
+        )
             .expect("static docker credential regex")
     })
 }

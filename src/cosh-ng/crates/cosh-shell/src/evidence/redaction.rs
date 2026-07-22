@@ -90,8 +90,8 @@ pub(crate) fn redact_sensitive_text(text: &str) -> (String, bool) {
         (authorization_pattern(), "$prefix$scheme <redacted>"),
         (bearer_pattern(), "$prefix<redacted>"),
         (url_password_pattern(), "$prefix<redacted>@"),
-        (sensitive_flag_pattern(), "$prefix<redacted>$suffix"),
-        (sensitive_assignment_pattern(), "$prefix<redacted>$suffix"),
+        (sensitive_flag_pattern(), "$prefix<redacted>"),
+        (sensitive_assignment_pattern(), "$prefix<redacted>"),
         (github_token_pattern(), "<redacted>"),
         (opaque_token_pattern(), "<redacted>"),
         (jwt_pattern(), "<redacted>"),
@@ -194,10 +194,13 @@ fn sensitive_flag_pattern() -> &'static Regex {
                      id[_-]?token|secret|client[_-]?secret|api[_-]?key|apikey|
                      access[_-]?key[_-]?secret|security[_-]?token|authorization)
                 (?:=|\s+)
-                ["']?
             )
-            (?P<value>[^\s,;&"']+)
-            (?P<suffix>["']?)
+            (?:
+                "(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
             "#,
         )
         .unwrap_or_else(|_| unreachable!("static sensitive flag pattern must compile"))
@@ -221,10 +224,13 @@ fn sensitive_assignment_pattern() -> &'static Regex {
                    password|passphrase|passwd|api[_-]?key|apikey|token|secret)
                 ["']?
                 \s*(?:=|:)\s*
-                ["']?
             )
-            (?P<value>[^\s,;&"']+)
-            (?P<suffix>["']?)
+            (?:
+                "(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
             "#,
         )
         .unwrap_or_else(|_| unreachable!("static sensitive assignment pattern must compile"))
@@ -353,6 +359,57 @@ mod tests {
             assert!(!redacted.contains(secret), "{redacted}");
         }
         assert!(redacted.contains("next=ok"), "{redacted}");
+    }
+
+    #[test]
+    fn redacts_complete_quoted_flag_and_assignment_values() {
+        let input = concat!(
+            "tool --password 'correct horse battery staple' ",
+            "--token=\"alpha beta\" password='gamma delta' --region cn"
+        );
+
+        let (redacted, changed) = redact_sensitive_text(input);
+
+        assert!(changed);
+        assert_eq!(
+            redacted,
+            "tool --password <redacted> --token=<redacted> password=<redacted> --region cn"
+        );
+    }
+
+    #[test]
+    fn redacts_escaped_quotes_and_whitespace_in_credential_values() {
+        let input = concat!(
+            r#"tool --password "correct horse\" battery staple" "#,
+            r#"--token=alpha\ beta password='gamma\' delta' "#,
+            r#"--secret escaped\ space --region cn; "#,
+            r#"tool --password "joined secret"tail deploy billing-api; "#,
+            "tool --token=line\\\ncontinued-tail deploy reports-api",
+            "; tool --password correct,horse|kubectl get pods",
+        );
+
+        let (redacted, changed) = redact_sensitive_text(input);
+
+        assert!(changed);
+        for secret in [
+            "battery staple",
+            "gamma\\' delta",
+            "escaped\\ space",
+            "tail deploy billing-api",
+            "continued-tail",
+            ",horse",
+        ] {
+            assert!(!redacted.contains(secret), "{redacted}");
+        }
+        assert!(redacted.contains("--region cn"), "{redacted}");
+        assert!(redacted.contains("billing-api"), "{redacted}");
+        assert!(redacted.contains("reports-api"), "{redacted}");
+        assert!(redacted.contains("|kubectl get pods"), "{redacted}");
+
+        let (unterminated, changed) =
+            redact_sensitive_text("tool --password \"unterminated secret tail");
+        assert!(changed);
+        assert_eq!(unterminated, "tool --password <redacted>");
     }
 
     #[test]
