@@ -529,7 +529,11 @@ pub async fn security_status(data: web::Data<AppState>) -> impl Responder {
     )
 }
 
-fn local_security_response(status: StatusCode, state: &str, data: Value) -> HttpResponse {
+pub(super) fn local_security_response(
+    status: StatusCode,
+    state: &str,
+    data: Value,
+) -> HttpResponse {
     HttpResponse::build(status).json(json!({
         "state": state,
         "data": data,
@@ -904,11 +908,12 @@ fn paginated_local_response(
     )
 }
 
-fn security_store_error(error: SecurityStoreError) -> HttpResponse {
+pub(super) fn security_store_error(error: SecurityStoreError) -> HttpResponse {
+    log::error!("local security store request failed: {error}");
     HttpResponse::InternalServerError().json(json!({
         "error": {
             "code": "security_store_unavailable",
-            "message": error.to_string(),
+            "message": "local security persistence is unavailable",
             "retryable": true,
         }
     }))
@@ -1125,6 +1130,7 @@ mod tests {
             interruption_store: None,
             evaluation_store: Arc::clone(&evaluation_store),
             enforcement: None,
+            containment: None,
             security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
@@ -1309,6 +1315,7 @@ mod tests {
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
             enforcement: None,
+            containment: None,
             security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
@@ -1433,6 +1440,7 @@ mod tests {
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
             enforcement: None,
+            containment: None,
             security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
@@ -1532,6 +1540,7 @@ mod tests {
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
             enforcement: None,
+            containment: None,
             security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,

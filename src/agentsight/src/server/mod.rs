@@ -4,6 +4,7 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 pub mod auth;
+mod containment;
 mod enforcement;
 mod handlers;
 mod token_savings;
@@ -20,7 +21,7 @@ use crate::config::ServerAuthConfig;
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
-use crate::security::{SecurityCoordinator, SecurityStore};
+use crate::security::{ContainmentCoordinator, SecurityCoordinator, SecurityStore};
 use crate::storage::sqlite::InterruptionStore;
 
 use self::auth::{AuthMiddleware, DashboardAuth};
@@ -57,6 +58,8 @@ pub struct AppState {
     pub evaluation_store: Arc<EvaluationStore>,
     /// Desired enforcement state and privileged-service client.
     pub enforcement: Option<Arc<EnforcementCoordinator>>,
+    /// Case-level containment orchestration, absent when enforcement is disabled.
+    pub containment: Option<Arc<ContainmentCoordinator>>,
     /// AgentSight-owned security events and correlated audit cases.
     pub security_store: Arc<SecurityStore>,
     /// agent-sec security observability integration configuration
@@ -192,6 +195,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::audit_cases_list)
                 .service(handlers::audit_case_detail)
                 .service(handlers::review_audit_case)
+                .service(containment::containment_plan)
+                .service(containment::contain_case)
                 // AgentSight-owned enforcement API routes
                 .service(enforcement::health)
                 .service(enforcement::apply_binding)
@@ -274,6 +279,19 @@ pub async fn run_server(
             return Err(std::io::Error::other(error.to_string()));
         }
     };
+    let containment_enforcer: Arc<dyn crate::security::ContainmentEnforcer> = enforcement.clone();
+    let containment = Arc::new(ContainmentCoordinator::new(
+        Arc::clone(&security_store),
+        containment_enforcer,
+    ));
+    let containment_reconciler = match containment::start_reconciler(&containment) {
+        Ok(worker) => worker,
+        Err(error) => {
+            stop_security_ingestion(&security_coordinator, security_ingestion);
+            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+    };
 
     // Initialize dashboard authentication
     let storage_base = storage_path
@@ -343,6 +361,7 @@ pub async fn run_server(
         interruption_store,
         evaluation_store,
         enforcement: Some(Arc::clone(&enforcement)),
+        containment: Some(Arc::clone(&containment)),
         security_store,
         security_observability,
         auth: dashboard_auth.clone(),
@@ -376,6 +395,7 @@ pub async fn run_server(
     {
         Ok(server) => server,
         Err(error) => {
+            containment::stop_reconciler(&containment, containment_reconciler);
             stop_security_ingestion(&security_coordinator, security_ingestion);
             stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
             return Err(error);
@@ -383,6 +403,7 @@ pub async fn run_server(
     };
     let server_result = server.run().await;
 
+    containment::stop_reconciler(&containment, containment_reconciler);
     stop_security_ingestion(&security_coordinator, security_ingestion);
     stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
     server_result
@@ -515,6 +536,7 @@ mod tests {
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
             enforcement: None,
+            containment: None,
             security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,

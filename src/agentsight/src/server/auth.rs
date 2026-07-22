@@ -300,12 +300,17 @@ fn is_localhost_only(path: &str) -> bool {
 
 fn is_enforcement_mutation(method: &actix_web::http::Method, path: &str) -> bool {
     match *method {
-        actix_web::http::Method::POST => matches!(
-            path,
-            "/api/enforcement/bindings"
-                | "/api/enforcement/file-bindings"
-                | "/api/enforcement/credential-bindings"
-        ),
+        actix_web::http::Method::POST => {
+            matches!(
+                path,
+                "/api/enforcement/bindings"
+                    | "/api/enforcement/file-bindings"
+                    | "/api/enforcement/credential-bindings"
+            ) || path
+                .strip_prefix("/api/audit/cases/")
+                .and_then(|case_id| case_id.strip_suffix("/contain"))
+                .is_some_and(|case_id| !case_id.is_empty() && !case_id.contains('/'))
+        }
         actix_web::http::Method::DELETE => path
             .strip_prefix("/api/enforcement/bindings/")
             .is_some_and(|binding_id| !binding_id.is_empty() && !binding_id.contains('/')),
@@ -829,6 +834,10 @@ mod tests {
                 .route(
                     "/api/enforcement/bindings/{binding_id}",
                     actix_web::web::delete().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/api/audit/cases/{case_id}/contain",
+                    actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
                 ),
         )
         .await;
@@ -846,6 +855,13 @@ mod tests {
             .peer_addr(loopback)
             .to_request();
         let response = actix_web::test::call_service(&app, unauthenticated_detach).await;
+        assert_eq!(response.status(), 401);
+
+        let unauthenticated_containment = actix_web::test::TestRequest::post()
+            .uri("/api/audit/cases/00000000-0000-0000-0000-000000000001/contain")
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, unauthenticated_containment).await;
         assert_eq!(response.status(), 401);
 
         let authenticated_apply = actix_web::test::TestRequest::post()
