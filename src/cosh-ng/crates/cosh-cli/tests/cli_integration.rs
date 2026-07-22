@@ -7,7 +7,7 @@
 //! - Error handling when daemon is unavailable
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// Get the path to the compiled cosh-cli binary.
 fn cosh_bin() -> Command {
@@ -22,15 +22,110 @@ fn systemctl_query_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Spawn `cosh-cli` with audit env vars pinned to a sandbox: log redirected to
-/// `audit_log` and any external `COSH_AUDIT_POLICY` cleared so the built-in
-/// `balanced` preset is used. Use this for any test that exercises the
-/// audit subsystem so it doesn't pollute the user's real audit log.
+/// Spawn `cosh-cli` with audit state pinned to a sandbox: redirect the log,
+/// isolate user policy discovery, and clear any explicit policy override.
+/// Use this for audit tests so they neither read nor write the user's state.
 fn cosh_bin_with_audit_sandbox(audit_log: &Path) -> Command {
     let mut cmd = cosh_bin();
     cmd.env("COSH_AUDIT_LOG", audit_log);
+    if let Some(sandbox_home) = audit_log.parent() {
+        cmd.env("HOME", sandbox_home);
+    }
     cmd.env_remove("COSH_AUDIT_POLICY");
     cmd
+}
+
+fn assert_json_object_keys(value: &serde_json::Value, expected: &[&str]) {
+    let mut actual: Vec<&str> = value
+        .as_object()
+        .expect("expected JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    actual.sort_unstable();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
+fn assert_audit_success(output: &Output) -> serde_json::Value {
+    assert_eq!(output.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_object_keys(&json, &["ok", "data", "meta"]);
+    assert_eq!(json["ok"], true);
+    assert!(json["data"].is_object());
+
+    let meta = &json["meta"];
+    assert_json_object_keys(meta, &["subsystem", "duration_ms", "distro", "dry_run"]);
+    assert_eq!(meta["subsystem"], "audit");
+    assert!(meta["duration_ms"].is_u64());
+    assert!(meta["distro"].is_string());
+    assert_eq!(meta["dry_run"], false);
+    json
+}
+
+fn assert_audit_failure(output: &Output) -> serde_json::Value {
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_json_object_keys(&json, &["ok", "error", "meta"]);
+    assert_eq!(json["ok"], false);
+    assert_json_object_keys(
+        &json["error"],
+        &[
+            "code",
+            "message",
+            "recoverable",
+            "hint",
+            "subsystem",
+            "details",
+        ],
+    );
+
+    let meta = &json["meta"];
+    assert_json_object_keys(meta, &["subsystem", "duration_ms", "distro", "dry_run"]);
+    assert_eq!(meta["subsystem"], "audit");
+    assert!(meta["duration_ms"].is_u64());
+    assert!(meta["distro"].is_string());
+    assert_eq!(meta["dry_run"], false);
+    json
+}
+
+fn record_audit_marker(audit_log: &Path, session: &str, marker: &str) {
+    let raw = format!("echo {marker}");
+    let output = cosh_bin_with_audit_sandbox(audit_log)
+        .env("COSH_SESSION_ID", session)
+        .args(["audit", "check", "--action", &raw])
+        .output()
+        .unwrap();
+    let json = assert_audit_success(&output);
+    assert_json_object_keys(
+        &json["data"],
+        &["outcome", "reason", "matched_rule", "policy_version"],
+    );
+}
+
+fn assert_audit_log_raws(audit_log: &Path, args: &[&str], expected: &[&str]) {
+    let output = cosh_bin_with_audit_sandbox(audit_log)
+        .args(["audit", "log"])
+        .args(args)
+        .output()
+        .unwrap();
+    let json = assert_audit_success(&output);
+    assert_json_object_keys(&json["data"], &["entries", "total"]);
+    assert_eq!(json["data"]["total"], expected.len());
+    let raws: Vec<&str> = json["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["action"]["raw"].as_str().unwrap())
+        .collect();
+    assert_eq!(raws, expected);
+}
+
+fn audit_log_line_count(audit_log: &Path) -> usize {
+    std::fs::read_to_string(audit_log)
+        .map(|contents| contents.lines().count())
+        .unwrap_or(0)
 }
 
 // --- Help / Version ---
@@ -191,17 +286,27 @@ fn test_audit_check_pkg_search_is_allow() {
 
 #[test]
 fn test_audit_check_missing_required_flags_is_403() {
-    // Neither --action-string nor --subsystem given → AuditActionMalformed.
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
-    let output = cosh_bin_with_audit_sandbox(&log)
-        .args(["audit", "check"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"]["code"], "AuditActionMalformed");
+    let cases: &[&[&str]] = &[
+        &["audit", "check"],
+        &["audit", "check", "--operation", "search"],
+        &["audit", "check", "--subsystem", "pkg"],
+    ];
+
+    for args in cases {
+        let output = cosh_bin_with_audit_sandbox(&log)
+            .args(*args)
+            .output()
+            .unwrap();
+        let json = assert_audit_failure(&output);
+        assert_eq!(json["error"]["code"], "AuditActionMalformed");
+        assert_eq!(json["error"]["recoverable"], false);
+        assert_eq!(json["error"]["subsystem"], "audit");
+        assert!(json["error"]["message"].is_string());
+        assert!(json["error"]["hint"].is_string());
+        assert!(json["error"]["details"].is_null());
+    }
 }
 
 // --- audit log: envelope ---
@@ -245,6 +350,44 @@ fn test_audit_log_starts_empty_and_grows_with_check() {
     let entries = json["data"]["entries"].as_array().unwrap();
     assert_eq!(entries[0]["action"]["operation"], "search");
     assert_eq!(entries[0]["decision"]["outcome"], "Allow");
+}
+
+#[test]
+fn test_audit_log_limit_is_newest_first_for_all_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    record_audit_marker(&log, "selected", "alpha");
+    record_audit_marker(&log, "excluded", "beta");
+    record_audit_marker(&log, "selected", "gamma");
+
+    assert_audit_log_raws(&log, &[], &["echo alpha", "echo beta", "echo gamma"]);
+    assert_audit_log_raws(&log, &["--limit", "2"], &["echo gamma", "echo beta"]);
+    assert_audit_log_raws(&log, &["--limit", "0"], &[]);
+    assert_audit_log_raws(
+        &log,
+        &["--limit", "3"],
+        &["echo gamma", "echo beta", "echo alpha"],
+    );
+    assert_audit_log_raws(
+        &log,
+        &["--limit", "4"],
+        &["echo gamma", "echo beta", "echo alpha"],
+    );
+}
+
+#[test]
+fn test_audit_log_applies_filters_before_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    record_audit_marker(&log, "selected", "alpha");
+    record_audit_marker(&log, "excluded", "beta");
+    record_audit_marker(&log, "selected", "gamma");
+
+    assert_audit_log_raws(
+        &log,
+        &["--session", "selected", "--limit", "2"],
+        &["echo gamma", "echo alpha"],
+    );
 }
 
 // --- audit policy ---
@@ -361,6 +504,60 @@ fn test_audit_policy_explain_returns_match_decision() {
         json["data"]["decision"]["matched_rule"],
         "shell-deny-git-mutating"
     );
+}
+
+#[test]
+fn test_audit_policy_explain_matches_check_for_parse_errors_without_logging() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let cases = [
+        ("", "parse failed: empty action string"),
+        (
+            "echo alpha; echo beta",
+            "parse failed: contains shell metacharacter ';'",
+        ),
+        (
+            "echo alpha\necho beta",
+            "parse failed: contains control byte (\\n or \\r)",
+        ),
+    ];
+
+    for (action, expected_reason) in cases {
+        let before_check = audit_log_line_count(&log);
+        let check_output = cosh_bin_with_audit_sandbox(&log)
+            .args(["audit", "check", "--action", action])
+            .output()
+            .unwrap();
+        let check = assert_audit_success(&check_output);
+        let check_decision = &check["data"];
+        assert_json_object_keys(check_decision, &["outcome", "reason", "policy_version"]);
+        assert_eq!(check_decision["outcome"], "Deny");
+        assert_eq!(check_decision["reason"], expected_reason);
+        assert!(check_decision.get("matched_rule").is_none());
+        assert!(check_decision["policy_version"]
+            .as_str()
+            .unwrap()
+            .starts_with("builtin-balanced@"));
+        assert_eq!(audit_log_line_count(&log), before_check + 1);
+
+        let before_explain = audit_log_line_count(&log);
+        let explain_output = cosh_bin_with_audit_sandbox(&log)
+            .args(["audit", "policy", "explain", action])
+            .output()
+            .unwrap();
+        let explain = assert_audit_success(&explain_output);
+        assert_json_object_keys(&explain["data"], &["action", "decision"]);
+        assert_eq!(explain["data"]["decision"], *check_decision);
+        assert_eq!(
+            explain["data"]["action"],
+            serde_json::json!({
+                "subsystem": "unparsed",
+                "operation": "<unparsed>",
+                "raw": action,
+            })
+        );
+        assert_eq!(audit_log_line_count(&log), before_explain);
+    }
 }
 
 // --- 17+ bypass regressions migrated from cosh-core::is_safe_command ---
