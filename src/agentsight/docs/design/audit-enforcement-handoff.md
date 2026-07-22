@@ -85,6 +85,7 @@ command requires the complete expected source binding snapshot. Its response dis
 
 - replacement acknowledged;
 - source retained or restored after replacement rejection;
+- conflict with an unrelated actual binding, which remains untouched;
 - indeterminate runtime state when both replacement and restoration fail.
 
 Unknown or mismatched actual bindings are conflicts and are never detached. Request and response
@@ -119,8 +120,9 @@ acknowledges it. A successful response atomically persists source `detached`, in
 `enforced`, and marks the transition `completed` before the containment action can become active.
 
 A source-retained or source-restored rejection marks the transition failed and may finish the
-containment action as failed because audit coverage is assured. An indeterminate or transport result
-keeps the transition and containment action retryable; it must not claim either policy is active.
+containment action as failed because audit coverage is assured. A third-party conflict,
+indeterminate result, or transport result keeps the transition and containment action retryable; it
+must not claim either policy is active.
 
 The normal desired-state reconciler always processes unfinished transitions before individual
 bindings. Source and target rows participating in a transition are excluded from UUID-ordered replay
