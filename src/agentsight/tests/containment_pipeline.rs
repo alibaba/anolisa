@@ -33,7 +33,7 @@ struct ApplyPause {
 struct FakeEnforcer {
     bindings: Mutex<Vec<Binding>>,
     applied: Mutex<Vec<ApplyCredentialPolicy>>,
-    failure: Mutex<Option<String>>,
+    failure: Mutex<Option<ContainmentEnforcerError>>,
     detach_failure: Mutex<Option<String>>,
     acknowledgement: Mutex<Option<AckMutation>>,
     pause: Mutex<Option<Arc<ApplyPause>>>,
@@ -50,7 +50,13 @@ impl FakeEnforcer {
     }
 
     fn fail_next_apply(&self, message: &str) {
-        *self.failure.lock().expect("failure should lock") = Some(message.into());
+        *self.failure.lock().expect("failure should lock") =
+            Some(ContainmentEnforcerError::Unavailable(message.into()));
+    }
+
+    fn reject_next_apply(&self, message: &str) {
+        *self.failure.lock().expect("failure should lock") =
+            Some(ContainmentEnforcerError::Rejected(message.into()));
     }
 
     fn fail_next_detach(&self, message: &str) {
@@ -116,8 +122,8 @@ impl ContainmentEnforcer for FakeEnforcer {
         request: ApplyCredentialPolicy,
     ) -> Result<StampedBinding, ContainmentEnforcerError> {
         self.apply_calls.fetch_add(1, Ordering::AcqRel);
-        if let Some(message) = self.failure.lock().expect("failure should lock").take() {
-            return Err(ContainmentEnforcerError::Unavailable(message));
+        if let Some(error) = self.failure.lock().expect("failure should lock").take() {
+            return Err(error);
         }
         self.applied
             .lock()
@@ -1264,22 +1270,46 @@ mod linux {
     #[test]
     fn attach_failure_is_persisted_and_does_not_confirm_the_case() {
         let (_process, fixture) = live_fixture();
-        fixture.enforcer.fail_next_apply("adapter unavailable");
+        fixture.enforcer.reject_next_apply("policy rejected");
         assert!(matches!(
             fixture.contain(Some(900)),
-            Err(ContainmentError::Enforcer(message)) if message == "adapter unavailable"
+            Err(ContainmentError::Enforcer(message)) if message == "policy rejected"
         ));
         let action = fixture.latest_action();
         assert_eq!(action.lifecycle_state, ContainmentLifecycle::Failed);
-        assert_eq!(
-            action.failure_reason.as_deref(),
-            Some("adapter unavailable")
-        );
+        assert_eq!(action.failure_reason.as_deref(), Some("policy rejected"));
         assert_eq!(
             action.failure_stage,
             Some(agentsight::security::ContainmentFailureStage::Attach)
         );
         assert_eq!(fixture.status(), RiskCaseStatus::Open);
+    }
+
+    #[test]
+    fn unavailable_attach_keeps_the_same_pending_action_without_detach() {
+        let (_process, fixture) = live_fixture();
+        fixture.enforcer.fail_next_apply("adapter unavailable");
+        assert!(matches!(
+            fixture.contain(Some(900)),
+            Err(ContainmentError::Enforcer(message)) if message == "adapter unavailable"
+        ));
+
+        let pending = fixture.latest_action();
+        assert_eq!(pending.lifecycle_state, ContainmentLifecycle::Pending);
+        assert_eq!(pending.attempt_count, 1);
+        assert!(pending.next_retry_at_ns.is_some());
+        assert_eq!(fixture.enforcer.detach_calls(), 0);
+        assert_eq!(fixture.status(), RiskCaseStatus::Open);
+
+        fixture
+            .reconstructed_coordinator()
+            .reconcile_once(pending.next_retry_at_ns.unwrap_or(u64::MAX))
+            .expect("retry should activate the same durable intent");
+        let active = fixture.latest_action();
+        assert_eq!(active.action_id, pending.action_id);
+        assert_eq!(active.binding_id, pending.binding_id);
+        assert_eq!(active.lifecycle_state, ContainmentLifecycle::Active);
+        assert_eq!(fixture.enforcer.detach_calls(), 0);
     }
 
     #[test]
