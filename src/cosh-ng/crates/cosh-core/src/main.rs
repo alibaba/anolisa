@@ -29,6 +29,12 @@ mod truncator;
 
 use clap::Parser;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
+use std::time::Duration;
 
 use config::CoreConfig;
 use provider::openai_compat::OpenAICompatProvider;
@@ -94,8 +100,40 @@ fn needs_auth(config: &CoreConfig) -> bool {
     resolved.api_key.is_empty()
 }
 
+#[cfg(unix)]
+fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| {
+            eprintln!("failed to start async runtime: {error}");
+            std::process::exit(1);
+        });
+
+    runtime.block_on(run_until_sigint());
+    // Tokio reads stdin on a blocking thread, which cannot be cancelled while a pipe stays open.
+    runtime.shutdown_timeout(Duration::from_millis(100));
+}
+
+#[cfg(not(unix))]
 #[tokio::main]
 async fn main() {
+    run().await;
+}
+
+#[cfg(unix)]
+async fn run_until_sigint() {
+    let sigint_received = install_sigint_handler();
+
+    tokio::select! {
+        _ = wait_for_sigint(sigint_received) => {
+            tracing::info!("received SIGINT, shutting down cosh-core");
+        }
+        _ = run() => {}
+    }
+}
+
+async fn run() {
     let args = cli::CliArgs::parse();
     if args.is_session_control() {
         std::process::exit(session_control::run());
@@ -117,6 +155,25 @@ async fn main() {
         headless::run(&args, config).await;
     } else {
         interactive::run(&args, config).await;
+    }
+}
+
+#[cfg(unix)]
+fn install_sigint_handler() -> Arc<AtomicBool> {
+    let received = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&received)).unwrap_or_else(
+        |error| {
+            eprintln!("failed to install SIGINT handler: {error}");
+            std::process::exit(1);
+        },
+    );
+    received
+}
+
+#[cfg(unix)]
+async fn wait_for_sigint(received: Arc<AtomicBool>) {
+    while !received.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

@@ -30,6 +30,7 @@ rustix = { version = "0.38", default-features = false, features = ["fs", "std"] 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
+signal-hook = "0.3"
 
 [profile.release]
 opt-level = 3
