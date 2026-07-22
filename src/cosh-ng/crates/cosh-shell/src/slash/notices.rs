@@ -1,6 +1,26 @@
 use crate::runtime::prelude::*;
 use crate::slash::panel::render_notice_panel;
-use crate::slash::parser::{slash_command_hints, RemovedCommand, SlashInfoCommand};
+use crate::slash::parser::{
+    slash_command_hints, RemovedCommand, SlashInfoCommand, SlashParseError,
+};
+
+pub(super) fn render_slash_parse_error<W: Write>(
+    error: SlashParseError,
+    state: &InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let i18n = state.i18n();
+    match error {
+        SlashParseError::QuotedArgumentsUnsupported => render_notice_panel(
+            output,
+            i18n.t(MessageId::SlashUnknownTitle),
+            vec![i18n
+                .t(MessageId::SlashQuotedArgumentsUnsupported)
+                .to_string()],
+            None,
+        ),
+    }
+}
 
 pub(super) fn render_removed_command<W: Write>(
     command: RemovedCommand<'_>,

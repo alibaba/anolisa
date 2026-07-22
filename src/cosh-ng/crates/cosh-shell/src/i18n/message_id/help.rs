@@ -36,6 +36,7 @@ macro_rules! help_core_ids {
             SlashUnknownBody,
             SlashUnknownSuggestionBody,
             SlashUnknownFooter,
+            SlashQuotedArgumentsUnsupported,
             SlashInfoAuditTitle,
             SlashInfoAuditApprovalsBody,
             SlashInfoAuditActivityBody,

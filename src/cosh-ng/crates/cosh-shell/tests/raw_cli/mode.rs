@@ -115,6 +115,52 @@ fn raw_cli_pasted_trust_confirm_sets_trust_mode() {
 }
 
 #[test]
+fn raw_cli_mode_rejects_quoted_arguments_without_changing_mode() {
+    let output = run_raw_cli_with_input(
+        "fake",
+        "/mode approval \"trust confirm\"\n\
+         /mode approval 'trust confirm'\n\
+         /config language \"en US\"\n\
+         printf '\"hello world\"\\n'\n\
+         /help\n\
+         exit\n",
+    );
+
+    assert_eq!(
+        count_occurrences(&output, "Quoted arguments are not supported."),
+        3,
+        "{output}"
+    );
+    assert!(
+        output.contains("Use /mode approval trust confirm instead."),
+        "{output}"
+    );
+    assert!(!output.contains("Unknown approval mode"), "{output}");
+    assert!(!output.contains("Invalid language"), "{output}");
+    assert!(!output.contains("Mode set to trust."), "{output}");
+    assert!(output.contains("Mode: auto. Strategy: smart."), "{output}");
+    assert!(output.contains("\r\n\"hello world\"\r\n"), "{output}");
+}
+
+#[test]
+fn raw_cli_mode_quoted_argument_error_uses_zh_language_env() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/mode approval 'trust confirm'\n/help\nexit\n",
+        &[("COSH_SHELL_LANG", "zh-CN")],
+    );
+
+    assert!(output.contains("不支持带引号的参数。"), "{output}");
+    assert!(
+        output.contains("本例请改用 /mode approval trust confirm。"),
+        "{output}"
+    );
+    assert!(!output.contains("未知审批模式"), "{output}");
+    assert!(!output.contains("模式已设置为 trust。"), "{output}");
+    assert!(output.contains("模式: auto. 策略: smart."), "{output}");
+}
+
+#[test]
 fn raw_cli_help_and_mode_use_zh_language_env() {
     let output = run_raw_cli_with_env(
         "fake",

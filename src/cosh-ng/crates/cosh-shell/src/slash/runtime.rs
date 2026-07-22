@@ -2,6 +2,7 @@ use crate::runtime::mode::render_mode_card_actions;
 use crate::runtime::prelude::*;
 use crate::slash::commands::render_slash_command;
 use crate::slash::config::render_config_card_actions;
+use crate::slash::notices::render_slash_parse_error;
 use crate::slash::parser::{slash_input, SlashCommand};
 use crate::slash::prompt::{clear_shell_prompt_line, write_shell_prompt};
 use crate::slash::session::{render_session_card_actions, render_session_launch};
@@ -24,8 +25,10 @@ pub(crate) fn render_slash_actions<W: Write>(
         let Some(input) = slash_input(event) else {
             continue;
         };
-        let Some(command) = SlashCommand::parse(input) else {
-            continue;
+        let parsed = match SlashCommand::parse(input) {
+            Ok(Some(command)) => Ok(command),
+            Ok(None) => continue,
+            Err(error) => Err(error),
         };
 
         let key = stable_event_key("slash", event_index, event);
@@ -34,15 +37,21 @@ pub(crate) fn render_slash_actions<W: Write>(
         }
 
         clear_shell_prompt_line(output)?;
-        let restore_prompt = render_slash_command(
-            command,
-            event,
-            blocks,
-            adapter,
-            state,
-            event.cwd.as_deref(),
-            output,
-        )?;
+        let restore_prompt = match parsed {
+            Ok(command) => render_slash_command(
+                command,
+                event,
+                blocks,
+                adapter,
+                state,
+                event.cwd.as_deref(),
+                output,
+            )?,
+            Err(error) => {
+                render_slash_parse_error(error, state, output)?;
+                true
+            }
+        };
         if restore_prompt {
             write_shell_prompt(state, output)?;
         }
