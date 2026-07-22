@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from agent_sec_cli.prompt_scanner.config import ScanMode
+from agent_sec_cli.prompt_scanner.config import ScanMode, get_config
 from agent_sec_cli.prompt_scanner.result import Verdict
 from agent_sec_cli.prompt_scanner.scanner import PromptScanner
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
@@ -18,6 +18,7 @@ class PromptScanBackend(BaseBackend):
         text: str = kwargs.get("text", "")
         mode_str: str = kwargs.get("mode", "standard")
         source: str = kwargs.get("source", "")
+        model: str = kwargs.get("model", "")
 
         if not text or not text.strip():
             return ActionResult(
@@ -38,7 +39,14 @@ class PromptScanBackend(BaseBackend):
             )
 
         try:
-            scanner = PromptScanner(mode=scan_mode)
+            if model and scan_mode in (ScanMode.STANDARD, ScanMode.STRICT):
+                # Override only the L2 model_name; keep the mode's layer
+                # layout and fast_fail policy intact.
+                config = get_config(scan_mode)
+                config.model_name = model
+                scanner = PromptScanner(config=config)
+            else:
+                scanner = PromptScanner(mode=scan_mode)
             if scan_mode is ScanMode.MULTI_TURN:
                 # L4 multi-turn mode: requires a conversation triple
                 # (history, current_query, assistant_response).

@@ -427,6 +427,41 @@ class TestPromptGuardClassifier(unittest.TestCase):
         result = self.PromptGuardClassifier._preprocess(text, bad_tokenizer)
         self.assertEqual(result, text)
 
+    def _make_result(self, label: str, confidence: float | None):
+        from agent_sec_cli.prompt_scanner.models.model_manager import (  # noqa: PLC0415
+            ClassifierResult,
+        )
+        from agent_sec_cli.prompt_scanner.result import (  # noqa: PLC0415
+            ThreatType,
+        )
+
+        threat_type = ThreatType.BENIGN if label == "BENIGN" else ThreatType.JAILBREAK
+        return ClassifierResult(
+            label=label,
+            confidence=confidence,
+            probabilities={label: confidence or 0.0},
+            threat_type=threat_type,
+        )
+
+    def test_is_threat_above_threshold(self) -> None:
+        result = self._make_result("JAILBREAK", 0.9)
+        self.assertTrue(self.PromptGuardClassifier.is_threat(result, 0.5))
+
+    def test_is_threat_below_threshold(self) -> None:
+        result = self._make_result("JAILBREAK", 0.4)
+        self.assertFalse(self.PromptGuardClassifier.is_threat(result, 0.5))
+
+    def test_is_threat_benign_above_threshold(self) -> None:
+        # A BENIGN prediction is never a threat, even with high confidence.
+        result = self._make_result("BENIGN", 0.99)
+        self.assertFalse(self.PromptGuardClassifier.is_threat(result, 0.5))
+
+    def test_is_threat_none_confidence_or_threshold(self) -> None:
+        result = self._make_result("JAILBREAK", None)
+        self.assertFalse(self.PromptGuardClassifier.is_threat(result, 0.5))
+        result = self._make_result("JAILBREAK", 0.9)
+        self.assertFalse(self.PromptGuardClassifier.is_threat(result, None))
+
 
 # ---------------------------------------------------------------------------
 # Tests: MLClassifier (L2 detection layer)
@@ -502,6 +537,9 @@ class TestMLClassifierLayer(unittest.TestCase):
         from agent_sec_cli.prompt_scanner.models.model_manager import (
             ClassifierResult,
         )
+        from agent_sec_cli.prompt_scanner.models.prompt_guard import (  # noqa: PLC0415
+            PromptGuardClassifier,
+        )
         from agent_sec_cli.prompt_scanner.result import ThreatType
 
         threat_map = {
@@ -518,6 +556,8 @@ class TestMLClassifierLayer(unittest.TestCase):
             probabilities={"BENIGN": 1 - confidence, label: confidence},
             threat_type=threat_map.get(label, ThreatType.BENIGN),
         )
+        # Only the inference call is mocked; judgment stays the real one.
+        mock_clf.is_threat.side_effect = PromptGuardClassifier.is_threat
         layer._classifier = mock_clf
         with patch.object(layer.__class__, "is_available", return_value=True):
             return layer.detect("some text")
@@ -553,6 +593,92 @@ class TestMLClassifierLayer(unittest.TestCase):
     def test_detect_layer_name(self) -> None:
         result = self._detect_with_mocked_availability("BENIGN", 0.99)
         self.assertEqual(result.layer_name, "ml_classifier")
+
+    def _detect_with_classifier_result(self, clf_result: Any) -> Any:
+        """Run detect() against a mocked backend returning *clf_result*.
+
+        ``_threshold`` is set to None to mirror the Qwen3Guard path where
+        judgment is purely label-based (no confidence threshold).  Only the
+        inference call is mocked; judgment uses the real Qwen3Guard logic.
+        """
+        from agent_sec_cli.prompt_scanner.models.qwen3_guard import (  # noqa: PLC0415
+            Qwen3GuardClassifier,
+        )
+
+        layer = self.MLClassifier.__new__(self.MLClassifier)
+        layer._threshold = None
+        mock_clf = MagicMock()
+        mock_clf.classify.return_value = clf_result
+        mock_clf.is_threat.side_effect = Qwen3GuardClassifier.is_threat
+        layer._classifier = mock_clf
+        with patch.object(layer.__class__, "is_available", return_value=True):
+            return layer.detect("some text")
+
+    def test_detect_unknown_label_not_flagged(self) -> None:
+        # Qwen3Guard unparseable output (UNKNOWN) fails open by design: it
+        # is not positive evidence of a threat, so the prompt is not blocked.
+        from agent_sec_cli.prompt_scanner.models.model_manager import (  # noqa: PLC0415
+            ClassifierResult,
+        )
+        from agent_sec_cli.prompt_scanner.result import (  # noqa: PLC0415
+            ThreatType,
+        )
+
+        result = self._detect_with_classifier_result(
+            ClassifierResult(
+                label="UNKNOWN",
+                confidence=None,
+                probabilities={"UNKNOWN": 1.0},
+                threat_type=ThreatType.UNCLASSIFIED_VIOLATION,
+            )
+        )
+        self.assertFalse(result.detected)
+        self.assertEqual(result.score, 0.0)
+        self.assertEqual(result.details, [])
+
+    def test_detect_unknown_label_leads_to_pass_verdict(self) -> None:
+        # With no other layer firing, an UNKNOWN ML result yields PASS.
+        from agent_sec_cli.prompt_scanner.models.model_manager import (  # noqa: PLC0415
+            ClassifierResult,
+        )
+        from agent_sec_cli.prompt_scanner.result import (  # noqa: PLC0415
+            ThreatType,
+            Verdict,
+        )
+        from agent_sec_cli.prompt_scanner.verdict import (  # noqa: PLC0415
+            determine_verdict,
+        )
+
+        result = self._detect_with_classifier_result(
+            ClassifierResult(
+                label="UNKNOWN",
+                confidence=None,
+                probabilities={"UNKNOWN": 1.0},
+                threat_type=ThreatType.UNCLASSIFIED_VIOLATION,
+            )
+        )
+        self.assertEqual(determine_verdict([result]), Verdict.PASS)
+
+    def test_detect_qwen3_guard_safe_not_flagged(self) -> None:
+        # Regression guard: the explicit UNKNOWN branch must not affect the
+        # Qwen3Guard SAFE result.
+        from agent_sec_cli.prompt_scanner.models.model_manager import (  # noqa: PLC0415
+            ClassifierResult,
+        )
+        from agent_sec_cli.prompt_scanner.result import (  # noqa: PLC0415
+            ThreatType,
+        )
+
+        result = self._detect_with_classifier_result(
+            ClassifierResult(
+                label="SAFE",
+                confidence=None,
+                probabilities={"SAFE": 1.0},
+                threat_type=ThreatType.BENIGN,
+            )
+        )
+        self.assertFalse(result.detected)
+        self.assertEqual(result.score, 0.0)
 
 
 # ---------------------------------------------------------------------------

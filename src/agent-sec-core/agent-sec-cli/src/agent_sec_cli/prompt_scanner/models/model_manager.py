@@ -52,7 +52,9 @@ class ClassifierResult(BaseModel):
     """
 
     label: str  # Raw model label, e.g. "JAILBREAK", "BENIGN"
-    confidence: float  # Probability of the predicted label (0.0–1.0)
+    confidence: (
+        float | None
+    )  # Probability of the predicted label (0.0–1.0), or None if model does not output confidence
     probabilities: dict[str, float]  # Full label -> prob mapping
     threat_type: ThreatType  # Domain type translated by the classifier wrapper
 

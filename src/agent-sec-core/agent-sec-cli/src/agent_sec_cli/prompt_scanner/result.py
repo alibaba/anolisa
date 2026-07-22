@@ -9,11 +9,27 @@ from pydantic import BaseModel, Field
 class ThreatType(str, Enum):
     """Type of detected threat.
 
+    Injection / jailbreak (attack technique):
     - DIRECT_INJECTION:   User input directly contains injection payload.
     - INDIRECT_INJECTION: Injection payload delivered via indirect channels
                           (RAG retrieval, tool output, memory/context injection)
                           — also known as IPI (Indirect Prompt Injection).
     - JAILBREAK:          Attempt to bypass safety restrictions or role-play.
+
+    Content safety violations (Qwen3Guard categories, produced by the L2
+    Qwen3Guard backend when it classifies the prompt as Controversial/Unsafe):
+    - VIOLENT:                  Violent content.
+    - NON_VIOLENT_ILLEGAL_ACTS: Non-violent illegal acts.
+    - SEXUAL_CONTENT:           Sexual content or sexual acts.
+    - PII:                      Personally identifiable information leakage.
+    - SUICIDE_SELF_HARM:        Suicide & self-harm.
+    - UNETHICAL_ACTS:           Unethical acts.
+    - POLITICALLY_SENSITIVE:    Politically sensitive topics.
+    - COPYRIGHT_VIOLATION:      Copyright violation.
+    - UNCLASSIFIED_VIOLATION:   Threat detected but the specific category
+                                could not be mapped to a known type.
+
+    Status:
     - BENIGN:             No threat detected.
     - NOT_SCANNED:        No detection layers executed (all detectors unavailable).
     """
@@ -22,6 +38,15 @@ class ThreatType(str, Enum):
     INDIRECT_INJECTION = "indirect_injection"
     JAILBREAK = "jailbreak"
     BENIGN = "benign"
+    VIOLENT = "violent"
+    NON_VIOLENT_ILLEGAL_ACTS = "non_violent_illegal_acts"
+    SEXUAL_CONTENT = "sexual_content"
+    PII = "pii"
+    SUICIDE_SELF_HARM = "suicide_self_harm"
+    UNETHICAL_ACTS = "unethical_acts"
+    POLITICALLY_SENSITIVE = "politically_sensitive"
+    COPYRIGHT_VIOLATION = "copyright_violation"
+    UNCLASSIFIED_VIOLATION = "unclassified_violation"
     NOT_SCANNED = "not_scanned"
 
 
@@ -63,7 +88,9 @@ class LayerResult(BaseModel):
 
     layer_name: str  # e.g. "rule_engine", "ml_classifier"
     detected: bool  # Whether this layer detected a threat
-    score: float  # Risk score from this layer (0.0 - 1.0)
+    score: (
+        float | None
+    )  # Risk score from this layer (0.0 - 1.0), or None if model does not output confidence
     details: list[ThreatDetail] = Field(default_factory=list)
     latency_ms: float = 0.0
 
@@ -88,7 +115,11 @@ class ScanResult(BaseModel):
             ok:             True when no threat detected.
             verdict:        PASS / WARN / DENY / ERROR.
             risk_level:     critical / high / medium / low (derived from verdict).
-            threat_type:    direct_injection / indirect_injection / jailbreak / benign.
+            threat_type:    direct_injection / indirect_injection / jailbreak /
+                            violent / non_violent_illegal_acts / sexual_content /
+                            pii / suicide_self_harm / unethical_acts /
+                            politically_sensitive / copyright_violation /
+                            unclassified_violation / benign.
             confidence:     Best available confidence (ML softmax prob when available,
                             otherwise highest rule-engine score).  None when PASS/ERROR.
             summary:        Human-readable one-liner.
@@ -114,7 +145,7 @@ class ScanResult(BaseModel):
             {
                 "layer": lr.layer_name,
                 "detected": lr.detected,
-                "score": round(lr.score, 4),
+                "score": round(lr.score, 4) if lr.score is not None else None,
                 "latency_ms": round(lr.latency_ms, 2),
             }
             for lr in self.layer_results
@@ -202,7 +233,8 @@ class ScanResult(BaseModel):
                 break
 
         threat_label = self.threat_type.value.replace("_", " ").title()
-        base = f"[{layer_tag}] {threat_label} detected (confidence: {confidence_pct}%)"
+        conf_str = f" (confidence: {confidence_pct}%)" if confidence_pct else ""
+        base = f"[{layer_tag}] {threat_label} detected{conf_str}"
         if evidence:
             base = f'{base} — "{evidence}"'
         return base
@@ -231,10 +263,11 @@ def _best_confidence(layer_results: list[LayerResult]) -> float:
 
     Prefers the ML classifier score (model-backed softmax probability) over
     rule-engine scores.  Falls back to the highest score among all detected
-    layers when no ML result is present.
+    layers when no ML result is present.  Returns 0.0 when scores are None
+    (e.g. Qwen3Guard which does not output confidence).
     """
     for lr in layer_results:
         if lr.layer_name == "ml_classifier" and lr.detected:
-            return lr.score
-    scores = [lr.score for lr in layer_results if lr.detected]
+            return lr.score if lr.score is not None else 0.0
+    scores = [lr.score for lr in layer_results if lr.detected and lr.score is not None]
     return max(scores) if scores else 0.0

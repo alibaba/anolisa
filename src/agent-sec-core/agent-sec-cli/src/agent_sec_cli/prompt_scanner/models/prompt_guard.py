@@ -199,6 +199,20 @@ class PromptGuardClassifier:
         probs_tensor = softmax(scaled, dim=-1)  # (batch, num_labels)
         return [self._probs_to_result(probs_tensor[i]) for i in range(len(texts))]
 
+    @staticmethod
+    def is_threat(result: ClassifierResult, threshold: float | None = None) -> bool:
+        """Judge whether a classification result exceeds the threat threshold.
+
+        Prompt Guard 2 is a binary classifier: the predicted label counts as
+        a threat when its softmax probability reaches *threshold*.  A missing
+        confidence or threshold yields False (insufficient evidence).
+        """
+        if result.confidence is None or threshold is None:
+            return False
+        return (
+            result.threat_type != ThreatType.BENIGN and result.confidence >= threshold
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

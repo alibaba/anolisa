@@ -26,6 +26,12 @@ class ModelLoadError(PromptScannerError):
     pass
 
 
+class ModelInferenceError(PromptScannerError):
+    """Raised when model inference fails (service unreachable, bad response)."""
+
+    pass
+
+
 class ConfigError(PromptScannerError):
     """Raised when scanner configuration is invalid."""
 

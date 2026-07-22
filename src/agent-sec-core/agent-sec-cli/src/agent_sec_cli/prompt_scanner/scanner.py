@@ -89,7 +89,6 @@ class PromptScanner:
 
     def warmup(self) -> None:
         """Pre-download all ML models so the first scan avoids a network fetch.
-
         Only downloads model files to the local cache with **visible**
         progress output.  Does **not** load models into memory — that
         happens lazily on the first ``scan()`` call via ``load_model``
@@ -294,21 +293,24 @@ class PromptScanner:
 
     @staticmethod
     def _determine_threat_type(layer_results: list[LayerResult]) -> ThreatType:
-        """Infer the primary threat type from layer results."""
+        """Infer the primary threat type from layer results.
+
+        Each ThreatDetail.category stores a ThreatType value (e.g.
+        ``"direct_injection"``, ``"violent"``).  We reverse-lookup it via
+        the enum so newly added types are supported automatically.
+        Non-standard categories (e.g. legacy ``"injection"``) fall through
+        to DIRECT_INJECTION.
+        """
         if not layer_results:
             return ThreatType.NOT_SCANNED
         for lr in layer_results:
             if lr.detected:
                 for detail in lr.details:
-                    if detail.category == "jailbreak":
-                        return ThreatType.JAILBREAK
-                    if detail.category == "direct_injection":
-                        return ThreatType.DIRECT_INJECTION
-                    if detail.category == "indirect_injection":
-                        return ThreatType.INDIRECT_INJECTION
-                    if detail.category == "injection":
-                        return ThreatType.DIRECT_INJECTION
-                # Default to direct_injection if category not explicit
+                    try:
+                        return ThreatType(detail.category)
+                    except ValueError:
+                        continue
+                # Default to direct_injection if category not a known ThreatType
                 return ThreatType.DIRECT_INJECTION
         return ThreatType.BENIGN
 

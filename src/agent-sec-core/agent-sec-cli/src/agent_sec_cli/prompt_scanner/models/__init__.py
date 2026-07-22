@@ -13,6 +13,9 @@ from agent_sec_cli.prompt_scanner.models.multi_turn_intent import (
 from agent_sec_cli.prompt_scanner.models.prompt_guard import (
     PromptGuardClassifier,
 )
+from agent_sec_cli.prompt_scanner.models.qwen3_guard import (
+    Qwen3GuardClassifier,
+)
 
 __all__ = [
     "ModelManager",
@@ -20,4 +23,5 @@ __all__ = [
     "DeBERTaClassifier",
     "MultiTurnIntentClassifier",
     "PromptGuardClassifier",
+    "Qwen3GuardClassifier",
 ]

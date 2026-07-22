@@ -310,6 +310,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
             text="hello",
             mode="standard",
             source="",
+            model="",
         )
 
     def test_middleware_text_format_outputs_verdict_line(self) -> None:
@@ -338,6 +339,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
             text="hello",
             mode="standard",
             source="",
+            model="",
         )
 
     def test_middleware_text_format_error_outputs_to_stderr(self) -> None:
@@ -371,6 +373,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
             text="hello",
             mode="standard",
             source="",
+            model="",
         )
 
     def test_middleware_json_format_falls_back_to_data_when_stdout_empty(self) -> None:
@@ -419,6 +422,7 @@ class TestCliDaemonFallbackHandling(unittest.TestCase):
             text="hello",
             mode="standard",
             source="",
+            model="",
         )
 
     def test_should_use_daemon_true_without_socket_env(self) -> None:
@@ -881,6 +885,7 @@ class TestCliMultiTurnMode(unittest.TestCase):
             text="hello",
             mode="multi_turn",
             source="",
+            model="",
             history=[{"role": "user", "content": "hi"}],
             assistant_response="world",
         )

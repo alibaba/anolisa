@@ -22,6 +22,10 @@ scanner_app = typer.Typer(
     name="scan-prompt", help="Prompt injection / jailbreak scanner"
 )
 DAEMON_REQUEST_TIMEOUT_MS = 30_000
+_SUPPORTED_MODELS = {
+    "LLM-Research/Llama-Prompt-Guard-2-86M",
+    "qwen3guard:0.6b",
+}
 
 
 @scanner_app.command("warmup")
@@ -106,6 +110,12 @@ def scan_prompt(
         #       transcript, or any multi-paragraph text stored in a file.
         help="Path to a file containing prompts (one per line). "
         "If omitted, reads from stdin.",
+    ),
+    model: str = typer.Option(
+        "",
+        "--model",
+        help="L2 model name. 'qwen3guard:0.6b' (Ollama) or "
+        "'LLM-Research/Llama-Prompt-Guard-2-86M' (default).",
     ),
 ) -> None:
     """Scan prompt text for injection / jailbreak attempts.
@@ -201,6 +211,7 @@ def scan_prompt(
                 text=current_query,
                 mode=scan_mode.value,
                 source=source,
+                model=model,
                 history=history,
                 assistant_response=assistant_response,
             )
@@ -258,6 +269,19 @@ def scan_prompt(
 
     use_daemon = _should_use_daemon()
 
+    # Validate model name
+    if model and model not in _SUPPORTED_MODELS:
+        typer.echo(
+            f"Error: Unsupported model '{model}'. "
+            f"Supported: {', '.join(sorted(_SUPPORTED_MODELS))}.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Qwen3Guard (Ollama) uses the local middleware path, not daemon.
+    if model == "qwen3guard:0.6b":
+        use_daemon = False
+
     # --- Scan through daemon unless explicitly disabled, otherwise use local middleware ---
     # Each text is scanned individually so that every invocation gets its own
     # daemon request or local SecurityEvent record.  This ensures precise per-input
@@ -291,6 +315,7 @@ def scan_prompt(
                 text=t,
                 mode=scan_mode.value,
                 source=source,
+                model=model,
             )
         except Exception as exc:
             _print_error_json(f"Scanner error: {exc}")

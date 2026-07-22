@@ -801,7 +801,7 @@ def test_prompt_model_preload_sync_does_not_redirect_daemon_stdio(monkeypatch, c
             calls.append(("init", mode.value))
 
         def warmup(self):
-            raise AssertionError("daemon preload should not run download warmup")
+            raise AssertionError("daemon preload should not call warmup during probe")
 
         def scan(self, text, source=None):
             assert sys.stdout is original_stdout

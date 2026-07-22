@@ -9,7 +9,13 @@ from agent_sec_cli.prompt_scanner.exceptions import LayerNotAvailableError
 from agent_sec_cli.prompt_scanner.models.model_manager import ModelManager
 from agent_sec_cli.prompt_scanner.models.prompt_guard import (
     PromptGuardClassifier,
-    get_default_threshold,
+)
+from agent_sec_cli.prompt_scanner.models.prompt_guard import (
+    get_default_threshold as get_prompt_guard_default_threshold,
+)
+from agent_sec_cli.prompt_scanner.models.qwen3_guard import (
+    Qwen3GuardClassifier,
+    is_qwen3_guard_model,
 )
 from agent_sec_cli.prompt_scanner.result import (
     LayerResult,
@@ -35,17 +41,21 @@ class MLClassifier(DetectionLayer):
         model_name: str = "LLM-Research/Llama-Prompt-Guard-2-86M",
         threshold: float | None = None,
     ) -> None:
-        with MLClassifier._manager_lock:
-            if MLClassifier._shared_manager is None:
-                MLClassifier._shared_manager = ModelManager()
-        self._classifier = PromptGuardClassifier(
-            model_name=model_name,
-            manager=MLClassifier._shared_manager,
-        )
-        # Fall back to the per-model recommended threshold when no override given.
-        self._threshold = (
-            threshold if threshold is not None else get_default_threshold(model_name)
-        )
+        if is_qwen3_guard_model(model_name):
+            self._classifier = Qwen3GuardClassifier(model_name=model_name)
+            # Qwen3Guard judgment is label-based (Safe/Controversial/Unsafe),
+            # no threshold needed.
+            self._threshold: float | None = None
+        else:
+            with MLClassifier._manager_lock:
+                if MLClassifier._shared_manager is None:
+                    MLClassifier._shared_manager = ModelManager()
+            self._classifier = PromptGuardClassifier(
+                model_name=model_name,
+                manager=MLClassifier._shared_manager,
+            )
+            default_threshold = get_prompt_guard_default_threshold(model_name)
+            self._threshold = threshold if threshold is not None else default_threshold
 
     @property
     def name(self) -> str:
@@ -61,7 +71,7 @@ class MLClassifier(DetectionLayer):
         self._classifier.warmup()
 
     def detect(self, text: str, metadata: dict[str, Any] | None = None) -> LayerResult:
-        """Classify *text* via PromptGuardClassifier and return a LayerResult.
+        """Classify *text* through the configured ML backend and return a LayerResult.
 
         Args:
             text:     Prompt text to classify (should be preprocessed).
@@ -84,28 +94,48 @@ class MLClassifier(DetectionLayer):
         latency_ms = (time.perf_counter() - t0) * 1000
 
         threat_type = result.threat_type
-        is_threat = (
-            threat_type != ThreatType.BENIGN and result.confidence >= self._threshold
-        )
+        # Threat judgment is delegated to the backend wrapper: Qwen3Guard is
+        # label-based (UNKNOWN fails open), PromptGuard is threshold-based.
+        is_threat = self._classifier.is_threat(result, self._threshold)
 
         details: list[ThreatDetail] = []
         if is_threat:
             details.append(
                 ThreatDetail(
                     rule_id=f"ML-{result.label}",
-                    description=(
-                        f"ML classifier detected {threat_type.value} "
-                        f"(confidence {result.confidence:.2%})"
+                    description=_build_description(
+                        result.label,
+                        threat_type,
+                        result.confidence,
                     ),
                     matched_text=text[:200],
                     category=threat_type.value,
                 )
             )
 
+        # score: None for models that do not output confidence (e.g. Qwen3Guard).
+        # 0.0 when no threat detected.
+        if not is_threat:
+            score: float | None = 0.0
+        else:
+            score = result.confidence
+
         return LayerResult(
             layer_name=self.name,
             detected=is_threat,
-            score=result.confidence if is_threat else 0.0,
+            score=score,
             details=details,
             latency_ms=latency_ms,
         )
+
+
+def _build_description(
+    label: str, threat_type: ThreatType, confidence: float | None
+) -> str:
+    """Build a human-readable ML finding description."""
+    conf_str = f" (confidence {confidence:.2%})" if confidence is not None else ""
+    if label.startswith("CONTROVERSIAL"):
+        return f"ML classifier reported controversial {threat_type.value}{conf_str}"
+    if label.startswith("UNSAFE"):
+        return f"ML classifier reported unsafe {threat_type.value}{conf_str}"
+    return f"ML classifier detected {threat_type.value}{conf_str}"

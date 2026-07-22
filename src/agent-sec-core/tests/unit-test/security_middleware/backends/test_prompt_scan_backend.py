@@ -640,5 +640,77 @@ class TestPromptScanBackendMultiTurn(unittest.TestCase):
         self.assertIn("Scanner error: ollama down", result.error)
 
 
+class TestPromptScanBackendModelOverride(unittest.TestCase):
+    """execute() must override the L2 model_name when --model is provided.
+
+    Only STANDARD/STRICT modes include the ml_classifier layer, so the
+    override only takes effect there.  FAST and MULTI_TURN ignore the
+    model kwarg (they have no L2 layer to reconfigure).
+    """
+
+    def setUp(self):
+        self.backend = PromptScanBackend()
+        self.ctx = RequestContext(action="prompt_scan")
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_standard_mode_with_model_uses_config_override(self, MockScanner):
+        scan_result = _make_scan_result()
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = scan_result
+        MockScanner.return_value = mock_scanner
+
+        self.backend.execute(
+            self.ctx, text="test", mode="standard", model="qwen3guard:0.6b"
+        )
+
+        # PromptScanner must be constructed with a config (not mode=).
+        call_kwargs = MockScanner.call_args.kwargs
+        self.assertNotIn("mode", call_kwargs)
+        self.assertIn("config", call_kwargs)
+        self.assertEqual(call_kwargs["config"].model_name, "qwen3guard:0.6b")
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_strict_mode_with_model_uses_config_override(self, MockScanner):
+        scan_result = _make_scan_result()
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = scan_result
+        MockScanner.return_value = mock_scanner
+
+        self.backend.execute(
+            self.ctx, text="test", mode="strict", model="qwen3guard:0.6b"
+        )
+
+        call_kwargs = MockScanner.call_args.kwargs
+        self.assertNotIn("mode", call_kwargs)
+        self.assertIn("config", call_kwargs)
+        self.assertEqual(call_kwargs["config"].model_name, "qwen3guard:0.6b")
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_fast_mode_ignores_model_override(self, MockScanner):
+        """FAST mode has no ml_classifier layer, so --model is a no-op."""
+        scan_result = _make_scan_result()
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = scan_result
+        MockScanner.return_value = mock_scanner
+
+        self.backend.execute(
+            self.ctx, text="test", mode="fast", model="qwen3guard:0.6b"
+        )
+
+        MockScanner.assert_called_once_with(mode=ScanMode.FAST)
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_empty_model_falls_back_to_mode_constructor(self, MockScanner):
+        """An empty model string preserves the default mode-based construction."""
+        scan_result = _make_scan_result()
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = scan_result
+        MockScanner.return_value = mock_scanner
+
+        self.backend.execute(self.ctx, text="test", mode="standard", model="")
+
+        MockScanner.assert_called_once_with(mode=ScanMode.STANDARD)
+
+
 if __name__ == "__main__":
     unittest.main()

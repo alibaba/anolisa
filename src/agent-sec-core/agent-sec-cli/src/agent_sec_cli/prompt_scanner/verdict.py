@@ -6,7 +6,7 @@ PASS   No layer detected a threat.  Message continues unchanged.
 WARN   L1 (rule engine) fired but L2 (ML) was present and did NOT
        confirm.  Regex heuristic may be a false-positive; log and
        alert, do not treat as definitive.
-DENY   L2 (ML classifier) confirmed a threat, OR L1 fired in FAST
+DENY L2 (ML classifier) confirmed a threat, OR L1 fired in FAST
        mode where no L2 layer ran (L1 is the sole authority),
        OR L4 (multi_turn_intent) detected a multi-turn jailbreak.
        Log as high-severity event.
@@ -30,12 +30,13 @@ def determine_verdict(layer_results: list[LayerResult]) -> Verdict:
 
     Decision rules (evaluated in order):
 
-    1. Any confirm-layer (L2 ML or L4 multi_turn_intent) detected → **DENY**
-    2. L1 detected AND no confirm-layer was present (FAST mode) → **DENY**
+    1. Any confirm-layer (L2 ML or L4 multi_turn_intent) detected unsafe → **DENY**
+    2. Qwen3Guard L2 reported Controversial severity → **WARN**
+    3. L1 detected AND no confirm-layer was present (FAST mode) → **DENY**
        L1 is the sole authority when L2 has not run.
-    3. L1 detected AND confirm-layer was present but did not fire → **WARN**
+    4. L1 detected AND confirm-layer was present but did not fire → **WARN**
        ML did not confirm the regex signal; treat as possible false-positive.
-    4. No layer detected → **PASS**
+    5. No layer detected → **PASS**
 
     Args:
         layer_results: Ordered list of per-layer results from the scanner.
@@ -44,10 +45,16 @@ def determine_verdict(layer_results: list[LayerResult]) -> Verdict:
         The applicable ``Verdict``.
     """
     confirmed = any(
-        lr.detected and lr.layer_name in _CONFIRM_LAYERS for lr in layer_results
+        lr.detected
+        and lr.layer_name in _CONFIRM_LAYERS
+        and not _is_controversial_ml_result(lr)
+        for lr in layer_results
     )
     if confirmed:
         return Verdict.DENY
+
+    if any(_is_controversial_ml_result(lr) for lr in layer_results):
+        return Verdict.WARN
 
     any_detected = any(lr.detected for lr in layer_results)
     if any_detected:
@@ -63,3 +70,10 @@ def determine_verdict(layer_results: list[LayerResult]) -> Verdict:
             return Verdict.DENY
 
     return Verdict.PASS
+
+
+def _is_controversial_ml_result(layer_result: LayerResult) -> bool:
+    """Return whether a layer result is Qwen3Guard Controversial severity."""
+    return layer_result.layer_name == "ml_classifier" and any(
+        detail.rule_id.startswith("ML-CONTROVERSIAL") for detail in layer_result.details
+    )
