@@ -1,6 +1,8 @@
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, EventIdentity, FileAction, SecurityEvent, SecurityEventKind,
@@ -9,30 +11,66 @@ use agentsight_enforcement_protocol::{
 use super::enforcer::{ContainmentReadinessLease, StampedBinding, StampedBindings};
 use super::*;
 use crate::enforcement::{
-    ApplyPolicy, Binding, BindingState, EnforcementClient, EnforcementCoordinator, EnforcementStore,
+    ApplyPolicy, Binding, BindingState, EnforcementClient, EnforcementCoordinator,
+    EnforcementStore, read_process_start_time,
 };
 use crate::ingestion_readiness::{GenerationReadiness, ReadinessLease, ReadinessStamp};
 use crate::security::{ContainmentLifecycle, RiskCase, RiskSeverity};
 
 const SECOND_NS: u64 = 1_000_000_000;
+const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct LeasePause {
-    entered: Barrier,
-    resume: Barrier,
+    entered: mpsc::Sender<()>,
+    resume: mpsc::Receiver<()>,
 }
 
-fn pause_next(slot: &Mutex<Option<Arc<LeasePause>>>) -> Arc<LeasePause> {
-    let pause = Arc::new(LeasePause {
-        entered: Barrier::new(2),
-        resume: Barrier::new(2),
+impl LeasePause {
+    fn enter_and_wait(self) {
+        self.entered
+            .send(())
+            .expect("lease waiter should still be observing entry");
+        self.resume
+            .recv_timeout(SYNC_TIMEOUT)
+            .expect("lease waiter should be resumed before the test timeout");
+    }
+}
+
+struct LeasePauseHandle {
+    entered: mpsc::Receiver<()>,
+    resume: mpsc::Sender<()>,
+}
+
+impl LeasePauseHandle {
+    fn wait_until_entered(&self) {
+        self.entered
+            .recv_timeout(SYNC_TIMEOUT)
+            .expect("reconciler should reach the lease before the test timeout");
+    }
+
+    fn resume(&self) {
+        self.resume
+            .send(())
+            .expect("lease waiter should still be waiting for resume");
+    }
+}
+
+fn pause_next(slot: &Mutex<Option<LeasePause>>) -> LeasePauseHandle {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    *slot.lock().expect("lease pause should lock") = Some(LeasePause {
+        entered: entered_tx,
+        resume: resume_rx,
     });
-    *slot.lock().expect("lease pause should lock") = Some(Arc::clone(&pause));
-    pause
+    LeasePauseHandle {
+        entered: entered_rx,
+        resume: resume_tx,
+    }
 }
 
 struct PausingProductionEnforcer {
     coordinator: Arc<EnforcementCoordinator>,
-    lease_pause: Mutex<Option<Arc<LeasePause>>>,
+    lease_pause: Mutex<Option<LeasePause>>,
     detach_calls: AtomicUsize,
 }
 
@@ -45,7 +83,7 @@ impl PausingProductionEnforcer {
         }
     }
 
-    fn pause_next_lease(&self) -> Arc<LeasePause> {
+    fn pause_next_lease(&self) -> LeasePauseHandle {
         pause_next(&self.lease_pause)
     }
 }
@@ -77,8 +115,7 @@ impl ContainmentEnforcer for PausingProductionEnforcer {
             .expect("lease pause should lock")
             .take()
         {
-            pause.entered.wait();
-            pause.resume.wait();
+            pause.enter_and_wait();
         }
         ContainmentEnforcer::lease_ready(self.coordinator.as_ref(), stamp)
     }
@@ -127,14 +164,14 @@ fn exact_binding_from_generation_a_cannot_activate_under_generation_b() {
     ));
     let reconciling = Arc::clone(&containment);
     let worker = thread::spawn(move || reconciling.reconcile_once(1_000));
-    pause.entered.wait();
+    pause.wait_until_entered();
 
     let successor = enforcement.ingestion_readiness().candidate();
     enforcement
         .ingestion_readiness()
         .install(Arc::clone(&successor));
     assert!(enforcement.ingestion_readiness().mark_ready(&successor));
-    pause.resume.wait();
+    pause.resume();
     assert!(matches!(
         worker.join().expect("reconciler should stop"),
         Err(ContainmentError::Enforcer(_))
@@ -157,7 +194,7 @@ fn exact_binding_from_generation_a_cannot_activate_under_generation_b() {
 struct ApplyingGenerationEnforcer {
     readiness: GenerationReadiness,
     bindings: Mutex<Vec<Binding>>,
-    lease_pause: Mutex<Option<Arc<LeasePause>>>,
+    lease_pause: Mutex<Option<LeasePause>>,
     apply_calls: AtomicUsize,
     detach_calls: AtomicUsize,
 }
@@ -179,7 +216,7 @@ impl ApplyingGenerationEnforcer {
         }
     }
 
-    fn pause_next_lease(&self) -> Arc<LeasePause> {
+    fn pause_next_lease(&self) -> LeasePauseHandle {
         pause_next(&self.lease_pause)
     }
 
@@ -233,8 +270,7 @@ impl ContainmentEnforcer for ApplyingGenerationEnforcer {
             .expect("lease pause should lock")
             .take()
         {
-            pause.entered.wait();
-            pause.resume.wait();
+            pause.enter_and_wait();
         }
         self.readiness
             .lease_ready(stamp)
@@ -253,17 +289,28 @@ fn apply_ack_from_generation_a_cannot_activate_under_generation_b() {
     assert!(readiness.mark_ready(&generation_a));
     let source_binding_id = Uuid::new_v4();
     let action_binding_id = Uuid::new_v4();
+    let mut target = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("live test target should start");
+    let pid = i32::try_from(target.id()).expect("test PID should fit in i32");
+    let process_start_time =
+        read_process_start_time(pid).expect("live test process should have a start time");
     let enforcer = Arc::new(ApplyingGenerationEnforcer::new(
         readiness.clone(),
         binding(
             source_binding_id,
-            4242,
-            99,
+            pid,
+            process_start_time,
             audit_policy("/root/secret.txt"),
         ),
     ));
-    let (security_store, case_id, action) =
-        security_fixture(source_binding_id, action_binding_id, 4242, 99);
+    let (security_store, case_id, action) = security_fixture(
+        source_binding_id,
+        action_binding_id,
+        pid,
+        process_start_time,
+    );
     let pause = enforcer.pause_next_lease();
     let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer.clone();
     let containment = Arc::new(ContainmentCoordinator::new(
@@ -272,12 +319,12 @@ fn apply_ack_from_generation_a_cannot_activate_under_generation_b() {
     ));
     let reconciling = Arc::clone(&containment);
     let worker = thread::spawn(move || reconciling.reconcile_once(1_000));
-    pause.entered.wait();
+    pause.wait_until_entered();
 
     let generation_b = readiness.candidate();
     readiness.install(Arc::clone(&generation_b));
     assert!(readiness.mark_ready(&generation_b));
-    pause.resume.wait();
+    pause.resume();
     assert!(matches!(
         worker.join().expect("reconciler should stop"),
         Err(ContainmentError::Enforcer(_))
@@ -292,6 +339,8 @@ fn apply_ack_from_generation_a_cannot_activate_under_generation_b() {
     assert_active(&security_store, case_id, &action);
     assert_eq!(enforcer.apply_calls.load(Ordering::Acquire), 1);
     assert_eq!(enforcer.detach_calls.load(Ordering::Acquire), 0);
+    target.kill().expect("live test target should stop");
+    target.wait().expect("live test target should be reaped");
 }
 
 fn security_fixture(
