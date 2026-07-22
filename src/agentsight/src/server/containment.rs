@@ -15,7 +15,7 @@ use crate::enforcement::read_process_start_time;
 use crate::health::{AgentHealthState, AgentHealthStatus, HealthStore};
 use crate::security::{
     ContainmentAction, ContainmentCandidate, ContainmentCoordinator, ContainmentError,
-    ContainmentPlan, ContainmentRequest,
+    ContainmentFailureStage, ContainmentLifecycle, ContainmentPlan, ContainmentRequest,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
@@ -222,7 +222,7 @@ fn containment_candidate_view(candidate: &ContainmentCandidate) -> Value {
     })
 }
 
-fn containment_action_view(action: &ContainmentAction) -> Value {
+pub(super) fn containment_action_view(action: &ContainmentAction) -> Value {
     json!({
         "action_id": action.action_id,
         "case_id": action.case_id,
@@ -236,10 +236,36 @@ fn containment_action_view(action: &ContainmentAction) -> Value {
         "blocked_at_ns": action.blocked_at_ns,
         "requested_by": action.requested_by,
         "failure_stage": action.failure_stage,
+        "failure_summary": failure_summary(action.lifecycle_state, action.failure_stage),
         "attempt_count": action.attempt_count,
         "next_retry_at_ns": action.next_retry_at_ns,
         "created_at_ns": action.created_at_ns,
         "updated_at_ns": action.updated_at_ns,
+    })
+}
+
+pub(super) fn case_detail_view(mut detail: Value, action: Option<&ContainmentAction>) -> Value {
+    if let Some(object) = detail.as_object_mut() {
+        object.insert(
+            "containment".into(),
+            action.map(containment_action_view).unwrap_or(Value::Null),
+        );
+    }
+    detail
+}
+
+fn failure_summary(
+    lifecycle: ContainmentLifecycle,
+    stage: Option<ContainmentFailureStage>,
+) -> Option<&'static str> {
+    if lifecycle != ContainmentLifecycle::Failed {
+        return None;
+    }
+    Some(match stage {
+        Some(ContainmentFailureStage::Attach) => "策略挂载失败，请确认 Agent 与执行器状态后重试",
+        Some(ContainmentFailureStage::Detach) => "策略解除失败，请确认执行器状态后重试",
+        Some(ContainmentFailureStage::Reconcile) => "策略状态恢复失败，请确认执行器状态后重试",
+        None => "策略执行失败，请确认 Agent 与执行器状态后重试",
     })
 }
 

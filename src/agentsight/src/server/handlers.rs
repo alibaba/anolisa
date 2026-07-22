@@ -793,7 +793,14 @@ pub async fn audit_case_detail(
         Err(_) => return bad_request_response("case_id must be a UUID".into()),
     };
     match data.security_store.case_detail(case_id) {
-        Ok(detail) => local_security_response(StatusCode::OK, "found", json!(detail)),
+        Ok(detail) => match data.security_store.latest_containment_action(case_id) {
+            Ok(action) => local_security_response(
+                StatusCode::OK,
+                "found",
+                super::containment::case_detail_view(json!(detail), action.as_ref()),
+            ),
+            Err(error) => security_store_error(error),
+        },
         Err(SecurityStoreError::MissingCase(_)) => local_security_response(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -955,7 +962,10 @@ mod tests {
     };
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
-    use crate::security::{RiskCase, RiskCaseStatus, RiskSeverity};
+    use crate::security::{
+        ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, RiskCase, RiskCaseStatus,
+        RiskSeverity,
+    };
     use crate::storage::sqlite::genai::{PendingCallInfo, PendingOrigin};
     use agentsight_enforcement_protocol::{
         EventIdentity, FileAction, SecurityEvent, SecurityEventKind,
@@ -1069,6 +1079,82 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = service_response_json(response).await;
         assert_eq!(body["data"]["evidence"].as_array().map(Vec::len), Some(4));
+        assert!(body["data"]["containment"].is_null());
+    }
+
+    #[actix_web::test]
+    async fn security_case_detail_keeps_sanitized_containment_after_resolution() {
+        let data = test_app_state(0);
+        let case_id = Uuid::new_v4();
+        data.security_store
+            .upsert_case(
+                &RiskCase {
+                    case_id,
+                    correlation_key: "contained-resolved-fixture".into(),
+                    policy_id: "credential-exfiltration".into(),
+                    policy_revision: 7,
+                    agent_id: "hermes-test".into(),
+                    session_id: Some("session-1".into()),
+                    severity: RiskSeverity::High,
+                    risk_score: 90,
+                    status: RiskCaseStatus::Resolved,
+                    blocked: true,
+                    opened_at_ns: 1,
+                    updated_at_ns: 10,
+                    summary: "Resolved credential exfiltration".into(),
+                },
+                &[],
+            )
+            .unwrap();
+        data.security_store
+            .insert_containment_action(&ContainmentAction {
+                action_id: Uuid::new_v4(),
+                case_id,
+                binding_id: Uuid::new_v4(),
+                agent_id: "hermes-test".into(),
+                root_pid: 4242,
+                process_start_time: 99,
+                source_path: "/root/private-credential".into(),
+                duration_secs: Some(900),
+                expires_at_ns: Some(900_000_000_000),
+                lifecycle_state: ContainmentLifecycle::Failed,
+                blocked_at_ns: Some(8),
+                requested_by: "dashboard".into(),
+                failure_stage: Some(ContainmentFailureStage::Attach),
+                failure_reason: Some("internal socket /run/private.sock policy_dsl".into()),
+                attempt_count: 3,
+                next_retry_at_ns: None,
+                created_at_ns: 5,
+                updated_at_ns: 10,
+            })
+            .unwrap();
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(super::super::configure_routes),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/api/audit/cases/{case_id}"))
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = service_response_json(response).await;
+        assert_eq!(body["data"]["status"], "resolved");
+        assert_eq!(body["data"]["containment"]["lifecycle_state"], "failed");
+        assert_eq!(
+            body["data"]["containment"]["failure_summary"],
+            "策略挂载失败，请确认 Agent 与执行器状态后重试"
+        );
+        let rendered = body.to_string();
+        assert!(!rendered.contains("/root/private-credential"));
+        assert!(!rendered.contains("/run/private.sock"));
+        assert!(!rendered.contains("policy_dsl"));
     }
 
     #[actix_web::test]

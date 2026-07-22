@@ -16,7 +16,9 @@ use uuid::Uuid;
 
 use super::super::auth::{AuthMiddleware, DashboardAuth};
 use super::super::{AppState, SecurityObservabilityConfig, configure_routes};
-use super::{start_reconciler, stop_reconciler, trusted_candidates};
+use super::{
+    case_detail_view, failure_summary, start_reconciler, stop_reconciler, trusted_candidates,
+};
 use crate::ReadinessStamp;
 use crate::config::ServerAuthConfig;
 use crate::enforcement::ApplyPolicy;
@@ -24,8 +26,9 @@ use crate::grader::EvaluationStore;
 use crate::health::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore};
 use crate::security::{
     ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError, ContainmentError,
-    ContainmentReadinessLease, RiskCase, RiskCaseStatus, RiskSeverity, SecurityStore,
-    StampedBinding, StampedBindings, stable_readiness_lease,
+    ContainmentFailureStage, ContainmentLifecycle, ContainmentReadinessLease, RiskCase,
+    RiskCaseStatus, RiskSeverity, SecurityStore, StampedBinding, StampedBindings,
+    stable_readiness_lease,
 };
 
 #[derive(Default)]
@@ -402,6 +405,38 @@ fn reconciler_lifecycle_stops_joins_and_allows_restart() {
     stop_reconciler(&coordinator, first);
     let second = start_reconciler(&coordinator).expect("worker should restart");
     stop_reconciler(&coordinator, second);
+}
+
+#[test]
+fn failure_summaries_are_stable_and_do_not_include_internal_details() {
+    assert_eq!(
+        failure_summary(
+            ContainmentLifecycle::Failed,
+            Some(ContainmentFailureStage::Attach),
+        ),
+        Some("策略挂载失败，请确认 Agent 与执行器状态后重试")
+    );
+    assert_eq!(
+        failure_summary(
+            ContainmentLifecycle::Failed,
+            Some(ContainmentFailureStage::Detach),
+        ),
+        Some("策略解除失败，请确认执行器状态后重试")
+    );
+    assert_eq!(
+        failure_summary(
+            ContainmentLifecycle::Failed,
+            Some(ContainmentFailureStage::Reconcile),
+        ),
+        Some("策略状态恢复失败，请确认执行器状态后重试")
+    );
+    assert_eq!(failure_summary(ContainmentLifecycle::Active, None), None);
+}
+
+#[test]
+fn empty_case_projection_has_an_explicit_containment_field() {
+    let view = case_detail_view(serde_json::json!({ "case_id": Uuid::nil() }), None);
+    assert!(view["containment"].is_null());
 }
 
 fn health_status(pid: u32, agent_name: &str) -> AgentHealthStatus {
