@@ -1097,9 +1097,9 @@ mod linux {
         let action = fixture.insert_action(
             ContainmentLifecycle::Pending,
             Some(60),
-            Some(1_000),
+            Some(2_000),
             0,
-            None,
+            Some(1_000),
         );
 
         fixture
