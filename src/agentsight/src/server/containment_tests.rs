@@ -23,7 +23,8 @@ use crate::ReadinessStamp;
 use crate::config::ServerAuthConfig;
 use crate::enforcement::ApplyPolicy;
 use crate::grader::EvaluationStore;
-use crate::health::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore};
+use crate::health::store::AgentRole;
+use crate::health::{AgentHealthState, AgentHealthStatus, HealthStore};
 use crate::security::{
     ContainmentAction, ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError,
     ContainmentError, ContainmentFailureStage, ContainmentLifecycle, ContainmentReadinessLease,
