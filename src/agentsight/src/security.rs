@@ -6,7 +6,8 @@ mod store;
 
 pub use coordinator::{SecurityCoordinator, SecurityCoordinatorError};
 pub use query::{
-    RiskCase, RiskCaseDetail, RiskCaseStatus, RiskSeverity, SecurityCountBy, SecurityEventFilter,
-    SecurityEventPage, SecuritySummary,
+    ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, RiskCase, RiskCaseDetail,
+    RiskCaseStatus, RiskSeverity, SecurityCountBy, SecurityEventFilter, SecurityEventPage,
+    SecuritySummary,
 };
 pub use store::{SecurityEventStore, SecurityStore, SecurityStoreError};

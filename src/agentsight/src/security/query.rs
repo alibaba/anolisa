@@ -147,3 +147,72 @@ pub struct RiskCaseDetail {
     /// Linked evidence ordered by position.
     pub evidence: Vec<SecurityEvent>,
 }
+
+/// Persisted lifecycle of one containment request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainmentLifecycle {
+    /// Persisted but not yet acknowledged by the enforcer.
+    Pending,
+    /// Enforcement is attached to the selected process tree.
+    Active,
+    /// Detachment is due, in progress, or awaiting retry.
+    Expiring,
+    /// Detachment was acknowledged by the enforcer.
+    Expired,
+    /// The current lifecycle operation failed terminally.
+    Failed,
+}
+
+/// Operation stage associated with a containment failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainmentFailureStage {
+    /// Applying the enforcement binding failed.
+    Attach,
+    /// Detaching the enforcement binding failed.
+    Detach,
+    /// Restoring persisted state against the enforcer failed.
+    Reconcile,
+}
+
+/// Durable record of one case containment request and its lifecycle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainmentAction {
+    /// Stable idempotency identifier for this request.
+    pub action_id: Uuid,
+    /// Audit case that initiated containment.
+    pub case_id: Uuid,
+    /// Enforcement binding created for this action.
+    pub binding_id: Uuid,
+    /// Product Agent identity used for correlation.
+    pub agent_id: String,
+    /// Selected process-tree root.
+    pub root_pid: i32,
+    /// Linux process start time used to reject PID reuse.
+    pub process_start_time: u64,
+    /// Canonical sensitive source path recovered from policy state.
+    pub source_path: String,
+    /// Temporary duration, or `None` for explicit persistent enforcement.
+    pub duration_secs: Option<u64>,
+    /// Detachment deadline for temporary actions.
+    pub expires_at_ns: Option<u64>,
+    /// Current containment lifecycle state.
+    pub lifecycle_state: ContainmentLifecycle,
+    /// First confirmed kernel denial for this binding.
+    pub blocked_at_ns: Option<u64>,
+    /// Authenticated principal or current dashboard-token identity.
+    pub requested_by: String,
+    /// Operation stage for the latest failure.
+    pub failure_stage: Option<ContainmentFailureStage>,
+    /// Sanitized actionable failure detail.
+    pub failure_reason: Option<String>,
+    /// Number of bounded reconciliation attempts.
+    pub attempt_count: u32,
+    /// Persisted deadline for the next reconciliation attempt.
+    pub next_retry_at_ns: Option<u64>,
+    /// Action creation timestamp.
+    pub created_at_ns: u64,
+    /// Most recent lifecycle update timestamp.
+    pub updated_at_ns: u64,
+}

@@ -1,5 +1,7 @@
 //! SQLite persistence for immutable normalized security events.
 
+mod containment;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -191,7 +193,31 @@ impl SecurityStore {
                 policy_json TEXT NOT NULL,
                 created_at_ns INTEGER NOT NULL,
                 PRIMARY KEY(policy_id, revision)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS containment_actions (
+                action_id TEXT PRIMARY KEY,
+                case_id TEXT NOT NULL,
+                binding_id TEXT NOT NULL UNIQUE,
+                agent_id TEXT NOT NULL,
+                root_pid INTEGER NOT NULL,
+                process_start_time INTEGER NOT NULL,
+                source_path TEXT NOT NULL,
+                duration_secs INTEGER,
+                expires_at_ns INTEGER,
+                lifecycle_state TEXT NOT NULL,
+                blocked_at_ns INTEGER,
+                requested_by TEXT NOT NULL,
+                failure_stage TEXT,
+                failure_reason TEXT,
+                attempt_count INTEGER NOT NULL,
+                next_retry_at_ns INTEGER,
+                created_at_ns INTEGER NOT NULL,
+                updated_at_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_containment_case_time
+                ON containment_actions(case_id, created_at_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_containment_due
+                ON containment_actions(lifecycle_state, expires_at_ns, next_retry_at_ns);",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
