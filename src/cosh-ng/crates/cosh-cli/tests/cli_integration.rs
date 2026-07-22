@@ -965,6 +965,12 @@ fn test_pkg_search_rejects_shell_metachar() {
 
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "InvalidInput");
+    assert!(json["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("search query")));
+    assert!(json["error"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("Search queries")));
 }
 
 #[test]
