@@ -1,6 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ContainmentDialog } from '../components/ContainmentDialog';
+import { ContainmentLifecycleCard } from '../components/ContainmentLifecycleCard';
 import {
+  fetchContainmentPlan,
   fetchSecurityCase,
   fetchSecurityCases,
   fetchSecurityEvents,
@@ -8,6 +11,7 @@ import {
   fetchSecuritySummary,
   reviewSecurityCase,
   type SecurityEventRecord,
+  type SecurityContainmentPlan,
   type SecurityEvidenceEvent,
   type SecurityRiskCase,
   type SecurityRiskCaseDetail,
@@ -87,6 +91,13 @@ function evidenceSummary(item: SecurityEvidenceEvent): string {
   }
 }
 
+function containmentEligible(riskCase: SecurityRiskCase): boolean {
+  return (riskCase.severity === 'high' || riskCase.severity === 'critical')
+    && riskCase.status !== 'false_positive'
+    && riskCase.status !== 'accepted_risk'
+    && riskCase.status !== 'resolved';
+}
+
 const StatCard: React.FC<{ label: string; value: React.ReactNode; hint: string }> = ({
   label,
   value,
@@ -111,6 +122,11 @@ export const SystemAuditPage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState('');
   const [reviewing, setReviewing] = useState(false);
+  const [containmentPlan, setContainmentPlan] = useState<SecurityContainmentPlan | null>(null);
+  const [containmentLoading, setContainmentLoading] = useState(false);
+  const [containmentError, setContainmentError] = useState(false);
+  const [containmentDialogOpen, setContainmentDialogOpen] = useState(false);
+  const caseRequestVersion = useRef(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -134,16 +150,47 @@ export const SystemAuditPage: React.FC = () => {
   }, [load]);
 
   const openCase = async (caseId: string) => {
+    caseRequestVersion.current += 1;
+    const version = caseRequestVersion.current;
     setDetailLoading(true);
     setError('');
+    setContainmentPlan(null);
+    setContainmentError(false);
+    setContainmentLoading(false);
     try {
       const response = await fetchSecurityCase(caseId);
-      setSelectedCase(response.data);
+      if (caseRequestVersion.current !== version) return;
+      const detail = response.data;
+      setSelectedCase(detail);
+      if (containmentEligible(detail)) {
+        setContainmentLoading(true);
+        try {
+          const planResponse = await fetchContainmentPlan(caseId);
+          if (caseRequestVersion.current === version) setContainmentPlan(planResponse.data);
+        } catch {
+          if (caseRequestVersion.current === version) setContainmentError(true);
+        } finally {
+          if (caseRequestVersion.current === version) setContainmentLoading(false);
+        }
+      }
     } catch (nextError) {
-      setError(errorText(nextError));
+      if (caseRequestVersion.current === version) setError(errorText(nextError));
     } finally {
-      setDetailLoading(false);
+      if (caseRequestVersion.current === version) setDetailLoading(false);
     }
+  };
+
+  const refresh = async () => {
+    const selectedCaseId = selectedCase?.case_id;
+    await load();
+    if (selectedCaseId) await openCase(selectedCaseId);
+  };
+
+  const handleContained = async () => {
+    if (!selectedCase) return;
+    const caseId = selectedCase.case_id;
+    setContainmentDialogOpen(false);
+    await Promise.all([load(), openCase(caseId)]);
   };
 
   const review = async (
@@ -196,7 +243,7 @@ export const SystemAuditPage: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => void load()}
+            onClick={() => void refresh()}
             disabled={loading}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:bg-blue-300"
           >
@@ -303,9 +350,22 @@ export const SystemAuditPage: React.FC = () => {
                   <div className="mt-4 flex flex-wrap gap-2 text-xs">
                     <button type="button" onClick={() => void review('false_positive')} className="rounded border px-3 py-1.5 text-gray-600">标记误报</button>
                     <button type="button" onClick={() => void review('accepted_risk')} className="rounded border px-3 py-1.5 text-gray-600">接受风险</button>
-                    <button type="button" onClick={() => void review('resolved')} className="rounded border px-3 py-1.5 text-gray-600">标记已处置</button>
+                    {!containmentPlan?.existing_action && (
+                      <button type="button" onClick={() => void review('resolved')} className="rounded border px-3 py-1.5 text-gray-600">标记已处置</button>
+                    )}
                     <button type="button" onClick={() => navigate('/enforcement')} className="rounded border border-blue-200 px-3 py-1.5 text-blue-700">查看拦截策略</button>
                   </div>
+                  {(containmentEligible(selectedCase) || containmentPlan?.existing_action) && (
+                    <ContainmentLifecycleCard
+                      action={containmentPlan?.existing_action ?? null}
+                      loading={containmentLoading}
+                      error={containmentError}
+                      canUpgrade={containmentEligible(selectedCase)}
+                      reviewing={reviewing}
+                      onUpgrade={() => setContainmentDialogOpen(true)}
+                      onResolve={() => void review('resolved')}
+                    />
+                  )}
                 </div>
                 <div className="p-5">
                   <h3 className="font-semibold text-gray-900">完整证据链</h3>
@@ -368,6 +428,15 @@ export const SystemAuditPage: React.FC = () => {
             </tbody>
           </table>
         </section>
+      )}
+
+      {selectedCase && (
+        <ContainmentDialog
+          caseId={selectedCase.case_id}
+          open={containmentDialogOpen}
+          onClose={() => setContainmentDialogOpen(false)}
+          onContained={() => void handleContained()}
+        />
       )}
     </div>
   );
