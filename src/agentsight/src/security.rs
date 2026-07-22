@@ -15,4 +15,7 @@ pub use query::{
     RiskCaseStatus, RiskSeverity, SecurityCountBy, SecurityEventFilter, SecurityEventPage,
     SecuritySummary,
 };
-pub use store::{SecurityEventStore, SecurityStore, SecurityStoreError};
+pub use store::{
+    ContainmentActivationResult, ContainmentClaimResult, SecurityEventStore, SecurityStore,
+    SecurityStoreError,
+};

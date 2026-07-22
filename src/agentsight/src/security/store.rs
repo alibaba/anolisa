@@ -2,6 +2,8 @@
 
 mod containment;
 
+pub use containment::{ContainmentActivationResult, ContainmentClaimResult};
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -217,7 +219,10 @@ impl SecurityStore {
             CREATE INDEX IF NOT EXISTS idx_containment_case_time
                 ON containment_actions(case_id, created_at_ns DESC);
             CREATE INDEX IF NOT EXISTS idx_containment_due
-                ON containment_actions(lifecycle_state, expires_at_ns, next_retry_at_ns);",
+                ON containment_actions(lifecycle_state, expires_at_ns, next_retry_at_ns);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_containment_live_case
+                ON containment_actions(case_id)
+                WHERE lifecycle_state IN ('pending', 'active', 'expiring');",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),

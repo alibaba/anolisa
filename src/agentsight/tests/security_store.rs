@@ -1,8 +1,9 @@
 use std::fs;
 
 use agentsight::security::{
-    ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, SecurityEventFilter,
-    SecurityStore, SecurityStoreError,
+    ContainmentAction, ContainmentActivationResult, ContainmentClaimResult,
+    ContainmentFailureStage, ContainmentLifecycle, RiskCase, RiskCaseStatus, RiskSeverity,
+    SecurityEventFilter, SecurityStore, SecurityStoreError,
 };
 use agentsight::storage::Storage;
 use agentsight_enforcement_protocol::{
@@ -23,13 +24,31 @@ fn containment_action(lifecycle_state: ContainmentLifecycle) -> ContainmentActio
         expires_at_ns: Some(1_000),
         lifecycle_state,
         blocked_at_ns: None,
-        requested_by: "dashboard-token".into(),
+        requested_by: "principal:test-operator".into(),
         failure_stage: None,
         failure_reason: None,
         attempt_count: 0,
         next_retry_at_ns: None,
         created_at_ns: 100,
         updated_at_ns: 100,
+    }
+}
+
+fn fixture_case(case_id: Uuid, status: RiskCaseStatus) -> RiskCase {
+    RiskCase {
+        case_id,
+        correlation_key: format!("case-{case_id}"),
+        policy_id: "credential-exfiltration".into(),
+        policy_revision: 3,
+        agent_id: "hermes-test".into(),
+        session_id: Some("session-1".into()),
+        severity: RiskSeverity::High,
+        risk_score: 85,
+        status,
+        blocked: false,
+        opened_at_ns: 1,
+        updated_at_ns: 1,
+        summary: "credential reached an untrusted target".into(),
     }
 }
 
@@ -275,6 +294,145 @@ fn containment_action_updates_all_mutable_state() {
             .containment_action(action.action_id)
             .expect("action query should work"),
         Some(action)
+    );
+}
+
+#[test]
+fn containment_claim_is_unique_across_store_instances() {
+    let path = security_db_path("containment-claim");
+    let first_store = SecurityStore::open(&path).expect("first store should open");
+    let second_store = SecurityStore::open(&path).expect("second store should open");
+    let first = containment_action(ContainmentLifecycle::Pending);
+    let mut competing = containment_action(ContainmentLifecycle::Pending);
+    competing.case_id = first.case_id;
+    first_store
+        .upsert_case(&fixture_case(first.case_id, RiskCaseStatus::Open), &[])
+        .expect("case should persist");
+
+    assert_eq!(
+        first_store
+            .claim_containment_action(&first)
+            .expect("first claim should work"),
+        ContainmentClaimResult::Claimed
+    );
+    assert_eq!(
+        second_store
+            .claim_containment_action(&competing)
+            .expect("competing claim should work"),
+        ContainmentClaimResult::Existing(Box::new(first.clone()))
+    );
+
+    let mut failed = first;
+    failed.lifecycle_state = ContainmentLifecycle::Failed;
+    first_store
+        .update_containment_action(&failed)
+        .expect("first action should become terminal");
+    assert_eq!(
+        second_store
+            .claim_containment_action(&competing)
+            .expect("terminal action should release the claim"),
+        ContainmentClaimResult::Claimed
+    );
+    drop(first_store);
+    drop(second_store);
+    fs::remove_file(path).expect("fixture database should be removed");
+}
+
+#[test]
+fn containment_claim_rejects_an_ineligible_case_without_inserting() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let action = containment_action(ContainmentLifecycle::Pending);
+    store
+        .upsert_case(
+            &fixture_case(action.case_id, RiskCaseStatus::FalsePositive),
+            &[],
+        )
+        .expect("case should persist");
+
+    assert_eq!(
+        store
+            .claim_containment_action(&action)
+            .expect("claim should inspect case state"),
+        ContainmentClaimResult::CaseIneligible(RiskCaseStatus::FalsePositive)
+    );
+    assert_eq!(
+        store
+            .containment_action(action.action_id)
+            .expect("action query should work"),
+        None
+    );
+}
+
+#[test]
+fn activation_confirms_case_in_the_same_store_operation() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let action = containment_action(ContainmentLifecycle::Pending);
+    store
+        .upsert_case(&fixture_case(action.case_id, RiskCaseStatus::Open), &[])
+        .expect("case should persist");
+    store
+        .claim_containment_action(&action)
+        .expect("action should be claimed");
+
+    assert_eq!(
+        store
+            .activate_containment_action(action.action_id, 500)
+            .expect("activation should work"),
+        ContainmentActivationResult::Activated
+    );
+    assert_eq!(
+        store
+            .containment_action(action.action_id)
+            .expect("action query should work")
+            .expect("action should exist")
+            .lifecycle_state,
+        ContainmentLifecycle::Active
+    );
+    assert_eq!(
+        store
+            .case_detail(action.case_id)
+            .expect("case should load")
+            .case
+            .status,
+        RiskCaseStatus::Confirmed
+    );
+}
+
+#[test]
+fn activation_cas_preserves_a_concurrent_review() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let action = containment_action(ContainmentLifecycle::Pending);
+    store
+        .upsert_case(&fixture_case(action.case_id, RiskCaseStatus::Open), &[])
+        .expect("case should persist");
+    store
+        .claim_containment_action(&action)
+        .expect("action should be claimed");
+    store
+        .review_case(action.case_id, RiskCaseStatus::AcceptedRisk, 400)
+        .expect("review should persist");
+
+    assert_eq!(
+        store
+            .activate_containment_action(action.action_id, 500)
+            .expect("activation should inspect case state"),
+        ContainmentActivationResult::CaseIneligible(RiskCaseStatus::AcceptedRisk)
+    );
+    assert_eq!(
+        store
+            .containment_action(action.action_id)
+            .expect("action query should work")
+            .expect("action should exist")
+            .lifecycle_state,
+        ContainmentLifecycle::Pending
+    );
+    assert_eq!(
+        store
+            .case_detail(action.case_id)
+            .expect("case should load")
+            .case
+            .status,
+        RiskCaseStatus::AcceptedRisk
     );
 }
 
