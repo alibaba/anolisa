@@ -130,6 +130,7 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 # itself (the unit is not shipped in %files). A telemetry failure must never
 # abort the package transaction, hence `|| :`.
 if [ ! -e %{_sysconfdir}/anolisa/.telemetry_disabled ]; then
+    echo "ANOLISA: enabling telemetry (opt-out). To disable: sudo anolisa telemetry disable"
     %{_bindir}/anolisa telemetry enable >/dev/null 2>&1 || :
 fi
 
@@ -144,6 +145,11 @@ fi
 # Full removal ($1 == 0): drop the unit written at runtime by `telemetry enable`
 # (it lives in the CLI's system unit dir, not tracked by %files) so no dangling
 # unit points at the removed binary.
+#
+# The path below is hardcoded because the binary is already removed by the time
+# %postun runs, so we cannot call `anolisa` to resolve FsLayout::SYSTEMD_UNITS.
+# It must stay in sync with the CLI default: /usr/local/lib/systemd/system
+# (see crates/anolisa-platform/src/fs_layout.rs → fhs::SYSTEMD_UNITS).
 if [ $1 -eq 0 ]; then
     rm -f /usr/local/lib/systemd/system/anolisa-telemetry.service
     systemctl daemon-reload >/dev/null 2>&1 || :
