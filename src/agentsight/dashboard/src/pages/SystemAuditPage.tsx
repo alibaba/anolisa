@@ -123,8 +123,11 @@ export const SystemAuditPage: React.FC = () => {
   const [containmentDialogOpen, setContainmentDialogOpen] = useState(false);
   const caseRequestVersion = useRef(0);
   const reviewRequestVersion = useRef(0);
+  const loadRequestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    loadRequestVersion.current += 1;
+    const version = loadRequestVersion.current;
     setLoading(true);
     const results = await Promise.allSettled([
       fetchSecuritySummary({ latest_limit: 10 }),
@@ -132,6 +135,7 @@ export const SystemAuditPage: React.FC = () => {
       fetchSecuritySessions({ limit: 100, offset: 0 }),
       fetchSecurityEvents({ limit: 100, offset: 0, include_details: true }),
     ]);
+    if (loadRequestVersion.current !== version) return;
     const failures = results.filter((result) => result.status === 'rejected');
     if (results[0].status === 'fulfilled') setSummary(results[0].value.data);
     if (results[1].status === 'fulfilled') setCases(results[1].value.data.items);

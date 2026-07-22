@@ -58,6 +58,7 @@ const caseDetail: SecurityRiskCaseDetail = {
     { event_id: 'event-4', event_type: 'policy_decision', occurred_at_ns: 4, identity: { pid: 42 }, event: { mode: 'audit', blocked: false } },
   ],
 };
+const secondSummary = { ...caseSummary, case_id: 'case-2', summary: '第二个案件' };
 
 const activeAction: SecurityContainmentAction = {
   action_id: 'action-1',
@@ -139,6 +140,30 @@ function renderPage() {
   return render(<MemoryRouter><SystemAuditPage /></MemoryRouter>);
 }
 
+function mockDetail(overrides: Partial<SecurityRiskCaseDetail>) {
+  vi.mocked(fetchSecurityCase).mockResolvedValue({
+    state: 'found', data: { ...caseDetail, ...overrides },
+  });
+}
+
+function mockCaseSwitch(first: ReturnType<typeof fetchSecurityCase>) {
+  vi.mocked(fetchSecurityCases).mockResolvedValue({
+    state: 'ok', data: { items: [caseSummary, secondSummary], total: 2, limit: 100, offset: 0 },
+  });
+  vi.mocked(fetchSecurityCase).mockImplementation((caseId) => (
+    caseId === 'case-1' ? first : Promise.resolve({
+      state: 'found', data: { ...caseDetail, ...secondSummary, containment: null },
+    })
+  ));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((onResolve, onReject) => { resolve = onResolve; reject = onReject; });
+  return { promise, resolve, reject };
+}
+
 async function selectCase() {
   fireEvent.click(await screen.findByText('疑似凭据外传'));
   await screen.findByText('完整证据链');
@@ -159,7 +184,6 @@ describe('SystemAuditPage', () => {
   it('opens containment from an eligible audit case', async () => {
     renderPage();
     await selectCase();
-
     expect(fetchContainmentPlan).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole('button', { name: '升级为拦截' }));
     expect(await screen.findByRole('dialog', { name: '确认升级为内核拦截' })).toBeInTheDocument();
@@ -167,34 +191,24 @@ describe('SystemAuditPage', () => {
   });
 
   it('offers containment for a critical case', async () => {
-    vi.mocked(fetchSecurityCase).mockResolvedValue({
-      state: 'found', data: { ...caseDetail, severity: 'critical' },
-    });
+    mockDetail({ severity: 'critical' });
     renderPage();
     await selectCase();
-
     expect(screen.getByRole('button', { name: '升级为拦截' })).toBeInTheDocument();
   });
 
   it('does not offer containment for an ineligible case', async () => {
-    vi.mocked(fetchSecurityCase).mockResolvedValue({
-      state: 'found',
-      data: { ...caseDetail, severity: 'medium' },
-    });
+    mockDetail({ severity: 'medium' });
     renderPage();
     await selectCase();
-
     expect(screen.queryByRole('button', { name: '升级为拦截' })).not.toBeInTheDocument();
     expect(fetchContainmentPlan).not.toHaveBeenCalled();
   });
 
   it('shows active as waiting for a block acknowledgement', async () => {
-    vi.mocked(fetchSecurityCase).mockResolvedValue({
-      state: 'found', data: { ...caseDetail, containment: activeAction },
-    });
+    mockDetail({ containment: activeAction });
     renderPage();
     await selectCase();
-
     expect(await screen.findByText('策略生效')).toBeInTheDocument();
     expect(screen.getByText('等待首次内核阻断')).toBeInTheDocument();
     expect(screen.queryByText('已遏制')).not.toBeInTheDocument();
@@ -203,37 +217,24 @@ describe('SystemAuditPage', () => {
   });
 
   it('shows contained only after blocked_at_ns exists', async () => {
-    vi.mocked(fetchSecurityCase).mockResolvedValue({
-      state: 'found',
-      data: {
-        ...caseDetail,
-        containment: { ...activeAction, blocked_at_ns: 1_720_000_004_000_000_000 },
-      },
+    mockDetail({
+      containment: { ...activeAction, blocked_at_ns: 1_720_000_004_000_000_000 },
     });
     renderPage();
     await selectCase();
-
     expect(await screen.findByText('已遏制')).toBeInTheDocument();
     expect(screen.getByText(/首次阻断/)).toBeInTheDocument();
   });
 
   it('shows failure stage without exposing an unavailable raw reason', async () => {
-    vi.mocked(fetchSecurityCase).mockResolvedValue({
-      state: 'found',
-      data: {
-        ...caseDetail,
-        containment: {
-          ...activeAction,
-          lifecycle_state: 'failed',
-          failure_stage: 'attach',
-          failure_summary: '策略挂载失败，请确认 Agent 与执行器状态后重试',
-          expires_at_ns: null,
-        },
+    mockDetail({
+      containment: {
+        ...activeAction, lifecycle_state: 'failed', failure_stage: 'attach', expires_at_ns: null,
+        failure_summary: '策略挂载失败，请确认 Agent 与执行器状态后重试',
       },
     });
     renderPage();
     await selectCase();
-
     expect(await screen.findByText('执行失败')).toBeInTheDocument();
     expect(screen.getByText('策略挂载')).toBeInTheDocument();
     expect(screen.getByText('策略挂载失败，请确认 Agent 与执行器状态后重试')).toBeInTheDocument();
@@ -241,20 +242,13 @@ describe('SystemAuditPage', () => {
   });
 
   it('shows expired containment as retryable', async () => {
-    vi.mocked(fetchSecurityCase).mockResolvedValue({
-      state: 'found',
-      data: {
-        ...caseDetail,
-        containment: {
-          ...activeAction,
-          lifecycle_state: 'expired',
-          expires_at_ns: Date.now() * 1_000_000,
-        },
+    mockDetail({
+      containment: {
+        ...activeAction, lifecycle_state: 'expired', expires_at_ns: Date.now() * 1_000_000,
       },
     });
     renderPage();
     await selectCase();
-
     expect(await screen.findByText('已到期')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重新下发拦截' })).toBeInTheDocument();
   });
@@ -262,22 +256,15 @@ describe('SystemAuditPage', () => {
   it.each(['false_positive', 'accepted_risk', 'resolved'] as const)(
     'keeps an existing action visible but excludes %s from retry',
     async (status) => {
-      vi.mocked(fetchSecurityCase).mockResolvedValue({
-        state: 'found',
-        data: {
-          ...caseDetail,
-          status,
-          containment: {
-            ...activeAction,
-            lifecycle_state: 'failed',
-            failure_stage: 'attach',
-            failure_summary: '策略挂载失败，请确认 Agent 与执行器状态后重试',
-          },
+      mockDetail({
+        status,
+        containment: {
+          ...activeAction, lifecycle_state: 'failed', failure_stage: 'attach',
+          failure_summary: '策略挂载失败，请确认 Agent 与执行器状态后重试',
         },
       });
       renderPage();
       await selectCase();
-
       expect(await screen.findByText('执行失败')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: '重新下发拦截' })).not.toBeInTheDocument();
       expect(fetchContainmentPlan).not.toHaveBeenCalled();
@@ -289,7 +276,6 @@ describe('SystemAuditPage', () => {
     await selectCase();
     fireEvent.click(await screen.findByRole('button', { name: '升级为拦截' }));
     fireEvent.click(await screen.findByRole('button', { name: '确认并下发' }));
-
     await waitFor(() => expect(containSecurityCase).toHaveBeenCalledWith('case-1', {
       root_pid: 42,
       duration_secs: 900,
@@ -302,6 +288,27 @@ describe('SystemAuditPage', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('ignores an older manual load after containment starts a newer load', async () => {
+    renderPage();
+    await selectCase();
+    const staleCases = deferred<Awaited<ReturnType<typeof fetchSecurityCases>>>();
+    const staleSummary = deferred<Awaited<ReturnType<typeof fetchSecuritySummary>>>();
+    vi.mocked(fetchSecurityCases)
+      .mockReturnValueOnce(staleCases.promise)
+      .mockResolvedValueOnce({ state: 'ok', data: { items: [{ ...caseSummary, summary: '最新案件' }], total: 1, limit: 100, offset: 0 } });
+    vi.mocked(fetchSecuritySummary).mockReturnValueOnce(staleSummary.promise);
+    fireEvent.click(screen.getByRole('button', { name: '升级为拦截' }));
+    await screen.findByRole('dialog', { name: '确认升级为内核拦截' });
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认并下发' }));
+    expect(await screen.findByText('最新案件')).toBeInTheDocument();
+
+    staleCases.resolve({ state: 'ok', data: { items: [{ ...caseSummary, summary: '过期案件' }], total: 1, limit: 100, offset: 0 } });
+    staleSummary.reject(new Error('stale load error'));
+    await waitFor(() => expect(screen.queryByText('过期案件')).not.toBeInTheDocument());
+    expect(screen.queryByText('stale load error')).not.toBeInTheDocument();
+  });
+
   it('reviews a case without publishing a policy revision', async () => {
     renderPage();
     await selectCase();
@@ -312,24 +319,12 @@ describe('SystemAuditPage', () => {
   });
 
   it('keeps the newer case when an older detail request finishes late', async () => {
-    const secondSummary = { ...caseSummary, case_id: 'case-2', summary: '第二个案件' };
     let resolveFirst: ((value: { state: string; data: SecurityRiskCaseDetail }) => void) | undefined;
     const first = new Promise<{ state: string; data: SecurityRiskCaseDetail }>((resolve) => {
       resolveFirst = resolve;
     });
-    vi.mocked(fetchSecurityCases).mockResolvedValue({
-      state: 'ok', data: { items: [caseSummary, secondSummary], total: 2, limit: 100, offset: 0 },
-    });
-    vi.mocked(fetchSecurityCase).mockImplementation((caseId) => (
-      caseId === 'case-1'
-        ? first as ReturnType<typeof fetchSecurityCase>
-        : Promise.resolve({
-            state: 'found',
-            data: { ...caseDetail, ...secondSummary, containment: null },
-          })
-    ));
+    mockCaseSwitch(first as ReturnType<typeof fetchSecurityCase>);
     renderPage();
-
     fireEvent.click(await screen.findByRole('button', { name: /疑似凭据外传/ }));
     fireEvent.click(screen.getByRole('button', { name: /第二个案件/ }));
     expect(await screen.findByRole('heading', { name: '第二个案件' })).toBeInTheDocument();
@@ -340,21 +335,10 @@ describe('SystemAuditPage', () => {
   });
 
   it('ignores an old detail failure after switching cases', async () => {
-    const secondSummary = { ...caseSummary, case_id: 'case-2', summary: '第二个案件' };
     let rejectFirst: ((reason: Error) => void) | undefined;
     const first = new Promise<never>((_, reject) => { rejectFirst = reject; });
-    vi.mocked(fetchSecurityCases).mockResolvedValue({
-      state: 'ok', data: { items: [caseSummary, secondSummary], total: 2, limit: 100, offset: 0 },
-    });
-    vi.mocked(fetchSecurityCase).mockImplementation((caseId) => (
-      caseId === 'case-1'
-        ? first
-        : Promise.resolve({
-            state: 'found', data: { ...caseDetail, ...secondSummary, containment: null },
-          })
-    ));
+    mockCaseSwitch(first);
     renderPage();
-
     fireEvent.click(await screen.findByRole('button', { name: /疑似凭据外传/ }));
     fireEvent.click(screen.getByRole('button', { name: /第二个案件/ }));
     expect(await screen.findByRole('heading', { name: '第二个案件' })).toBeInTheDocument();
@@ -363,25 +347,15 @@ describe('SystemAuditPage', () => {
   });
 
   it('does not let a slow review overwrite a newly selected case', async () => {
-    const secondSummary = { ...caseSummary, case_id: 'case-2', summary: '第二个案件' };
     let resolveReview: ((value: Awaited<ReturnType<typeof reviewSecurityCase>>) => void) | undefined;
     const pendingReview = new Promise<Awaited<ReturnType<typeof reviewSecurityCase>>>((resolve) => {
       resolveReview = resolve;
     });
-    vi.mocked(fetchSecurityCases).mockResolvedValue({
-      state: 'ok', data: { items: [caseSummary, secondSummary], total: 2, limit: 100, offset: 0 },
-    });
-    vi.mocked(fetchSecurityCase).mockImplementation((caseId) => Promise.resolve({
-      state: 'found',
-      data: caseId === 'case-1'
-        ? caseDetail
-        : { ...caseDetail, ...secondSummary, containment: null },
-    }));
+    mockCaseSwitch(Promise.resolve({ state: 'found', data: caseDetail }));
     vi.mocked(reviewSecurityCase).mockReturnValue(pendingReview);
     renderPage();
     await selectCase();
     fireEvent.click(screen.getByRole('button', { name: '确认风险' }));
-
     fireEvent.click(screen.getByRole('button', { name: /第二个案件/ }));
     expect(await screen.findByRole('heading', { name: '第二个案件' })).toBeInTheDocument();
     resolveReview?.({ state: 'updated', data: { ...caseSummary, status: 'confirmed' } });

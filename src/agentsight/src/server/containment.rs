@@ -258,15 +258,19 @@ fn failure_summary(
     lifecycle: ContainmentLifecycle,
     stage: Option<ContainmentFailureStage>,
 ) -> Option<&'static str> {
-    if lifecycle != ContainmentLifecycle::Failed {
-        return None;
+    match stage {
+        Some(ContainmentFailureStage::Attach) => {
+            Some("策略挂载失败，请确认 Agent 与执行器状态后重试")
+        }
+        Some(ContainmentFailureStage::Detach) => Some("策略解除失败，请确认执行器状态后重试"),
+        Some(ContainmentFailureStage::Reconcile) => {
+            Some("策略状态恢复失败，请确认执行器状态后重试")
+        }
+        None if lifecycle == ContainmentLifecycle::Failed => {
+            Some("策略执行失败，请确认 Agent 与执行器状态后重试")
+        }
+        None => None,
     }
-    Some(match stage {
-        Some(ContainmentFailureStage::Attach) => "策略挂载失败，请确认 Agent 与执行器状态后重试",
-        Some(ContainmentFailureStage::Detach) => "策略解除失败，请确认执行器状态后重试",
-        Some(ContainmentFailureStage::Reconcile) => "策略状态恢复失败，请确认执行器状态后重试",
-        None => "策略执行失败，请确认 Agent 与执行器状态后重试",
-    })
 }
 
 fn parse_case_id(value: String) -> Result<Uuid, HttpResponse> {

@@ -25,9 +25,9 @@ use crate::enforcement::ApplyPolicy;
 use crate::grader::EvaluationStore;
 use crate::health::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore};
 use crate::security::{
-    ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError, ContainmentError,
-    ContainmentFailureStage, ContainmentLifecycle, ContainmentReadinessLease, RiskCase,
-    RiskCaseStatus, RiskSeverity, SecurityStore, StampedBinding, StampedBindings,
+    ContainmentAction, ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError,
+    ContainmentError, ContainmentFailureStage, ContainmentLifecycle, ContainmentReadinessLease,
+    RiskCase, RiskCaseStatus, RiskSeverity, SecurityStore, StampedBinding, StampedBindings,
     stable_readiness_lease,
 };
 
@@ -409,34 +409,82 @@ fn reconciler_lifecycle_stops_joins_and_allows_restart() {
 
 #[test]
 fn failure_summaries_are_stable_and_do_not_include_internal_details() {
-    assert_eq!(
-        failure_summary(
+    let cases = [
+        (
             ContainmentLifecycle::Failed,
             Some(ContainmentFailureStage::Attach),
+            Some("策略挂载失败，请确认 Agent 与执行器状态后重试"),
         ),
-        Some("策略挂载失败，请确认 Agent 与执行器状态后重试")
-    );
-    assert_eq!(
-        failure_summary(
-            ContainmentLifecycle::Failed,
+        (
+            ContainmentLifecycle::Expiring,
             Some(ContainmentFailureStage::Detach),
+            Some("策略解除失败，请确认执行器状态后重试"),
         ),
-        Some("策略解除失败，请确认执行器状态后重试")
-    );
-    assert_eq!(
-        failure_summary(
-            ContainmentLifecycle::Failed,
+        (
+            ContainmentLifecycle::Pending,
             Some(ContainmentFailureStage::Reconcile),
+            Some("策略状态恢复失败，请确认执行器状态后重试"),
         ),
-        Some("策略状态恢复失败，请确认执行器状态后重试")
-    );
-    assert_eq!(failure_summary(ContainmentLifecycle::Active, None), None);
+        (
+            ContainmentLifecycle::Failed,
+            None,
+            Some("策略执行失败，请确认 Agent 与执行器状态后重试"),
+        ),
+        (ContainmentLifecycle::Active, None, None),
+    ];
+    for (lifecycle, stage, expected) in cases {
+        assert_eq!(failure_summary(lifecycle, stage), expected);
+    }
 }
 
 #[test]
 fn empty_case_projection_has_an_explicit_containment_field() {
     let view = case_detail_view(serde_json::json!({ "case_id": Uuid::nil() }), None);
     assert!(view["containment"].is_null());
+}
+
+fn action_with_failure(
+    lifecycle_state: ContainmentLifecycle,
+    failure_stage: ContainmentFailureStage,
+) -> ContainmentAction {
+    ContainmentAction {
+        action_id: Uuid::new_v4(),
+        case_id: Uuid::nil(),
+        binding_id: Uuid::new_v4(),
+        agent_id: "hermes-test".into(),
+        root_pid: 42,
+        process_start_time: 7,
+        source_path: "/root/private-credential".into(),
+        duration_secs: Some(900),
+        expires_at_ns: None,
+        lifecycle_state,
+        blocked_at_ns: None,
+        requested_by: "dashboard".into(),
+        failure_stage: Some(failure_stage),
+        failure_reason: Some("internal socket /run/private.sock policy_dsl".into()),
+        attempt_count: 2,
+        next_retry_at_ns: None,
+        created_at_ns: 1,
+        updated_at_ns: 2,
+    }
+}
+
+#[test]
+fn case_projection_exposes_only_sanitized_containment() {
+    let action = action_with_failure(
+        ContainmentLifecycle::Pending,
+        ContainmentFailureStage::Reconcile,
+    );
+    let rendered =
+        case_detail_view(serde_json::json!({ "status": "resolved" }), Some(&action)).to_string();
+    assert!(rendered.contains("策略状态恢复失败"));
+    for secret in [
+        action.source_path.as_str(),
+        "/run/private.sock",
+        "policy_dsl",
+    ] {
+        assert!(!rendered.contains(secret));
+    }
 }
 
 fn health_status(pid: u32, agent_name: &str) -> AgentHealthStatus {
