@@ -127,7 +127,6 @@ impl InlineState {
             self.pending_input_ghost_route = PromptGhostRoute::AgentSelection {
                 candidates: remaining,
                 active,
-                pending_escape: Vec::new(),
             };
         } else if had_personal_candidates
             && (selection_route

@@ -297,7 +297,6 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> Vec<Planne
         state.pending_input_ghost_route = PromptGhostRoute::AgentSelection {
             candidates,
             active: 0,
-            pending_escape: Vec::new(),
         };
         state.pending_input_ghost_binding = state
             .pending_prompt_suggestion_bindings

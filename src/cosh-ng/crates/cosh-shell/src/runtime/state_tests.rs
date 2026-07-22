@@ -63,7 +63,6 @@ fn clearing_personal_candidates_rebuilds_health_first_selection() {
             },
         ],
         active: 0,
-        pending_escape: Vec::new(),
     };
 
     assert!(state.clear_personal_prompt_ghost());
@@ -76,7 +75,6 @@ fn clearing_personal_candidates_rebuilds_health_first_selection() {
                 suggestion_id: "health-1".to_string(),
             }],
             active: 0,
-            pending_escape: Vec::new(),
         }
     );
     assert!(!state

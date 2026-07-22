@@ -91,37 +91,6 @@ pub(super) fn relay_prompt_ghost_input(
     route: &PromptGhostRoute,
     relay: &mut InputRelayContext<'_>,
 ) -> io::Result<bool> {
-    if let PromptGhostRoute::AgentSelection {
-        candidates,
-        active,
-        pending_escape,
-    } = route
-    {
-        if !pending_escape.is_empty() {
-            let mut combined = pending_escape.clone();
-            combined.extend_from_slice(bytes);
-            let resumed = PromptGhostRoute::AgentSelection {
-                candidates: candidates.clone(),
-                active: *active,
-                pending_escape: Vec::new(),
-            };
-            return relay_prompt_ghost_input(&combined, ghost_text, &resumed, relay);
-        }
-        if b"\x1b[Z".starts_with(bytes) && bytes.len() < 3 {
-            let paused = PromptGhostRoute::AgentSelection {
-                candidates: candidates.clone(),
-                active: *active,
-                pending_escape: bytes.to_vec(),
-            };
-            if let Ok(mut mode) = relay.input_mode.lock() {
-                *mode = RawInputMode::PromptGhost {
-                    text: ghost_text.to_string(),
-                    route: paused,
-                };
-            }
-            return Ok(true);
-        }
-    }
     if bytes.starts_with(b"\x1b[Z") {
         if let PromptGhostRoute::AgentSelection {
             candidates, active, ..
@@ -133,7 +102,6 @@ pub(super) fn relay_prompt_ghost_input(
                 let next_route = PromptGhostRoute::AgentSelection {
                     candidates: candidates.clone(),
                     active: next,
-                    pending_escape: Vec::new(),
                 };
                 if let Ok(mut mode) = relay.input_mode.lock() {
                     *mode = RawInputMode::PromptGhost {
@@ -241,6 +209,13 @@ pub(super) fn relay_prompt_ghost_input(
         }
         return Ok(true);
     }
+    dismiss_prompt_ghost_input(bytes, relay)
+}
+
+pub(super) fn dismiss_prompt_ghost_input(
+    bytes: &[u8],
+    relay: &mut InputRelayContext<'_>,
+) -> io::Result<bool> {
     if let Ok(mut mode) = relay.input_mode.lock() {
         *mode = RawInputMode::Passthrough;
     }

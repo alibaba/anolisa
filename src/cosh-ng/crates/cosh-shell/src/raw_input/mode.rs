@@ -27,7 +27,6 @@ pub enum PromptGhostRoute {
     AgentSelection {
         candidates: Vec<PromptGhostCandidate>,
         active: usize,
-        pending_escape: Vec<u8>,
     },
 }
 
