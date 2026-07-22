@@ -314,8 +314,6 @@ fn due_containment_actions_include_only_actionable_temporary_rows() {
     let mut persistent = containment_action(ContainmentLifecycle::Active);
     persistent.duration_secs = None;
     persistent.expires_at_ns = None;
-    let mut pending = containment_action(ContainmentLifecycle::Pending);
-    pending.next_retry_at_ns = None;
     let mut due_retry = containment_action(ContainmentLifecycle::Expiring);
     due_retry.next_retry_at_ns = Some(500);
     let mut future_retry = containment_action(ContainmentLifecycle::Expiring);
@@ -329,7 +327,6 @@ fn due_containment_actions_include_only_actionable_temporary_rows() {
         &due_active,
         &future_active,
         &persistent,
-        &pending,
         &due_retry,
         &future_retry,
         &expired,
@@ -348,10 +345,66 @@ fn due_containment_actions_include_only_actionable_temporary_rows() {
         .map(|action| action.action_id)
         .collect::<std::collections::HashSet<_>>();
 
-    assert_eq!(due_ids.len(), 3);
+    assert_eq!(due_ids.len(), 2);
     assert!(due_ids.contains(&due_active.action_id));
-    assert!(due_ids.contains(&pending.action_id));
     assert!(due_ids.contains(&due_retry.action_id));
+}
+
+#[test]
+fn due_containment_actions_require_reached_expiry_or_explicit_retry() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+
+    let mut future_pending = containment_action(ContainmentLifecycle::Pending);
+    future_pending.expires_at_ns = Some(501);
+    future_pending.next_retry_at_ns = None;
+    let mut future_expiring = containment_action(ContainmentLifecycle::Expiring);
+    future_expiring.expires_at_ns = Some(501);
+    future_expiring.next_retry_at_ns = None;
+    let mut retry_pending = containment_action(ContainmentLifecycle::Pending);
+    retry_pending.expires_at_ns = Some(501);
+    retry_pending.next_retry_at_ns = Some(500);
+
+    for action in [&future_pending, &future_expiring, &retry_pending] {
+        store
+            .insert_containment_action(action)
+            .expect("action should insert");
+    }
+
+    let due = store
+        .due_containment_actions(500, 10)
+        .expect("due action query should work");
+
+    assert_eq!(due, vec![retry_pending]);
+}
+
+#[test]
+fn due_containment_actions_reject_due_unknown_lifecycle() {
+    let path = security_db_path("invalid-due-containment-lifecycle");
+    let mut action = containment_action(ContainmentLifecycle::Pending);
+    action.expires_at_ns = Some(500);
+    {
+        let store = SecurityStore::open(&path).expect("fixture store should open");
+        store
+            .insert_containment_action(&action)
+            .expect("action should insert");
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).expect("fixture database should open");
+        conn.execute(
+            "UPDATE containment_actions SET lifecycle_state = 'unknown' WHERE action_id = ?1",
+            [action.action_id.to_string()],
+        )
+        .expect("fixture row should mutate");
+    }
+
+    let store = SecurityStore::open(&path).expect("fixture store should reopen");
+    let error = store
+        .due_containment_actions(500, 10)
+        .expect_err("due unknown lifecycle must fail");
+
+    assert!(matches!(error, SecurityStoreError::InvalidData(_)));
+    drop(store);
+    fs::remove_file(path).expect("fixture database should be removed");
 }
 
 #[test]

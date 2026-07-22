@@ -100,10 +100,7 @@ impl SecurityStore {
             .transpose()
     }
 
-    /// Lists temporary actions whose expiry or reconciliation work is due.
-    ///
-    /// Pending and expiring actions without a retry deadline are immediately
-    /// actionable so an interrupted operation can resume after restart.
+    /// Lists actionable temporary rows with a reached expiry or explicit retry.
     ///
     /// # Errors
     ///
@@ -119,25 +116,28 @@ impl SecurityStore {
              FROM containment_actions
              WHERE duration_secs IS NOT NULL
                AND (
-                    (lifecycle_state = 'active'
-                     AND expires_at_ns IS NOT NULL
-                     AND expires_at_ns <= ?1)
-                 OR (lifecycle_state IN ('pending', 'expiring')
-                     AND (next_retry_at_ns IS NULL OR next_retry_at_ns <= ?1))
+                    (expires_at_ns IS NOT NULL AND expires_at_ns <= ?1)
+                 OR (next_retry_at_ns IS NOT NULL AND next_retry_at_ns <= ?1)
                )
              ORDER BY COALESCE(next_retry_at_ns, expires_at_ns, created_at_ns) ASC,
-                      action_id ASC
-             LIMIT ?2"
+                      action_id ASC"
         ))?;
-        let rows = statement.query_map(
-            params![sqlite_time(now_ns)?, limit.clamp(1, 1_000) as i64],
-            containment_row,
-        )?;
-        rows.map(|row| {
-            row.map_err(SecurityStoreError::from)
-                .and_then(containment_action_from_row)
-        })
-        .collect()
+        let rows = statement.query_map([sqlite_time(now_ns)?], containment_row)?;
+        let limit = limit.clamp(1, 1_000);
+        let mut actions = Vec::with_capacity(limit);
+        for row in rows {
+            let action = containment_action_from_row(row?)?;
+            if matches!(
+                action.lifecycle_state,
+                ContainmentLifecycle::Pending
+                    | ContainmentLifecycle::Active
+                    | ContainmentLifecycle::Expiring
+            ) && actions.len() < limit
+            {
+                actions.push(action);
+            }
+        }
+        Ok(actions)
     }
 
     /// Persists the current mutable lifecycle fields for an action.
