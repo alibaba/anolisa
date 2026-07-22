@@ -8,7 +8,7 @@
 //! 2. `?token=<token>` query parameter
 //! 3. `agentsight_session` cookie (set after a successful login)
 
-use std::future::{ready, Future, Ready};
+use std::future::{Future, Ready, ready};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;

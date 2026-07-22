@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use actix_web::http::StatusCode;
-use actix_web::{test as awtest, web, App, HttpResponse};
+use actix_web::{App, HttpResponse, test as awtest, web};
 
 use super::{AuthMiddleware, DashboardAuth};
 use crate::config::ServerAuthConfig;

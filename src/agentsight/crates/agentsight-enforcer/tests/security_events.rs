@@ -83,7 +83,8 @@ impl EnforcerFixture {
 impl Drop for EnforcerFixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        let _ = UnixStream::connect(&self.socket_path).and_then(|mut stream| stream.write_all(b"\n"));
+        let _ =
+            UnixStream::connect(&self.socket_path).and_then(|mut stream| stream.write_all(b"\n"));
         if let Some(worker) = self.worker.take() {
             worker.join().expect("fixture service should stop");
         }
@@ -130,11 +131,7 @@ fn subscription_returns_ordered_source_taint_sink_and_decision() {
 
     fixture
         .backend
-        .emit_credential_exfiltration(
-            binding_id,
-            "/home/test/.ssh/id_rsa",
-            "198.51.100.10:443",
-        )
+        .emit_credential_exfiltration(binding_id, "/home/test/.ssh/id_rsa", "198.51.100.10:443")
         .expect("fixture event chain should publish");
 
     let events = read_security_events(&mut subscription, request_id, 4);
@@ -173,11 +170,7 @@ fn enforce_mode_preserves_the_observed_eperm_result() {
 
     fixture
         .backend
-        .emit_credential_exfiltration(
-            binding_id,
-            "/home/test/.ssh/id_rsa",
-            "198.51.100.10:443",
-        )
+        .emit_credential_exfiltration(binding_id, "/home/test/.ssh/id_rsa", "198.51.100.10:443")
         .expect("fixture event chain should publish");
 
     let events = read_security_events(&mut subscription, request_id, 4);

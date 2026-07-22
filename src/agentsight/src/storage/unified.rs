@@ -196,8 +196,8 @@ impl Storage {
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, "token_consumption")
                 .expect("in-memory token_consumption store should always succeed");
-        let security_store =
-            SecurityStore::open_in_memory().expect("in-memory security store should always succeed");
+        let security_store = SecurityStore::open_in_memory()
+            .expect("in-memory security store should always succeed");
 
         Storage {
             backend: StorageBackend::Noop,

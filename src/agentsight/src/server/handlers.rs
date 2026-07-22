@@ -568,7 +568,11 @@ pub async fn security_summary(
         .len();
     local_security_response(
         StatusCode::OK,
-        if summary.total_events == 0 { "empty" } else { "ok" },
+        if summary.total_events == 0 {
+            "empty"
+        } else {
+            "ok"
+        },
         json!({
             "total": summary.total_events,
             "blocked": summary.blocked_events,
@@ -691,13 +695,15 @@ pub async fn security_observability_sessions(
     }
     let items = sessions
         .into_iter()
-        .map(|(session_id, (first, last, count))| json!({
-            "session_id": session_id,
-            "first_seen_ns": first,
-            "last_seen_ns": last,
-            "security_event_count": count,
-            "observability_event_count": 0,
-        }))
+        .map(|(session_id, (first, last, count))| {
+            json!({
+                "session_id": session_id,
+                "first_seen_ns": first,
+                "last_seen_ns": last,
+                "security_event_count": count,
+                "observability_event_count": 0,
+            })
+        })
         .collect::<Vec<_>>();
     paginated_local_response(items, query.limit, query.offset)
 }
@@ -877,17 +883,33 @@ fn security_event_result(event: &agentsight_enforcement_protocol::SecurityEvent)
     use agentsight_enforcement_protocol::SecurityEventKind;
     match &event.kind {
         SecurityEventKind::FileAction(action) => {
-            if action.succeeded { "allowed" } else { "failed" }
+            if action.succeeded {
+                "allowed"
+            } else {
+                "failed"
+            }
         }
         SecurityEventKind::TaintTransition(_) => "changed",
         SecurityEventKind::NetworkAction(action) => {
-            if action.succeeded { "allowed" } else { "blocked" }
+            if action.succeeded {
+                "allowed"
+            } else {
+                "blocked"
+            }
         }
         SecurityEventKind::PolicyDecision(decision) => {
-            if decision.blocked { "blocked" } else { "allowed" }
+            if decision.blocked {
+                "blocked"
+            } else {
+                "allowed"
+            }
         }
         SecurityEventKind::EnforcementState(state) => {
-            if state.ready { "ready" } else { "degraded" }
+            if state.ready {
+                "ready"
+            } else {
+                "degraded"
+            }
         }
     }
 }
@@ -970,7 +992,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-
 
     #[actix_web::test]
     async fn security_status_is_local_ready_without_agent_sec_socket() {
