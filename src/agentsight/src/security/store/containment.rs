@@ -1,5 +1,7 @@
 //! SQLite reads and writes for durable containment lifecycle state.
 
+mod evidence;
+
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use uuid::Uuid;
 
@@ -286,10 +288,9 @@ impl SecurityStore {
         Ok(changed == 1)
     }
 
-    /// Records the first confirmed kernel denial for a containment binding.
+    /// Records the earliest confirmed kernel denial for a containment binding.
     ///
-    /// Later calls for the same binding are successful no-ops and cannot
-    /// overwrite the original timestamp.
+    /// Duplicate or reordered calls retain the smallest occurrence timestamp.
     ///
     /// # Errors
     ///
@@ -302,9 +303,12 @@ impl SecurityStore {
         let blocked_at_ns = sqlite_time(blocked_at_ns)?;
         let changed = self.connection()?.execute(
             "UPDATE containment_actions
-             SET blocked_at_ns = ?1,
+             SET blocked_at_ns = CASE
+                     WHEN blocked_at_ns IS NULL OR blocked_at_ns > ?1 THEN ?1
+                     ELSE blocked_at_ns
+                 END,
                  updated_at_ns = MAX(updated_at_ns, ?1)
-             WHERE binding_id = ?2 AND blocked_at_ns IS NULL",
+             WHERE binding_id = ?2",
             params![blocked_at_ns, binding_id.to_string()],
         )?;
         Ok(changed == 1)
