@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -30,29 +30,6 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
         }
     };
 
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-
-    // --- Auth check: if no API key, request auth from Shell ---
-    let mut buffered_lines: Vec<String> = Vec::new();
-    let provider = if crate::needs_auth(&config) {
-        match request_auth(&mut config, &mut lines, &mut writer, &mut buffered_lines).await {
-            Some(p) => p,
-            None => {
-                // Auth failed/cancelled, use mock provider
-                Box::new(crate::provider::mock::MockProvider::text_only(
-                    "Authentication required. Please configure API key via environment variable or config.toml.",
-                )) as Box<dyn crate::provider::ContentGenerator>
-            }
-        }
-    } else {
-        crate::create_provider(&config)
-    };
-
-    let resolved = config.resolve_provider();
-    let extra_params = resolved.extra_params.clone();
-    session.finalize_model(&resolved.model, args.model.is_some());
-
     // --- Extension Manager setup ---
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut ext_manager = ExtensionManager::new(project_root.clone());
@@ -79,8 +56,44 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     }
     crate::tool::mcp::register_configured_tools(&mut tools, &config.mcp.servers).await;
     if let Some(selection) = args.tools.as_deref() {
-        tools.retain_selected_tools(selection)?;
+        if let Err(error) = tools.retain_selected_tools(selection) {
+            let message = OutputMessage::result_error_with_code(
+                session.record.session_id.as_str(),
+                &error,
+                Some("InvalidToolSelection"),
+            );
+            if let Ok(json) = serde_json::to_string(&message) {
+                let _ = writeln!(writer, "{json}");
+                let _ = writer.flush();
+            }
+            eprintln!("[cosh-core] {error}");
+            return Ok(2);
+        }
     }
+
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+
+    // --- Auth check: if no API key, request auth from Shell ---
+    let mut buffered_lines: Vec<String> = Vec::new();
+    let provider = if crate::needs_auth(&config) {
+        match request_auth(&mut config, &mut lines, &mut writer, &mut buffered_lines).await {
+            Some(p) => p,
+            None => {
+                // Auth failed/cancelled, use mock provider
+                Box::new(crate::provider::mock::MockProvider::text_only(
+                    "Authentication required. Please configure API key via environment variable or config.toml.",
+                )) as Box<dyn crate::provider::ContentGenerator>
+            }
+        }
+    } else {
+        crate::create_provider(&config)
+    };
+
+    let resolved = config.resolve_provider();
+    let extra_params = resolved.extra_params.clone();
+    session.finalize_model(&resolved.model, args.model.is_some());
+
     let mut engine = CoshCore::new(config, provider, tools);
     engine.extra_params = extra_params;
     engine.session_id = session.record.session_id.to_string();
