@@ -1,10 +1,11 @@
 //! Instance metadata probing for telemetry integration
 //!
-//! Collects machine identity and hardware specs at register time,
-//! producing an `InstanceSnapshot` that is written to
+//! Collects machine identity and hardware specs when the instance snapshot
+//! is written, producing an `InstanceSnapshot` that is written to
 //! `/var/log/anolisa/sls/ops/instance.jsonl`.
 
-use crate::metadata::MetadataClient;
+use crate::telemetry::metadata::MetadataClient;
+use crate::telemetry::{TelemetryConfig, TelemetryError};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -22,7 +23,6 @@ pub struct InstanceInfo {
     /// instance-type from metadata API (e.g. "ecs.c7.xlarge")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
-    pub region: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,13 +42,13 @@ pub struct InstanceInfo {
 
 /// A single flat JSONL record written to instance.jsonl (design doc §4.3).
 /// Fields are dot-prefixed to match the downstream telemetry schema.
+///
+/// Note: `instance_id`, `region`, `uid`, and `telemetry_id` are deliberately
+/// omitted here because the uploader injects them as common dimensions on every
+/// log line. `telemetry_id` (a persistent UUID) is always injected so every
+/// logstore's lines carry it for scale counting; `instance_id` / `uid` are
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceSnapshot {
-    #[serde(rename = "instance.id")]
-    pub instance_id: String,
-    #[serde(rename = "instance.owner_account_id")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub instance_owner_account_id: Option<String>,
     #[serde(rename = "instance.source")]
     pub instance_source: String,
     #[serde(rename = "instance.type")]
@@ -57,8 +57,6 @@ pub struct InstanceSnapshot {
     /// vCPU count as string to match downstream SLS JSONL schema; empty when unavailable.
     #[serde(rename = "instance.vcpu_count")]
     pub instance_vcpu_count: String,
-    #[serde(rename = "instance.region-id")]
-    pub instance_region_id: String,
     #[serde(rename = "instance.image-id")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_image_id: Option<String>,
@@ -70,14 +68,17 @@ pub struct InstanceSnapshot {
 
 impl InstanceSnapshot {
     /// Build a flat snapshot from probed instance metadata.
+    ///
+    /// The record carries only anonymous (L2) fields. Personal identifiers are
+    /// never written here: `instance_id`, the cloud account owner (`uid`), and
+    /// `telemetry_id` are injected by the uploader as common dimensions, and
+    /// the `uid` dimension is attached only while named reporting is linked
+    /// (source minimization, PIPL/GDPR).
     pub fn from_instance_info(info: &InstanceInfo) -> Self {
         Self {
-            instance_id: info.id.clone(),
-            instance_owner_account_id: info.owner_account_id.clone(),
             instance_source: info.source.clone(),
             instance_type: info.instance_type.clone(),
             instance_vcpu_count: info.vcpu_count.map(|n| n.to_string()).unwrap_or_default(),
-            instance_region_id: info.region.clone(),
             instance_image_id: info.image_id.clone(),
             distro_name: info.distro_name.clone().unwrap_or_default(),
             distro_version: info.distro_version.clone().unwrap_or_default(),
@@ -162,14 +163,13 @@ impl InstanceProber {
     }
 
     /// Run all probes and return an `InstanceInfo` with best-effort values.
-    pub fn probe(&self, region: &str) -> InstanceInfo {
+    pub fn probe(&self) -> InstanceInfo {
         let (distro_name, distro_version) = self.probe_distro();
 
         InstanceInfo {
             id: self.probe_instance_id(),
             source: self.probe_product_type(),
             instance_type: self.probe_instance_type(),
-            region: region.to_string(),
             owner_account_id: self.probe_owner_account_id(),
             vcpu_count: self.probe_vcpu_count(),
             image_id: self.probe_image_id(),
@@ -238,28 +238,7 @@ impl InstanceProber {
     // ── Product type ─────────────────────────────────────────────────
 
     fn probe_product_type(&self) -> String {
-        // 1. /etc/anolisa-release PRODUCT_TYPE field
-        if let Ok(content) = fs::read_to_string(&self.release_path) {
-            if let Some(pt) = crate::register::find_product_type_in_release(&content) {
-                return pt.to_string();
-            }
-        }
-
-        // 2. EDS detection: desktop-id starts with "ecd"
-        if let Some(desktop_id) = self.client.query("desktop-id") {
-            if desktop_id.starts_with("ecd") {
-                return "eds".to_string();
-            }
-        }
-
-        // 3. ECS detection: instance-type starts with "ecs"
-        if let Some(instance_type) = self.client.query("instance/instance-type") {
-            if instance_type.starts_with("ecs") {
-                return "ecs".to_string();
-            }
-        }
-
-        "unknown".to_string()
+        crate::telemetry::common::probe_product_type(&self.release_path, &self.client)
     }
 
     // ── Instance type ────────────────────────────────────────────────
@@ -336,6 +315,116 @@ impl InstanceProber {
     }
 }
 
+// ── Snapshot writing ─────────────────────────────────────────────────
+
+/// Personal identity mirrored to disk once the operator authorizes named
+/// reporting via `telemetry link`.
+///
+/// The uploader injects these into the common dimensions of *every* uploaded
+/// log line (not just `instance.jsonl`) — but only while a `link_id` is
+/// present. Written by [`write_instance_snapshot`] when `linked`, and removed
+/// by [`remove_identity_cache`] when unlinked, so withdrawing consent also
+/// erases the on-disk identifiers (source minimization, PIPL/GDPR).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Identity {
+    /// Instance identifier; serialized under the downstream schema key.
+    //
+    // `alias = "instance.id"` keeps deserialization backward-compatible with
+    // identity caches written before the field was renamed to `instance_id`.
+    #[serde(
+        rename = "instance_id",
+        alias = "instance.id",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub instance_id: Option<String>,
+    /// Cloud account owner id.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub uid: Option<String>,
+}
+
+impl Identity {
+    /// Read the identity cache; `None` when the file is absent or malformed.
+    pub fn read(path: &Path) -> Option<Self> {
+        let content = fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Whether every personal field is absent.
+    pub fn is_empty(&self) -> bool {
+        self.instance_id.is_none() && self.uid.is_none()
+    }
+
+    /// Atomically write the identity cache to `path` (temp file + rename).
+    pub fn write_to(&self, path: &Path) -> Result<(), TelemetryError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content =
+            serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        fs::write(&tmp, content.as_bytes())?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+}
+
+/// Remove the identity cache. Idempotent (absent file is treated as success).
+///
+/// Called on `telemetry unlink` and whenever an unlinked snapshot is written,
+/// so the anonymous state never leaves personal identifiers on disk.
+pub fn remove_identity_cache(config: &TelemetryConfig) -> Result<(), TelemetryError> {
+    match fs::remove_file(&config.identity_cache_path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Probe the instance and append one snapshot line to
+/// `<config.ops_dir>/instance.jsonl`.
+///
+/// The snapshot line itself is always anonymous (L2). `linked` only governs
+/// the identity cache ([`Identity`]): when linked, `instance_id` / `uid` are
+/// mirrored there for the uploader to inject as common dimensions on every
+/// line; while unlinked the cache is removed so no personal identifier reaches
+/// the upload stream. Returns the probed [`InstanceInfo`].
+pub fn write_instance_snapshot(
+    config: &TelemetryConfig,
+    linked: bool,
+) -> Result<InstanceInfo, TelemetryError> {
+    // `metadata_url` points at the region-id endpoint; `from_key_url` strips
+    // the trailing key to obtain the `/latest/meta-data` base.
+    let client = MetadataClient::from_key_url(&config.metadata_url);
+
+    let prober = InstanceProber::with_client(
+        client,
+        config.machine_id_path.clone(),
+        config.release_path.clone(),
+        config.os_release_path.clone(),
+        config.instance_id_cache_path.clone(),
+        config.cpu_present_path.clone(),
+        config.image_id_path.clone(),
+    );
+
+    let instance_info = prober.probe();
+    let snapshot = InstanceSnapshot::from_instance_info(&instance_info);
+    snapshot.write_to(&config.ops_dir.join("instance.jsonl"))?;
+
+    // Keep the uploader's identity cache in lockstep with the link state.
+    if linked {
+        let identity = Identity {
+            instance_id: Some(instance_info.id.clone()),
+            uid: instance_info.owner_account_id.clone(),
+        };
+        identity.write_to(&config.identity_cache_path)?;
+    } else {
+        remove_identity_cache(config)?;
+    }
+
+    Ok(instance_info)
+}
+
 // ── Parsing helpers ──────────────────────────────────────────────────
 
 /// Parse `/sys/devices/system/cpu/present` format (e.g. "0-3" → 4, "0" → 1)
@@ -405,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_probe_product_type_unknown() {
-        crate::metadata::with_cloud_init_disabled(|| {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
             let dir = TempDir::new().unwrap();
             let p = prober(&dir);
             assert_eq!(p.probe_product_type(), "unknown");
@@ -414,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_probe_product_type_from_instance_type() {
-        crate::metadata::with_cloud_init_responses(
+        crate::telemetry::metadata::with_cloud_init_responses(
             &[("ds.meta_data.instance.instance-type", "ecs.c7.xlarge")],
             || {
                 let dir = TempDir::new().unwrap();
@@ -426,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_probe_product_type_from_desktop_id() {
-        crate::metadata::with_cloud_init_responses(
+        crate::telemetry::metadata::with_cloud_init_responses(
             &[("ds.meta_data.desktop-id", "ecd-abc123")],
             || {
                 let dir = TempDir::new().unwrap();
@@ -438,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_probe_instance_id_from_machine_id() {
-        crate::metadata::with_cloud_init_disabled(|| {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
             let dir = TempDir::new().unwrap();
             let p = prober(&dir);
             fs::write(&p.machine_id_path, "abc123def456\n").unwrap();
@@ -448,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_probe_instance_id_generated_and_cached() {
-        crate::metadata::with_cloud_init_disabled(|| {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
             let dir = TempDir::new().unwrap();
             let p = prober(&dir);
             let id1 = p.probe_instance_id();
@@ -462,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_probe_instance_id_prefers_cache_over_machine_id() {
-        crate::metadata::with_cloud_init_disabled(|| {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
             let dir = TempDir::new().unwrap();
             let p = prober(&dir);
 
@@ -476,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_probe_instance_id_caches_machine_id() {
-        crate::metadata::with_cloud_init_disabled(|| {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
             let dir = TempDir::new().unwrap();
             let p = prober(&dir);
 
@@ -572,12 +661,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("instance.jsonl");
         let snapshot = InstanceSnapshot {
-            instance_id: "i-test".to_string(),
-            instance_owner_account_id: Some("1644215368948677".to_string()),
             instance_source: "ecs".to_string(),
             instance_type: Some("ecs.g7.xlarge".to_string()),
             instance_vcpu_count: "4".to_string(),
-            instance_region_id: "cn-hangzhou".to_string(),
             instance_image_id: Some("img-test".to_string()),
             distro_name: "alinux".to_string(),
             distro_version: "3".to_string(),
@@ -585,12 +671,11 @@ mod tests {
         snapshot.write_to(&path).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("\"instance.id\":\"i-test\""));
-        assert!(content.contains("\"instance.owner_account_id\":\"1644215368948677\""));
+        assert!(!content.contains("device_id"));
+        assert!(!content.contains("owner_account_id"));
         assert!(content.contains("\"instance.source\":\"ecs\""));
         assert!(content.contains("\"instance.type\":\"ecs.g7.xlarge\""));
         assert!(content.contains("\"instance.vcpu_count\":\"4\""));
-        assert!(content.contains("\"instance.region-id\":\"cn-hangzhou\""));
         assert!(content.contains("\"instance.image-id\":\"img-test\""));
         assert!(content.contains("\"distro.name\":\"alinux\""));
         assert!(content.contains("\"distro.version\":\"3\""));
@@ -603,12 +688,9 @@ mod tests {
 
         // First write
         let snapshot = InstanceSnapshot {
-            instance_id: "i-test".to_string(),
-            instance_owner_account_id: Some("1644215368948677".to_string()),
             instance_source: "ecs".to_string(),
             instance_type: Some("ecs.g7.xlarge".to_string()),
             instance_vcpu_count: "4".to_string(),
-            instance_region_id: "cn-hangzhou".to_string(),
             instance_image_id: Some("img-test".to_string()),
             distro_name: "alinux".to_string(),
             distro_version: "3".to_string(),
@@ -621,8 +703,86 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("\"instance.id\":\"i-test\""));
-        assert!(lines[1].contains("\"instance.id\":\"i-test\""));
+        assert!(lines[0].contains("\"instance.source\":\"ecs\""));
+        assert!(lines[1].contains("\"instance.source\":\"ecs\""));
+    }
+
+    #[test]
+    fn test_from_instance_info_never_emits_personal_fields() {
+        let info = InstanceInfo {
+            id: "i-secret".to_string(),
+            source: "ecs".to_string(),
+            instance_type: Some("ecs.g7.xlarge".to_string()),
+            owner_account_id: Some("1644215368948677".to_string()),
+            vcpu_count: Some(4),
+            image_id: Some("img-test".to_string()),
+            distro_name: Some("alinux".to_string()),
+            distro_version: Some("3".to_string()),
+        };
+
+        // The snapshot is always anonymous (L2): the cloud account owner rides
+        // on the uploader's `uid` common dimension, never on the snapshot, and
+        // `instance_id` is likewise injected as a common dimension.
+        let snapshot = serde_json::to_string(&InstanceSnapshot::from_instance_info(&info)).unwrap();
+        assert!(!snapshot.contains("owner_account_id"));
+        assert!(!snapshot.contains("1644215368948677"));
+        assert!(!snapshot.contains("device_id"));
+        // L2 aggregate fields stay for anonymous scale statistics.
+        assert!(snapshot.contains("\"instance.source\":\"ecs\""));
+        assert!(snapshot.contains("\"distro.name\":\"alinux\""));
+    }
+
+    #[test]
+    fn test_identity_serialization_keys() {
+        let id = Identity {
+            instance_id: Some("i-x".into()),
+            uid: Some("123".into()),
+        };
+        let s = serde_json::to_string(&id).unwrap();
+        assert!(s.contains("\"instance_id\":\"i-x\""));
+        assert!(s.contains("\"uid\":\"123\""));
+
+        // Absent fields are omitted entirely, and `is_empty` reflects that.
+        let empty = Identity::default();
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_identity_deserialize_legacy_field_name() {
+        // identity caches written before the rename used `instance.id` as the
+        // JSON key. The `alias` ensures they still deserialize correctly.
+        let legacy = r#"{"instance.id":"i-legacy","uid":"456"}"#;
+        let id: Identity = serde_json::from_str(legacy).unwrap();
+        assert_eq!(id.instance_id.as_deref(), Some("i-legacy"));
+        assert_eq!(id.uid.as_deref(), Some("456"));
+
+        // New format also works.
+        let current = r#"{"instance_id":"i-new","uid":"789"}"#;
+        let id: Identity = serde_json::from_str(current).unwrap();
+        assert_eq!(id.instance_id.as_deref(), Some("i-new"));
+        assert_eq!(id.uid.as_deref(), Some("789"));
+    }
+
+    #[test]
+    fn test_write_instance_snapshot_manages_identity_cache() {
+        crate::telemetry::metadata::with_cloud_init_disabled(|| {
+            let dir = TempDir::new().unwrap();
+            let config = crate::telemetry::test_config(&dir);
+
+            // Linked: identity cache is written and carries the instance id.
+            write_instance_snapshot(&config, true).unwrap();
+            let id = Identity::read(&config.identity_cache_path).unwrap();
+            assert!(id.instance_id.is_some());
+
+            // The snapshot no longer carries device_id (moved to common dimensions).
+            let content = fs::read_to_string(config.ops_dir.join("instance.jsonl")).unwrap();
+            assert!(!content.contains("device_id"));
+
+            // Unlinked: withdrawing consent erases the cache.
+            write_instance_snapshot(&config, false).unwrap();
+            assert!(!config.identity_cache_path.exists());
+        });
     }
 
     #[test]

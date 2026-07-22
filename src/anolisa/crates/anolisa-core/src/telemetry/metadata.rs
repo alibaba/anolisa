@@ -5,12 +5,36 @@
 //! `InstanceProber`.
 
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// Client for querying Alibaba Cloud instance metadata and cloud-init datasource.
+///
+/// Once the metadata API is found unreachable (curl fails), subsequent
+/// `query_metadata` calls short-circuit to `None` without spawning curl again,
+/// so a non-ECS host pays the timeout cost only once instead of once per key.
+///
+/// Cheap to clone: the cloud-init cache is shared and the unreachable flag is
+/// copied so probes reuse the same short-circuit state across the uploader
+/// round.
 pub struct MetadataClient {
     metadata_url_base: String,
-    cloud_init_all: OnceLock<Option<serde_json::Value>>,
+    cloud_init_all: Arc<OnceLock<Option<serde_json::Value>>>,
+    /// Set to `true` after the first curl failure; all further `query_metadata`
+    /// calls skip curl entirely.
+    metadata_unreachable: AtomicBool,
+}
+
+impl Clone for MetadataClient {
+    fn clone(&self) -> Self {
+        Self {
+            metadata_url_base: self.metadata_url_base.clone(),
+            cloud_init_all: self.cloud_init_all.clone(),
+            metadata_unreachable: AtomicBool::new(
+                self.metadata_unreachable.load(Ordering::Relaxed),
+            ),
+        }
+    }
 }
 
 impl MetadataClient {
@@ -19,7 +43,8 @@ impl MetadataClient {
     pub fn new(metadata_url_base: &str) -> Self {
         Self {
             metadata_url_base: metadata_url_base.trim_end_matches('/').to_string(),
-            cloud_init_all: OnceLock::new(),
+            cloud_init_all: Arc::new(OnceLock::new()),
+            metadata_unreachable: AtomicBool::new(false),
         }
     }
 
@@ -38,13 +63,21 @@ impl MetadataClient {
         Self::new(base)
     }
 
-    /// Query a metadata API key via curl with a 2-second timeout.
+    /// Query a metadata API key via curl.
     ///
-    /// Returns `None` on curl failure, HTTP error, or empty response.
+    /// Uses `--connect-timeout 1` (connect phase) and `--max-time 2` (total)
+    /// so an unreachable metadata endpoint fails fast without blocking the
+    /// caller. Returns `None` on curl failure, HTTP error, or empty response.
     pub fn query_metadata(&self, key: &str) -> Option<String> {
+        // Short-circuit: once the metadata endpoint is known unreachable,
+        // skip curl for all subsequent keys.
+        if self.metadata_unreachable.load(Ordering::Relaxed) {
+            return None;
+        }
+
         let url = format!("{}/{}", self.metadata_url_base, key);
         let output = Command::new("curl")
-            .args(["-sf", "--max-time", "2", &url])
+            .args(["-sf", "--connect-timeout", "1", "--max-time", "2", &url])
             .output()
             .ok()?;
 
@@ -54,6 +87,9 @@ impl MetadataClient {
                 return Some(val);
             }
         }
+
+        // Mark unreachable so later calls skip curl entirely.
+        self.metadata_unreachable.store(true, Ordering::Relaxed);
         None
     }
 
