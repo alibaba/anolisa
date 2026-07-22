@@ -83,7 +83,7 @@ async fn typed_errors_have_stable_sanitized_mappings() {
                 action_id: id,
                 reason: "/root/recovery".into(),
             },
-            S::SERVICE_UNAVAILABLE,
+            S::CONFLICT,
             "recovery_failed",
         ),
         (E::ClaimLost(id), S::CONFLICT, "claim_lost"),
@@ -107,4 +107,19 @@ async fn typed_errors_have_stable_sanitized_mappings() {
         assert!(!text.contains("/private/"));
         assert!(!text.contains("token at"));
     }
+}
+
+#[actix_web::test]
+async fn recovery_failure_is_a_non_retryable_conflict() {
+    let response = containment_error(ContainmentError::RecoveryFailed {
+        action_id: Uuid::new_v4(),
+        reason: "sensitive recovery detail".into(),
+    });
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body())
+        .await
+        .expect("error body should read");
+    let value: Value = serde_json::from_slice(&body).expect("error should be JSON");
+    assert_eq!(value["error"]["retryable"], false);
 }

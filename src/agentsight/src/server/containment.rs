@@ -98,11 +98,18 @@ pub(super) async fn contain_case(
     })
     .await
     {
-        Ok(Ok(action)) => handlers::local_security_response(
-            StatusCode::OK,
-            "contained",
-            containment_action_view(&action),
-        ),
+        Ok(Ok(action)) => {
+            let state = if action.blocked_at_ns.is_some() {
+                "contained"
+            } else {
+                "policy_active"
+            };
+            handlers::local_security_response(
+                StatusCode::OK,
+                state,
+                containment_action_view(&action),
+            )
+        }
         Ok(Err(error)) => operation_error(error),
         Err(error) => blocking_error(error),
     }
@@ -135,7 +142,7 @@ fn candidate_snapshot(
 }
 
 fn trusted_candidates(statuses: Vec<AgentHealthStatus>) -> Vec<ContainmentCandidate> {
-    let mut candidates = statuses
+    let candidates = statuses
         .into_iter()
         .filter(|status| status.status != AgentHealthState::Offline)
         .filter_map(|status| {
@@ -153,6 +160,12 @@ fn trusted_candidates(statuses: Vec<AgentHealthStatus>) -> Vec<ContainmentCandid
             })
         })
         .collect::<Vec<_>>();
+    resolve_candidate_identities(candidates)
+}
+
+fn resolve_candidate_identities(
+    mut candidates: Vec<ContainmentCandidate>,
+) -> Vec<ContainmentCandidate> {
     candidates.sort_by(|left, right| {
         (
             &left.agent_id,
@@ -167,19 +180,22 @@ fn trusted_candidates(statuses: Vec<AgentHealthStatus>) -> Vec<ContainmentCandid
                 &right.display_name,
             ))
     });
-    candidates.dedup();
-
-    let mut agent_pids = BTreeMap::<String, BTreeSet<i32>>::new();
+    let mut pid_identities = BTreeMap::<i32, BTreeSet<(String, u64)>>::new();
     for candidate in &candidates {
-        agent_pids
-            .entry(candidate.agent_id.clone())
+        pid_identities
+            .entry(candidate.root_pid)
             .or_default()
-            .insert(candidate.root_pid);
+            .insert((candidate.agent_id.clone(), candidate.process_start_time));
     }
     candidates.retain(|candidate| {
-        agent_pids
-            .get(&candidate.agent_id)
-            .is_some_and(|pids| pids.len() == 1)
+        pid_identities
+            .get(&candidate.root_pid)
+            .is_some_and(|identities| identities.len() == 1)
+    });
+    candidates.dedup_by(|left, right| {
+        left.agent_id == right.agent_id
+            && left.root_pid == right.root_pid
+            && left.process_start_time == right.process_start_time
     });
     candidates
 }
@@ -234,7 +250,7 @@ fn parse_case_id(value: String) -> Result<Uuid, HttpResponse> {
 fn operation_error(error: OperationError) -> HttpResponse {
     match error {
         OperationError::Containment(error) => containment_error(error),
-        OperationError::HealthStoreUnavailable => error_response(
+        OperationError::HealthStoreUnavailable => handlers::local_error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "health_store_unavailable",
             "trusted Agent health is unavailable",
@@ -338,10 +354,10 @@ fn containment_error(error: ContainmentError) -> HttpResponse {
             true,
         ),
         RecoveryFailed { .. } => (
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::CONFLICT,
             "recovery_failed",
             "containment recovery failed",
-            true,
+            false,
         ),
         ClaimLost(_) => (
             StatusCode::CONFLICT,
@@ -356,11 +372,11 @@ fn containment_error(error: ContainmentError) -> HttpResponse {
             true,
         ),
     };
-    error_response(status, code, message, retryable)
+    handlers::local_error_response(status, code, message, retryable)
 }
 
 fn unavailable() -> HttpResponse {
-    error_response(
+    handlers::local_error_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "containment_disabled",
         "containment coordinator is not configured",
@@ -369,11 +385,11 @@ fn unavailable() -> HttpResponse {
 }
 
 fn request_error(message: &str) -> HttpResponse {
-    error_response(StatusCode::BAD_REQUEST, "bad_request", message, false)
+    handlers::local_error_response(StatusCode::BAD_REQUEST, "bad_request", message, false)
 }
 
 fn blocking_error(_: actix_web::error::BlockingError) -> HttpResponse {
-    error_response(
+    handlers::local_error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
         "blocking_worker_failed",
         "containment worker failed",
@@ -381,15 +397,13 @@ fn blocking_error(_: actix_web::error::BlockingError) -> HttpResponse {
     )
 }
 
-fn error_response(status: StatusCode, code: &str, message: &str, retryable: bool) -> HttpResponse {
-    HttpResponse::build(status).json(json!({
-        "error": { "code": code, "message": message, "retryable": retryable }
-    }))
-}
-
 #[cfg(test)]
 #[path = "containment_error_tests.rs"]
 mod error_tests;
+
+#[cfg(test)]
+#[path = "containment_candidate_tests.rs"]
+mod candidate_tests;
 
 #[cfg(test)]
 #[path = "containment_tests.rs"]

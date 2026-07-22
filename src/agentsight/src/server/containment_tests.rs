@@ -265,6 +265,7 @@ async fn active_post_is_idempotent_and_persists_only_dashboard_principal() {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let value: Value = awtest::read_body_json(response).await;
+        assert_eq!(value["state"], "policy_active");
         assert_eq!(value["data"]["requested_by"], "dashboard");
         assert_eq!(value["data"]["lifecycle_state"], "active");
         let observed = value["data"]["action_id"].clone();
@@ -283,6 +284,25 @@ async fn active_post_is_idempotent_and_persists_only_dashboard_principal() {
         .expect("action should persist");
     assert_eq!(stored.requested_by, "dashboard");
     assert!(!stored.requested_by.contains(&token));
+    fixture
+        .store
+        .mark_containment_blocked(stored.binding_id, stored.updated_at_ns.saturating_add(1))
+        .expect("block correlation should persist");
+    let response = awtest::call_service(
+        &app,
+        awtest::TestRequest::post()
+            .uri(&fixture.contain_uri())
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({
+                "root_pid": fixture.child.id(),
+                "duration_secs": 60,
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value = awtest::read_body_json(response).await;
+    assert_eq!(value["state"], "contained");
 }
 
 #[actix_web::test]

@@ -910,21 +910,30 @@ fn paginated_local_response(
 
 pub(super) fn security_store_error(error: SecurityStoreError) -> HttpResponse {
     log::error!("local security store request failed: {error}");
-    HttpResponse::InternalServerError().json(json!({
-        "error": {
-            "code": "security_store_unavailable",
-            "message": "local security persistence is unavailable",
-            "retryable": true,
-        }
-    }))
+    local_error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "security_store_unavailable",
+        "local security persistence is unavailable",
+        true,
+    )
 }
 
 fn bad_request_response(message: String) -> HttpResponse {
-    HttpResponse::BadRequest().json(json!({
+    local_error_response(StatusCode::BAD_REQUEST, "bad_request", &message, false)
+}
+
+/// Builds the stable error envelope shared by local security endpoints.
+pub(super) fn local_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) -> HttpResponse {
+    HttpResponse::build(status).json(json!({
         "error": {
-            "code": "bad_request",
+            "code": code,
             "message": message,
-            "retryable": false,
+            "retryable": retryable,
         }
     }))
 }
