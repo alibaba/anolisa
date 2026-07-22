@@ -1,6 +1,7 @@
 //! Case-level orchestration for upgrading audit evidence to enforcement.
 
 mod policy;
+mod reconciler;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -162,6 +163,20 @@ pub enum ContainmentError {
     /// Local security persistence failed.
     #[error(transparent)]
     Store(#[from] SecurityStoreError),
+    /// A second background reconciler was requested for this coordinator.
+    #[error("containment reconciler is already running")]
+    AlreadyRunning,
+    /// Spawning the background reconciler failed.
+    #[error("failed to start containment reconciler: {0}")]
+    ReconcilerThread(std::io::Error),
+    /// Persisted provenance could not safely restore a pending action.
+    #[error("containment action {action_id} recovery failed: {reason}")]
+    RecoveryFailed {
+        /// Pending action that could not be recovered.
+        action_id: Uuid,
+        /// Sanitized actionable failure detail.
+        reason: String,
+    },
 }
 
 /// Coordinates provenance recovery, durable intent, and enforced acknowledgement.
@@ -169,6 +184,7 @@ pub struct ContainmentCoordinator {
     store: Arc<SecurityStore>,
     enforcer: Arc<dyn ContainmentEnforcer>,
     stop: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
 }
 
 impl ContainmentCoordinator {
@@ -178,6 +194,7 @@ impl ContainmentCoordinator {
             store,
             enforcer,
             stop: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
