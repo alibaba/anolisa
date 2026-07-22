@@ -41,6 +41,51 @@ function safeErrorMessage(error: unknown): string {
   return '请求失败，请稍后重试。';
 }
 
+function existingActionNotice(action: SecurityContainmentAction): {
+  title: string;
+  message: string;
+  live: boolean;
+} {
+  switch (action.lifecycle_state) {
+    case 'pending':
+      return {
+        title: '策略正在下发',
+        message: '系统正在等待内核执行器确认，请稍后在案件详情中查看。',
+        live: true,
+      };
+    case 'active':
+      return action.duration_secs === null
+        ? {
+            title: '持续拦截已生效',
+            message: '该案件已有持续生效的内核策略，请在案件详情中查看或解除。',
+            live: true,
+          }
+        : {
+            title: '临时拦截已生效',
+            message: '该案件已有临时内核策略，请在案件详情中查看到期时间。',
+            live: true,
+          };
+    case 'expiring':
+      return {
+        title: '策略正在解除',
+        message: '内核策略正在清理，完成前不能重复下发。',
+        live: true,
+      };
+    case 'expired':
+      return {
+        title: '上次临时拦截已到期，可重新下发',
+        message: '新动作仍会重新校验当前在线进程身份。',
+        live: false,
+      };
+    case 'failed':
+      return {
+        title: '上次拦截失败，可重新尝试',
+        message: '请确认 Agent 在线且内核执行服务已恢复。',
+        live: false,
+      };
+  }
+}
+
 export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
   caseId,
   open,
@@ -55,6 +100,11 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
   const [error, setError] = useState('');
   const requestVersion = useRef(0);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const headerCloseRef = useRef<HTMLButtonElement>(null);
+  const firstDecisionRef = useRef<HTMLElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     requestVersion.current += 1;
@@ -94,20 +144,63 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
 
   useEffect(() => {
     if (!open) return undefined;
-    dialogRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !submitting) onClose();
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    return () => {
+      previousFocusRef.current?.focus();
+      previousFocusRef.current = null;
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose, open, submitting]);
+  }, [open]);
+
+  const existingNotice = plan?.existing_action
+    ? existingActionNotice(plan.existing_action)
+    : null;
+  const liveExistingAction = Boolean(existingNotice?.live);
+
+  useEffect(() => {
+    if (!open) return;
+    if (plan && !liveExistingAction) {
+      firstDecisionRef.current?.focus();
+    } else {
+      headerCloseRef.current?.focus();
+    }
+  }, [liveExistingAction, open, plan]);
 
   if (!open) return null;
 
-  const canSubmit = Boolean(plan && selectedPid !== null && !loading && !submitting);
+  const canSubmit = Boolean(
+    plan && selectedPid !== null && !loading && !submitting && !liveExistingAction,
+  );
   const originalTarget = plan?.original_target;
   const targetStale = Boolean(plan && !plan.original_target_valid);
   const durationMinutes = Math.round((plan?.default_duration_secs ?? 900) / 60);
+
+  const handleDialogKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      if (!submitting) onCloseRef.current();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    ));
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) {
+      event.preventDefault();
+      return;
+    }
+    const focusOutside = !event.currentTarget.contains(document.activeElement);
+    if (event.shiftKey && (document.activeElement === first || focusOutside)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || focusOutside)) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const submit = async () => {
     if (!plan || selectedPid === null || loading || submitting) return;
@@ -128,13 +221,20 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+    <div
+      data-testid="containment-backdrop"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !submitting) onCloseRef.current();
+      }}
+    >
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="containment-dialog-title"
         tabIndex={-1}
+        onKeyDown={handleDialogKeyDown}
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl outline-none"
       >
         <header className="flex items-start justify-between border-b border-gray-200 px-6 py-5">
@@ -147,6 +247,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
             </p>
           </div>
           <button
+            ref={headerCloseRef}
             type="button"
             aria-label="关闭"
             onClick={onClose}
@@ -187,7 +288,21 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                 </div>
               </dl>
 
-              {targetStale ? (
+              {existingNotice && (
+                <div
+                  role="status"
+                  className={`rounded-xl border px-4 py-3 ${
+                    existingNotice.live
+                      ? 'border-blue-200 bg-blue-50 text-blue-800'
+                      : 'border-amber-200 bg-amber-50 text-amber-800'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">{existingNotice.title}</p>
+                  <p className="mt-1 text-xs">{existingNotice.message}</p>
+                </div>
+              )}
+
+              {!liveExistingAction && (targetStale ? (
                 <div>
                   <label htmlFor="containment-agent" className="text-sm font-medium text-gray-800">
                     选择在线 Agent
@@ -196,6 +311,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                     原始 PID 已失效，必须选择同一 Agent 的在线进程。
                   </p>
                   <select
+                    ref={(element) => { firstDecisionRef.current = element; }}
                     id="containment-agent"
                     required
                     value={selectedPid ?? ''}
@@ -216,12 +332,13 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                 <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
                   进程身份有效：PID {originalTarget.root_pid}
                 </p>
-              )}
+              ))}
 
-              <fieldset className="space-y-3">
+              {!liveExistingAction && <fieldset className="space-y-3">
                 <legend className="text-sm font-medium text-gray-800">拦截时长</legend>
                 <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 p-4">
                   <input
+                    ref={targetStale ? undefined : (element) => { firstDecisionRef.current = element; }}
                     type="radio"
                     name="containment-duration"
                     aria-label={`临时拦截 ${durationMinutes} 分钟`}
@@ -254,7 +371,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                     </span>
                   </span>
                 </label>
-              </fieldset>
+              </fieldset>}
             </>
           )}
 
@@ -272,16 +389,16 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
             disabled={submitting}
             className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 disabled:opacity-40"
           >
-            取消
+            {liveExistingAction ? '关闭' : '取消'}
           </button>
-          <button
+          {!liveExistingAction && <button
             type="button"
             onClick={() => void submit()}
             disabled={!canSubmit}
             className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:bg-red-300"
           >
             {submitting ? '正在下发...' : '确认并下发'}
-          </button>
+          </button>}
         </footer>
       </div>
     </div>

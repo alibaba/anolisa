@@ -167,6 +167,112 @@ describe('ContainmentDialog', () => {
     await waitFor(() => expect(containSecurityCase).toHaveBeenCalledTimes(1));
   });
 
+  it('shows an existing persistent active action instead of allowing another submission', async () => {
+    vi.mocked(fetchContainmentPlan).mockResolvedValue({
+      state: 'found',
+      data: {
+        ...plan,
+        existing_action: { ...action, duration_secs: null },
+      },
+    });
+    render(
+      <ContainmentDialog caseId="case-1" open onClose={vi.fn()} onContained={vi.fn()} />,
+    );
+
+    expect(await screen.findByText('持续拦截已生效')).toBeInTheDocument();
+    expect(screen.getByText('该案件已有持续生效的内核策略，请在案件详情中查看或解除。'))
+      .toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '确认并下发' })).not.toBeInTheDocument();
+    expect(containSecurityCase).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['pending', '策略正在下发'],
+    ['expiring', '策略正在解除'],
+  ] as const)('suppresses submission while an existing action is %s', async (state, label) => {
+    vi.mocked(fetchContainmentPlan).mockResolvedValue({
+      state: 'found',
+      data: {
+        ...plan,
+        existing_action: { ...action, lifecycle_state: state },
+      },
+    });
+    render(
+      <ContainmentDialog caseId="case-1" open onClose={vi.fn()} onContained={vi.fn()} />,
+    );
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '确认并下发' })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['failed', '上次拦截失败，可重新尝试'],
+    ['expired', '上次临时拦截已到期，可重新下发'],
+  ] as const)('allows a new attempt after an existing action is %s', async (state, label) => {
+    vi.mocked(fetchContainmentPlan).mockResolvedValue({
+      state: 'found',
+      data: {
+        ...plan,
+        existing_action: { ...action, lifecycle_state: state },
+      },
+    });
+    render(
+      <ContainmentDialog caseId="case-1" open onClose={vi.fn()} onContained={vi.fn()} />,
+    );
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认并下发' })).toBeEnabled();
+  });
+
+  it('closes on Escape and restores focus to the previously active element', async () => {
+    const trigger = document.createElement('button');
+    trigger.textContent = '打开拦截弹窗';
+    document.body.appendChild(trigger);
+    trigger.focus();
+    const onClose = vi.fn();
+    const props = { caseId: 'case-1', onClose, onContained: vi.fn() };
+    const { rerender } = render(<ContainmentDialog {...props} open />);
+    const dialog = await screen.findByRole('dialog', { name: '确认升级为内核拦截' });
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledOnce();
+    rerender(<ContainmentDialog {...props} open={false} />);
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
+  it('closes only when the backdrop itself is clicked', async () => {
+    const onClose = vi.fn();
+    render(
+      <ContainmentDialog caseId="case-1" open onClose={onClose} onContained={vi.fn()} />,
+    );
+    const dialog = await screen.findByRole('dialog', { name: '确认升级为内核拦截' });
+
+    fireEvent.click(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('containment-backdrop'));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('focuses the first decision control and traps Tab in both directions', async () => {
+    render(
+      <ContainmentDialog caseId="case-1" open onClose={vi.fn()} onContained={vi.fn()} />,
+    );
+    const dialog = await screen.findByRole('dialog', { name: '确认升级为内核拦截' });
+    const temporary = await screen.findByLabelText('临时拦截 15 分钟');
+    await waitFor(() => expect(temporary).toHaveFocus());
+
+    const close = screen.getByRole('button', { name: '关闭' });
+    const submit = screen.getByRole('button', { name: '确认并下发' });
+    submit.focus();
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(close).toHaveFocus();
+
+    close.focus();
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(submit).toHaveFocus();
+  });
+
   it('discards stale loading results and resets choices when the case changes', async () => {
     let resolveFirst: ((value: { state: string; data: typeof plan }) => void) | undefined;
     vi.mocked(fetchContainmentPlan)
