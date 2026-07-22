@@ -122,6 +122,7 @@ fn handle_auth(
                 })
                 .collect();
             let active_provider = config.ai.active_provider.clone();
+            let effective_auth_required = config.resolve_provider().auth_required();
             let saved_providers: Vec<Value> = config
                 .ai
                 .providers
@@ -161,6 +162,7 @@ fn handle_auth(
                     "templates": templates,
                     "saved_providers": saved_providers,
                     "active_provider": active_provider,
+                    "effective_auth_required": effective_auth_required,
                 })),
                 error: None,
             }

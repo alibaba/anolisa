@@ -608,6 +608,19 @@ pub struct ResolvedProvider {
     pub security_token: Option<String>,
 }
 
+impl ResolvedProvider {
+    pub fn auth_required(&self) -> bool {
+        if self.provider_type == "mock" {
+            return false;
+        }
+        if self.provider_type == "aliyun" {
+            return self.auth_source.as_deref() != Some("ecs_ram_role")
+                && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
+        }
+        self.api_key.is_empty()
+    }
+}
+
 /// Persist the current provider config to `~/.copilot-shell/config.toml`.
 /// Only writes the [ai] section to avoid overwriting other settings.
 pub fn persist_config(config: &CoreConfig) -> Result<(), String> {

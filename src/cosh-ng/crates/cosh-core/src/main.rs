@@ -82,17 +82,7 @@ fn create_provider_from_resolved(
 
 /// Check if auth is needed (no API key or AK/SK configured).
 fn needs_auth(config: &CoreConfig) -> bool {
-    let resolved = config.resolve_provider();
-    if resolved.provider_type == "mock" {
-        return false;
-    }
-    if resolved.provider_type == "aliyun" {
-        if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
-            return false;
-        }
-        return resolved.access_key_id.is_empty() || resolved.access_key_secret.is_empty();
-    }
-    resolved.api_key.is_empty()
+    config.resolve_provider().auth_required()
 }
 
 #[tokio::main]
