@@ -111,7 +111,53 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Tue Jul 21 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Jul 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa update all` now updates every tracked raw and RPM component while leaving the CLI unchanged.
+- `anolisa repair` now restores damaged raw installations from their recorded versions.
+- `anolisa repair` now supports user-scope installations without root privileges.
+- `anolisa repair` now recovers interrupted install, update, adopt, uninstall, and batch operations.
+- `anolisa repair` now reinstalls missing managed RPM packages.
+- `anolisa status` now reports unclassified legacy records as needs-attention with scope-aware repair and forget guidance.
+- `anolisa status` and `anolisa doctor` now run health checks from each installation's saved component manifest.
+- User-mode adapter commands can now target visible system installations.
+- `anolisa repair` can now restore unclassified legacy records from installed packages or intact files.
+- `anolisa forget` can now remove unclassified legacy records without touching installed files or packages.
+- `anolisa install` now refuses unmanaged system RPMs and directs users to `anolisa adopt`.
+- `anolisa install` now succeeds without changes when the component is already tracked.
+- `anolisa adopt` now makes existing RPMs updatable while keeping package removal opt-in.
+- `anolisa adopt` now succeeds without changes for already adopted packages.
+- `anolisa update` now requires observed-only RPMs to be adopted first.
+- `anolisa install --all` now applies new RPM packages in one package transaction.
+- `anolisa upgrade` now applies planned RPM updates in one package transaction.
+- `anolisa upgrade` now applies planned RPM installs in one package transaction.
+- `anolisa list` and `anolisa status` now show separate user and system rows for shadowed components.
+- `anolisa list` now labels tracked installations as owned, managed, adopted, or observed.
+- `anolisa --install-mode user install` can now create a user installation beside a visible system installation.
+- Lifecycle mutations now remain within the selected scope, including package aliases.
+- The first modifying command now upgrades legacy state and preserves `installed.toml.v4.bak`.
+- Newer state formats now produce an error instead of appearing empty.
+- `install-anolisa.sh` now leaves distribution index retrieval to the CLI, keeping mirror data current.
+- `install-anolisa.sh` now stages only OS-base manifests because component manifests are fetched when needed.
+- `install-anolisa.sh --strict` now validates only binary and manifest bundle checksums.
+- `ANOLISA_INDEX_URL` and `ANOLISA_INDEX_SHA256` no longer affect `install-anolisa.sh`.
+- Lifecycle JSON output now includes explicit plans across install, adopt, update, repair, and uninstall.
+- Uninstall JSON output now uses one schema for raw and RPM components, including package removal and plans.
+- `anolisa uninstall --dry-run` now reports missing components as errors instead of empty successful plans.
+- `anolisa forget` and `anolisa restart` now stop while an earlier component operation needs recovery.
+- `anolisa doctor` now reports incomplete operations even without an active component record.
+- RPM-managed components no longer fail `status` or `doctor` because of raw-install health checks.
+- RPM component updates now refresh saved component manifests before reporting success.
+- Incomplete RPM manifest refreshes now appear in `anolisa logs --severity warn`.
+- Interrupted RPM updates now remain repairable instead of appearing successful with stale settings.
+- `anolisa doctor` no longer recommends lifecycle commands when recovery data is unreadable or ambiguous.
+- `anolisa doctor` no longer duplicates recovery findings across components sharing one state location.
+- `anolisa doctor --help` now states that `--fix` remains unavailable.
+- Batch RPM failures now preserve repairable state for packages that changed.
+- Component aliases no longer redirect lifecycle changes into a different installation scope.
+- Health checks for user services now use the correct service manager across installation scopes.
+- Failed batch RPM operations now retry unaffected components individually.
+
+* Tue Jul 21 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.8-1
 - `anolisa adapter enable` now supports `--allow-unsafe-plugin-install` for explicitly authorized OpenClaw plugin installation.
 - OpenClaw adapter settings can now target specific OpenClaw versions.
 - `anolisa adapter enable` now checks OpenClaw compatibility before making changes.

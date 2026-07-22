@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-07-22
+
+### Added
+
+- `anolisa update all` now updates every tracked raw and RPM component while leaving the CLI unchanged.
+- `anolisa repair` now restores damaged raw installations from their recorded versions.
+- `anolisa repair` now supports user-scope installations without root privileges.
+- `anolisa repair` now recovers interrupted install, update, adopt, uninstall, and batch operations.
+- `anolisa repair` now reinstalls missing managed RPM packages.
+- `anolisa status` now reports unclassified legacy records as needs-attention with scope-aware repair and forget guidance.
+- `anolisa status` and `anolisa doctor` now run health checks from each installation's saved component manifest.
+- User-mode adapter commands can now target visible system installations.
+- `anolisa repair` can now restore unclassified legacy records from installed packages or intact files.
+- `anolisa forget` can now remove unclassified legacy records without touching installed files or packages.
+
+### Changed
+
+- `anolisa install` now refuses unmanaged system RPMs and directs users to `anolisa adopt`.
+- `anolisa install` now succeeds without changes when the component is already tracked.
+- `anolisa adopt` now makes existing RPMs updatable while keeping package removal opt-in.
+- `anolisa adopt` now succeeds without changes for already adopted packages.
+- `anolisa update` now requires observed-only RPMs to be adopted first.
+- `anolisa install --all` now applies new RPM packages in one package transaction.
+- `anolisa upgrade` now applies planned RPM updates in one package transaction.
+- `anolisa upgrade` now applies planned RPM installs in one package transaction.
+- `anolisa list` and `anolisa status` now show separate user and system rows for shadowed components.
+- `anolisa list` now labels tracked installations as owned, managed, adopted, or observed.
+- `anolisa --install-mode user install` can now create a user installation beside a visible system installation.
+- Lifecycle mutations now remain within the selected scope, including package aliases.
+- The first modifying command now upgrades legacy state and preserves `installed.toml.v4.bak`.
+- Newer state formats now produce an error instead of appearing empty.
+- `install-anolisa.sh` now leaves distribution index retrieval to the CLI, keeping mirror data current.
+- `install-anolisa.sh` now stages only OS-base manifests because component manifests are fetched when needed.
+- `install-anolisa.sh --strict` now validates only binary and manifest bundle checksums.
+- `ANOLISA_INDEX_URL` and `ANOLISA_INDEX_SHA256` no longer affect `install-anolisa.sh`.
+- Lifecycle JSON output now includes explicit plans across install, adopt, update, repair, and uninstall.
+- Uninstall JSON output now uses one schema for raw and RPM components, including package removal and plans.
+- `anolisa uninstall --dry-run` now reports missing components as errors instead of empty successful plans.
+- `anolisa forget` and `anolisa restart` now stop while an earlier component operation needs recovery.
+- `anolisa doctor` now reports incomplete operations even without an active component record.
+
+### Fixed
+
+- RPM-managed components no longer fail `status` or `doctor` because of raw-install health checks.
+- RPM component updates now refresh saved component manifests before reporting success.
+- Incomplete RPM manifest refreshes now appear in `anolisa logs --severity warn`.
+- Interrupted RPM updates now remain repairable instead of appearing successful with stale settings.
+- `anolisa doctor` no longer recommends lifecycle commands when recovery data is unreadable or ambiguous.
+- `anolisa doctor` no longer duplicates recovery findings across components sharing one state location.
+- `anolisa doctor --help` now states that `--fix` remains unavailable.
+- Batch RPM failures now preserve repairable state for packages that changed.
+- Component aliases no longer redirect lifecycle changes into a different installation scope.
+- Health checks for user services now use the correct service manager across installation scopes.
+- Failed batch RPM operations now retry unaffected components individually.
+
 ## [0.2.8] - 2026-07-21
 
 ### Added
@@ -554,6 +609,61 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.9] - 2026-07-22
+
+### 新增
+
+- `anolisa update all` 现更新全部已跟踪的 raw 与 RPM 组件，不更新 CLI。
+- `anolisa repair` 现可按记录版本恢复损坏的 raw 安装。
+- `anolisa repair` 现支持无 root 权限修复 user scope 安装。
+- `anolisa repair` 现可恢复中断的安装、更新、采纳、卸载和批量操作。
+- `anolisa repair` 现可重装缺失的托管 RPM 软件包。
+- `anolisa status` 现将不明旧记录标为需处理，并给出按 scope 修复或遗忘的指引。
+- `anolisa status` 与 `anolisa doctor` 现按安装时保存的组件清单执行健康检查。
+- user mode 的 adapter 命令现可作用于可见的 system 安装。
+- `anolisa repair` 现可根据已安装软件包或完好文件恢复不明旧记录。
+- `anolisa forget` 现可仅删除不明旧记录，不改动已安装内容。
+
+### 变更
+
+- `anolisa install` 遇到未托管的 system RPM 时现会拒绝，并提示使用 `anolisa adopt`。
+- 已跟踪组件再次执行 `anolisa install` 时现直接成功，不再重复安装。
+- `anolisa adopt` 现允许更新既有 RPM，卸载软件包仍需显式授权。
+- 已采纳软件包再次执行 `anolisa adopt` 时现直接成功。
+- 仅观察的 RPM 组件现须先执行 `anolisa adopt` 才能更新。
+- `anolisa install --all` 现用一次软件包事务安装全部新 RPM。
+- `anolisa upgrade` 现用一次软件包事务完成全部 RPM 更新。
+- `anolisa upgrade` 现用一次软件包事务安装全部计划内 RPM。
+- `anolisa list` 与 `anolisa status` 现分别显示同名组件的 user 和 system 记录。
+- `anolisa list` 现将记录标为 owned、managed、adopted 或 observed。
+- `anolisa --install-mode user install` 现可在 system 安装旁创建独立 user 安装。
+- 生命周期修改现严格限制在所选 scope，软件包别名也不例外。
+- 首次修改旧状态时现自动升级格式，并保留 `installed.toml.v4.bak`。
+- 遇到新版状态格式时现会报错，不再显示为空状态。
+- `install-anolisa.sh` 现由 CLI 获取分发索引，以使用镜像最新数据。
+- `install-anolisa.sh` 现仅部署 OS-base 清单，组件清单改为按需获取。
+- `install-anolisa.sh --strict` 现仅校验二进制和清单包。
+- `ANOLISA_INDEX_URL` 与 `ANOLISA_INDEX_SHA256` 现不再影响安装脚本。
+- 安装、采纳、更新、修复和卸载的 JSON 输出现包含明确执行计划。
+- raw 与 RPM 组件的卸载 JSON 现统一格式，并包含删除方式和计划。
+- `anolisa uninstall --dry-run` 遇到缺失组件时现会报错，不再返回空成功计划。
+- 组件存在待恢复操作时，`anolisa forget` 与 `anolisa restart` 现会停止。
+- `anolisa doctor` 现会报告没有活动组件记录的未完成操作。
+
+### 修复
+
+- RPM 托管组件不再因 raw 安装健康检查被 `status` 或 `doctor` 误报失败。
+- RPM 组件更新现会先刷新已保存组件清单，再报告成功。
+- RPM 清单刷新未完成时，`anolisa logs --severity warn` 现可检索该操作。
+- RPM 更新中断后现保持可修复，不再以过期设置显示成功。
+- `anolisa doctor` 遇到损坏或不明确的恢复数据时不再建议生命周期命令。
+- 多个组件共用状态目录时，`anolisa doctor` 不再重复报告恢复问题。
+- `anolisa doctor --help` 现明确说明 `--fix` 尚不可用。
+- 批量 RPM 操作失败后，已变更软件包现会保留可修复状态。
+- 组件别名不再将生命周期修改导向其他 scope 的安装。
+- 跨 scope 健康检查现使用正确的 user 服务管理器。
+- 批量 RPM 操作失败后，未受影响组件现会单独重试。
 
 ## [0.2.8] - 2026-07-21
 
