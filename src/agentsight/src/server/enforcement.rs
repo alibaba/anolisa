@@ -1,7 +1,8 @@
 //! HTTP boundary for local enforcement control and evidence queries.
 
+#[cfg(test)]
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use actix_web::{HttpResponse, delete, get, post, web};
 use agentsight_enforcement_protocol::{
@@ -12,7 +13,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::AppState;
-use crate::enforcement::EnforcementCoordinatorError;
+use crate::enforcement::{
+    EnforcementCoordinatorError, canonical_policy_file, read_process_start_time,
+};
 
 /// Bounded evidence list query.
 #[derive(Debug, Deserialize)]
@@ -180,7 +183,7 @@ where
 }
 
 fn validate_target_identity(root_pid: i32, expected_start_time: u64) -> Result<(), String> {
-    let actual_start_time = read_target_start_time(root_pid)?;
+    let actual_start_time = read_process_start_time(root_pid).map_err(|error| error.to_string())?;
     if actual_start_time != expected_start_time {
         return Err(format!(
             "PID {root_pid} start time changed: expected {expected_start_time}, found {actual_start_time}"
@@ -194,8 +197,9 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
     if agent_id.is_empty() || agent_id.len() > 128 {
         return Err("agent_id must contain 1 to 128 characters".into());
     }
-    let path = validate_policy_path(&request.path)?;
-    let process_start_time = read_target_start_time(request.root_pid)?;
+    let path = canonical_policy_file(&request.path).map_err(|error| error.to_string())?;
+    let process_start_time =
+        read_process_start_time(request.root_pid).map_err(|error| error.to_string())?;
     let binding_id = Uuid::new_v4();
     let path = path
         .to_str()
@@ -228,12 +232,14 @@ fn build_credential_binding(
     if agent_id.is_empty() || agent_id.len() > 128 {
         return Err("agent_id must contain 1 to 128 characters".into());
     }
-    let source_path = validate_policy_path(&request.source_path)?;
+    let source_path =
+        canonical_policy_file(&request.source_path).map_err(|error| error.to_string())?;
     let source_path = source_path
         .to_str()
         .ok_or_else(|| "source_path must be valid UTF-8".to_string())?
         .to_string();
-    let process_start_time = read_target_start_time(request.root_pid)?;
+    let process_start_time =
+        read_process_start_time(request.root_pid).map_err(|error| error.to_string())?;
     let trusted_endpoints = request
         .trusted_endpoint
         .map(|value| value.trim().to_string())
@@ -261,65 +267,6 @@ fn build_credential_binding(
         process_start_time,
         policy,
     })
-}
-
-fn validate_policy_path(path: &Path) -> Result<PathBuf, String> {
-    if !path.is_absolute() {
-        return Err("path must be absolute".into());
-    }
-    validate_policy_path_text(path)?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| format!("cannot canonicalize path {}: {error}", path.display()))?;
-    let metadata = fs::metadata(&canonical)
-        .map_err(|error| format!("cannot inspect path {}: {error}", canonical.display()))?;
-    if !metadata.is_file() {
-        return Err("path must identify an existing regular file".into());
-    }
-    validate_policy_path_text(&canonical)?;
-    Ok(canonical)
-}
-
-fn validate_policy_path_text(path: &Path) -> Result<(), String> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| "path must be valid UTF-8".to_string())?;
-    if value.contains(['\0', '"', '\r', '\n']) {
-        return Err("path contains characters unsupported by the policy lexer".into());
-    }
-    Ok(())
-}
-
-fn read_target_start_time(root_pid: i32) -> Result<u64, String> {
-    if root_pid <= 1 {
-        return Err("root_pid must identify a non-init process".into());
-    }
-    if root_pid == std::process::id() as i32 {
-        return Err("AgentSight cannot enforce itself".into());
-    }
-    let stat_path = format!("/proc/{root_pid}/stat");
-    let stat = fs::read_to_string(&stat_path)
-        .map_err(|error| format!("cannot read {stat_path}: {error}"))?;
-    let open = stat
-        .find('(')
-        .ok_or_else(|| "invalid proc stat".to_string())?;
-    let close = stat
-        .rfind(')')
-        .filter(|close| *close > open)
-        .ok_or_else(|| "invalid proc stat".to_string())?;
-    let process_name = &stat[open + 1..close];
-    if matches!(
-        process_name,
-        "agentsight" | "agentsight-enfo" | "agentsight-enforcer"
-    ) {
-        return Err(format!("cannot target protected service {process_name}"));
-    }
-    stat[close + 1..]
-        .split_whitespace()
-        .nth(19)
-        .ok_or_else(|| "proc stat is missing start time".to_string())?
-        .parse::<u64>()
-        .map_err(|error| format!("invalid proc start time: {error}"))
 }
 
 fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
@@ -494,8 +441,8 @@ mod tests {
             .is_err()
         );
 
-        assert!(validate_policy_path(std::path::Path::new("relative/secret")).is_err());
-        assert!(validate_policy_path(std::path::Path::new("/tmp/quote\"secret")).is_err());
+        assert!(canonical_policy_file(std::path::Path::new("relative/secret")).is_err());
+        assert!(canonical_policy_file(std::path::Path::new("/tmp/quote\"secret")).is_err());
     }
 
     #[test]
