@@ -60,6 +60,7 @@ impl ContainmentEnforcer for EnforcementCoordinator {
         &self,
         request: ApplyCredentialPolicy,
     ) -> Result<Binding, ContainmentEnforcerError> {
+        require_containment_ingestion(self)?;
         EnforcementCoordinator::apply_credential_policy(self, request)
             .map_err(containment_enforcer_error)
     }
@@ -69,8 +70,23 @@ impl ContainmentEnforcer for EnforcementCoordinator {
     }
 
     fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError> {
-        EnforcementCoordinator::bindings(self).map_err(containment_enforcer_error)
+        require_containment_ingestion(self)?;
+        let bindings =
+            EnforcementCoordinator::bindings(self).map_err(containment_enforcer_error)?;
+        require_containment_ingestion(self)?;
+        Ok(bindings)
     }
+}
+
+fn require_containment_ingestion(
+    coordinator: &EnforcementCoordinator,
+) -> Result<(), ContainmentEnforcerError> {
+    if coordinator.is_ingestion_ready() {
+        return Ok(());
+    }
+    Err(containment_enforcer_error(
+        EnforcementCoordinatorError::IngestionUnavailable,
+    ))
 }
 
 fn containment_enforcer_error(error: EnforcementCoordinatorError) -> ContainmentEnforcerError {
@@ -531,3 +547,7 @@ fn now_ns() -> u64 {
         .as_nanos();
     u64::try_from(nanos).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+#[path = "containment_adapter_tests.rs"]
+mod adapter_tests;

@@ -261,6 +261,10 @@ impl EnforcementCoordinator {
         &self.ingestion_readiness
     }
 
+    pub(crate) fn is_ingestion_ready(&self) -> bool {
+        self.ingestion_readiness.is_ready()
+    }
+
     /// Queries backend readiness and requires an acknowledged violation subscriber.
     ///
     /// # Errors
