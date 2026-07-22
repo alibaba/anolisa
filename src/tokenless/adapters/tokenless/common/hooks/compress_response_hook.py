@@ -51,6 +51,12 @@ from hook_utils import (
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 _MIN_RESPONSE_CHARS = 200
 
+# Adapters whose PostToolUse hook contract supports
+# ``hookSpecificOutput.updatedToolOutput`` for full tool-result replacement
+# (Claude Code >= v2.1.121).  Other adapters still receive the legacy
+# ``additionalContext`` append path.
+_REPLACEMENT_ADAPTERS = frozenset({"claude-code"})
+
 
 # -- helpers -------------------------------------------------------------------
 
@@ -64,6 +70,26 @@ def _build_additional_context(
         parts.append(env_attribution)
     parts.append(content)
     return "\n".join(parts)
+
+
+def _build_replacement_output(
+    replacement: str,
+    env_attribution: str = "",
+) -> dict:
+    """Build a PostToolUse hook output that *replaces* the tool result.
+
+    Uses ``updatedToolOutput`` (Claude Code >= v2.1.121) so the model sees
+    only the compressed text, not the original plus a compressed duplicate.
+    ``additionalContext`` is reserved for genuinely additive diagnostics
+    such as environment-error attribution hints.
+    """
+    hso: dict = {
+        "hookEventName": "PostToolUse",
+        "updatedToolOutput": replacement,
+    }
+    if env_attribution:
+        hso["additionalContext"] = env_attribution
+    return {"hookSpecificOutput": hso}
 
 
 # -- main --------------------------------------------------------------------
@@ -233,18 +259,48 @@ def main() -> None:
     final_output = toon_output if toon_output else compressed
 
     # 14. Build response
-    context = _build_additional_context(
-        final_output,
-        env_attribution=env_attribution,
-    )
+    #
+    # For adapters that support ``updatedToolOutput`` (Claude Code >= v2.1.121),
+    # *replace* the tool result with the compressed version.  This avoids the
+    # duplication bug where the model sees both the original output and the
+    # compressed context appended via ``additionalContext``.
+    #
+    # ``additionalContext`` is reserved for genuinely additive diagnostics
+    # (environment-error attribution hints).
+    #
+    # For adapters without replacement support, fall back to the legacy
+    # ``additionalContext`` append path.
+    if _AGENT_ID in _REPLACEMENT_ADAPTERS:
+        compression_applied = bool(toon_output) or used_resp_compression
+        if compression_applied:
+            output = _build_replacement_output(
+                final_output,
+                env_attribution=env_attribution,
+            )
+        elif env_attribution:
+            # Compression did not reduce size.  Inject only the additive
+            # environment attribution — do NOT duplicate the original content.
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": env_attribution,
+                },
+            }
+        else:
+            skip()
+    else:
+        context = _build_additional_context(
+            final_output,
+            env_attribution=env_attribution,
+        )
 
-    output = {
-        "suppressOutput": True,
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": context,
-        },
-    }
+        output = {
+            "suppressOutput": True,
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": context,
+            },
+        }
     print(json.dumps(output, ensure_ascii=False))
 
 
