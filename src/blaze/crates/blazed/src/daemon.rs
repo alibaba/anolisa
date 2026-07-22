@@ -36,12 +36,18 @@ pub async fn run(config_path: &Path) -> Result<()> {
     let pool = PoolManager::new();
     let template = TemplateRegistry::new();
     let hook = HookRegistry::new();
-    let spawner = build_spawner(&config).await;
+    let (spawner, active_backend) = build_spawner(&config).await;
 
     let socket_path = config.daemon.socket.clone();
     let http_addr = config.listen.http_addr.clone();
     let state = Arc::new(ServerState::build(
-        config, policy, pool, template, hook, spawner,
+        config,
+        policy,
+        pool,
+        template,
+        hook,
+        spawner,
+        active_backend,
     ));
 
     if socket_path.exists() {
@@ -81,7 +87,7 @@ fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
 ///   1. `firecracker` → [`FirecrackerSpawner`]
 ///   2. `bubblewrap` → [`BubblewrapSpawner`]
 ///   3. fallback → [`MockSpawner`]
-async fn build_spawner(cfg: &DaemonConfig) -> DynSpawner {
+async fn build_spawner(cfg: &DaemonConfig) -> (DynSpawner, BackendKind) {
     // --- Firecracker --------------------------------------------------------
     if let Some(fc_path) = cfg.backends.get(BackendKind::Firecracker.as_str()).cloned() {
         let fc = FirecrackerSpawner {
@@ -94,7 +100,7 @@ async fn build_spawner(cfg: &DaemonConfig) -> DynSpawner {
                     images_dir = %cfg.storage.images_dir.display(),
                     "data plane: using FirecrackerSpawner",
                 );
-                return Arc::new(fc);
+                return (Arc::new(fc), BackendKind::Firecracker);
             }
             Ok(false) => {
                 tracing::warn!(
@@ -121,7 +127,7 @@ async fn build_spawner(cfg: &DaemonConfig) -> DynSpawner {
                     binary = %path.display(),
                     "data plane: using BubblewrapSpawner",
                 );
-                return Arc::new(BubblewrapSpawner);
+                return (Arc::new(BubblewrapSpawner), BackendKind::Bubblewrap);
             }
             Ok(false) => {
                 tracing::warn!(
@@ -143,7 +149,7 @@ async fn build_spawner(cfg: &DaemonConfig) -> DynSpawner {
     tracing::warn!(
         "no usable backend found in [backends], using MockSpawner (data plane is simulated)",
     );
-    Arc::new(MockSpawner)
+    (Arc::new(MockSpawner), BackendKind::Mock)
 }
 
 fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {

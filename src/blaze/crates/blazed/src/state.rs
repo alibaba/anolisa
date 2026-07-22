@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use blaze_core::backend::BackendKind;
 use blaze_core::config::DaemonConfig;
 use blaze_core::kernel::HookRegistry;
 use blaze_core::lifecycle::SandboxInstance;
@@ -32,6 +33,10 @@ pub struct ServerState {
     pub instances: Mutex<HashMap<Uuid, SandboxInstance>>,
     pub spawn_handles: Mutex<HashMap<Uuid, SpawnHandle>>,
     pub spawner: DynSpawner,
+    /// The backend kind that `build_spawner` actually probed and selected.
+    /// API handlers use this to constrain availability to the single active
+    /// backend rather than reporting all configured binaries.
+    pub active_backend: BackendKind,
     pub state_dir: PathBuf,
     pub metrics: Metrics,
 }
@@ -47,6 +52,7 @@ impl ServerState {
         template: TemplateRegistry,
         hook: HookRegistry,
         spawner: DynSpawner,
+        active_backend: BackendKind,
     ) -> Self {
         let state_dir = config.daemon.state_dir.clone();
         let instances = scan_state_dir(&state_dir).unwrap_or_else(|err| {
@@ -63,6 +69,7 @@ impl ServerState {
             instances: Mutex::new(instances),
             spawn_handles: Mutex::new(HashMap::new()),
             spawner,
+            active_backend,
             state_dir,
             metrics: Metrics::new(),
         }

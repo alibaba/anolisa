@@ -202,8 +202,8 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         }
     };
 
-    // 2. Backend selection. Check which backends the daemon actually has
-    // configured; only those with an existing binary path are available.
+    // 2. Backend selection. Constrain availability to the daemon's active
+    // spawner — only the backend that was actually probed at boot can execute.
     let availability: Vec<BackendStatus> = {
         let cfg = state
             .config
@@ -213,11 +213,13 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
             .backend_priority
             .iter()
             .map(|kind| {
-                let available = cfg
-                    .backends
-                    .get(kind.as_str())
-                    .map(|p| p.exists())
-                    .unwrap_or(false);
+                let available = *kind == state.active_backend
+                    && (state.active_backend == BackendKind::Mock
+                        || cfg
+                            .backends
+                            .get(kind.as_str())
+                            .map(|p| p.exists())
+                            .unwrap_or(false));
                 BackendStatus {
                     kind: *kind,
                     available,
@@ -226,15 +228,21 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
             })
             .collect()
     };
-    // If no real backend is available the daemon is in dev/mock mode;
-    // fall back to the first policy entry so instance metadata is
-    // populated — the spawner (MockSpawner) will report the true
-    // backend in its SpawnHandle.
+    // Select backend from available options. If no match is found:
+    // - Mock mode: fall back to the first policy entry (dev convenience)
+    // - Real backend: propagate BackendUnavailable (policy does not permit
+    //   the active backend, refusing to silently bypass policy)
     let backend = match select_backend(&decision.backend_priority, &availability) {
         Ok(b) => b,
-        Err(_) => *decision.backend_priority.first().ok_or_else(|| {
-            BlazeDaemonError::Internal("policy has empty backend_priority".into())
-        })?,
+        Err(e) => {
+            if state.active_backend == BackendKind::Mock {
+                *decision.backend_priority.first().ok_or_else(|| {
+                    BlazeDaemonError::Internal("policy has empty backend_priority".into())
+                })?
+            } else {
+                return Err(e.into());
+            }
+        }
     };
 
     // 3. Pool lookup.
@@ -305,7 +313,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
             .lock()
             .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
         cfg.backends
-            .get(backend.as_str())
+            .get(state.active_backend.as_str())
             .cloned()
             .unwrap_or_else(std::path::PathBuf::new)
     };
@@ -715,3 +723,108 @@ fn error_response(err: &BlazeDaemonError) -> Response<Full<Bytes>> {
 // future-only hook registration paths.
 #[allow(dead_code)]
 fn _hookkind_marker(_k: HookKind) {}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use blaze_core::backend::BackendKind;
+    use blaze_core::config::DaemonConfig;
+    use blaze_core::kernel::HookRegistry;
+    use blaze_core::policy::{
+        BackendConfigs, FallbackOnMissingHook, PolicyEngine, PolicyFile, PolicyHooks, PolicyMatch,
+        PolicySelect, WorkloadClass,
+    };
+    use blaze_core::pool::PoolManager;
+    use blaze_core::template::TemplateRegistry;
+
+    use crate::spawner::MockSpawner;
+    use crate::state::ServerState;
+
+    use super::*;
+
+    /// When multiple backend binaries exist on disk but the daemon probed
+    /// Firecracker at boot, only Firecracker should be reported available
+    /// and selected — even if policy prioritizes bubblewrap higher.
+    #[tokio::test]
+    async fn availability_constrained_to_active_backend() {
+        // Create temp files to simulate both binaries existing.
+        let tmp = std::env::temp_dir().join("blaze-test-active-backend");
+        let _ = std::fs::create_dir_all(&tmp);
+        let fc_bin = tmp.join("firecracker");
+        let bwrap_bin = tmp.join("bwrap");
+        std::fs::write(&fc_bin, b"fake-fc").unwrap();
+        std::fs::write(&bwrap_bin, b"fake-bwrap").unwrap();
+
+        // Minimal config with both backends present.
+        let mut config = DaemonConfig::default();
+        config.daemon.state_dir = tmp.join("state");
+        let _ = std::fs::create_dir_all(&config.daemon.state_dir);
+        config.backends.insert("firecracker".into(), fc_bin.clone());
+        config
+            .backends
+            .insert("bubblewrap".into(), bwrap_bin.clone());
+
+        // Policy that prioritizes bubblewrap over firecracker.
+        let policy_file = PolicyFile {
+            manifest_version: 1,
+            policy_name: "test-multi-backend".into(),
+            priority: 100,
+            match_: PolicyMatch {
+                workload_class: WorkloadClass::AgentRl,
+                image_labels: HashMap::new(),
+            },
+            select: PolicySelect {
+                backend_priority: vec![BackendKind::Bubblewrap, BackendKind::Firecracker],
+                kernel_hooks: vec![],
+                templates: vec![],
+                fallback_on_missing_hook: FallbackOnMissingHook::default(),
+            },
+            pool: None,
+            checkpoint: None,
+            quota: None,
+            hooks: PolicyHooks::default(),
+            backend: BackendConfigs::default(),
+            vm: None,
+        };
+        let engine = PolicyEngine::with_policies(vec![policy_file]);
+
+        // Build state with active_backend = Firecracker (simulating probe
+        // selected FC at boot) but using MockSpawner for test portability.
+        let spawner: crate::spawner::DynSpawner = Arc::new(MockSpawner);
+        let state = Arc::new(ServerState::build(
+            config,
+            engine,
+            PoolManager::new(),
+            TemplateRegistry::new(),
+            HookRegistry::new(),
+            spawner,
+            BackendKind::Firecracker,
+        ));
+
+        // Create instance request for AgentRl workload.
+        let req_body = serde_json::to_vec(&serde_json::json!({
+            "workload_class": "agent-rl",
+            "image_digest": "sha256:abc123",
+        }))
+        .unwrap();
+
+        let resp = create_instance(&state, &req_body).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let resp_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // The instance should be created with backend = firecracker,
+        // NOT bubblewrap (even though bwrap was higher priority in policy)
+        // because only the active backend is reported as available.
+        assert_eq!(
+            resp_json["instance"]["backend"].as_str().unwrap(),
+            "firecracker",
+            "instance backend should be the active backend (firecracker), \
+             not the higher-priority bubblewrap"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
