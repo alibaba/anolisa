@@ -218,6 +218,7 @@ impl FrameworkDriver for CodexDriver {
                 bundle_digest: bundle.digest.clone(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
+                notices: Vec::new(),
                 resources,
                 driver_payload: DriverPayload::Codex(CodexClaim {
                     marketplace_dir_resource: RES_MARKETPLACE_DIR.to_string(),

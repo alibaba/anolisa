@@ -59,8 +59,16 @@ const OUTPUT_CAP: usize = 64 * 1024;
 #[derive(Debug, Clone)]
 pub enum EnableOutcome {
     /// `--dry-run`: what enable *would* do, no state mutated.
-    Planned(DriverPlan),
-    /// Enable ran; the persisted receipt.
+    Planned {
+        /// The driver's plan.
+        plan: DriverPlan,
+        /// Static `post_enable` notices a real enable would display.
+        /// Preview only — nothing was executed.
+        notices: Vec<crate::manifest::AdapterNotice>,
+    },
+    /// Enable ran; the persisted receipt. The declared notices are carried
+    /// in [`AdapterClaim::notices`]; the `post_enable` subset is what a
+    /// caller displays after success.
     Enabled(Box<AdapterClaim>),
 }
 
@@ -95,6 +103,11 @@ pub struct DisableOutcome {
     pub claim_removed: bool,
     /// True when the operation was a dry-run (no state mutated).
     pub dry_run: bool,
+    /// Static `post_disable` notices from the receipt. Populated when a
+    /// disable succeeds, or as a preview under dry-run; empty for the
+    /// no-op and degraded (cleanup-incomplete) outcomes. Display-only;
+    /// the text is inert and never executed.
+    pub notices: Vec<crate::manifest::AdapterNotice>,
 }
 
 /// One row of [`AdapterManager::scan`].
@@ -557,6 +570,7 @@ impl AdapterManager {
         let config = declared_config(&manifest, &framework);
         let framework_version_req = declared_framework_version_req(&manifest, &framework);
         let bundle_entry = declared_bundle_entry(&manifest, &framework);
+        let all_notices = declared_all_notices(&manifest, &framework);
         if adapter_type.as_deref() == Some("skill_bundle") && !config.is_empty() {
             return Err(AdapterError::InvalidAdapterInput {
                 component: component.to_string(),
@@ -690,7 +704,12 @@ impl AdapterManager {
 
         if dry_run {
             let plan = driver.plan_enable(&bundle, &ctx)?;
-            return Ok(EnableOutcome::Planned(plan));
+            let notices = declared_notices(
+                &manifest,
+                &framework,
+                crate::manifest::NoticeWhen::PostEnable,
+            );
+            return Ok(EnableOutcome::Planned { plan, notices });
         }
 
         // enable mutates framework state, so the framework must be usable.
@@ -705,6 +724,10 @@ impl AdapterManager {
         }
 
         let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx)?;
+        // Persist the manifest's static notices in the receipt so a later
+        // disable can show `post_disable` notices from the receipt alone.
+        // Inert text — never expanded or executed.
+        claim.notices = all_notices;
         let claim_allowed_roots = driver.allowed_external_roots(&ctx);
         if let Some(prior) = state.find_adapter_claim(component, &framework).cloned() {
             // A forged prior receipt must not gain authority merely because a
@@ -813,6 +836,7 @@ impl AdapterManager {
                             },
                             claim_removed: false,
                             dry_run,
+                            notices: Vec::new(),
                         });
                     }
                     1 => claimed[0].clone(),
@@ -841,6 +865,7 @@ impl AdapterManager {
                     },
                     claim_removed: false,
                     dry_run,
+                    notices: Vec::new(),
                 });
             }
         };
@@ -924,17 +949,21 @@ impl AdapterManager {
 
         if dry_run {
             let report = plan_disable_report(&claim);
+            let notices = post_disable_notices(&claim);
             return Ok(DisableOutcome {
                 component: component.to_string(),
                 framework: Some(framework),
                 report,
                 claim_removed: false,
                 dry_run: true,
+                notices,
             });
         }
 
         let report = driver.disable(&claim, &ctx)?;
         let claim_removed = report.cleanup_complete;
+        // Extract before the branch below moves `claim` into the kept receipt.
+        let disable_notices = post_disable_notices(&claim);
         if claim_removed {
             state.remove_adapter_claim(component, &framework);
             self.log_operation(&label, component, LogStatus::Ok, "adapter disabled", None);
@@ -959,6 +988,13 @@ impl AdapterManager {
             report,
             claim_removed,
             dry_run: false,
+            // Notices are shown only on a successful disable; a degraded
+            // (cleanup-incomplete) disable shows the retry path instead.
+            notices: if claim_removed {
+                disable_notices
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -2615,6 +2651,52 @@ fn declared_config(
     adapter.config.clone()
 }
 
+/// Extract every declared notice for a framework, checking the
+/// framework-specific section first then falling back to the generic one.
+///
+/// Notices are inert, display-only text: they are returned verbatim and
+/// never shell-expanded, template-substituted, or executed.
+fn declared_all_notices(
+    manifest: &ComponentManifest,
+    framework: &str,
+) -> Vec<crate::manifest::AdapterNotice> {
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework));
+    let adapter = match adapter {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    // Framework-specific section takes precedence.
+    let notices = match framework {
+        "openclaw" => adapter
+            .openclaw
+            .as_ref()
+            .filter(|oc| !oc.notices.is_empty())
+            .map_or(&adapter.notices, |oc| &oc.notices),
+        "hermes" => adapter
+            .hermes
+            .as_ref()
+            .filter(|h| !h.notices.is_empty())
+            .map_or(&adapter.notices, |h| &h.notices),
+        _ => &adapter.notices,
+    };
+    notices.clone()
+}
+
+/// The subset of a framework's declared notices matching `when`.
+fn declared_notices(
+    manifest: &ComponentManifest,
+    framework: &str,
+    when: crate::manifest::NoticeWhen,
+) -> Vec<crate::manifest::AdapterNotice> {
+    declared_all_notices(manifest, framework)
+        .into_iter()
+        .filter(|notice| notice.when == when)
+        .collect()
+}
+
 /// Resolve the adapter-level framework version requirement for a framework.
 ///
 /// `[adapters.compat].framework_version` is the primary source; the legacy
@@ -2667,6 +2749,17 @@ fn declared_bundle_entry(manifest: &ComponentManifest, framework: &str) -> Optio
         _ => {}
     }
     adapter.bundle.entry.clone()
+}
+
+/// The `post_disable` notices persisted in a receipt, verbatim. Notices are
+/// inert display text — never expanded, substituted, or executed.
+fn post_disable_notices(claim: &AdapterClaim) -> Vec<crate::manifest::AdapterNotice> {
+    claim
+        .notices
+        .iter()
+        .filter(|notice| notice.when == crate::manifest::NoticeWhen::PostDisable)
+        .cloned()
+        .collect()
 }
 
 /// Build a non-mutating [`DisableReport`] from a validated receipt,
@@ -3617,6 +3710,7 @@ source = "adapters/openclaw"
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: Vec::new(),
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "openclaw_state".to_string(),
@@ -5761,6 +5855,7 @@ dest = "{datadir}/skills"
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources,
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "state_dir".to_string(),
@@ -5945,6 +6040,7 @@ dest = "{datadir}/skills"
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "hermes_home".to_string(),
@@ -6016,6 +6112,7 @@ dest = "{datadir}/skills"
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "hermes_home".to_string(),

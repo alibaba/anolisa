@@ -24,6 +24,7 @@ use anolisa_core::adapter::claim::{
 };
 use anolisa_core::adapter::driver::{AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOptions, EnableOutcome};
+use anolisa_core::manifest::{NoticeLevel, NoticeWhen};
 use anolisa_core::state::InstallMode as StateInstallMode;
 use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
@@ -483,7 +484,7 @@ fn enable_status_disable_happy_path() {
         .expect("enable");
     let claim = match outcome {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled, got plan"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled, got plan"),
     };
     assert_eq!(claim.component, COMPONENT);
     assert_eq!(claim.framework, FRAMEWORK);
@@ -685,7 +686,7 @@ fn dry_run_enable_does_not_register_or_persist() {
         .enable(COMPONENT, Some(FRAMEWORK), true)
         .expect("dry-run enable");
     match outcome {
-        EnableOutcome::Planned(plan) => {
+        EnableOutcome::Planned { plan, .. } => {
             assert_eq!(plan.component, COMPONENT);
             assert!(plan.register_command.is_some());
         }
@@ -1047,6 +1048,237 @@ fn dry_run_disable_no_receipt_is_noop() {
         "must report no receipt: {:?}",
         outcome.report.messages
     );
+}
+
+// ---------------------------------------------------------------------------
+// Adapter operation notices
+// ---------------------------------------------------------------------------
+
+/// An OpenClaw plugin adapter block declaring both a `post_enable` and a
+/// `post_disable` notice.
+fn notices_adapter_block() -> String {
+    format!(
+        r#"[[adapters]]
+framework = "openclaw"
+source = "adapters/{COMPONENT}/openclaw"
+dest = "{{datadir}}/adapters/{{component}}/openclaw/"
+
+[[adapters.notices]]
+when = "post_enable"
+level = "info"
+text = "Restart the framework to load the plugin."
+command = "openclaw restart"
+
+[[adapters.notices]]
+when = "post_disable"
+level = "warning"
+text = "Cached tokens remain until the framework restarts."
+"#
+    )
+}
+
+#[test]
+fn enable_persists_all_declared_notices_in_receipt() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(&world.layout, &notices_adapter_block());
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    let outcome = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+    let claim = match outcome {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    // Both triggers are persisted so a later receipt-only disable can show
+    // the post_disable notice.
+    assert_eq!(claim.notices.len(), 2);
+
+    let state = world.load_state();
+    let persisted = state
+        .find_adapter_claim(COMPONENT, FRAMEWORK)
+        .expect("receipt persisted");
+    assert_eq!(persisted.notices.len(), 2);
+    assert!(
+        persisted
+            .notices
+            .iter()
+            .any(|n| n.when == NoticeWhen::PostEnable)
+    );
+    assert!(
+        persisted
+            .notices
+            .iter()
+            .any(|n| n.when == NoticeWhen::PostDisable)
+    );
+}
+
+#[test]
+fn dry_run_enable_previews_only_post_enable_notices() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(&world.layout, &notices_adapter_block());
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    let outcome = manager
+        .enable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("dry-run enable");
+    match outcome {
+        EnableOutcome::Planned { notices, .. } => {
+            assert_eq!(notices.len(), 1, "preview only post_enable notices");
+            assert_eq!(notices[0].when, NoticeWhen::PostEnable);
+            assert_eq!(notices[0].level, NoticeLevel::Info);
+            assert_eq!(notices[0].text, "Restart the framework to load the plugin.");
+            assert_eq!(notices[0].command.as_deref(), Some("openclaw restart"));
+        }
+        EnableOutcome::Enabled(_) => panic!("dry-run must not enable"),
+    }
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, FRAMEWORK)
+            .is_none(),
+        "dry-run must not persist a receipt"
+    );
+}
+
+#[test]
+fn disable_returns_post_disable_notices_from_receipt() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(&world.layout, &notices_adapter_block());
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    assert_eq!(disabled.notices.len(), 1);
+    assert_eq!(disabled.notices[0].when, NoticeWhen::PostDisable);
+    assert_eq!(disabled.notices[0].level, NoticeLevel::Warning);
+    assert_eq!(
+        disabled.notices[0].text,
+        "Cached tokens remain until the framework restarts."
+    );
+}
+
+#[test]
+fn dry_run_disable_previews_post_disable_notices() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(&world.layout, &notices_adapter_block());
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("dry-run disable");
+    assert!(outcome.dry_run);
+    assert!(!outcome.claim_removed);
+    assert_eq!(outcome.notices.len(), 1);
+    assert_eq!(outcome.notices[0].when, NoticeWhen::PostDisable);
+    // The receipt is untouched: a real disable still shows the notice once.
+    assert!(world.has_claim());
+}
+
+#[test]
+fn failed_disable_shows_no_notices() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    write_openclaw_manifest(&world.layout, &notices_adapter_block());
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    world.apply_env(&guard, Some("uninstall"));
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable runs");
+    assert!(!disabled.claim_removed);
+    assert!(
+        disabled.notices.is_empty(),
+        "a degraded disable must not display post_disable notices"
+    );
+}
+
+#[test]
+fn notice_text_is_preserved_verbatim_in_receipt() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    let block = format!(
+        r#"[[adapters]]
+framework = "openclaw"
+source = "adapters/{COMPONENT}/openclaw"
+dest = "{{datadir}}/adapters/{{component}}/openclaw/"
+
+[[adapters.notices]]
+when = "post_enable"
+text = "run {{datadir}}/bin/tool; echo $HOME `id`"
+"#
+    );
+    write_openclaw_manifest(&world.layout, &block);
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    let outcome = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+    let claim = match outcome {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    // Inert text: placeholders and shell metacharacters survive unchanged.
+    assert_eq!(
+        claim.notices[0].text,
+        "run {datadir}/bin/tool; echo $HOME `id`"
+    );
+}
+
+#[test]
+fn framework_specific_notices_take_precedence() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    let block = format!(
+        r#"[[adapters]]
+framework = "openclaw"
+source = "adapters/{COMPONENT}/openclaw"
+dest = "{{datadir}}/adapters/{{component}}/openclaw/"
+
+[[adapters.notices]]
+when = "post_enable"
+text = "generic notice"
+
+[[adapters.openclaw.notices]]
+when = "post_enable"
+text = "openclaw-specific notice"
+"#
+    );
+    write_openclaw_manifest(&world.layout, &block);
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    let outcome = manager
+        .enable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("dry-run enable");
+    match outcome {
+        EnableOutcome::Planned { notices, .. } => {
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0].text, "openclaw-specific notice");
+        }
+        EnableOutcome::Enabled(_) => panic!("dry-run must not enable"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1850,7 +2082,7 @@ fn dry_run_probes_but_does_not_mutate() {
         .enable(COMPONENT, Some(FRAMEWORK), true)
         .expect("dry-run enable");
     match outcome {
-        EnableOutcome::Planned(plan) => {
+        EnableOutcome::Planned { plan, .. } => {
             let cmd = plan
                 .register_command
                 .expect("plan shows the install command");
@@ -2499,7 +2731,7 @@ fn authorized_unsafe_dry_run_shows_flag_without_mutation() {
         )
         .expect("dry-run enable");
     match outcome {
-        EnableOutcome::Planned(plan) => {
+        EnableOutcome::Planned { plan, .. } => {
             let cmd = plan
                 .register_command
                 .expect("plan shows the install command");

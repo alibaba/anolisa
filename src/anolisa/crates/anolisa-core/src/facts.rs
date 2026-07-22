@@ -1087,6 +1087,7 @@ mod tests {
                 bundle_digest: None,
                 driver_schema: 1,
                 status: ClaimStatus::Enabled,
+                notices: Vec::new(),
                 resources: Vec::new(),
                 driver_payload: DriverPayload::Cosh(CoshClaim {
                     extension_dir_resource: "ext".to_string(),

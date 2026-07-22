@@ -262,6 +262,7 @@ impl FrameworkDriver for QoderDriver {
                 bundle_digest: bundle.digest.clone(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
+                notices: Vec::new(),
                 resources,
                 driver_payload: DriverPayload::Qoder(QoderClaim {
                     plugin_resource: RES_PLUGIN.to_string(),

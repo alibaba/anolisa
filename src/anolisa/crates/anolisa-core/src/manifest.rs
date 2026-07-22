@@ -649,6 +649,11 @@ pub struct AdapterSpec {
     /// Post-install config key/value pairs the driver should apply.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<AdapterConfigSetSpec>,
+    /// Static, display-only operator notices shown after `adapter enable`
+    /// or `adapter disable` succeeds. Inert text: never expanded,
+    /// substituted, or executed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<AdapterNotice>,
     /// Semver constraint on the target framework version, e.g. `">=1.2"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framework_version_req: Option<String>,
@@ -719,6 +724,56 @@ pub struct AdapterConfigSetSpec {
     /// so those manifests round-trip byte-stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framework_version: Option<String>,
+}
+
+/// A static, display-only operator notice attached to an adapter. The
+/// adapter manager surfaces matching notices after `adapter enable`
+/// ([`NoticeWhen::PostEnable`]) or `adapter disable`
+/// ([`NoticeWhen::PostDisable`]) succeeds.
+///
+/// Notices are inert text: `text` and `command` are never shell-expanded,
+/// template-substituted, or executed. Structured output preserves their
+/// values, while human output escapes control characters. Required framework
+/// configuration is NOT a notice — it stays a structured
+/// [`AdapterConfigSetSpec`] entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterNotice {
+    /// When the notice is displayed.
+    pub when: NoticeWhen,
+    /// Notice severity. Defaults to [`NoticeLevel::Info`] when absent.
+    #[serde(default, skip_serializing_if = "is_default_level")]
+    pub level: NoticeLevel,
+    /// The notice body. Required; human output escapes control characters.
+    pub text: String,
+    /// Optional display-only command hint (e.g. a follow-up the operator
+    /// may run). Never parsed or executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// Lifecycle point at which an [`AdapterNotice`] is displayed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeWhen {
+    /// Show after `adapter enable` succeeds.
+    PostEnable,
+    /// Show after `adapter disable` succeeds.
+    PostDisable,
+}
+
+/// Severity of an [`AdapterNotice`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeLevel {
+    /// Informational notice.
+    #[default]
+    Info,
+    /// Warning the operator should pay attention to.
+    Warning,
+}
+
+fn is_default_level(level: &NoticeLevel) -> bool {
+    matches!(level, NoticeLevel::Info)
 }
 
 /// One skill entry in an `[[adapters]]` or framework-specific section.
@@ -799,12 +854,18 @@ pub struct OpenClawAdapterSpec {
     /// Post-install config key/value pairs for OpenClaw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<AdapterConfigSetSpec>,
+    /// Static, display-only operator notices for the OpenClaw adapter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<AdapterNotice>,
 }
 
 impl OpenClawAdapterSpec {
     /// Whether no framework-specific data is present.
     pub fn is_empty(&self) -> bool {
-        self.bundle.is_empty() && self.skills.is_empty() && self.config.is_empty()
+        self.bundle.is_empty()
+            && self.skills.is_empty()
+            && self.config.is_empty()
+            && self.notices.is_empty()
     }
 }
 
@@ -824,12 +885,15 @@ pub struct HermesAdapterSpec {
         serialize_with = "serialize_skills"
     )]
     pub skills: Vec<AdapterSkillSpec>,
+    /// Static, display-only operator notices for the Hermes adapter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<AdapterNotice>,
 }
 
 impl HermesAdapterSpec {
     /// Whether no framework-specific data is present.
     pub fn is_empty(&self) -> bool {
-        self.bundle.is_empty() && self.skills.is_empty()
+        self.bundle.is_empty() && self.skills.is_empty() && self.notices.is_empty()
     }
 }
 
@@ -1111,6 +1175,8 @@ struct AdapterRaw {
     #[serde(default)]
     config: Vec<AdapterConfigSetSpec>,
     #[serde(default)]
+    notices: Vec<AdapterNotice>,
+    #[serde(default)]
     framework_version_req: Option<String>,
     #[serde(default)]
     openclaw: Option<OpenClawAdapterSpec>,
@@ -1327,6 +1393,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                 detect: a.detect,
                 skills: a.skills,
                 config: a.config,
+                notices: a.notices,
                 framework_version_req: a.framework_version_req,
                 openclaw: a.openclaw,
                 hermes: a.hermes,
@@ -2905,6 +2972,242 @@ mod tests {
         assert!(
             !serialized.contains("[hermes]"),
             "absent hermes section must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
+    fn adapter_notices_parse_generic() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            plugin_id = "sec-core"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            level = "info"
+            text = "Restart the framework to load the plugin."
+            command = "openclaw restart"
+
+            [[adapters.notices]]
+            when = "post_disable"
+            level = "warning"
+            text = "Cached tokens remain until the framework restarts."
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert_eq!(a.notices.len(), 2);
+        assert_eq!(a.notices[0].when, NoticeWhen::PostEnable);
+        assert_eq!(a.notices[0].level, NoticeLevel::Info);
+        assert_eq!(
+            a.notices[0].text,
+            "Restart the framework to load the plugin."
+        );
+        assert_eq!(a.notices[0].command.as_deref(), Some("openclaw restart"));
+        assert_eq!(a.notices[1].when, NoticeWhen::PostDisable);
+        assert_eq!(a.notices[1].level, NoticeLevel::Warning);
+        assert!(a.notices[1].command.is_none());
+    }
+
+    #[test]
+    fn adapter_notice_level_defaults_to_info() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            text = "No level declared."
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.adapters[0].notices[0].level, NoticeLevel::Info);
+    }
+
+    #[test]
+    fn adapter_notices_parse_framework_specific_sections() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.openclaw.notices]]
+            when = "post_enable"
+            text = "OpenClaw-specific notice."
+
+            [[adapters]]
+            framework = "hermes"
+
+            [[adapters.hermes.notices]]
+            when = "post_disable"
+            level = "warning"
+            text = "Hermes-specific notice."
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let oc = m.adapters[0].openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.notices.len(), 1);
+        assert_eq!(oc.notices[0].when, NoticeWhen::PostEnable);
+        assert_eq!(oc.notices[0].text, "OpenClaw-specific notice.");
+        let h = m.adapters[1].hermes.as_ref().expect("hermes section");
+        assert_eq!(h.notices.len(), 1);
+        assert_eq!(h.notices[0].when, NoticeWhen::PostDisable);
+        assert_eq!(h.notices[0].level, NoticeLevel::Warning);
+    }
+
+    #[test]
+    fn adapter_notices_round_trip() {
+        let toml_text = r#"
+            [component]
+            name = "roundtrip"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            level = "warning"
+            text = "Keep this verbatim: {datadir} $HOME `id`"
+            command = "echo {datadir}/$HOME"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(
+            m.adapters, m2.adapters,
+            "round-trip must preserve notices verbatim"
+        );
+    }
+
+    #[test]
+    fn adapter_notices_text_is_verbatim_and_inert() {
+        // Placeholders and shell metacharacters must survive parsing
+        // unchanged: notices are display-only and never expanded/executed.
+        let toml_text = r#"
+            [component]
+            name = "inert"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            text = "run {datadir}/bin/tool; rm -rf $(whoami)"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(
+            m.adapters[0].notices[0].text,
+            "run {datadir}/bin/tool; rm -rf $(whoami)"
+        );
+    }
+
+    #[test]
+    fn adapter_notices_skip_serializing_when_empty() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("notices"),
+            "absent notices must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_default_level_skips_serializing_field() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            text = "info-level notice"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("level ="),
+            "default info level must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_unknown_when_rejected() {
+        let toml_text = r#"
+            [component]
+            name = "bad"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_install"
+            text = "unsupported trigger"
+        "#;
+        assert!(
+            ComponentManifest::from_toml_str(toml_text).is_err(),
+            "unknown `when` must fail closed"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_unknown_level_rejected() {
+        let toml_text = r#"
+            [component]
+            name = "bad"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            level = "critical"
+            text = "unsupported level"
+        "#;
+        assert!(
+            ComponentManifest::from_toml_str(toml_text).is_err(),
+            "unknown `level` must fail closed"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_missing_text_rejected() {
+        let toml_text = r#"
+            [component]
+            name = "bad"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+        "#;
+        assert!(
+            ComponentManifest::from_toml_str(toml_text).is_err(),
+            "missing required `text` must fail"
         );
     }
 
