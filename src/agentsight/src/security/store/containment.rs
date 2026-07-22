@@ -1,6 +1,7 @@
 //! SQLite reads and writes for durable containment lifecycle state.
 
 mod evidence;
+mod reconcile;
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use uuid::Uuid;
@@ -210,43 +211,6 @@ impl SecurityStore {
             .optional()?
             .map(containment_action_from_row)
             .transpose()
-    }
-
-    /// Lists actionable temporary rows with a reached expiry or explicit retry.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed database, timestamp, stored-data, or lock error.
-    pub fn due_containment_actions(
-        &self,
-        now_ns: u64,
-        limit: usize,
-    ) -> Result<Vec<ContainmentAction>, SecurityStoreError> {
-        let conn = self.connection()?;
-        let mut statement = conn.prepare(&format!(
-            "SELECT {ACTION_COLUMNS}
-             FROM containment_actions
-             WHERE (duration_secs IS NOT NULL AND expires_at_ns IS NOT NULL AND expires_at_ns <= ?1)
-                OR (next_retry_at_ns IS NOT NULL AND next_retry_at_ns <= ?1)
-             ORDER BY COALESCE(next_retry_at_ns, expires_at_ns, created_at_ns) ASC,
-                      action_id ASC"
-        ))?;
-        let rows = statement.query_map([sqlite_time(now_ns)?], containment_row)?;
-        let limit = limit.clamp(1, 1_000);
-        let mut actions = Vec::with_capacity(limit);
-        for row in rows {
-            let action = containment_action_from_row(row?)?;
-            if matches!(
-                action.lifecycle_state,
-                ContainmentLifecycle::Pending
-                    | ContainmentLifecycle::Active
-                    | ContainmentLifecycle::Expiring
-            ) && actions.len() < limit
-            {
-                actions.push(action);
-            }
-        }
-        Ok(actions)
     }
 
     /// Persists the current mutable lifecycle fields for an action.
