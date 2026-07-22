@@ -1,32 +1,30 @@
 //! Case-level orchestration for upgrading audit evidence to enforcement.
 
-use std::collections::HashMap;
-use std::path::{Component, Path};
+mod policy;
+
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, Binding, BindingState, CredentialExfiltrationPolicy, PolicyMode,
-};
+use agentsight_enforcement_protocol::{ApplyCredentialPolicy, Binding};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::{
-    ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, RiskCaseDetail,
-    RiskCaseStatus, SecurityStore, SecurityStoreError,
+use self::policy::{
+    ResolvedPolicy, acknowledgement_matches, enforce_request, live_candidates, resolve_policy,
+    select_candidate,
 };
-use crate::enforcement::{EnforcementCoordinator, read_process_start_time};
+use super::{
+    ContainmentAction, ContainmentActivationResult, ContainmentClaimResult,
+    ContainmentFailureStage, ContainmentLifecycle, RiskCaseDetail, RiskCaseStatus, SecurityStore,
+    SecurityStoreError,
+};
+use crate::enforcement::EnforcementCoordinator;
 
 const DEFAULT_DURATION_SECS: u64 = 900;
 const MIN_DURATION_SECS: u64 = 60;
 const MAX_DURATION_SECS: u64 = 86_400;
-// Compiled legacy bindings do not encode TTL; retain the existing credential-template value.
-const CREDENTIAL_TAINT_TTL_SECS: u64 = 900;
-const SOURCE_PREFIX: &str = "source CREDENTIAL = file \"";
-const AUDIT_SINK_PREFIX: &str = "  notify connect endpoint \"*\" if CREDENTIAL";
-const TRUSTED_PREFIX: &str = " unless target \"";
 
 /// Enforcement operations required by containment orchestration.
 pub trait ContainmentEnforcer: Send + Sync {
@@ -110,6 +108,9 @@ pub enum ContainmentError {
     /// The selected PID is missing, protected, recycled, or not an approved candidate.
     #[error("root process {0} is stale")]
     RootProcessStale(i32),
+    /// Multiple trusted candidates identify the same selected PID.
+    #[error("multiple trusted candidates identify root process {0}")]
+    AmbiguousCandidate(i32),
     /// The case review state forbids containment.
     #[error("case {case_id} cannot be contained from state {status:?}")]
     IneligibleCase {
@@ -121,9 +122,26 @@ pub enum ContainmentError {
     /// A temporary duration falls outside the approved bounds.
     #[error("duration must be null or between 60 and 86400 seconds")]
     InvalidDuration,
+    /// The authenticated requester identity is unsafe to persist.
+    #[error("requested_by must be 1 to 128 bytes without control characters")]
+    InvalidRequestedBy,
     /// An active lifecycle action exists with a different target or duration.
     #[error("containment action {0} already targets this case with different parameters")]
     IncompatibleAction(Uuid),
+    /// A compatible action is still awaiting an enforcement acknowledgement.
+    #[error("containment action {0} is still in progress")]
+    ContainmentInProgress(Uuid),
+    /// A compatible action is already detaching and cannot be reported active.
+    #[error("containment action {0} is expiring")]
+    ContainmentExpiring(Uuid),
+    /// Human review made the case ineligible while enforcement was applying.
+    #[error("case {case_id} changed to {status:?} while containment was applying")]
+    CaseEligibilityChanged {
+        /// Requested case.
+        case_id: Uuid,
+        /// Review state observed by the activation transaction.
+        status: RiskCaseStatus,
+    },
     /// The privileged enforcement boundary failed or returned an invalid acknowledgement.
     #[error("enforcement unavailable: {0}")]
     Enforcer(String),
@@ -137,8 +155,6 @@ pub struct ContainmentCoordinator {
     store: Arc<SecurityStore>,
     enforcer: Arc<dyn ContainmentEnforcer>,
     stop: Arc<AtomicBool>,
-    candidates: Mutex<HashMap<Uuid, Vec<ContainmentCandidate>>>,
-    lifecycle: Mutex<()>,
 }
 
 impl ContainmentCoordinator {
@@ -148,8 +164,6 @@ impl ContainmentCoordinator {
             store,
             enforcer,
             stop: Arc::new(AtomicBool::new(false)),
-            candidates: Mutex::new(HashMap::new()),
-            lifecycle: Mutex::new(()),
         }
     }
 
@@ -163,14 +177,7 @@ impl ContainmentCoordinator {
         candidates: Vec<ContainmentCandidate>,
     ) -> Result<ContainmentPlan, ContainmentError> {
         let context = self.case_context(case_id)?;
-        let candidates: Vec<_> = candidates
-            .into_iter()
-            .filter(|candidate| candidate.agent_id == context.detail.case.agent_id)
-            .collect();
-        self.candidates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(case_id, candidates.clone());
+        let candidates = live_candidates(&context.detail.case.agent_id, candidates)?;
         let request = &context.binding.request;
         let original_target = ContainmentCandidate {
             agent_id: request.agent_id.clone(),
@@ -183,8 +190,10 @@ impl ContainmentCoordinator {
                 .find_map(|event| event.identity.agent_name.clone())
                 .unwrap_or_else(|| request.agent_id.clone()),
         };
-        let original_target_valid =
-            process_matches(original_target.root_pid, original_target.process_start_time);
+        let original_target_valid = candidates.iter().any(|candidate| {
+            candidate.root_pid == original_target.root_pid
+                && candidate.process_start_time == original_target.process_start_time
+        });
         Ok(ContainmentPlan {
             case_id,
             source_path: context.source_path,
@@ -208,42 +217,29 @@ impl ContainmentCoordinator {
         &self,
         case_id: Uuid,
         request: ContainmentRequest,
+        candidates: &[ContainmentCandidate],
         requested_by: &str,
     ) -> Result<ContainmentAction, ContainmentError> {
         validate_duration(request.duration_secs)?;
-        let _lifecycle = self
-            .lifecycle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let requested_by = validate_requested_by(requested_by)?;
         let detail = self.case_detail(case_id)?;
+        let selected = select_candidate(&detail.case.agent_id, request.root_pid, candidates)?;
         if let Some(existing) = self.store.latest_containment_action(case_id)?
-            && matches!(
-                existing.lifecycle_state,
-                ContainmentLifecycle::Pending
-                    | ContainmentLifecycle::Active
-                    | ContainmentLifecycle::Expiring
-            )
+            && live_lifecycle(existing.lifecycle_state)
         {
-            if existing.root_pid == request.root_pid
-                && existing.duration_secs == request.duration_secs
-            {
-                if !process_matches(existing.root_pid, existing.process_start_time) {
-                    return Err(ContainmentError::RootProcessStale(existing.root_pid));
-                }
-                return Ok(existing);
-            }
-            return Err(ContainmentError::IncompatibleAction(existing.action_id));
+            return existing_action(existing, &request, selected.process_start_time);
         }
         let context = self.context_from_detail(detail)?;
-        let expected_start_time = self.expected_start_time(&context, request.root_pid)?;
-        if !process_matches(request.root_pid, expected_start_time) {
-            return Err(ContainmentError::RootProcessStale(request.root_pid));
-        }
 
         let now = now_ns();
         let binding_id = Uuid::new_v4();
-        let apply =
-            self.apply_request(&context, binding_id, request.root_pid, expected_start_time)?;
+        let apply = enforce_request(
+            &context,
+            binding_id,
+            request.root_pid,
+            selected.process_start_time,
+        )
+        .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
         let expires_at_ns = request
             .duration_secs
             .map(|duration| now.saturating_add(duration.saturating_mul(1_000_000_000)));
@@ -253,13 +249,13 @@ impl ContainmentCoordinator {
             binding_id,
             agent_id: context.detail.case.agent_id.clone(),
             root_pid: request.root_pid,
-            process_start_time: expected_start_time,
+            process_start_time: selected.process_start_time,
             source_path: context.source_path,
             duration_secs: request.duration_secs,
             expires_at_ns,
             lifecycle_state: ContainmentLifecycle::Pending,
             blocked_at_ns: None,
-            requested_by: requested_by.into(),
+            requested_by,
             failure_stage: None,
             failure_reason: None,
             attempt_count: 0,
@@ -267,42 +263,55 @@ impl ContainmentCoordinator {
             created_at_ns: now,
             updated_at_ns: now,
         };
-        if !self.store.insert_containment_action(&action)? {
-            return Err(SecurityStoreError::InvalidData(format!(
-                "duplicate containment action {}",
-                action.action_id
-            ))
-            .into());
+        match self.store.claim_containment_action(&action)? {
+            ContainmentClaimResult::Claimed => {}
+            ContainmentClaimResult::Existing(existing) => {
+                return existing_action(*existing, &request, selected.process_start_time);
+            }
+            ContainmentClaimResult::CaseIneligible(status) => {
+                return Err(ContainmentError::IneligibleCase { case_id, status });
+            }
         }
 
-        let acknowledgement = match self.enforcer.apply_credential_policy(apply) {
+        let acknowledgement = match self.enforcer.apply_credential_policy(apply.clone()) {
             Ok(binding) => binding,
             Err(message) => return self.attach_failed(action, &message),
         };
-        if !acknowledges(&acknowledgement, &action, &context.binding) {
-            return self.attach_failed(
-                action,
-                "enforcer returned an invalid binding acknowledgement",
-            );
+        if !acknowledgement_matches(&acknowledgement, &apply) {
+            let message = "enforcer returned an invalid binding acknowledgement";
+            self.detach_and_fail(&mut action, ContainmentFailureStage::Attach, message)?;
+            return Err(ContainmentError::Enforcer(message.into()));
         }
 
-        action.lifecycle_state = ContainmentLifecycle::Active;
         action.updated_at_ns = now_ns();
-        if !self.store.update_containment_action(&action)? {
-            return Err(SecurityStoreError::InvalidData(format!(
-                "containment action {} disappeared before acknowledgement",
-                action.action_id
-            ))
-            .into());
+        match self
+            .store
+            .activate_containment_action(action.action_id, action.updated_at_ns)
+        {
+            Ok(ContainmentActivationResult::Activated) => {
+                action.lifecycle_state = ContainmentLifecycle::Active;
+                Ok(action)
+            }
+            Ok(ContainmentActivationResult::CaseIneligible(status)) => {
+                self.detach_and_fail(
+                    &mut action,
+                    ContainmentFailureStage::Reconcile,
+                    "case eligibility changed while enforcement was applying",
+                )?;
+                Err(ContainmentError::CaseEligibilityChanged { case_id, status })
+            }
+            Err(error) => {
+                self.detach_and_fail(
+                    &mut action,
+                    ContainmentFailureStage::Reconcile,
+                    &format!("transactional activation failed: {error}"),
+                )?;
+                Err(error.into())
+            }
         }
-        if context.detail.case.status == RiskCaseStatus::Open {
-            self.store
-                .review_case(case_id, RiskCaseStatus::Confirmed, action.updated_at_ns)?;
-        }
-        Ok(action)
     }
 
-    fn case_context(&self, case_id: Uuid) -> Result<CaseContext, ContainmentError> {
+    fn case_context(&self, case_id: Uuid) -> Result<ResolvedPolicy, ContainmentError> {
         let detail = self.case_detail(case_id)?;
         self.context_from_detail(detail)
     }
@@ -327,93 +336,16 @@ impl ContainmentCoordinator {
         Ok(detail)
     }
 
-    fn context_from_detail(&self, detail: RiskCaseDetail) -> Result<CaseContext, ContainmentError> {
+    fn context_from_detail(
+        &self,
+        detail: RiskCaseDetail,
+    ) -> Result<ResolvedPolicy, ContainmentError> {
         let case_id = detail.case.case_id;
-        let binding_id = detail
-            .evidence
-            .first()
-            .map(|event| event.identity.binding_id)
-            .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
         let bindings = self
             .enforcer
             .bindings()
             .map_err(|message| ContainmentError::Enforcer(sanitize_failure(&message)))?;
-        let mut matches = bindings
-            .into_iter()
-            .filter(|binding| binding.request.binding_id == binding_id);
-        let binding = matches
-            .next()
-            .filter(|_| matches.next().is_none())
-            .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
-        let (source_path, trusted_endpoints) = recover_policy(&detail, &binding)
-            .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
-        Ok(CaseContext {
-            detail,
-            binding,
-            source_path,
-            trusted_endpoints,
-        })
-    }
-
-    fn expected_start_time(
-        &self,
-        context: &CaseContext,
-        root_pid: i32,
-    ) -> Result<u64, ContainmentError> {
-        if root_pid == context.binding.request.root_pid {
-            return Ok(context.binding.request.process_start_time);
-        }
-        let candidates = self
-            .candidates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut matches = candidates
-            .get(&context.detail.case.case_id)
-            .into_iter()
-            .flatten()
-            .filter(|candidate| {
-                candidate.agent_id == context.detail.case.agent_id && candidate.root_pid == root_pid
-            });
-        matches
-            .next()
-            .filter(|_| matches.next().is_none())
-            .map(|candidate| candidate.process_start_time)
-            .ok_or(ContainmentError::RootProcessStale(root_pid))
-    }
-
-    fn apply_request(
-        &self,
-        context: &CaseContext,
-        binding_id: Uuid,
-        root_pid: i32,
-        process_start_time: u64,
-    ) -> Result<ApplyCredentialPolicy, ContainmentError> {
-        let revision = context
-            .binding
-            .request
-            .policy_revision
-            .parse::<u64>()
-            .map_err(|_| ContainmentError::SourcePolicyUnavailable(context.detail.case.case_id))?;
-        let policy = CredentialExfiltrationPolicy {
-            policy_id: context.binding.request.policy_id.clone(),
-            revision,
-            source_patterns: vec![context.source_path.clone()],
-            trusted_endpoints: context.trusted_endpoints.clone(),
-            taint_label: "CREDENTIAL".into(),
-            taint_ttl_secs: CREDENTIAL_TAINT_TTL_SECS,
-            mode: PolicyMode::Enforce,
-        };
-        policy
-            .validate()
-            .map_err(|_| ContainmentError::SourcePolicyUnavailable(context.detail.case.case_id))?;
-        Ok(ApplyCredentialPolicy {
-            binding_id,
-            agent_id: context.binding.request.agent_id.clone(),
-            session_id: context.binding.request.session_id.clone(),
-            root_pid,
-            process_start_time,
-            policy,
-        })
+        resolve_policy(detail, bindings).ok_or(ContainmentError::SourcePolicyUnavailable(case_id))
     }
 
     fn attach_failed(
@@ -422,18 +354,45 @@ impl ContainmentCoordinator {
         message: &str,
     ) -> Result<ContainmentAction, ContainmentError> {
         let message = sanitize_failure(message);
+        self.persist_failed(
+            &mut action,
+            ContainmentFailureStage::Attach,
+            message.clone(),
+        )?;
+        Err(ContainmentError::Enforcer(message))
+    }
+
+    fn detach_and_fail(
+        &self,
+        action: &mut ContainmentAction,
+        stage: ContainmentFailureStage,
+        message: &str,
+    ) -> Result<(), ContainmentError> {
+        let reason = match self.enforcer.detach(action.binding_id) {
+            Ok(()) => sanitize_failure(message),
+            Err(error) => sanitize_failure(&format!("{message}; detach failed: {error}")),
+        };
+        self.persist_failed(action, stage, reason)
+    }
+
+    fn persist_failed(
+        &self,
+        action: &mut ContainmentAction,
+        stage: ContainmentFailureStage,
+        reason: String,
+    ) -> Result<(), ContainmentError> {
         action.lifecycle_state = ContainmentLifecycle::Failed;
-        action.failure_stage = Some(ContainmentFailureStage::Attach);
-        action.failure_reason = Some(message.clone());
+        action.failure_stage = Some(stage);
+        action.failure_reason = Some(reason);
         action.updated_at_ns = now_ns();
-        if !self.store.update_containment_action(&action)? {
+        if !self.store.update_containment_action(action)? {
             return Err(SecurityStoreError::InvalidData(format!(
-                "containment action {} disappeared after attach failure",
+                "containment action {} disappeared while recording failure",
                 action.action_id
             ))
             .into());
         }
-        Err(ContainmentError::Enforcer(message))
+        Ok(())
     }
 }
 
@@ -443,73 +402,38 @@ impl Drop for ContainmentCoordinator {
     }
 }
 
-struct CaseContext {
-    detail: RiskCaseDetail,
-    binding: Binding,
-    source_path: String,
-    trusted_endpoints: Vec<String>,
+fn live_lifecycle(lifecycle: ContainmentLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        ContainmentLifecycle::Pending
+            | ContainmentLifecycle::Active
+            | ContainmentLifecycle::Expiring
+    )
 }
 
-fn recover_policy(detail: &RiskCaseDetail, binding: &Binding) -> Option<(String, Vec<String>)> {
-    let request = &binding.request;
-    if request.agent_id != detail.case.agent_id
-        || request.policy_id != detail.case.policy_id
-        || request.policy_revision != detail.case.policy_revision.to_string()
+fn existing_action(
+    existing: ContainmentAction,
+    request: &ContainmentRequest,
+    process_start_time: u64,
+) -> Result<ContainmentAction, ContainmentError> {
+    if existing.root_pid != request.root_pid
+        || existing.process_start_time != process_start_time
+        || existing.duration_secs != request.duration_secs
     {
-        return None;
+        return Err(ContainmentError::IncompatibleAction(existing.action_id));
     }
-    let mut source = None;
-    let mut trusted = None;
-    for line in request.policy_dsl.split('\n') {
-        if let Some(value) = line.strip_prefix(SOURCE_PREFIX) {
-            let value = value.strip_suffix('"')?;
-            if source.is_some() || !valid_source_path(value) {
-                return None;
-            }
-            source = Some(value.to_string());
-        } else if line.contains("source CREDENTIAL") {
-            return None;
+    match existing.lifecycle_state {
+        ContainmentLifecycle::Active => Ok(existing),
+        ContainmentLifecycle::Pending => {
+            Err(ContainmentError::ContainmentInProgress(existing.action_id))
         }
-
-        if let Some(suffix) = line.strip_prefix(AUDIT_SINK_PREFIX) {
-            if trusted.is_some() {
-                return None;
-            }
-            trusted = Some(if suffix.is_empty() {
-                Vec::new()
-            } else {
-                let endpoint = suffix.strip_prefix(TRUSTED_PREFIX)?.strip_suffix('"')?;
-                if !valid_literal(endpoint) {
-                    return None;
-                }
-                vec![endpoint.to_string()]
-            });
-        } else if line.contains("connect endpoint") && line.contains("CREDENTIAL") {
-            return None;
+        ContainmentLifecycle::Expiring => {
+            Err(ContainmentError::ContainmentExpiring(existing.action_id))
+        }
+        ContainmentLifecycle::Expired | ContainmentLifecycle::Failed => {
+            Err(ContainmentError::IncompatibleAction(existing.action_id))
         }
     }
-    Some((source?, trusted?))
-}
-
-fn valid_source_path(value: &str) -> bool {
-    if !valid_literal(value)
-        || value.contains("//")
-        || value.contains('\u{fffd}')
-        || !Path::new(value).is_absolute()
-    {
-        return false;
-    }
-    Path::new(value)
-        .components()
-        .all(|component| !matches!(component, Component::CurDir | Component::ParentDir))
-}
-
-fn valid_literal(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() < 127
-        && !value
-            .chars()
-            .any(|character| character == '"' || character == '\\' || character.is_control())
 }
 
 fn validate_duration(duration_secs: Option<u64>) -> Result<(), ContainmentError> {
@@ -520,18 +444,15 @@ fn validate_duration(duration_secs: Option<u64>) -> Result<(), ContainmentError>
     Ok(())
 }
 
-fn process_matches(pid: i32, expected_start_time: u64) -> bool {
-    read_process_start_time(pid).is_ok_and(|actual| actual == expected_start_time)
-}
-
-fn acknowledges(binding: &Binding, action: &ContainmentAction, original: &Binding) -> bool {
-    binding.state == BindingState::Enforced
-        && binding.request.binding_id == action.binding_id
-        && binding.request.agent_id == action.agent_id
-        && binding.request.root_pid == action.root_pid
-        && binding.request.process_start_time == action.process_start_time
-        && binding.request.policy_id == original.request.policy_id
-        && binding.request.policy_revision == original.request.policy_revision
+fn validate_requested_by(requested_by: &str) -> Result<String, ContainmentError> {
+    if requested_by.len() > 128 || requested_by.chars().any(char::is_control) {
+        return Err(ContainmentError::InvalidRequestedBy);
+    }
+    let requested_by = requested_by.trim();
+    if requested_by.is_empty() {
+        return Err(ContainmentError::InvalidRequestedBy);
+    }
+    Ok(requested_by.to_string())
 }
 
 fn sanitize_failure(message: &str) -> String {

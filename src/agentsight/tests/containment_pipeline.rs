@@ -1,23 +1,39 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 use agentsight::enforcement::{ApplyPolicy, Binding, BindingState};
 use agentsight::security::{
     ContainmentCandidate, ContainmentCoordinator, ContainmentEnforcer, ContainmentError,
-    ContainmentLifecycle, ContainmentRequest, RiskCase, RiskCaseStatus, RiskSeverity,
-    SecurityStore,
+    ContainmentFailureStage, ContainmentLifecycle, ContainmentRequest, RiskCase, RiskCaseStatus,
+    RiskSeverity, SecurityStore,
 };
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, EventIdentity, FileAction, PolicyMode, SecurityEvent, SecurityEventKind,
 };
 use uuid::Uuid;
 
+#[derive(Clone, Copy)]
+enum AckMutation {
+    State(BindingState),
+    Session,
+    Source,
+    TrustedEndpoint,
+    Notify,
+}
+
+struct ApplyPause {
+    entered: Barrier,
+    resume: Barrier,
+}
+
 #[derive(Default)]
 struct FakeEnforcer {
     bindings: Mutex<Vec<Binding>>,
     applied: Mutex<Vec<ApplyCredentialPolicy>>,
     failure: Mutex<Option<String>>,
-    acknowledgement: Mutex<Option<BindingState>>,
+    acknowledgement: Mutex<Option<AckMutation>>,
+    pause: Mutex<Option<Arc<ApplyPause>>>,
+    detached: Mutex<Vec<Uuid>>,
     apply_calls: AtomicUsize,
 }
 
@@ -30,8 +46,17 @@ impl FakeEnforcer {
         *self.failure.lock().expect("failure should lock") = Some(message.into());
     }
 
-    fn acknowledge_as(&self, state: BindingState) {
-        *self.acknowledgement.lock().expect("ack should lock") = Some(state);
+    fn mutate_ack(&self, mutation: AckMutation) {
+        *self.acknowledgement.lock().expect("ack should lock") = Some(mutation);
+    }
+
+    fn pause_apply(&self) -> Arc<ApplyPause> {
+        let pause = Arc::new(ApplyPause {
+            entered: Barrier::new(2),
+            resume: Barrier::new(2),
+        });
+        *self.pause.lock().expect("pause should lock") = Some(Arc::clone(&pause));
+        pause
     }
 
     fn apply_calls(&self) -> usize {
@@ -40,6 +65,10 @@ impl FakeEnforcer {
 
     fn applied(&self) -> Vec<ApplyCredentialPolicy> {
         self.applied.lock().expect("applied should lock").clone()
+    }
+
+    fn detached(&self) -> Vec<Uuid> {
+        self.detached.lock().expect("detached should lock").clone()
     }
 }
 
@@ -53,31 +82,43 @@ impl ContainmentEnforcer for FakeEnforcer {
             .lock()
             .expect("applied should lock")
             .push(request.clone());
-        let state = self
-            .acknowledgement
-            .lock()
-            .expect("ack should lock")
-            .take()
-            .unwrap_or(BindingState::Enforced);
-        let trusted = request
-            .policy
-            .trusted_endpoints
-            .first()
-            .map(|value| format!(" unless target \"{value}\""))
-            .unwrap_or_default();
+        let pause = self.pause.lock().expect("pause should lock").take();
+        if let Some(pause) = pause {
+            pause.entered.wait();
+            pause.resume.wait();
+        }
+        let mutation = self.acknowledgement.lock().expect("ack should lock").take();
+        let state = match mutation {
+            Some(AckMutation::State(state)) => state,
+            _ => BindingState::Enforced,
+        };
+        let session_id = match mutation {
+            Some(AckMutation::Session) => Some("session-other".into()),
+            _ => request.session_id,
+        };
+        let source = match mutation {
+            Some(AckMutation::Source) => "/root/other.txt",
+            _ => &request.policy.source_patterns[0],
+        };
+        let trusted = match mutation {
+            Some(AckMutation::TrustedEndpoint) => Some("other.example:443"),
+            _ => request.policy.trusted_endpoints.first().map(String::as_str),
+        };
+        let action = if matches!(mutation, Some(AckMutation::Notify)) {
+            "notify"
+        } else {
+            "block"
+        };
         Ok(Binding {
             request: ApplyPolicy {
                 binding_id: request.binding_id,
                 agent_id: request.agent_id,
-                session_id: request.session_id,
+                session_id,
                 root_pid: request.root_pid,
                 process_start_time: request.process_start_time,
                 policy_id: request.policy.policy_id,
                 policy_revision: request.policy.revision.to_string(),
-                policy_dsl: format!(
-                    "source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{}\"\nrule agentsight-credential-exfiltration:\n  block connect endpoint \"*\" if CREDENTIAL{trusted}\n",
-                    request.policy.source_patterns[0]
-                ),
+                policy_dsl: compiled_policy(action, source, trusted),
             },
             state,
             message: None,
@@ -85,7 +126,11 @@ impl ContainmentEnforcer for FakeEnforcer {
         })
     }
 
-    fn detach(&self, _binding_id: Uuid) -> Result<(), String> {
+    fn detach(&self, binding_id: Uuid) -> Result<(), String> {
+        self.detached
+            .lock()
+            .expect("detached should lock")
+            .push(binding_id);
         Ok(())
     }
 
@@ -99,12 +144,31 @@ struct Fixture {
     binding_id: Uuid,
     store: Arc<SecurityStore>,
     enforcer: Arc<FakeEnforcer>,
-    coordinator: ContainmentCoordinator,
+    coordinator: Arc<ContainmentCoordinator>,
 }
 
 impl Fixture {
     fn new(source_policy: Option<&str>, root_pid: i32, process_start_time: u64) -> Self {
         let store = Arc::new(SecurityStore::open_in_memory().expect("fixture store should open"));
+        Self::with_store(store, source_policy, root_pid, process_start_time)
+    }
+
+    fn at_path(
+        path: &std::path::Path,
+        source_policy: Option<&str>,
+        root_pid: i32,
+        process_start_time: u64,
+    ) -> Self {
+        let store = Arc::new(SecurityStore::open(path).expect("fixture store should open"));
+        Self::with_store(store, source_policy, root_pid, process_start_time)
+    }
+
+    fn with_store(
+        store: Arc<SecurityStore>,
+        source_policy: Option<&str>,
+        root_pid: i32,
+        process_start_time: u64,
+    ) -> Self {
         let enforcer = Arc::new(FakeEnforcer::default());
         let binding_id = Uuid::new_v4();
         if let Some(policy_dsl) = source_policy {
@@ -122,7 +186,10 @@ impl Fixture {
             .upsert_case(&risk_case(case_id), &[event.event_id])
             .expect("case should persist");
         let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer.clone();
-        let coordinator = ContainmentCoordinator::new(Arc::clone(&store), enforcer_trait);
+        let coordinator = Arc::new(ContainmentCoordinator::new(
+            Arc::clone(&store),
+            enforcer_trait,
+        ));
         Self {
             case_id,
             binding_id,
@@ -137,6 +204,90 @@ impl Fixture {
             .review_case(self.case_id, status, 2)
             .expect("case status should update");
     }
+
+    fn status(&self) -> RiskCaseStatus {
+        self.store
+            .case_detail(self.case_id)
+            .expect("case should load")
+            .case
+            .status
+    }
+
+    fn candidate(&self) -> ContainmentCandidate {
+        let identity = &self
+            .store
+            .case_detail(self.case_id)
+            .expect("case should load")
+            .evidence[0]
+            .identity;
+        ContainmentCandidate {
+            agent_id: identity.agent_id.clone(),
+            root_pid: identity.pid,
+            process_start_time: identity.process_start_time,
+            display_name: "Hermes test".into(),
+        }
+    }
+
+    fn contain_as(
+        &self,
+        duration_secs: Option<u64>,
+        candidates: &[ContainmentCandidate],
+        requested_by: &str,
+    ) -> Result<agentsight::security::ContainmentAction, ContainmentError> {
+        let root_pid = candidates.first().map_or(0, |candidate| candidate.root_pid);
+        self.coordinator.contain(
+            self.case_id,
+            ContainmentRequest {
+                root_pid,
+                duration_secs,
+            },
+            candidates,
+            requested_by,
+        )
+    }
+
+    fn contain(
+        &self,
+        duration_secs: Option<u64>,
+    ) -> Result<agentsight::security::ContainmentAction, ContainmentError> {
+        self.contain_as(
+            duration_secs,
+            &[self.candidate()],
+            "principal:test-operator",
+        )
+    }
+
+    fn latest_action(&self) -> agentsight::security::ContainmentAction {
+        self.store
+            .latest_containment_action(self.case_id)
+            .expect("action query should work")
+            .expect("action should exist")
+    }
+}
+
+fn coordinator(
+    store: Arc<SecurityStore>,
+    enforcer: Arc<FakeEnforcer>,
+) -> Arc<ContainmentCoordinator> {
+    let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer;
+    Arc::new(ContainmentCoordinator::new(store, enforcer_trait))
+}
+
+fn contain_candidate(
+    coordinator: &ContainmentCoordinator,
+    case_id: Uuid,
+    candidate: ContainmentCandidate,
+    duration_secs: Option<u64>,
+) -> Result<agentsight::security::ContainmentAction, ContainmentError> {
+    coordinator.contain(
+        case_id,
+        ContainmentRequest {
+            root_pid: candidate.root_pid,
+            duration_secs,
+        },
+        std::slice::from_ref(&candidate),
+        "principal:test-operator",
+    )
 }
 
 fn binding(binding_id: Uuid, root_pid: i32, start_time: u64, policy_dsl: &str) -> Binding {
@@ -208,35 +359,48 @@ fn risk_case(case_id: Uuid) -> RiskCase {
     }
 }
 
-fn policy(source: &str) -> String {
+fn compiled_policy(action: &str, source: &str, trusted: Option<&str>) -> String {
+    let trusted = trusted
+        .map(|value| format!(" unless target \"{value}\""))
+        .unwrap_or_default();
     format!(
-        "source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{source}\"\nrule agentsight-credential-exfiltration:\n  notify connect endpoint \"*\" if CREDENTIAL unless target \"trusted.example:443\"\n  because \"credential-derived data reached an untrusted network target\"\n"
+        "source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{source}\"\nrule agentsight-credential-exfiltration:\n  {action} connect endpoint \"*\" if CREDENTIAL{trusted}\n  because \"credential-derived data reached an untrusted network target\"\n"
     )
+}
+
+fn policy(source: &str) -> String {
+    compiled_policy("notify", source, Some("trusted.example:443"))
 }
 
 #[test]
 fn plan_recovers_only_the_original_binding_path() {
     let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
-    let candidate = ContainmentCandidate {
-        agent_id: "hermes-test".into(),
-        root_pid: 1234,
-        process_start_time: 88,
-        display_name: "replacement".into(),
-    };
 
     let plan = fixture
         .coordinator
-        .plan(fixture.case_id, vec![candidate.clone()])
+        .plan(fixture.case_id, Vec::new())
         .expect("plan should load");
 
     assert_eq!(plan.source_path, "/root/secret.txt");
-    assert_eq!(plan.candidates, vec![candidate]);
+    assert!(plan.candidates.is_empty());
     assert!(!plan.original_target_valid);
     assert_eq!(plan.default_duration_secs, 900);
     assert_eq!(
         (plan.min_duration_secs, plan.max_duration_secs),
         (60, 86_400)
     );
+    let candidate = ContainmentCandidate {
+        agent_id: "hermes-test".into(),
+        root_pid: 12_345,
+        process_start_time: 88,
+        display_name: "replacement".into(),
+    };
+    assert!(matches!(
+        fixture
+            .coordinator
+            .plan(fixture.case_id, vec![candidate.clone(), candidate]),
+        Err(ContainmentError::AmbiguousCandidate(12_345))
+    ));
 }
 
 #[test]
@@ -246,24 +410,43 @@ fn missing_original_binding_never_uses_redacted_evidence_path() {
         fixture.coordinator.plan(fixture.case_id, Vec::new()),
         Err(ContainmentError::SourcePolicyUnavailable(id)) if id == fixture.case_id
     ));
+    let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
+    let mut original = binding(fixture.binding_id, 999_999, 42, &policy("/root/secret.txt"));
+    original.state = BindingState::Pending;
+    fixture.enforcer.set_bindings(vec![original]);
+
+    assert!(matches!(
+        fixture.coordinator.plan(fixture.case_id, Vec::new()),
+        Err(ContainmentError::SourcePolicyUnavailable(_))
+    ));
 }
 
 #[test]
 fn malformed_source_declarations_are_rejected() {
     let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
-    let malformed = [
-        "source AGENT = exec \"**\"\n",
-        "source CREDENTIAL = file \"relative/secret\"\n",
-        "source CREDENTIAL = file \"/root/secret\\\"\n",
-        "source CREDENTIAL=file \"/root/secret\"\n",
-        "source CREDENTIAL = file \"/root/a\"\nsource CREDENTIAL = file \"/root/b\"\n",
-        "source OTHER = file \"/root/secret\"\n",
+    let malformed = vec![
+        "source AGENT = exec \"**\"\n".into(),
+        "source CREDENTIAL = file \"relative/secret\"\n".into(),
+        "source CREDENTIAL = file \"/root/secret\\\"\n".into(),
+        "source CREDENTIAL=file \"/root/secret\"\n".into(),
+        "source CREDENTIAL = file \"/root/a\"\nsource CREDENTIAL = file \"/root/b\"\n".into(),
+        "source OTHER = file \"/root/secret\"\n".into(),
+        policy("/root/./secret"),
+        policy("/root/../secret"),
+        format!(
+            "{}source  CREDENTIAL = file \"/root/other\"\n",
+            policy("/root/secret")
+        ),
+        format!(
+            "{}source\tCREDENTIAL = file \"/root/other\"\n",
+            policy("/root/secret")
+        ),
     ];
 
     for dsl in malformed {
         fixture
             .enforcer
-            .set_bindings(vec![binding(fixture.binding_id, 999_999, 42, dsl)]);
+            .set_bindings(vec![binding(fixture.binding_id, 999_999, 42, &dsl)]);
         assert!(matches!(
             fixture.coordinator.plan(fixture.case_id, Vec::new()),
             Err(ContainmentError::SourcePolicyUnavailable(_))
@@ -327,43 +510,18 @@ mod linux {
         (process, fixture)
     }
 
-    fn contain(
-        fixture: &Fixture,
-        duration_secs: Option<u64>,
-    ) -> Result<agentsight::security::ContainmentAction, ContainmentError> {
-        let root_pid = fixture
-            .store
-            .case_detail(fixture.case_id)
-            .expect("case should load")
-            .evidence[0]
-            .identity
-            .pid;
-        fixture.coordinator.contain(
-            fixture.case_id,
-            ContainmentRequest {
-                root_pid,
-                duration_secs,
-            },
-            "dashboard-token",
-        )
-    }
-
     #[test]
     fn contain_uses_original_policy_and_confirms_only_after_enforced_ack() {
         let (_process, fixture) = live_fixture();
-        let action = contain(&fixture, Some(900)).expect("containment should apply");
+        let candidate = fixture.candidate();
+        let action = fixture
+            .contain_as(Some(900), &[candidate], "  principal:test-operator  ")
+            .expect("containment should apply");
 
         assert_eq!(action.source_path, "/root/secret.txt");
         assert_eq!(action.lifecycle_state, ContainmentLifecycle::Active);
-        assert_eq!(
-            fixture
-                .store
-                .case_detail(fixture.case_id)
-                .expect("case should load")
-                .case
-                .status,
-            RiskCaseStatus::Confirmed
-        );
+        assert_eq!(action.requested_by, "principal:test-operator");
+        assert_eq!(fixture.status(), RiskCaseStatus::Confirmed);
         let applied = fixture.enforcer.applied();
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].policy.mode, PolicyMode::Enforce);
@@ -374,51 +532,37 @@ mod linux {
     }
 
     #[test]
-    fn repeated_active_request_returns_the_existing_action() {
-        let (_process, fixture) = live_fixture();
-        let first = contain(&fixture, Some(900)).expect("first containment should apply");
-        fixture.enforcer.set_bindings(Vec::new());
-        let second = contain(&fixture, Some(900)).expect("repeat should be idempotent");
-
-        assert_eq!(first.action_id, second.action_id);
-        assert_eq!(fixture.enforcer.apply_calls(), 1);
-        assert!(matches!(
-            contain(&fixture, Some(901)),
-            Err(ContainmentError::IncompatibleAction(_))
-        ));
-    }
-
-    #[test]
     fn duration_and_process_identity_are_validated_before_apply() {
         let (_process, fixture) = live_fixture();
         for duration_secs in [Some(59), Some(86_401)] {
             assert!(matches!(
-                contain(&fixture, duration_secs),
+                fixture.contain(duration_secs),
                 Err(ContainmentError::InvalidDuration)
             ));
         }
-        let root_pid = fixture.enforcer.bindings().expect("bindings should load")[0]
-            .request
-            .root_pid;
-        fixture.enforcer.set_bindings(vec![binding(
-            fixture.binding_id,
-            root_pid,
-            1,
-            &policy("/root/secret.txt"),
-        )]);
+        let mut stale = fixture.candidate();
+        stale.process_start_time = stale.process_start_time.saturating_add(1);
         assert!(matches!(
-            contain(&fixture, Some(900)),
-            Err(ContainmentError::RootProcessStale(pid)) if pid == root_pid
+            fixture.contain_as(
+                Some(900),
+                &[stale.clone()],
+                "principal:test-operator",
+            ),
+            Err(ContainmentError::RootProcessStale(pid)) if pid == stale.root_pid
         ));
         assert_eq!(fixture.enforcer.apply_calls(), 0);
     }
 
     #[test]
-    fn persistent_duration_stays_explicitly_persistent() {
-        let (_process, fixture) = live_fixture();
-        let action = contain(&fixture, None).expect("persistent containment should apply");
-        assert_eq!(action.duration_secs, None);
-        assert_eq!(action.expires_at_ns, None);
+    fn exact_duration_boundaries_and_persistent_mode_are_accepted() {
+        for duration_secs in [Some(60), Some(86_400), None] {
+            let (_process, fixture) = live_fixture();
+            let action = fixture
+                .contain(duration_secs)
+                .expect("valid duration should apply");
+            assert_eq!(action.duration_secs, duration_secs);
+            assert_eq!(action.expires_at_ns.is_none(), duration_secs.is_none());
+        }
     }
 
     #[test]
@@ -426,14 +570,10 @@ mod linux {
         let (_process, fixture) = live_fixture();
         fixture.enforcer.fail_next_apply("adapter unavailable");
         assert!(matches!(
-            contain(&fixture, Some(900)),
+            fixture.contain(Some(900)),
             Err(ContainmentError::Enforcer(message)) if message == "adapter unavailable"
         ));
-        let action = fixture
-            .store
-            .latest_containment_action(fixture.case_id)
-            .expect("action query should work")
-            .expect("failed action should persist");
+        let action = fixture.latest_action();
         assert_eq!(action.lifecycle_state, ContainmentLifecycle::Failed);
         assert_eq!(
             action.failure_reason.as_deref(),
@@ -443,34 +583,28 @@ mod linux {
             action.failure_stage,
             Some(agentsight::security::ContainmentFailureStage::Attach)
         );
-        assert_eq!(
-            fixture
-                .store
-                .case_detail(fixture.case_id)
-                .expect("case should load")
-                .case
-                .status,
-            RiskCaseStatus::Open
-        );
+        assert_eq!(fixture.status(), RiskCaseStatus::Open);
     }
 
     #[test]
-    fn non_enforced_acknowledgement_is_not_reported_active() {
-        let (_process, fixture) = live_fixture();
-        fixture.enforcer.acknowledge_as(BindingState::Pending);
-        assert!(matches!(
-            contain(&fixture, Some(900)),
-            Err(ContainmentError::Enforcer(_))
-        ));
-        assert_eq!(
-            fixture
-                .store
-                .latest_containment_action(fixture.case_id)
-                .expect("action query should work")
-                .expect("action should exist")
-                .lifecycle_state,
-            ContainmentLifecycle::Failed
-        );
+    fn acknowledgement_must_match_exact_enforce_semantics() {
+        for mutation in [
+            AckMutation::State(BindingState::Pending),
+            AckMutation::Session,
+            AckMutation::Source,
+            AckMutation::TrustedEndpoint,
+            AckMutation::Notify,
+        ] {
+            let (_process, fixture) = live_fixture();
+            fixture.enforcer.mutate_ack(mutation);
+            assert!(matches!(
+                fixture.contain(Some(900)),
+                Err(ContainmentError::Enforcer(_))
+            ));
+            let action = fixture.latest_action();
+            assert_eq!(action.lifecycle_state, ContainmentLifecycle::Failed);
+            assert_eq!(fixture.enforcer.detached(), [action.binding_id]);
+        }
     }
 
     #[test]
@@ -483,7 +617,7 @@ mod linux {
             let (_process, fixture) = live_fixture();
             fixture.set_status(status);
             assert!(matches!(
-                contain(&fixture, Some(900)),
+                fixture.contain(Some(900)),
                 Err(ContainmentError::IneligibleCase { status: actual, .. }) if actual == status
             ));
             assert_eq!(fixture.enforcer.apply_calls(), 0);
@@ -494,44 +628,170 @@ mod linux {
     fn replacement_candidate_identity_must_match_proc_start_time() {
         let candidate_process = LiveProcess::spawn();
         let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 1);
-        let mut candidate = ContainmentCandidate {
+        let candidate = ContainmentCandidate {
             agent_id: "hermes-test".into(),
             root_pid: candidate_process.pid(),
-            process_start_time: candidate_process.start_time() + 1,
+            process_start_time: candidate_process.start_time(),
             display_name: "replacement".into(),
         };
-        fixture
+        let action = contain_candidate(
+            &fixture.coordinator,
+            fixture.case_id,
+            candidate.clone(),
+            Some(900),
+        )
+        .expect("fresh valid candidate should apply without a plan call");
+        assert_eq!(action.process_start_time, candidate.process_start_time);
+    }
+
+    #[test]
+    fn plan_returns_only_live_candidates_and_creates_no_post_authority() {
+        let (_process, fixture) = live_fixture();
+        let candidate = fixture.candidate();
+        let stale = ContainmentCandidate {
+            agent_id: "hermes-test".into(),
+            root_pid: 999_999,
+            process_start_time: 1,
+            display_name: "stale".into(),
+        };
+        let plan = fixture
             .coordinator
-            .plan(fixture.case_id, vec![candidate.clone()])
-            .expect("plan should cache candidates");
+            .plan(fixture.case_id, vec![candidate.clone(), stale])
+            .expect("plan should load");
+        assert_eq!(plan.candidates, [candidate.clone()]);
+        assert!(plan.original_target_valid);
+
         assert!(matches!(
             fixture.coordinator.contain(
                 fixture.case_id,
                 ContainmentRequest {
                     root_pid: candidate.root_pid,
-                    duration_secs: Some(900)
-                },
-                "dashboard-token",
-            ),
-            Err(ContainmentError::RootProcessStale(_))
-        ));
-
-        candidate.process_start_time = candidate_process.start_time();
-        fixture
-            .coordinator
-            .plan(fixture.case_id, vec![candidate.clone()])
-            .expect("plan should refresh candidates");
-        let action = fixture
-            .coordinator
-            .contain(
-                fixture.case_id,
-                ContainmentRequest {
-                    root_pid: candidate.root_pid,
                     duration_secs: Some(900),
                 },
-                "dashboard-token",
-            )
-            .expect("valid candidate should apply");
-        assert_eq!(action.process_start_time, candidate.process_start_time);
+                &[],
+                "principal:test-operator",
+            ),
+            Err(ContainmentError::RootProcessStale(pid)) if pid == candidate.root_pid
+        ));
+        assert_eq!(fixture.enforcer.apply_calls(), 0);
+    }
+
+    #[test]
+    fn requested_by_is_validated_before_mutation() {
+        let (_process, fixture) = live_fixture();
+        let candidate = fixture.candidate();
+        for requested_by in [
+            String::new(),
+            "   ".into(),
+            "x".repeat(129),
+            "principal:\noperator".into(),
+        ] {
+            assert!(matches!(
+                fixture.contain_as(Some(900), &[candidate.clone()], &requested_by),
+                Err(ContainmentError::InvalidRequestedBy)
+            ));
+        }
+        assert_eq!(fixture.enforcer.apply_calls(), 0);
+        assert_eq!(
+            fixture
+                .store
+                .latest_containment_action(fixture.case_id)
+                .expect("action query should work"),
+            None
+        );
+    }
+
+    #[test]
+    fn durable_claim_serializes_coordinators_and_types_live_states() {
+        let process = LiveProcess::spawn();
+        let path = std::env::temp_dir().join(format!("containment-race-{}.db", Uuid::new_v4()));
+        let fixture = Fixture::at_path(
+            &path,
+            Some(&policy("/root/secret.txt")),
+            process.pid(),
+            process.start_time(),
+        );
+        let second_store = Arc::new(SecurityStore::open(&path).expect("second store should open"));
+        let second = coordinator(Arc::clone(&second_store), Arc::clone(&fixture.enforcer));
+        let candidate = fixture.candidate();
+        let pause = fixture.enforcer.pause_apply();
+        let first = Arc::clone(&fixture.coordinator);
+        let first_candidate = candidate.clone();
+        let case_id = fixture.case_id;
+        let worker = std::thread::spawn(move || {
+            contain_candidate(&first, case_id, first_candidate, Some(900))
+        });
+        pause.entered.wait();
+        let repeat =
+            |duration| contain_candidate(&second, fixture.case_id, candidate.clone(), duration);
+
+        assert!(matches!(
+            repeat(Some(900)),
+            Err(ContainmentError::ContainmentInProgress(_))
+        ));
+        pause.resume.wait();
+        let active = worker
+            .join()
+            .expect("containment worker should join")
+            .expect("first containment should activate");
+        fixture.enforcer.set_bindings(Vec::new());
+        let repeated = repeat(Some(900)).expect("active claim should be idempotent");
+        assert_eq!(repeated.action_id, active.action_id);
+        assert_eq!(fixture.enforcer.apply_calls(), 1);
+        assert!(matches!(
+            repeat(Some(901)),
+            Err(ContainmentError::IncompatibleAction(_))
+        ));
+
+        let mut expiring = active;
+        expiring.lifecycle_state = ContainmentLifecycle::Expiring;
+        second_store
+            .update_containment_action(&expiring)
+            .expect("action should become expiring");
+        assert!(matches!(
+            repeat(Some(900)),
+            Err(ContainmentError::ContainmentExpiring(id)) if id == expiring.action_id
+        ));
+        drop(fixture);
+        drop(second);
+        drop(second_store);
+        std::fs::remove_file(path).expect("fixture database should be removed");
+    }
+
+    #[test]
+    fn review_race_detaches_and_persists_reconcile_failure() {
+        let (_process, fixture) = live_fixture();
+        let pause = fixture.enforcer.pause_apply();
+        let coordinator = Arc::clone(&fixture.coordinator);
+        let candidate = fixture.candidate();
+        let case_id = fixture.case_id;
+        let worker = std::thread::spawn(move || {
+            contain_candidate(&coordinator, case_id, candidate, Some(900))
+        });
+        pause.entered.wait();
+        fixture.set_status(RiskCaseStatus::FalsePositive);
+        pause.resume.wait();
+
+        assert!(matches!(
+            worker.join().expect("containment worker should join"),
+            Err(ContainmentError::CaseEligibilityChanged {
+                status: RiskCaseStatus::FalsePositive,
+                ..
+            })
+        ));
+        let action = fixture.latest_action();
+        assert_eq!(action.lifecycle_state, ContainmentLifecycle::Failed);
+        assert_eq!(
+            action.failure_stage,
+            Some(ContainmentFailureStage::Reconcile)
+        );
+        assert!(
+            action
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.chars().any(char::is_control))
+        );
+        assert_eq!(fixture.enforcer.detached(), [action.binding_id]);
+        assert_eq!(fixture.status(), RiskCaseStatus::FalsePositive);
     }
 }
