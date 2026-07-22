@@ -2,14 +2,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
+use agentsight::ReadinessStamp;
 use agentsight::enforcement::{ApplyPolicy, Binding, BindingState};
 use agentsight::security::{
-    stable_readiness_lease, ContainmentAction, ContainmentCandidate, ContainmentCoordinator,
-    ContainmentEnforcer, ContainmentEnforcerError, ContainmentError, ContainmentFailureStage,
-    ContainmentLifecycle, ContainmentReadinessLease, ContainmentRequest, RiskCase, RiskCaseStatus,
-    RiskSeverity, SecurityStore, StampedBinding, StampedBindings,
+    ContainmentAction, ContainmentCandidate, ContainmentCoordinator, ContainmentEnforcer,
+    ContainmentEnforcerError, ContainmentError, ContainmentFailureStage, ContainmentLifecycle,
+    ContainmentReadinessLease, ContainmentRequest, RiskCase, RiskCaseStatus, RiskSeverity,
+    SecurityStore, StampedBinding, StampedBindings, stable_readiness_lease,
 };
-use agentsight::ReadinessStamp;
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, EventIdentity, FileAction, PolicyMode, SecurityEvent, SecurityEventKind,
 };
@@ -669,10 +669,12 @@ fn pending_restart_fails_safely_without_original_binding_provenance() {
         stored.failure_stage,
         Some(ContainmentFailureStage::Reconcile)
     );
-    assert!(stored
-        .failure_reason
-        .as_deref()
-        .is_some_and(|reason| !reason.chars().any(char::is_control)));
+    assert!(
+        stored
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.chars().any(char::is_control))
+    );
     assert_eq!(fixture.enforcer.apply_calls(), 0);
 }
 
@@ -771,10 +773,12 @@ fn detach_failures_schedule_five_backoffs_before_terminal_retry() {
             stored.next_retry_at_ns,
             Some(due_at + delay_secs * SECOND_NS)
         );
-        assert!(stored
-            .failure_reason
-            .as_deref()
-            .is_some_and(|reason| !reason.chars().any(char::is_control)));
+        assert!(
+            stored
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.chars().any(char::is_control))
+        );
         due_at += delay_secs * SECOND_NS;
     }
 
@@ -925,10 +929,12 @@ fn corrupt_due_row_does_not_block_valid_reconciliation() {
         quarantined.failure_stage,
         Some(ContainmentFailureStage::Reconcile)
     );
-    assert!(quarantined
-        .failure_reason
-        .as_deref()
-        .is_some_and(|reason| !reason.chars().any(char::is_control)));
+    assert!(
+        quarantined
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.chars().any(char::is_control))
+    );
     assert_eq!(reconciled.lifecycle_state, ContainmentLifecycle::Expired);
     assert_eq!(fixture.enforcer.detached(), [valid.binding_id]);
 
@@ -1325,10 +1331,12 @@ mod linux {
         assert_eq!(action.failure_stage, Some(ContainmentFailureStage::Detach));
         assert_eq!(action.attempt_count, 1);
         assert!(action.next_retry_at_ns.is_some());
-        assert!(action
-            .failure_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("detach adapter unavailable")));
+        assert!(
+            action
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("detach adapter unavailable"))
+        );
         assert!(matches!(
             fixture.contain(Some(900)),
             Err(ContainmentError::ContainmentExpiring(id)) if id == action.action_id
@@ -1523,10 +1531,12 @@ mod linux {
             action.failure_stage,
             Some(ContainmentFailureStage::Reconcile)
         );
-        assert!(action
-            .failure_reason
-            .as_deref()
-            .is_some_and(|reason| !reason.chars().any(char::is_control)));
+        assert!(
+            action
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.chars().any(char::is_control))
+        );
         assert_eq!(fixture.enforcer.detached(), [action.binding_id]);
         assert_eq!(fixture.status(), RiskCaseStatus::FalsePositive);
     }
