@@ -17,7 +17,7 @@ use crate::ingestion_readiness::{GenerationReadiness, GenerationToken};
 
 mod reconciliation;
 
-use reconciliation::reconcile_desired_state;
+use reconciliation::{reconcile_desired_state, remote_failure_binding};
 
 const INGESTION_UNAVAILABLE_MESSAGE: &str = "violation ingestion is not subscribed";
 
@@ -107,6 +107,11 @@ impl EnforcementCoordinator {
             Ok(binding) => {
                 self.store.upsert_binding(&binding)?;
                 Ok(binding)
+            }
+            Err(EnforcementError::Remote { code, message }) => {
+                self.store
+                    .upsert_binding(&remote_failure_binding(request, &code, &message))?;
+                Err(EnforcementError::Remote { code, message }.into())
             }
             Err(error) => {
                 self.store.upsert_binding(&Binding {
