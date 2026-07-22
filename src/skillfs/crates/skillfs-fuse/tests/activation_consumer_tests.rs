@@ -166,6 +166,13 @@ fn access_errno(path: &Path, mask: i32) -> Option<i32> {
     }
 }
 
+fn assert_errno<T>(result: std::io::Result<T>, expected: i32) {
+    match result {
+        Ok(_) => panic!("operation unexpectedly succeeded"),
+        Err(error) => assert_eq!(error.raw_os_error(), Some(expected)),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests: target=null -> hidden
 // ─────────────────────────────────────────────────────────────────────────────
@@ -614,6 +621,107 @@ fn hermes_symlinked_top_marker_is_category_nested_child_visible() {
         content.contains("SNAPSHOT BODY"),
         "activated nested skill must serve its snapshot via id top/child, got {content:?}"
     );
+}
+
+#[test]
+fn hermes_symlinked_boundaries_are_hidden_and_cannot_escape() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let top_target = outside.path().join("top-target");
+    let nested_target = outside.path().join("nested-target");
+    std::fs::create_dir_all(&top_target).unwrap();
+    std::fs::create_dir_all(&nested_target).unwrap();
+    std::fs::write(
+        top_target.join("SKILL.md"),
+        "---\nname: escaped-top\ndescription: outside\n---\n",
+    )
+    .unwrap();
+    std::fs::write(top_target.join("secret.txt"), "TOP-SECRET\n").unwrap();
+    std::fs::write(
+        nested_target.join("SKILL.md"),
+        "---\nname: escaped-nested\ndescription: outside\n---\n",
+    )
+    .unwrap();
+    std::fs::write(nested_target.join("secret.txt"), "NESTED-SECRET\n").unwrap();
+
+    let mount = ActivationMount::new_with_layout(
+        |src| {
+            create_skill_dir(src, "top-skill");
+            std::fs::create_dir_all(src.join("safe/real")).unwrap();
+            std::fs::write(
+                src.join("safe/real/SKILL.md"),
+                "---\nname: real\ndescription: safe\n---\n",
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&top_target, src.join("evil-top")).unwrap();
+            std::os::unix::fs::symlink(&nested_target, src.join("safe/evil-nested")).unwrap();
+        },
+        |_| None,
+        Some(skillfs_fuse::SkillLayout::Hermes),
+    );
+
+    let skills = mount.skills_dir();
+    let root_listing = sorted_dir(&skills);
+    assert!(root_listing.contains(&"top-skill".to_string()));
+    assert!(root_listing.contains(&"safe".to_string()));
+    assert!(!root_listing.contains(&"evil-top".to_string()));
+
+    let category_listing = sorted_dir(&skills.join("safe"));
+    assert!(category_listing.contains(&"real".to_string()));
+    assert!(!category_listing.contains(&"evil-nested".to_string()));
+
+    let escaped_top = skills.join("evil-top");
+    let escaped_nested = skills.join("safe/evil-nested");
+    assert_errno(std::fs::symlink_metadata(&escaped_top), libc::ENOENT);
+    assert_errno(std::fs::symlink_metadata(&escaped_nested), libc::ENOENT);
+    assert_errno(
+        std::fs::read_to_string(escaped_top.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::read_to_string(escaped_nested.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(escaped_top.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(escaped_nested.join("created.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::remove_file(escaped_nested.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::rename(
+            escaped_top.join("secret.txt"),
+            skills.join("safe/moved.txt"),
+        ),
+        libc::ENOENT,
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(top_target.join("secret.txt")).unwrap(),
+        "TOP-SECRET\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(nested_target.join("secret.txt")).unwrap(),
+        "NESTED-SECRET\n"
+    );
+    assert!(!nested_target.join("created.txt").exists());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

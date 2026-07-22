@@ -493,6 +493,9 @@ impl SkillFs {
         if self.skill_layout != SkillLayout::Hermes {
             return parsed;
         }
+        if self.hermes_has_symlinked_boundary(&parsed) {
+            return PathType::Invalid;
+        }
         match parsed {
             PathType::CategoryDir { category } if self.hermes_is_top_level_skill(&category) => {
                 PathType::SkillDir {
@@ -552,6 +555,47 @@ impl SkillFs {
             }
             other => other,
         }
+    }
+
+    fn hermes_has_symlinked_boundary(&self, path_type: &crate::path::PathType) -> bool {
+        use crate::path::PathType;
+
+        let (category, nested) = match path_type {
+            PathType::CategoryDir { category } => (category, None),
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            }
+            | PathType::NestedSkillMd {
+                category,
+                skill_name,
+            }
+            | PathType::NestedPassthrough {
+                category,
+                skill_name,
+                ..
+            } => (category, Some(skill_name)),
+            _ => return false,
+        };
+
+        let category_path = self.source_base().join(category);
+        if std::fs::symlink_metadata(&category_path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return true;
+        }
+
+        // A second Hermes component is structural only below a category.
+        // Below a real top-level Skill it is ordinary passthrough content,
+        // whose existing same-Skill symlink policy remains unchanged.
+        if self.hermes_is_top_level_skill(category) {
+            return false;
+        }
+
+        nested.is_some_and(|name| {
+            std::fs::symlink_metadata(category_path.join(name))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
     }
 
     fn virtual_file_attr(&self, size: u64) -> FileAttr {
