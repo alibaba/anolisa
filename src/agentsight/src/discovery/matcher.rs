@@ -63,50 +63,6 @@ pub fn match_domain_glob(domain: &str, patterns: &[String]) -> bool {
     false
 }
 
-/// Domain-based filter deciding whether a captured HTTP flow should be
-/// reported via the raw-HTTP FFI callback (`AgentsightHttpsData`).
-///
-/// Patterns are glob rules collected from the config `https` and `http`
-/// sections. An **empty** pattern set means "no domain restriction" — every
-/// flow is reported, preserving the pre-existing full-report behaviour.
-#[derive(Debug, Clone, Default)]
-pub struct HttpReportFilter {
-    patterns: Vec<String>,
-}
-
-impl HttpReportFilter {
-    /// Build a filter from a set of glob patterns.
-    pub fn new(patterns: Vec<String>) -> Self {
-        Self { patterns }
-    }
-
-    /// Decide whether a flow to `host` should be reported.
-    ///
-    /// * Empty pattern set → always `true` (unrestricted).
-    /// * `host = None` (could not be determined) under a restricted filter →
-    ///   `false` (strict: do not report what we cannot match).
-    /// * Otherwise match `host`, with and without a trailing `:port`, against
-    ///   the glob patterns (case-insensitive).
-    pub fn should_report(&self, host: Option<&str>) -> bool {
-        if self.patterns.is_empty() {
-            return true;
-        }
-        let Some(host) = host else {
-            return false;
-        };
-        if match_domain_glob(host, &self.patterns) {
-            return true;
-        }
-        // Also try the host without its port (e.g. "api.openai.com:443").
-        if let Some((bare, _port)) = host.rsplit_once(':') {
-            if match_domain_glob(bare, &self.patterns) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 /// Matcher based on cmdline glob patterns (config-driven).
 pub struct CmdlineGlobMatcher {
     info: AgentInfo,
@@ -247,49 +203,6 @@ mod tests {
         assert!(match_domain_glob("api.openai.com", &patterns));
         assert!(match_domain_glob("api.anthropic.com", &patterns));
         assert!(!match_domain_glob("example.com", &patterns));
-    }
-
-    #[test]
-    fn test_http_report_filter_unrestricted_reports_everything() {
-        let filter = HttpReportFilter::new(vec![]);
-        assert!(filter.should_report(Some("anything.example.com")));
-        // Even a missing host is reported when unrestricted.
-        assert!(filter.should_report(None));
-    }
-
-    #[test]
-    fn test_http_report_filter_matches_glob() {
-        let filter = HttpReportFilter::new(vec!["*.openai.com".to_string()]);
-        assert!(filter.should_report(Some("api.openai.com")));
-        assert!(!filter.should_report(Some("example.com")));
-    }
-
-    #[test]
-    fn test_http_report_filter_strips_port() {
-        let filter = HttpReportFilter::new(vec!["*.openai.com".to_string()]);
-        assert!(filter.should_report(Some("api.openai.com:443")));
-    }
-
-    #[test]
-    fn test_http_report_filter_matches_ip_endpoint() {
-        // Endpoint IPs are contributed as literal patterns.
-        let filter = HttpReportFilter::new(vec!["10.0.0.1".to_string()]);
-        assert!(filter.should_report(Some("10.0.0.1")));
-        assert!(filter.should_report(Some("10.0.0.1:8080")));
-        assert!(!filter.should_report(Some("10.0.0.2")));
-    }
-
-    #[test]
-    fn test_http_report_filter_strict_when_host_missing() {
-        // Restricted filter + unknown host → do not report.
-        let filter = HttpReportFilter::new(vec!["*.openai.com".to_string()]);
-        assert!(!filter.should_report(None));
-    }
-
-    #[test]
-    fn test_http_report_filter_case_insensitive() {
-        let filter = HttpReportFilter::new(vec!["*.OpenAI.com".to_string()]);
-        assert!(filter.should_report(Some("API.OPENAI.COM")));
     }
 
     #[test]

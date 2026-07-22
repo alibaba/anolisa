@@ -303,6 +303,12 @@ mod tests {
         assert!(ParsedRequest::decode_chunked_json("not chunked").is_none());
     }
 
+    /// Regression: a binary body (e.g. OTLP/Protobuf) passed through
+    /// `String::from_utf8_lossy` contains `U+FFFD` replacement chars that are
+    /// 3 bytes wide. If the chunk-size parser succeeds by accident and the
+    /// computed slice boundary lands inside one of those chars, the old
+    /// implementation panicked with "byte index N is not a char boundary".
+    /// The current implementation must return `None` instead.
     #[test]
     fn test_decode_chunked_json_binary_body_does_not_panic() {
         // A hex digit + \r\n + arbitrary invalid-UTF8 bytes (rendered as
@@ -313,6 +319,7 @@ mod tests {
             raw.push(0xC2); // invalid stray UTF-8 lead byte
         }
         let lossy = String::from_utf8_lossy(&raw);
+        // Must not panic; chunked decode should give up and return None.
         assert!(ParsedRequest::decode_chunked_json(&lossy).is_none());
     }
 

@@ -159,6 +159,7 @@ int agentsight_read(AgentsightHandle* h,
 | `log_path` | NULL | 日志文件保存路径，NULL 时输出到 stderr |
 | `cmdline_rules` | 空 | 用户自定义规则列表；allow=1 为进程白名单，allow=0 为进程黑名单 |
 | `domain_rules` | 空 | 域名白名单规则列表，DNS 阶段独立判定是否 attach |
+| raw HTTPS FFI 输出 | `false` | 仅通过 `agentsight_config_set_enable_raw_https` 显式开启 |
 
 ### 3.2 Cmdline Rule 配置
 
@@ -257,7 +258,7 @@ void agentsight_config_add_domain_rule(
 - **匹配对象**：HTTP 请求的目标域名（从 `Host` header 或 URL 中提取，不含端口号）
 - **Glob 通配符**：支持 `*`（匹配任意字符序列）和 `?`（匹配单个字符）
 - **大小写不敏感**：域名匹配忽略大小写
-- **对 LLMData 和 HttpsData 均生效**：LLMData 从 `request_url` 提取域名，HttpsData 从请求 headers 中的 `Host` 提取
+- **仅作用于 attach 判定**：域名规则只决定是否为进程 attach SSL 探针，不再过滤上报。启用 raw HTTPS FFI 输出后，进程一旦被 attach（无论是命中 cmdline 白名单还是域名规则），其无法解析为 LLM 语义的流量均产生 `AgentsightHttpsData`，不受域名白名单限制
 
 #### 域名提取逻辑
 
@@ -421,6 +422,23 @@ DNS 事件到达
 - **cmdline_deny 两阶段都生效**：黑名单一票否决
 - **都不配置**：无事件输出
 
+### 3.6 Raw HTTPS FFI 输出
+
+raw HTTPS fallback 默认关闭。需要接收 `AgentsightHttpsData` 的 FFI 调用方必须在
+`agentsight_new()` 前显式开启：
+
+```c
+void agentsight_config_set_enable_raw_https(
+    AgentsightConfigHandle* cfg,
+    int enabled
+);
+```
+
+- `enabled == 0`：不可解析为 LLM 语义的 HTTPS 流量不会构造或进入 FFI 事件队列。
+- `enabled != 0`：不可解析流量通过 HTTPS callback 上报，不再受域名规则过滤。
+- 配置句柄为 NULL 时静默忽略。
+- 此开关仅影响 FFI raw HTTPS 输出，不改变 standalone binary 的分析和存储行为。
+
 ## 4. 使用示例
 
 完整示例程序见 `tools/examples/agentsight/agentsight_example.c`。
@@ -512,7 +530,7 @@ agentsight_free(h);
 
 ## 6. HttpsData 与 LLMData 的关系
 
-一条被捕获的 HTTPS 流量只会产生一种数据：若被识别为 LLM API 调用，则产生 `AgentsightLLMData`；否则产生 `AgentsightHttpsData`。两者互斥，不会同时产生，无需关联。
+一条被捕获的 HTTPS 流量最多产生一种 FFI 数据：若被识别为 LLM API 调用，则产生 `AgentsightLLMData`；否则仅在 raw HTTPS FFI 输出开启时产生 `AgentsightHttpsData`。两者互斥，不会同时产生，无需关联。
 
 ## 7. 编译与链接
 

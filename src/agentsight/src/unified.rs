@@ -100,9 +100,6 @@ pub struct AgentSight {
     pid_agent_name_cache: lru::LruCache<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
-    /// Domain filter gating raw-HTTP (`AgentsightHttpsData`) FFI reporting.
-    /// Built from the config `https` + `http` rules; empty = report everything.
-    http_report_filter: crate::discovery::HttpReportFilter,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
     pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
     /// DeadLoop auto-kill: enabled flag
@@ -519,23 +516,6 @@ impl AgentSight {
             crate::background::start_stale_scanner(Arc::clone(sqlite_store), Arc::clone(&running));
         }
 
-        // Domain filter for raw-HTTP FFI reporting: reuse the config `https`
-        // globs and `http` domain/endpoint rules. Empty → report everything.
-        let mut report_patterns: Vec<String> = config
-            .https_rules
-            .iter()
-            .map(|r| r.pattern.clone())
-            .collect();
-        report_patterns.extend(http_domains.iter().cloned());
-        for target in &config.http_targets {
-            if let crate::config::HttpTarget::Endpoint(ep) = target {
-                if let Some(ip) = ep.ip {
-                    report_patterns.push(ip.to_string());
-                }
-            }
-        }
-        let http_report_filter = crate::discovery::HttpReportFilter::new(report_patterns);
-
         Ok(AgentSight {
             probes,
             parser: Parser::new(),
@@ -569,7 +549,6 @@ impl AgentSight {
             last_interruption_purge: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
-            http_report_filter,
             pending_logtail,
             deadloop_kill_enabled: config.deadloop_kill_enabled,
             deadloop_kill_after_count: config.deadloop_kill_after_count,
@@ -864,20 +843,11 @@ impl AgentSight {
                 }
             } else if let Some(ref sender) = self.ffi_sender {
                 // Either no LLM event was produced, or all LLM events were
-                // semantically empty (fallback). Send raw HTTP via FFI, but only
-                // for flows whose host matches the configured domain rules.
-                // An empty rule set reports everything (backward compatible).
+                // semantically empty (fallback). The FFI sender suppresses
+                // raw HTTPS before cloning or enqueueing when it is disabled.
                 for ar in &analysis_results {
                     if let crate::analyzer::AnalysisResult::Http(record) = ar {
-                        let host = Self::http_record_host(record);
-                        if self.http_report_filter.should_report(host.as_deref()) {
-                            sender.send(FfiEvent::Https(record.clone()));
-                        } else {
-                            log::debug!(
-                                "Skipping AgentsightHttpsData for host {:?}: no domain-rule match",
-                                host
-                            );
-                        }
+                        sender.send_https(record);
                     }
                 }
             }
@@ -1024,23 +994,6 @@ impl AgentSight {
     /// only caller lives in this crate's FFI layer.
     pub(crate) fn set_ffi_sender(&mut self, sender: FfiEventSender) {
         self.ffi_sender = Some(sender);
-    }
-
-    /// Extract the target host from an `HttpRecord`'s request headers.
-    ///
-    /// Checks the `host`, `Host`, and HTTP/2 `:authority` header keys. Returns
-    /// `None` when headers are unparseable or no host header is present.
-    fn http_record_host(record: &crate::analyzer::HttpRecord) -> Option<String> {
-        let headers: serde_json::Value = serde_json::from_str(&record.request_headers).ok()?;
-        let obj = headers.as_object()?;
-        for key in ["host", "Host", ":authority"] {
-            if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
-            }
-        }
-        None
     }
 
     /// Export GenAI events to all registered exporters
@@ -2341,24 +2294,6 @@ mod tests {
 
     // ── Tests for the AgentsightHttpsData fallback path ──
 
-    fn make_http_record(request_headers: &str) -> crate::analyzer::HttpRecord {
-        crate::analyzer::HttpRecord {
-            timestamp_ns: 1,
-            pid: 1,
-            comm: "test".to_string(),
-            method: "POST".to_string(),
-            path: "/v1/chat/completions".to_string(),
-            status_code: 200,
-            request_headers: request_headers.to_string(),
-            request_body: None,
-            response_headers: "{}".to_string(),
-            response_body: None,
-            duration_ns: 0,
-            is_sse: false,
-            sse_event_count: 0,
-        }
-    }
-
     #[test]
     fn test_events_are_empty_llm() {
         use crate::genai::semantic::{InputMessage, MessagePart};
@@ -2395,46 +2330,5 @@ mod tests {
             pid: 1,
         });
         assert!(!events_are_empty_llm(&[empty, tool]));
-    }
-
-    #[test]
-    fn test_http_record_host_extraction() {
-        // Lowercase `host` key.
-        let r = make_http_record(r#"{"host":"api.openai.com","accept":"*/*"}"#);
-        assert_eq!(
-            AgentSight::http_record_host(&r).as_deref(),
-            Some("api.openai.com")
-        );
-
-        // HTTP/2 `:authority` pseudo-header.
-        let r = make_http_record(r#"{":authority":"api.anthropic.com"}"#);
-        assert_eq!(
-            AgentSight::http_record_host(&r).as_deref(),
-            Some("api.anthropic.com")
-        );
-
-        // No host header → None.
-        let r = make_http_record(r#"{"accept":"*/*"}"#);
-        assert_eq!(AgentSight::http_record_host(&r), None);
-
-        // Unparseable headers → None.
-        let r = make_http_record("not json");
-        assert_eq!(AgentSight::http_record_host(&r), None);
-    }
-
-    #[test]
-    fn test_http_report_filter_gates_by_host() {
-        use crate::discovery::HttpReportFilter;
-
-        let filter = HttpReportFilter::new(vec!["*.openai.com".to_string()]);
-        let matched = make_http_record(r#"{"host":"api.openai.com"}"#);
-        let other = make_http_record(r#"{"host":"telemetry.example.com"}"#);
-
-        assert!(filter.should_report(AgentSight::http_record_host(&matched).as_deref()));
-        assert!(!filter.should_report(AgentSight::http_record_host(&other).as_deref()));
-
-        // Empty rule set reports everything (backward compatible).
-        let unrestricted = HttpReportFilter::new(vec![]);
-        assert!(unrestricted.should_report(AgentSight::http_record_host(&other).as_deref()));
     }
 }
