@@ -259,4 +259,3 @@ the operation being run; there is no `[install] mode` setting.
 
 - [Installation Guide](../installation.md)
 - [Troubleshooting](../troubleshooting.md)
-- [Install Lifecycle Design](../../../../src/anolisa/docs/design/install-lifecycle.md)

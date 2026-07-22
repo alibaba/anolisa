@@ -94,10 +94,8 @@ Five-crate Cargo workspace:
 
 Supports dual backends: **raw** (OSS tar.gz) and **RPM** (dnf repository).
 The lifecycle planner separates ANOLISA-owned files from native-package
-authority and records crash-recovery intent before side effects. See the
-[lifecycle design](docs/design/install-lifecycle.md) for the authority,
-scope, transaction, and recovery invariants. Component metadata is declared
-through `component.toml`.
+authority and records crash-recovery intent before side effects. Component
+metadata is declared through `component.toml`.
 
 ## Requirements
 

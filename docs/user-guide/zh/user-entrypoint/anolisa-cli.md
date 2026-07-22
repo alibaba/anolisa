@@ -247,4 +247,3 @@ backend 选择和 endpoint 位于对应的 `repo.toml`（`/etc/anolisa/repo.toml
 
 - [安装指南](../installation.md)
 - [故障排查](../troubleshooting.md)
-- [安装生命周期设计](../../../../src/anolisa/docs/design/install-lifecycle_zh.md)

@@ -93,9 +93,7 @@ scope。因此，即使 system scope 已安装同名组件，
 
 支持双后端：**raw**（OSS tar.gz）和 **RPM**（dnf 仓库）。生命周期
 planner 区分 ANOLISA 自有文件与 native package authority，并在副作用前
-记录崩溃恢复意图。authority、scope、transaction 与 recovery 不变量见
-[生命周期设计](docs/design/install-lifecycle_zh.md)。组件元数据通过
-`component.toml` 声明。
+记录崩溃恢复意图。组件元数据通过 `component.toml` 声明。
 
 ## 环境要求
 

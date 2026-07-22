@@ -9,7 +9,7 @@ ANOLISA is a server-side operating layer for AI Agent workloads. It provides Tok
 ## Install the CLI
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://agentic-os.sh/install.sh | bash
 ```
 
 > Alinux 4 users can also install via `sudo yum install anolisa`.
