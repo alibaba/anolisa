@@ -129,6 +129,10 @@ impl SecurityCoordinator {
     pub fn wait_ingestion_ready(&self, timeout: Duration) -> Result<(), IngestionReadinessError> {
         self.ingestion_readiness.wait_ready(timeout)
     }
+
+    pub(crate) fn ingestion_readiness(&self) -> &GenerationReadiness {
+        &self.ingestion_readiness
+    }
 }
 
 fn ingest_event(

@@ -257,6 +257,10 @@ impl EnforcementCoordinator {
         self.ingestion_readiness.wait_ready(timeout)
     }
 
+    pub(crate) fn ingestion_readiness(&self) -> &GenerationReadiness {
+        &self.ingestion_readiness
+    }
+
     /// Queries backend readiness and requires an acknowledged violation subscriber.
     ///
     /// # Errors

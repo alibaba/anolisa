@@ -40,6 +40,23 @@ pub(crate) struct GenerationGuard {
     worker: Arc<GenerationToken>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JointReadinessEvent {
+    FirstReady,
+    Retrying,
+}
+
+enum TokenWait {
+    Ready,
+    GenerationChanged,
+}
+
+enum JointState {
+    Ready,
+    Retry,
+    WorkerStopped,
+}
+
 #[derive(Clone)]
 pub(crate) struct GenerationReadiness {
     inner: Arc<ReadinessInner>,
@@ -178,6 +195,62 @@ impl GenerationReadiness {
         }
     }
 
+    pub(crate) fn wait_for_both_ready(
+        first: &Self,
+        second: &Self,
+        timeout: Duration,
+    ) -> Result<(), IngestionReadinessError> {
+        Self::wait_for_both_ready_inner(first, second, timeout, |_| {})
+    }
+
+    #[cfg(test)]
+    fn wait_for_both_ready_observed(
+        first: &Self,
+        second: &Self,
+        timeout: Duration,
+        observer: impl FnMut(JointReadinessEvent),
+    ) -> Result<(), IngestionReadinessError> {
+        Self::wait_for_both_ready_inner(first, second, timeout, observer)
+    }
+
+    fn wait_for_both_ready_inner(
+        first: &Self,
+        second: &Self,
+        timeout: Duration,
+        mut observer: impl FnMut(JointReadinessEvent),
+    ) -> Result<(), IngestionReadinessError> {
+        let deadline = Instant::now().checked_add(timeout);
+        loop {
+            let first_worker = first.current_worker()?;
+            let second_worker = second.current_worker()?;
+            if matches!(
+                first.wait_for_worker(&first_worker, deadline, timeout)?,
+                TokenWait::GenerationChanged
+            ) {
+                observer(JointReadinessEvent::Retrying);
+                continue;
+            }
+            observer(JointReadinessEvent::FirstReady);
+            if matches!(
+                second.wait_for_worker(&second_worker, deadline, timeout)?,
+                TokenWait::GenerationChanged
+            ) {
+                observer(JointReadinessEvent::Retrying);
+                continue;
+            }
+            match joint_state(first, &first_worker, second, &second_worker) {
+                JointState::Ready => return Ok(()),
+                JointState::Retry => observer(JointReadinessEvent::Retrying),
+                JointState::WorkerStopped => {
+                    return Err(IngestionReadinessError::WorkerStopped);
+                }
+            }
+            if remaining_until(deadline).is_zero() {
+                return Err(timeout_error(timeout));
+            }
+        }
+    }
+
     pub(crate) fn is_ready(&self) -> bool {
         self.state().ready
     }
@@ -203,6 +276,46 @@ impl GenerationReadiness {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn current_worker(&self) -> Result<Arc<GenerationToken>, IngestionReadinessError> {
+        self.state()
+            .current
+            .clone()
+            .ok_or(IngestionReadinessError::WorkerStopped)
+    }
+
+    fn wait_for_worker(
+        &self,
+        worker: &Arc<GenerationToken>,
+        deadline: Option<Instant>,
+        timeout: Duration,
+    ) -> Result<TokenWait, IngestionReadinessError> {
+        let mut state = self.state();
+        loop {
+            if !is_worker(&state, worker) {
+                return Ok(TokenWait::GenerationChanged);
+            }
+            if state.ready {
+                return Ok(TokenWait::Ready);
+            }
+            let remaining = remaining_until(deadline);
+            if remaining.is_zero() {
+                return Err(timeout_error(timeout));
+            }
+            let (next, timed_out) = self
+                .inner
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next;
+            if timed_out.timed_out() && !state.ready {
+                if !is_worker(&state, worker) {
+                    return Ok(TokenWait::GenerationChanged);
+                }
+                return Err(timeout_error(timeout));
+            }
+        }
+    }
 }
 
 impl Drop for GenerationGuard {
@@ -216,6 +329,60 @@ fn is_worker(state: &ReadinessState, worker: &Arc<GenerationToken>) -> bool {
         .current
         .as_ref()
         .is_some_and(|current| Arc::ptr_eq(current, worker))
+}
+
+fn joint_state(
+    first: &GenerationReadiness,
+    first_worker: &Arc<GenerationToken>,
+    second: &GenerationReadiness,
+    second_worker: &Arc<GenerationToken>,
+) -> JointState {
+    if Arc::ptr_eq(&first.inner, &second.inner) {
+        let state = first.state();
+        return readiness_pair_state(&state, first_worker, &state, second_worker);
+    }
+    let first_address = Arc::as_ptr(&first.inner) as usize;
+    let second_address = Arc::as_ptr(&second.inner) as usize;
+    if first_address < second_address {
+        let first_state = first.state();
+        let second_state = second.state();
+        readiness_pair_state(&first_state, first_worker, &second_state, second_worker)
+    } else {
+        let second_state = second.state();
+        let first_state = first.state();
+        readiness_pair_state(&first_state, first_worker, &second_state, second_worker)
+    }
+}
+
+fn readiness_pair_state(
+    first: &ReadinessState,
+    first_worker: &Arc<GenerationToken>,
+    second: &ReadinessState,
+    second_worker: &Arc<GenerationToken>,
+) -> JointState {
+    if first.current.is_none() || second.current.is_none() {
+        JointState::WorkerStopped
+    } else if !is_worker(first, first_worker)
+        || !is_worker(second, second_worker)
+        || !first.ready
+        || !second.ready
+    {
+        JointState::Retry
+    } else {
+        JointState::Ready
+    }
+}
+
+fn remaining_until(deadline: Option<Instant>) -> Duration {
+    deadline
+        .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+        .unwrap_or(Duration::ZERO)
+}
+
+fn timeout_error(timeout: Duration) -> IngestionReadinessError {
+    IngestionReadinessError::Timeout {
+        timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+    }
 }
 
 #[cfg(test)]

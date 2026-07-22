@@ -6,9 +6,9 @@ use crate::security::store::DueContainmentAction;
 
 use super::{
     ContainmentAction, ContainmentActivationResult, ContainmentCoordinator, ContainmentEnforcer,
-    ContainmentError, ContainmentFailureStage, ContainmentLifecycle, RiskCaseStatus, SecurityStore,
-    SecurityStoreError, acknowledgement_matches, enforce_request, resolve_policy, sanitize_failure,
-    validate_process_identity,
+    ContainmentEnforcerError, ContainmentError, ContainmentFailureStage, ContainmentLifecycle,
+    RiskCaseStatus, SecurityStore, SecurityStoreError, acknowledgement_matches, enforce_request,
+    resolve_policy, sanitize_failure, validate_process_identity,
 };
 
 const DUE_BATCH_LIMIT: usize = 100;
@@ -114,12 +114,16 @@ impl Reconciler<'_> {
         let claimed_at_ns = action.updated_at_ns;
         let bindings = match self.enforcer.bindings() {
             Ok(bindings) => bindings,
-            Err(message) => {
-                let reason = sanitize_failure(&message);
-                action.failure_stage = Some(ContainmentFailureStage::Reconcile);
-                action.failure_reason = Some(reason.clone());
-                self.finish_claimed(&action, ContainmentLifecycle::Pending, claimed_at_ns)?;
-                return Err(ContainmentError::Enforcer(reason));
+            Err(ContainmentEnforcerError::Unavailable(message)) => {
+                return self.record_pending_unavailable(
+                    &mut action,
+                    claimed_at_ns,
+                    current_time_ns,
+                    message,
+                );
+            }
+            Err(ContainmentEnforcerError::Rejected(message)) => {
+                return self.fail_pending(action, claimed_at_ns, &message, false, current_time_ns);
             }
         };
         let exact = exact_binding(&bindings, action.binding_id);
@@ -217,7 +221,15 @@ impl Reconciler<'_> {
                 }
                 match self.enforcer.apply_credential_policy(request.clone()) {
                     Ok(binding) => binding,
-                    Err(message) => {
+                    Err(ContainmentEnforcerError::Unavailable(message)) => {
+                        return self.record_pending_unavailable(
+                            &mut action,
+                            claimed_at_ns,
+                            current_time_ns,
+                            message,
+                        );
+                    }
+                    Err(ContainmentEnforcerError::Rejected(message)) => {
                         let reason = sanitize_failure(&message);
                         action.lifecycle_state = ContainmentLifecycle::Failed;
                         action.failure_stage = Some(ContainmentFailureStage::Reconcile);
@@ -259,6 +271,24 @@ impl Reconciler<'_> {
                 self.fail_pending(action, claimed_at_ns, &reason, true, current_time_ns)
             }
         }
+    }
+
+    fn record_pending_unavailable(
+        &self,
+        action: &mut ContainmentAction,
+        claimed_at_ns: u64,
+        current_time_ns: u64,
+        reason: String,
+    ) -> Result<(), ContainmentError> {
+        let reason = sanitize_failure(&reason);
+        action.lifecycle_state = ContainmentLifecycle::Pending;
+        action.failure_stage = Some(ContainmentFailureStage::Reconcile);
+        action.failure_reason = Some(reason.clone());
+        action.attempt_count = action.attempt_count.saturating_add(1);
+        action.next_retry_at_ns =
+            Some(current_time_ns.saturating_add(retry_delay_ns(action.attempt_count)));
+        self.finish_claimed(action, ContainmentLifecycle::Pending, claimed_at_ns)?;
+        Err(ContainmentError::Enforcer(reason))
     }
 
     fn expire_pending_binding(
@@ -403,7 +433,7 @@ impl Reconciler<'_> {
         } else {
             action.lifecycle_state = ContainmentLifecycle::Expiring;
             action.next_retry_at_ns =
-                Some(current_time_ns.saturating_add(detach_retry_delay_ns(action.attempt_count)));
+                Some(current_time_ns.saturating_add(retry_delay_ns(action.attempt_count)));
         }
         self.finish_claimed(action, claimed_lifecycle, claimed_at_ns)
     }
@@ -435,7 +465,7 @@ fn exact_binding(bindings: &[Binding], binding_id: uuid::Uuid) -> Result<Option<
     Ok(first)
 }
 
-fn detach_retry_delay_ns(attempt_count: u32) -> u64 {
+fn retry_delay_ns(attempt_count: u32) -> u64 {
     let shift = attempt_count.saturating_sub(1).min(4);
     SECOND_NS.saturating_mul(1_u64 << shift)
 }

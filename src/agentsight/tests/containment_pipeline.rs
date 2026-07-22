@@ -5,8 +5,8 @@ use std::time::Duration;
 use agentsight::enforcement::{ApplyPolicy, Binding, BindingState};
 use agentsight::security::{
     ContainmentAction, ContainmentCandidate, ContainmentCoordinator, ContainmentEnforcer,
-    ContainmentError, ContainmentFailureStage, ContainmentLifecycle, ContainmentRequest, RiskCase,
-    RiskCaseStatus, RiskSeverity, SecurityStore,
+    ContainmentEnforcerError, ContainmentError, ContainmentFailureStage, ContainmentLifecycle,
+    ContainmentRequest, RiskCase, RiskCaseStatus, RiskSeverity, SecurityStore,
 };
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, EventIdentity, FileAction, PolicyMode, SecurityEvent, SecurityEventKind,
@@ -36,6 +36,7 @@ struct FakeEnforcer {
     acknowledgement: Mutex<Option<AckMutation>>,
     pause: Mutex<Option<Arc<ApplyPause>>>,
     bindings_pause: Mutex<Option<Arc<ApplyPause>>>,
+    bindings_failure: Mutex<Option<String>>,
     detached: Mutex<Vec<Uuid>>,
     apply_calls: AtomicUsize,
     panic_bindings: AtomicBool,
@@ -55,6 +56,13 @@ impl FakeEnforcer {
             .detach_failure
             .lock()
             .expect("detach failure should lock") = Some(message.into());
+    }
+
+    fn fail_next_bindings(&self, message: &str) {
+        *self
+            .bindings_failure
+            .lock()
+            .expect("bindings failure should lock") = Some(message.into());
     }
 
     fn mutate_ack(&self, mutation: AckMutation) {
@@ -101,10 +109,13 @@ impl FakeEnforcer {
 }
 
 impl ContainmentEnforcer for FakeEnforcer {
-    fn apply_credential_policy(&self, request: ApplyCredentialPolicy) -> Result<Binding, String> {
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, ContainmentEnforcerError> {
         self.apply_calls.fetch_add(1, Ordering::AcqRel);
         if let Some(message) = self.failure.lock().expect("failure should lock").take() {
-            return Err(message);
+            return Err(ContainmentEnforcerError::Unavailable(message));
         }
         self.applied
             .lock()
@@ -170,11 +181,19 @@ impl ContainmentEnforcer for FakeEnforcer {
         }
     }
 
-    fn bindings(&self) -> Result<Vec<Binding>, String> {
+    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError> {
         assert!(
             !self.panic_bindings.swap(false, Ordering::AcqRel),
             "test-only bindings panic"
         );
+        if let Some(message) = self
+            .bindings_failure
+            .lock()
+            .expect("bindings failure should lock")
+            .take()
+        {
+            return Err(ContainmentEnforcerError::Unavailable(message));
+        }
         let pause = self
             .bindings_pause
             .lock()
@@ -649,6 +668,35 @@ fn pending_restart_fails_safely_without_original_binding_provenance() {
 }
 
 #[test]
+fn unavailable_binding_snapshot_keeps_pending_recovery_retryable() {
+    const SECOND_NS: u64 = 1_000_000_000;
+
+    let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
+    let action = fixture.insert_action(
+        ContainmentLifecycle::Pending,
+        Some(60),
+        Some(2 * SECOND_NS),
+        0,
+        Some(1_000),
+    );
+    fixture
+        .enforcer
+        .fail_next_bindings("enforcement transport unavailable");
+
+    assert!(matches!(
+        fixture.reconstructed_coordinator().reconcile_once(1_000),
+        Err(ContainmentError::Enforcer(message))
+            if message == "enforcement transport unavailable"
+    ));
+    let stored = fixture.latest_action();
+    assert_eq!(stored.action_id, action.action_id);
+    assert_eq!(stored.lifecycle_state, ContainmentLifecycle::Pending);
+    assert_eq!(stored.attempt_count, 1);
+    assert_eq!(stored.next_retry_at_ns, Some(1_000 + SECOND_NS));
+    assert_eq!(fixture.status(), RiskCaseStatus::Open);
+}
+
+#[test]
 fn expiring_restart_retries_temporary_and_explicit_persistent_cleanup() {
     for duration_secs in [Some(60), None] {
         let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
@@ -1052,6 +1100,44 @@ mod linux {
         assert_eq!(applied[0].root_pid, action.root_pid);
         assert_eq!(applied[0].process_start_time, action.process_start_time);
         assert_eq!(applied[0].policy.source_patterns, [action.source_path]);
+    }
+
+    #[test]
+    fn unavailable_pending_apply_retries_the_same_durable_binding() {
+        let (_process, fixture) = live_fixture();
+        let action = fixture.insert_action(
+            ContainmentLifecycle::Pending,
+            Some(60),
+            Some(u64::MAX / 2),
+            0,
+            Some(1_000),
+        );
+        fixture.enforcer.fail_next_apply("adapter unavailable");
+        let restarted = fixture.reconstructed_coordinator();
+
+        assert!(matches!(
+            restarted.reconcile_once(1_000),
+            Err(ContainmentError::Enforcer(message)) if message == "adapter unavailable"
+        ));
+        let pending = fixture.latest_action();
+        assert_eq!(pending.action_id, action.action_id);
+        assert_eq!(pending.binding_id, action.binding_id);
+        assert_eq!(pending.lifecycle_state, ContainmentLifecycle::Pending);
+        assert_eq!(pending.attempt_count, 1);
+        assert!(pending.next_retry_at_ns.is_some());
+        assert_eq!(fixture.status(), RiskCaseStatus::Open);
+
+        restarted
+            .reconcile_once(pending.next_retry_at_ns.unwrap_or(u64::MAX))
+            .expect("restored enforcer should activate durable intent");
+        let active = fixture.latest_action();
+        assert_eq!(active.action_id, action.action_id);
+        assert_eq!(active.binding_id, action.binding_id);
+        assert_eq!(active.lifecycle_state, ContainmentLifecycle::Active);
+        assert_eq!(fixture.status(), RiskCaseStatus::Confirmed);
+        assert_eq!(fixture.enforcer.apply_calls(), 2);
+        assert_eq!(fixture.enforcer.applied().len(), 1);
+        assert_eq!(fixture.enforcer.applied()[0].binding_id, action.binding_id);
     }
 
     #[test]

@@ -22,35 +22,72 @@ use super::{
     ContainmentFailureStage, ContainmentLifecycle, RiskCaseDetail, RiskCaseStatus, SecurityStore,
     SecurityStoreError,
 };
-use crate::enforcement::{EnforcementCoordinator, read_process_start_time};
+use crate::enforcement::{
+    EnforcementCoordinator, EnforcementCoordinatorError, EnforcementError, read_process_start_time,
+};
 
 const DEFAULT_DURATION_SECS: u64 = 900;
 const MIN_DURATION_SECS: u64 = 60;
 const MAX_DURATION_SECS: u64 = 86_400;
 const CLEANUP_RETRY_DELAY_NS: u64 = 1_000_000_000;
 
+/// Typed failures returned by the containment enforcement boundary.
+#[derive(Debug, Error)]
+pub enum ContainmentEnforcerError {
+    /// Readiness, transport, or local enforcement state is temporarily unavailable.
+    #[error("{0}")]
+    Unavailable(String),
+    /// The enforcement boundary rejected or contradicted the durable request.
+    #[error("{0}")]
+    Rejected(String),
+}
+
 /// Enforcement operations required by containment orchestration.
 pub trait ContainmentEnforcer: Send + Sync {
     /// Compiles and applies one product-level credential policy.
-    fn apply_credential_policy(&self, request: ApplyCredentialPolicy) -> Result<Binding, String>;
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, ContainmentEnforcerError>;
     /// Detaches a previously applied binding.
     fn detach(&self, binding_id: Uuid) -> Result<(), String>;
     /// Lists persisted enforcement bindings.
-    fn bindings(&self) -> Result<Vec<Binding>, String>;
+    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError>;
 }
 
 impl ContainmentEnforcer for EnforcementCoordinator {
-    fn apply_credential_policy(&self, request: ApplyCredentialPolicy) -> Result<Binding, String> {
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, ContainmentEnforcerError> {
         EnforcementCoordinator::apply_credential_policy(self, request)
-            .map_err(|error| error.to_string())
+            .map_err(containment_enforcer_error)
     }
 
     fn detach(&self, binding_id: Uuid) -> Result<(), String> {
         EnforcementCoordinator::detach(self, binding_id).map_err(|error| error.to_string())
     }
 
-    fn bindings(&self) -> Result<Vec<Binding>, String> {
-        EnforcementCoordinator::bindings(self).map_err(|error| error.to_string())
+    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError> {
+        EnforcementCoordinator::bindings(self).map_err(containment_enforcer_error)
+    }
+}
+
+fn containment_enforcer_error(error: EnforcementCoordinatorError) -> ContainmentEnforcerError {
+    let unavailable = matches!(
+        &error,
+        EnforcementCoordinatorError::IngestionUnavailable
+            | EnforcementCoordinatorError::Store(_)
+            | EnforcementCoordinatorError::Thread(_)
+            | EnforcementCoordinatorError::Client(
+                EnforcementError::Io(_) | EnforcementError::Disconnected
+            )
+    );
+    let message = error.to_string();
+    if unavailable {
+        ContainmentEnforcerError::Unavailable(message)
+    } else {
+        ContainmentEnforcerError::Rejected(message)
     }
 }
 
@@ -318,7 +355,7 @@ impl ContainmentCoordinator {
 
         let acknowledgement = match self.enforcer.apply_credential_policy(apply.clone()) {
             Ok(binding) => binding,
-            Err(message) => return self.attach_failed(action, &message),
+            Err(error) => return self.attach_failed(action, &error.to_string()),
         };
         if !acknowledgement_matches(&acknowledgement, &apply) {
             let message = "enforcer returned an invalid binding acknowledgement";
@@ -394,7 +431,7 @@ impl ContainmentCoordinator {
         let bindings = self
             .enforcer
             .bindings()
-            .map_err(|message| ContainmentError::Enforcer(sanitize_failure(&message)))?;
+            .map_err(|error| ContainmentError::Enforcer(sanitize_failure(&error.to_string())))?;
         resolve_policy(detail, bindings).ok_or(ContainmentError::SourcePolicyUnavailable(case_id))
     }
 

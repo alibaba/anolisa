@@ -288,16 +288,10 @@ pub async fn run_server(
     let readiness_timeout = Duration::from_millis(security_observability.timeout_ms);
     let mut ingestion_workers = Some((enforcement_ingestion, security_ingestion));
     let containment_reconciler = match startup::start_after_ingestion_ready(
-        || {
-            enforcement
-                .wait_ingestion_ready(readiness_timeout)
-                .map_err(|error| std::io::Error::other(error.to_string()))
-        },
-        || {
-            security_coordinator
-                .wait_ingestion_ready(readiness_timeout)
-                .map_err(|error| std::io::Error::other(error.to_string()))
-        },
+        enforcement.ingestion_readiness(),
+        security_coordinator.ingestion_readiness(),
+        readiness_timeout,
+        |error| std::io::Error::other(error.to_string()),
         || {
             containment::start_reconciler(&containment)
                 .map_err(|error| std::io::Error::other(error.to_string()))

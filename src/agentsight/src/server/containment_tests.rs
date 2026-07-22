@@ -22,8 +22,8 @@ use crate::enforcement::ApplyPolicy;
 use crate::grader::EvaluationStore;
 use crate::health::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore};
 use crate::security::{
-    ContainmentCoordinator, ContainmentEnforcer, ContainmentError, RiskCase, RiskCaseStatus,
-    RiskSeverity, SecurityStore,
+    ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError, ContainmentError,
+    RiskCase, RiskCaseStatus, RiskSeverity, SecurityStore,
 };
 
 #[derive(Default)]
@@ -33,7 +33,10 @@ struct FakeEnforcer {
 }
 
 impl ContainmentEnforcer for FakeEnforcer {
-    fn apply_credential_policy(&self, request: ApplyCredentialPolicy) -> Result<Binding, String> {
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, ContainmentEnforcerError> {
         self.apply_count.fetch_add(1, Ordering::AcqRel);
         let source = request
             .policy
@@ -62,7 +65,7 @@ impl ContainmentEnforcer for FakeEnforcer {
         Ok(())
     }
 
-    fn bindings(&self) -> Result<Vec<Binding>, String> {
+    fn bindings(&self) -> Result<Vec<Binding>, ContainmentEnforcerError> {
         Ok(self
             .bindings
             .lock()

@@ -6,8 +6,8 @@ mod query;
 mod store;
 
 pub use containment::{
-    ContainmentCandidate, ContainmentCoordinator, ContainmentEnforcer, ContainmentError,
-    ContainmentPlan, ContainmentRequest,
+    ContainmentCandidate, ContainmentCoordinator, ContainmentEnforcer, ContainmentEnforcerError,
+    ContainmentError, ContainmentPlan, ContainmentRequest,
 };
 pub use coordinator::{SecurityCoordinator, SecurityCoordinatorError};
 pub use query::{
