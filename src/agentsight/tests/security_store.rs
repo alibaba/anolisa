@@ -437,6 +437,38 @@ fn activation_cas_preserves_a_concurrent_review() {
 }
 
 #[test]
+fn activation_rejects_a_replaced_claim_version() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let mut action = containment_action(ContainmentLifecycle::Pending);
+    store
+        .upsert_case(&fixture_case(action.case_id, RiskCaseStatus::Open), &[])
+        .expect("case should persist");
+    store
+        .claim_containment_action(&action)
+        .expect("action should be claimed");
+    let stale_claim = action.updated_at_ns;
+    action.updated_at_ns = stale_claim + 1;
+    store
+        .update_containment_action(&action)
+        .expect("replacement claim should persist");
+
+    assert_eq!(
+        store
+            .activate_containment_action(action.action_id, stale_claim, 500)
+            .expect("activation should report claim loss"),
+        ContainmentActivationResult::LostClaim
+    );
+    assert_eq!(
+        store
+            .containment_action(action.action_id)
+            .expect("action query should work")
+            .expect("action should exist")
+            .lifecycle_state,
+        ContainmentLifecycle::Pending
+    );
+}
+
+#[test]
 fn mark_containment_blocked_preserves_the_first_timestamp() {
     let store = SecurityStore::open_in_memory().expect("fixture store should open");
     let action = containment_action(ContainmentLifecycle::Active);

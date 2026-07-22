@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
@@ -35,8 +35,10 @@ struct FakeEnforcer {
     detach_failure: Mutex<Option<String>>,
     acknowledgement: Mutex<Option<AckMutation>>,
     pause: Mutex<Option<Arc<ApplyPause>>>,
+    bindings_pause: Mutex<Option<Arc<ApplyPause>>>,
     detached: Mutex<Vec<Uuid>>,
     apply_calls: AtomicUsize,
+    panic_bindings: AtomicBool,
 }
 
 impl FakeEnforcer {
@@ -66,6 +68,19 @@ impl FakeEnforcer {
         });
         *self.pause.lock().expect("pause should lock") = Some(Arc::clone(&pause));
         pause
+    }
+
+    fn pause_bindings(&self) -> Arc<ApplyPause> {
+        let pause = Arc::new(ApplyPause {
+            entered: Barrier::new(2),
+            resume: Barrier::new(2),
+        });
+        *self.bindings_pause.lock().expect("pause should lock") = Some(Arc::clone(&pause));
+        pause
+    }
+
+    fn panic_next_bindings(&self) {
+        self.panic_bindings.store(true, Ordering::Release);
     }
 
     fn apply_calls(&self) -> usize {
@@ -156,6 +171,19 @@ impl ContainmentEnforcer for FakeEnforcer {
     }
 
     fn bindings(&self) -> Result<Vec<Binding>, String> {
+        assert!(
+            !self.panic_bindings.swap(false, Ordering::AcqRel),
+            "test-only bindings panic"
+        );
+        let pause = self
+            .bindings_pause
+            .lock()
+            .expect("bindings pause should lock")
+            .take();
+        if let Some(pause) = pause {
+            pause.entered.wait();
+            pause.resume.wait();
+        }
         Ok(self.bindings.lock().expect("bindings should lock").clone())
     }
 }
@@ -503,9 +531,9 @@ fn pending_restart_activates_an_existing_exact_binding_without_reapply() {
     let action = fixture.insert_action(
         ContainmentLifecycle::Pending,
         Some(60),
-        Some(1_000),
+        Some(2_000),
         0,
-        None,
+        Some(1_000),
     );
     fixture.enforcer.set_bindings(vec![
         binding(fixture.binding_id, 999_999, 42, &policy("/root/secret.txt")),
@@ -526,14 +554,73 @@ fn pending_restart_activates_an_existing_exact_binding_without_reapply() {
 }
 
 #[test]
+fn persistent_pending_restart_is_immediately_recoverable() {
+    let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
+    let action = fixture.insert_action(ContainmentLifecycle::Pending, None, None, 0, Some(10));
+    fixture.enforcer.set_bindings(vec![
+        binding(fixture.binding_id, 999_999, 42, &policy("/root/secret.txt")),
+        containment_binding(&action),
+    ]);
+
+    fixture
+        .reconstructed_coordinator()
+        .reconcile_once(10)
+        .expect("persistent pending intent should recover immediately");
+
+    let stored = fixture.latest_action();
+    assert_eq!(stored.lifecycle_state, ContainmentLifecycle::Active);
+    assert_eq!(stored.next_retry_at_ns, None);
+    assert_eq!(fixture.enforcer.apply_calls(), 0);
+}
+
+#[test]
+fn expired_pending_restart_never_reapplies_enforcement() {
+    for exact_binding_exists in [false, true] {
+        let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
+        let action = fixture.insert_action(
+            ContainmentLifecycle::Pending,
+            Some(60),
+            Some(1_000),
+            0,
+            Some(10),
+        );
+        let mut bindings = vec![binding(
+            fixture.binding_id,
+            999_999,
+            42,
+            &policy("/root/secret.txt"),
+        )];
+        if exact_binding_exists {
+            bindings.push(containment_binding(&action));
+        }
+        fixture.enforcer.set_bindings(bindings);
+
+        fixture
+            .reconstructed_coordinator()
+            .reconcile_once(1_000)
+            .expect("expired pending intent should converge without applying");
+
+        assert_eq!(
+            fixture.latest_action().lifecycle_state,
+            ContainmentLifecycle::Expired
+        );
+        assert_eq!(fixture.enforcer.apply_calls(), 0);
+        assert_eq!(
+            fixture.enforcer.detach_calls(),
+            usize::from(exact_binding_exists)
+        );
+    }
+}
+
+#[test]
 fn pending_restart_fails_safely_without_original_binding_provenance() {
     let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
     let action = fixture.insert_action(
         ContainmentLifecycle::Pending,
         Some(60),
-        Some(1_000),
+        Some(2_000),
         0,
-        None,
+        Some(1_000),
     );
     fixture.enforcer.set_bindings(Vec::new());
 
@@ -694,6 +781,111 @@ fn reconciler_worker_rejects_duplicates_and_stops_cleanly() {
         .expect("stopped reconciler should restart");
     coordinator.stop();
     restarted.join().expect("restarted reconciler should stop");
+}
+
+#[test]
+fn reconciler_restart_is_owned_by_its_worker_generation() {
+    let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
+    fixture.insert_action(ContainmentLifecycle::Pending, None, None, 0, Some(10));
+    let coordinator = fixture.reconstructed_coordinator();
+    let pause = fixture.enforcer.pause_bindings();
+    let old_worker = coordinator
+        .start_reconciler(Duration::from_secs(60))
+        .expect("first generation should start");
+    pause.entered.wait();
+
+    coordinator.stop();
+    let new_worker = coordinator
+        .start_reconciler(Duration::from_secs(60))
+        .expect("a stopped generation should be replaceable before teardown");
+    pause.resume.wait();
+    old_worker.join().expect("old generation should stop");
+
+    assert!(matches!(
+        coordinator.start_reconciler(Duration::from_secs(60)),
+        Err(ContainmentError::AlreadyRunning)
+    ));
+    coordinator.stop();
+    new_worker.join().expect("new generation should stop");
+}
+
+#[test]
+fn reconciler_generation_resets_after_worker_panic() {
+    let fixture = Fixture::new(Some(&policy("/root/secret.txt")), 999_999, 42);
+    fixture.insert_action(ContainmentLifecycle::Pending, None, None, 0, Some(10));
+    let coordinator = fixture.reconstructed_coordinator();
+    fixture.enforcer.panic_next_bindings();
+
+    let panicked = coordinator
+        .start_reconciler(Duration::from_secs(60))
+        .expect("panicking generation should start");
+    assert!(panicked.join().is_err());
+
+    let restarted = coordinator
+        .start_reconciler(Duration::from_secs(60))
+        .expect("RAII teardown should clear the panicked generation");
+    coordinator.stop();
+    restarted
+        .join()
+        .expect("replacement generation should stop");
+}
+
+#[test]
+fn corrupt_due_row_does_not_block_valid_reconciliation() {
+    let path = std::env::temp_dir().join(format!("corrupt-due-{}.db", Uuid::new_v4()));
+    let fixture = Fixture::at_path(&path, Some(&policy("/root/secret.txt")), 999_999, 42);
+    let corrupt = fixture.insert_action(
+        ContainmentLifecycle::Pending,
+        Some(60),
+        Some(1_000),
+        0,
+        None,
+    );
+    let conn = rusqlite::Connection::open(&path).expect("fixture database should open");
+    conn.execute(
+        "UPDATE containment_actions SET lifecycle_state = 'unknown' WHERE action_id = ?1",
+        [corrupt.action_id.to_string()],
+    )
+    .expect("fixture row should mutate");
+    drop(conn);
+    let valid = fixture.insert_action(ContainmentLifecycle::Active, Some(60), Some(1_000), 0, None);
+
+    assert!(matches!(
+        fixture.coordinator.reconcile_once(1_000),
+        Err(ContainmentError::CorruptActions { count: 1 })
+    ));
+
+    let quarantined = fixture
+        .store
+        .containment_action(corrupt.action_id)
+        .expect("corrupt action query should work")
+        .expect("corrupt action should remain auditable");
+    let reconciled = fixture
+        .store
+        .containment_action(valid.action_id)
+        .expect("valid action query should work")
+        .expect("valid action should exist");
+    assert_eq!(quarantined.lifecycle_state, ContainmentLifecycle::Failed);
+    assert_eq!(
+        quarantined.failure_stage,
+        Some(ContainmentFailureStage::Reconcile)
+    );
+    assert!(
+        quarantined
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.chars().any(char::is_control))
+    );
+    assert_eq!(reconciled.lifecycle_state, ContainmentLifecycle::Expired);
+    assert_eq!(fixture.enforcer.detached(), [valid.binding_id]);
+
+    fixture
+        .coordinator
+        .reconcile_once(1_000)
+        .expect("quarantined row should not recur");
+    assert_eq!(fixture.enforcer.detach_calls(), 1);
+    drop(fixture);
+    std::fs::remove_file(path).expect("fixture database should be removed");
 }
 
 #[test]
@@ -1176,6 +1368,9 @@ mod linux {
             contain_candidate(&first, case_id, first_candidate, Some(900))
         });
         pause.entered.wait();
+        let pending = fixture.latest_action();
+        assert_eq!(pending.lifecycle_state, ContainmentLifecycle::Pending);
+        assert_eq!(pending.next_retry_at_ns, Some(pending.created_at_ns));
         let repeat =
             |duration| contain_candidate(&second, fixture.case_id, candidate.clone(), duration);
 
@@ -1247,5 +1442,47 @@ mod linux {
         );
         assert_eq!(fixture.enforcer.detached(), [action.binding_id]);
         assert_eq!(fixture.status(), RiskCaseStatus::FalsePositive);
+    }
+
+    #[test]
+    fn stale_recovery_claim_cannot_detach_the_takeover_winner() {
+        const CLAIM_LEASE_NS: u64 = 1_000_000_000;
+
+        let process = LiveProcess::spawn();
+        let path = std::env::temp_dir().join(format!("recovery-race-{}.db", Uuid::new_v4()));
+        let fixture = Fixture::at_path(
+            &path,
+            Some(&policy("/root/secret.txt")),
+            process.pid(),
+            process.start_time(),
+        );
+        let action = fixture.insert_action(ContainmentLifecycle::Pending, None, None, 0, Some(10));
+        let winner_store = Arc::new(SecurityStore::open(&path).expect("winner store should open"));
+        let winner = coordinator(Arc::clone(&winner_store), Arc::clone(&fixture.enforcer));
+        let pause = fixture.enforcer.pause_apply();
+        let stale = fixture.reconstructed_coordinator();
+        let stale_worker = std::thread::spawn(move || stale.reconcile_once(10));
+        pause.entered.wait();
+
+        winner
+            .reconcile_once(11 + CLAIM_LEASE_NS)
+            .expect("takeover worker should activate the durable intent");
+        pause.resume.wait();
+
+        assert!(matches!(
+            stale_worker.join().expect("stale worker should join"),
+            Err(ContainmentError::ClaimLost(id)) if id == action.action_id
+        ));
+        let stored = winner_store
+            .containment_action(action.action_id)
+            .expect("action query should work")
+            .expect("action should exist");
+        assert_eq!(stored.lifecycle_state, ContainmentLifecycle::Active);
+        assert_eq!(fixture.enforcer.detach_calls(), 0);
+
+        drop(fixture);
+        drop(winner);
+        drop(winner_store);
+        std::fs::remove_file(path).expect("fixture database should be removed");
     }
 }
