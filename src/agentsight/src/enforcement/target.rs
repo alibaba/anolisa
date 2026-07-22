@@ -96,6 +96,52 @@ fn invalid_path(path: &Path, message: impl Into<String>) -> TargetValidationErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TemporaryRegularFile {
+        path: PathBuf,
+    }
+
+    impl TemporaryRegularFile {
+        fn create() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+            let pid = std::process::id();
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+
+            for _ in 0..100 {
+                let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "agentsight-target-{pid}-{timestamp}-{counter}.policy"
+                ));
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(_) => return Self { path },
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("failed to create temporary policy file: {error}"),
+                }
+            }
+
+            panic!("could not create a unique temporary policy file")
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TemporaryRegularFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 
     #[test]
     fn rejects_init_and_agentsight_processes() {
@@ -111,7 +157,7 @@ mod tests {
 
     #[test]
     fn canonicalizes_an_existing_regular_file() {
-        let file = tempfile::NamedTempFile::new().unwrap();
+        let file = TemporaryRegularFile::create();
         assert_eq!(
             canonical_policy_file(file.path()).unwrap(),
             file.path().canonicalize().unwrap()
