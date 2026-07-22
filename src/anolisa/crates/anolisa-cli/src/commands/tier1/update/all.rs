@@ -527,9 +527,23 @@ fn execute_merged_updates_with_deps(
             // batch operation: the audit trail must show that these refreshes
             // came out of a single native transaction, not N independent
             // updates. The parent owns no journal — each member journals
-            // for itself.
+            // for itself. Like the members, the parent is persisted as
+            // `partial` (still running) before any member completes, so an
+            // exit mid-batch never leaves member records pointing at a
+            // parent that was never written.
             let batch_operation_id = mint_operation_id("update-all");
             let members_start = items.len();
+            store.operations.push(OperationRecord {
+                id: batch_operation_id.clone(),
+                command: BATCH_COMMAND.to_string(),
+                status: "partial".to_string(),
+                started_at: now.clone(),
+                finished_at: None,
+                parent_operation_id: None,
+            });
+            if let Err(err) = store.save(&state_path) {
+                eprintln!("warning: failed to record operation history: {err}");
+            }
             for (item, mut journal) in active {
                 let target = item.planned.target.clone();
                 if let Err(err) = journal.mark_done(0) {
@@ -575,26 +589,29 @@ fn execute_merged_updates_with_deps(
                 match result {
                     Ok(outcome) => {
                         // Same completion semantics as the single-component
-                        // path: the member's record refresh persisted, so
-                        // refresh its contract snapshot. A refresh failure
-                        // only demotes this member (and the batch summary
-                        // below) — every other member keeps its own outcome.
-                        let completion = complete_delegated_update(
+                        // path: persist the member's operation as `partial`,
+                        // refresh its contract snapshot, promote to `ok`. A
+                        // refresh failure only demotes this member (and the
+                        // batch summary below) — every other member keeps
+                        // its own outcome.
+                        let command = format!("{COMMAND} {target}");
+                        let completion_failure = complete_delegated_update(
                             &layout,
                             ctx,
                             &target,
                             &item.package,
                             BATCH_COMMAND,
+                            &mut store,
+                            &state_path,
+                            OperationRecord {
+                                id: operation_id.clone(),
+                                command: command.clone(),
+                                status: String::new(),
+                                started_at: now.clone(),
+                                finished_at: Some(now_iso8601()),
+                                parent_operation_id: Some(batch_operation_id.clone()),
+                            },
                         );
-                        let command = format!("{COMMAND} {target}");
-                        store.operations.push(OperationRecord {
-                            id: operation_id.clone(),
-                            command: command.clone(),
-                            status: completion.operation_status.to_string(),
-                            started_at: now.clone(),
-                            finished_at: Some(now_iso8601()),
-                            parent_operation_id: Some(batch_operation_id.clone()),
-                        });
                         let to_version = outcome
                             .observation
                             .as_ref()
@@ -608,9 +625,9 @@ fn execute_merged_updates_with_deps(
                             &now,
                             &item.package,
                             to_version.as_deref(),
-                            completion.failure.as_deref(),
+                            completion_failure.as_deref(),
                         );
-                        if let Some(reason) = completion.failure {
+                        if let Some(reason) = completion_failure {
                             items.push(failed_item(
                                 &item.name,
                                 format!(
@@ -638,20 +655,20 @@ fn execute_merged_updates_with_deps(
                     )),
                 }
             }
-            // The parent record itself: `partial` when any member's tail
-            // failed after the shared transaction committed, so the history
-            // reads the same as the members' journals.
+            // Finalize the parent record by id: `partial` when any member's
+            // tail failed after the shared transaction committed, so the
+            // history reads the same as the members' journals.
             let any_member_failed = items[members_start..]
                 .iter()
                 .any(|item| item.status == "failed");
-            store.operations.push(OperationRecord {
-                id: batch_operation_id,
-                command: BATCH_COMMAND.to_string(),
-                status: if any_member_failed { "partial" } else { "ok" }.to_string(),
-                started_at: now.clone(),
-                finished_at: Some(now_iso8601()),
-                parent_operation_id: None,
-            });
+            if let Some(parent) = store
+                .operations
+                .iter_mut()
+                .rfind(|operation| operation.id == batch_operation_id)
+            {
+                parent.status = if any_member_failed { "partial" } else { "ok" }.to_string();
+                parent.finished_at = Some(now_iso8601());
+            }
             // Operation history is best-effort bookkeeping on top of the
             // committed record refreshes, exactly like the single-component
             // path.

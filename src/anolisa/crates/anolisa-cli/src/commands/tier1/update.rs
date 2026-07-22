@@ -723,26 +723,29 @@ fn execute_planned_update(
         },
     })?;
 
-    // The record refresh was committed by the executor's sink; refresh the
-    // package-owned contract snapshot before the durable status is written,
-    // so `status`/`doctor`/adapter resolution read the new contract without
-    // waiting for a repair, and a refresh failure demotes the operation to
-    // `partial` instead of overstating it as `ok`.
-    let completion = complete_delegated_update(&layout, ctx, target, &package, &command);
-
-    // Operation history is best-effort bookkeeping on top of the committed
-    // record refresh.
-    store.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.clone(),
-        status: completion.operation_status.to_string(),
-        started_at: now.clone(),
-        finished_at: Some(now_iso8601()),
-        parent_operation_id: None,
-    });
-    if let Err(err) = store.save(&state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
-    }
+    // The record refresh was committed by the executor's sink; the shared
+    // completion persists the operation as `partial`, refreshes the
+    // package-owned contract snapshot, and promotes the operation to `ok`
+    // once the refresh landed — so `status`/`doctor`/adapter resolution
+    // read the new contract, and a crash mid-refresh leaves a discoverable
+    // `partial` record.
+    let completion_failure = complete_delegated_update(
+        &layout,
+        ctx,
+        target,
+        &package,
+        &command,
+        &mut store,
+        &state_path,
+        OperationRecord {
+            id: operation_id.clone(),
+            command: command.clone(),
+            status: String::new(),
+            started_at: now.clone(),
+            finished_at: Some(now_iso8601()),
+            parent_operation_id: None,
+        },
+    );
 
     let to_version = outcome
         .observation
@@ -762,10 +765,10 @@ fn execute_planned_update(
         &now,
         &package,
         to_version.as_deref(),
-        completion.failure.as_deref(),
+        completion_failure.as_deref(),
     );
 
-    if let Some(reason) = completion.failure {
+    if let Some(reason) = completion_failure {
         return Err(CliError::Runtime {
             command: command.clone(),
             reason: format!(
@@ -1154,63 +1157,95 @@ fn tooling_missing_err(command: &str, bin: &str, target: &str) -> CliError {
     }
 }
 
-/// Shared completion for a committed delegated update: contract snapshot
-/// refresh plus the durable operation status derived from it.
+/// Shared completion for a committed delegated update: the durable
+/// operation record plus the contract snapshot refresh, in a crash-safe
+/// order.
+///
+/// The journal already settled inside the executor, so `operation` is the
+/// only durable signal while the refresh is in flight: it is persisted as
+/// `partial` *before* the refresh and promoted to `ok` only after the
+/// snapshot and provenance published (and the promotion itself persisted).
+/// An exit mid-refresh therefore leaves a discoverable `partial` record
+/// instead of a silently stale snapshot — the same pessimistic pattern
+/// `repair` uses for its manifest reconciliation. When the pessimistic
+/// record itself cannot be persisted the refresh is skipped entirely:
+/// mutating the snapshot without the durable signal would reopen that
+/// window.
+///
+/// A package that publishes no contract stays a success without new
+/// warnings ([`ContractRefreshOutcome`] reports `NotApplicable`); an
+/// unreadable contract or a failed snapshot/provenance write keeps the
+/// operation `partial` and returns the failure for the result and central
+/// log.
 ///
 /// Both the single-component path and the merged `update all` members run
 /// this after their record refresh persisted, so `status`, `doctor`, and
 /// adapter resolution read the post-update contract without waiting for a
 /// later `repair` or `upgrade` reconciliation.
-pub(crate) struct DelegatedUpdateCompletion {
-    /// `ok`, or `partial` when the refresh genuinely failed — a durable
-    /// operation must never overstate what happened (upgrade/repair
-    /// semantics).
-    pub(crate) operation_status: &'static str,
-    /// Why the refresh did not complete, for the result and central log.
-    pub(crate) failure: Option<String>,
-}
-
-/// Refresh the package-owned contract snapshot after a delegated update
-/// committed and derive the final operation status.
-///
-/// Must run only after the component record was persisted, so a failed
-/// state commit never exposes a new contract. A package that publishes no
-/// contract stays a success without new warnings ([`ContractRefreshOutcome`]
-/// reports `NotApplicable`); an unreadable contract or a failed
-/// snapshot/provenance write demotes the operation to `partial`.
 ///
 /// [`ContractRefreshOutcome`]: super::install::ContractRefreshOutcome
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn complete_delegated_update(
     layout: &FsLayout,
     ctx: &CliContext,
     target: &str,
     package: &str,
     command: &str,
-) -> DelegatedUpdateCompletion {
+    store: &mut StateStore,
+    state_path: &Path,
+    operation: OperationRecord,
+) -> Option<String> {
+    // Pessimistic durable status first, as a hard gate: the record is the
+    // only durable signal while the refresh mutates the snapshot, so if it
+    // cannot be persisted the refresh must not run — proceeding anyway
+    // would reopen the crash window this completion exists to close.
+    let mut operation = operation;
+    let operation_id = operation.id.clone();
+    operation.status = "partial".to_string();
+    store.operations.push(operation);
+    if let Err(err) = store.save(state_path) {
+        return Some(format!(
+            "component manifest refresh was skipped because the operation record could not be persisted first: {err}"
+        ));
+    }
+
     let refresh = refresh_datadir_contract_snapshot(layout, target, command);
     if !ctx.quiet {
         for warning in &refresh.warnings {
             eprintln!("warning: {warning}");
         }
     }
-    match refresh.error_detail() {
-        Some(detail) => DelegatedUpdateCompletion {
-            operation_status: "partial",
-            failure: Some(format!(
-                "component manifest refresh for package '{package}' did not complete: {detail}"
-            )),
-        },
-        None => DelegatedUpdateCompletion {
-            operation_status: "ok",
-            failure: None,
-        },
+    if let Some(detail) = refresh.error_detail() {
+        return Some(format!(
+            "component manifest refresh for package '{package}' did not complete: {detail}"
+        ));
     }
+
+    // Promote by id, not by position: the pessimistic record was pushed
+    // above, but the promotion must never depend on it still being the
+    // last entry.
+    if let Some(operation) = store
+        .operations
+        .iter_mut()
+        .rfind(|operation| operation.id == operation_id)
+    {
+        operation.status = "ok".to_string();
+    }
+    if let Err(err) = store.save(state_path) {
+        // The durable status must never overstate what happened: an
+        // unpersisted promotion keeps the operation partial.
+        return Some(format!(
+            "component manifest refresh completed, but the operation could not be finalized as ok: {err}"
+        ));
+    }
+    None
 }
 
 /// Best-effort central-log record for a committed update.
 ///
 /// A `completion_failure` (delegated contract refresh not completed) logs
-/// `Partial` so the durable history never overstates what happened.
+/// `Partial` at `Warn` severity so `logs --severity warn` surfaces the
+/// operations that still need a repair, matching repair/upgrade.
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn append_update_log(
     layout: &FsLayout,
@@ -1234,7 +1269,10 @@ pub(crate) fn append_update_log(
         command: command.to_string(),
         source: "anolisa-cli".to_string(),
         component: Some(component.to_string()),
-        severity: Severity::Info,
+        severity: match completion_failure {
+            Some(_) => Severity::Warn,
+            None => Severity::Info,
+        },
         message: match completion_failure {
             Some(_) => format!("{base}, but the component manifest refresh did not complete"),
             None => base,
@@ -2769,6 +2807,60 @@ pub(crate) mod tests {
             "the committed record refresh must be kept"
         );
         assert_eq!(update_operation_status(&c, "copilot-shell"), "partial");
+        // The central-log record must be discoverable by `logs --severity
+        // warn`, exactly like repair/upgrade partials.
+        let log = std::fs::read_to_string(&common::resolve_layout(&c).central_log)
+            .expect("read central log");
+        let record: serde_json::Value =
+            serde_json::from_str(log.lines().last().expect("log record")).expect("parse record");
+        assert_eq!(record["status"], "partial");
+        assert_eq!(record["severity"], "warn");
+    }
+
+    /// When the pessimistic `partial` record cannot be persisted, the
+    /// refresh must not run: mutating the snapshot without a durable signal
+    /// would reopen the crash window this completion exists to close.
+    #[test]
+    fn refresh_is_skipped_when_partial_record_cannot_be_persisted() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let (_, snapshot) = seed_package_contract_and_stale_snapshot(&c, "copilot-shell");
+        let layout = common::resolve_layout(&c);
+        // A non-empty directory at the state path blocks the pessimistic
+        // save's atomic replacement.
+        let state_path = layout.state_dir.join("installed.toml");
+        std::fs::create_dir_all(&state_path).expect("create blocking state directory");
+        std::fs::write(state_path.join("keep"), b"x").expect("write blocking marker");
+        let mut store = StateStore::load(&tmp.path().join("absent.toml"), 0).expect("empty store");
+
+        let failure = complete_delegated_update(
+            &layout,
+            &c,
+            "copilot-shell",
+            "copilot-shell",
+            "update copilot-shell",
+            &mut store,
+            &state_path,
+            OperationRecord {
+                id: "op-update-test".to_string(),
+                command: "update copilot-shell".to_string(),
+                status: String::new(),
+                started_at: now_iso8601(),
+                finished_at: Some(now_iso8601()),
+                parent_operation_id: None,
+            },
+        )
+        .expect("a blocked pessimistic save must fail the completion");
+
+        assert!(
+            failure.contains("skipped") && failure.contains("could not be persisted"),
+            "failure must explain the refresh was gated on the record: {failure}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&snapshot).expect("read snapshot"),
+            "framework = \"old\"\n",
+            "the refresh must not run without the durable partial record"
+        );
     }
 
     /// U6 (breaking): an observed record carries no management consent, so
