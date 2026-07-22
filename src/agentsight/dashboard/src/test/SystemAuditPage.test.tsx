@@ -50,6 +50,7 @@ const caseSummary: SecurityRiskCase = {
 
 const caseDetail: SecurityRiskCaseDetail = {
   ...caseSummary,
+  containment: null,
   evidence: [
     { event_id: 'event-1', event_type: 'file_action', occurred_at_ns: 1, identity: { pid: 42 }, event: { path: '~/.ssh/id_rsa' } },
     { event_id: 'event-2', event_type: 'taint_transition', occurred_at_ns: 2, identity: { pid: 42 }, event: { label: 'CREDENTIAL' } },
@@ -71,6 +72,7 @@ const activeAction: SecurityContainmentAction = {
   blocked_at_ns: null,
   requested_by: 'dashboard',
   failure_stage: null,
+  failure_summary: null,
   attempt_count: 1,
   next_retry_at_ns: null,
   created_at_ns: 1_720_000_002_000_000_000,
@@ -158,8 +160,20 @@ describe('SystemAuditPage', () => {
     renderPage();
     await selectCase();
 
+    expect(fetchContainmentPlan).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole('button', { name: '升级为拦截' }));
     expect(await screen.findByRole('dialog', { name: '确认升级为内核拦截' })).toBeInTheDocument();
+    expect(fetchContainmentPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers containment for a critical case', async () => {
+    vi.mocked(fetchSecurityCase).mockResolvedValue({
+      state: 'found', data: { ...caseDetail, severity: 'critical' },
+    });
+    renderPage();
+    await selectCase();
+
+    expect(screen.getByRole('button', { name: '升级为拦截' })).toBeInTheDocument();
   });
 
   it('does not offer containment for an ineligible case', async () => {
@@ -175,7 +189,9 @@ describe('SystemAuditPage', () => {
   });
 
   it('shows active as waiting for a block acknowledgement', async () => {
-    mockPlan(activeAction);
+    vi.mocked(fetchSecurityCase).mockResolvedValue({
+      state: 'found', data: { ...caseDetail, containment: activeAction },
+    });
     renderPage();
     await selectCase();
 
@@ -187,7 +203,13 @@ describe('SystemAuditPage', () => {
   });
 
   it('shows contained only after blocked_at_ns exists', async () => {
-    mockPlan({ ...activeAction, blocked_at_ns: 1_720_000_004_000_000_000 });
+    vi.mocked(fetchSecurityCase).mockResolvedValue({
+      state: 'found',
+      data: {
+        ...caseDetail,
+        containment: { ...activeAction, blocked_at_ns: 1_720_000_004_000_000_000 },
+      },
+    });
     renderPage();
     await selectCase();
 
@@ -196,25 +218,39 @@ describe('SystemAuditPage', () => {
   });
 
   it('shows failure stage without exposing an unavailable raw reason', async () => {
-    mockPlan({
-      ...activeAction,
-      lifecycle_state: 'failed',
-      failure_stage: 'attach',
-      expires_at_ns: null,
+    vi.mocked(fetchSecurityCase).mockResolvedValue({
+      state: 'found',
+      data: {
+        ...caseDetail,
+        containment: {
+          ...activeAction,
+          lifecycle_state: 'failed',
+          failure_stage: 'attach',
+          failure_summary: '策略挂载失败，请确认 Agent 与执行器状态后重试',
+          expires_at_ns: null,
+        },
+      },
     });
     renderPage();
     await selectCase();
 
     expect(await screen.findByText('执行失败')).toBeInTheDocument();
     expect(screen.getByText('策略挂载')).toBeInTheDocument();
+    expect(screen.getByText('策略挂载失败，请确认 Agent 与执行器状态后重试')).toBeInTheDocument();
     expect(screen.queryByText(/failure_reason/)).not.toBeInTheDocument();
   });
 
   it('shows expired containment as retryable', async () => {
-    mockPlan({
-      ...activeAction,
-      lifecycle_state: 'expired',
-      expires_at_ns: Date.now() * 1_000_000,
+    vi.mocked(fetchSecurityCase).mockResolvedValue({
+      state: 'found',
+      data: {
+        ...caseDetail,
+        containment: {
+          ...activeAction,
+          lifecycle_state: 'expired',
+          expires_at_ns: Date.now() * 1_000_000,
+        },
+      },
     });
     renderPage();
     await selectCase();
@@ -223,14 +259,30 @@ describe('SystemAuditPage', () => {
     expect(screen.getByRole('button', { name: '重新下发拦截' })).toBeInTheDocument();
   });
 
-  it('uses a safe error state when the containment summary cannot load', async () => {
-    vi.mocked(fetchContainmentPlan).mockRejectedValue(new Error('private backend detail'));
-    renderPage();
-    await selectCase();
+  it.each(['false_positive', 'accepted_risk', 'resolved'] as const)(
+    'keeps an existing action visible but excludes %s from retry',
+    async (status) => {
+      vi.mocked(fetchSecurityCase).mockResolvedValue({
+        state: 'found',
+        data: {
+          ...caseDetail,
+          status,
+          containment: {
+            ...activeAction,
+            lifecycle_state: 'failed',
+            failure_stage: 'attach',
+            failure_summary: '策略挂载失败，请确认 Agent 与执行器状态后重试',
+          },
+        },
+      });
+      renderPage();
+      await selectCase();
 
-    expect(await screen.findByText('拦截状态暂时不可用，请刷新后重试。')).toBeInTheDocument();
-    expect(screen.queryByText('private backend detail')).not.toBeInTheDocument();
-  });
+      expect(await screen.findByText('执行失败')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '重新下发拦截' })).not.toBeInTheDocument();
+      expect(fetchContainmentPlan).not.toHaveBeenCalled();
+    },
+  );
 
   it('refreshes list, detail, and containment summary after success', async () => {
     renderPage();
@@ -245,7 +297,7 @@ describe('SystemAuditPage', () => {
     await waitFor(() => {
       expect(vi.mocked(fetchSecurityCases).mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(vi.mocked(fetchSecurityCase).mock.calls.length).toBeGreaterThanOrEqual(2);
-      expect(vi.mocked(fetchContainmentPlan).mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(vi.mocked(fetchContainmentPlan).mock.calls.length).toBe(1);
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
@@ -257,5 +309,85 @@ describe('SystemAuditPage', () => {
 
     await waitFor(() => expect(reviewSecurityCase).toHaveBeenCalledWith('case-1', 'confirmed'));
     expect(await screen.findByText('已确认')).toBeInTheDocument();
+  });
+
+  it('keeps the newer case when an older detail request finishes late', async () => {
+    const secondSummary = { ...caseSummary, case_id: 'case-2', summary: '第二个案件' };
+    let resolveFirst: ((value: { state: string; data: SecurityRiskCaseDetail }) => void) | undefined;
+    const first = new Promise<{ state: string; data: SecurityRiskCaseDetail }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    vi.mocked(fetchSecurityCases).mockResolvedValue({
+      state: 'ok', data: { items: [caseSummary, secondSummary], total: 2, limit: 100, offset: 0 },
+    });
+    vi.mocked(fetchSecurityCase).mockImplementation((caseId) => (
+      caseId === 'case-1'
+        ? first as ReturnType<typeof fetchSecurityCase>
+        : Promise.resolve({
+            state: 'found',
+            data: { ...caseDetail, ...secondSummary, containment: null },
+          })
+    ));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /疑似凭据外传/ }));
+    fireEvent.click(screen.getByRole('button', { name: /第二个案件/ }));
+    expect(await screen.findByRole('heading', { name: '第二个案件' })).toBeInTheDocument();
+    resolveFirst?.({ state: 'found', data: caseDetail });
+    await waitFor(() => expect(
+      screen.getByRole('heading', { name: '第二个案件' }),
+    ).toBeInTheDocument());
+  });
+
+  it('ignores an old detail failure after switching cases', async () => {
+    const secondSummary = { ...caseSummary, case_id: 'case-2', summary: '第二个案件' };
+    let rejectFirst: ((reason: Error) => void) | undefined;
+    const first = new Promise<never>((_, reject) => { rejectFirst = reject; });
+    vi.mocked(fetchSecurityCases).mockResolvedValue({
+      state: 'ok', data: { items: [caseSummary, secondSummary], total: 2, limit: 100, offset: 0 },
+    });
+    vi.mocked(fetchSecurityCase).mockImplementation((caseId) => (
+      caseId === 'case-1'
+        ? first
+        : Promise.resolve({
+            state: 'found', data: { ...caseDetail, ...secondSummary, containment: null },
+          })
+    ));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /疑似凭据外传/ }));
+    fireEvent.click(screen.getByRole('button', { name: /第二个案件/ }));
+    expect(await screen.findByRole('heading', { name: '第二个案件' })).toBeInTheDocument();
+    rejectFirst?.(new Error('old private error'));
+    await waitFor(() => expect(screen.queryByText('old private error')).not.toBeInTheDocument());
+  });
+
+  it('does not let a slow review overwrite a newly selected case', async () => {
+    const secondSummary = { ...caseSummary, case_id: 'case-2', summary: '第二个案件' };
+    let resolveReview: ((value: Awaited<ReturnType<typeof reviewSecurityCase>>) => void) | undefined;
+    const pendingReview = new Promise<Awaited<ReturnType<typeof reviewSecurityCase>>>((resolve) => {
+      resolveReview = resolve;
+    });
+    vi.mocked(fetchSecurityCases).mockResolvedValue({
+      state: 'ok', data: { items: [caseSummary, secondSummary], total: 2, limit: 100, offset: 0 },
+    });
+    vi.mocked(fetchSecurityCase).mockImplementation((caseId) => Promise.resolve({
+      state: 'found',
+      data: caseId === 'case-1'
+        ? caseDetail
+        : { ...caseDetail, ...secondSummary, containment: null },
+    }));
+    vi.mocked(reviewSecurityCase).mockReturnValue(pendingReview);
+    renderPage();
+    await selectCase();
+    fireEvent.click(screen.getByRole('button', { name: '确认风险' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /第二个案件/ }));
+    expect(await screen.findByRole('heading', { name: '第二个案件' })).toBeInTheDocument();
+    resolveReview?.({ state: 'updated', data: { ...caseSummary, status: 'confirmed' } });
+    await waitFor(() => expect(
+      screen.getByRole('heading', { name: '第二个案件' }),
+    ).toBeInTheDocument());
+    expect(screen.queryByText('已确认')).not.toBeInTheDocument();
   });
 });

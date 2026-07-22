@@ -73,10 +73,17 @@ export const ContainmentLifecycleCard: React.FC<ContainmentLifecycleCardProps> =
   const expiryMs = action?.expires_at_ns ? action.expires_at_ns / 1_000_000 : null;
 
   useEffect(() => {
-    setNowMs(Date.now());
-    if (expiryMs === null || expiryMs <= Date.now()) return undefined;
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const tick = () => {
+      const current = Date.now();
+      setNowMs(current);
+      const remaining = expiryMs === null ? 0 : expiryMs - current;
+      if (remaining > 0) timer = window.setTimeout(tick, Math.min(1_000, remaining));
+    };
+    tick();
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [expiryMs]);
 
   const presentation = useMemo(() => (
@@ -123,6 +130,12 @@ export const ContainmentLifecycleCard: React.FC<ContainmentLifecycleCardProps> =
           <div><dt className="text-xs text-gray-500">剩余时间</dt><dd className="mt-1 text-gray-900">{action.expires_at_ns ? formatRemaining(action.expires_at_ns, nowMs) : '需手动解除'}</dd></div>
           <div><dt className="text-xs text-gray-500">首次阻断</dt><dd className="mt-1 text-gray-900">{formatNs(action.blocked_at_ns)}</dd></div>
           <div><dt className="text-xs text-gray-500">失败阶段</dt><dd className="mt-1 text-gray-900">{action.failure_stage ? failureStageLabel[action.failure_stage] : '—'}</dd></div>
+          {action.failure_summary && (
+            <div className="sm:col-span-2 lg:col-span-3">
+              <dt className="text-xs text-gray-500">失败说明</dt>
+              <dd className="mt-1 text-gray-900">{action.failure_summary}</dd>
+            </div>
+          )}
         </dl>
       )}
 

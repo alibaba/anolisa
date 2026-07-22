@@ -945,6 +945,7 @@ export interface SecurityEvidenceEvent {
 
 export interface SecurityRiskCaseDetail extends SecurityRiskCase {
   evidence: SecurityEvidenceEvent[];
+  containment: SecurityContainmentAction | null;
 }
 
 export type SecurityContainmentLifecycle =
@@ -974,6 +975,7 @@ export interface SecurityContainmentAction {
   blocked_at_ns: number | null;
   requested_by: string;
   failure_stage: 'attach' | 'detach' | 'reconcile' | null;
+  failure_summary: string | null;
   attempt_count: number;
   next_retry_at_ns: number | null;
   created_at_ns: number;

@@ -49,6 +49,7 @@ const action = {
   blocked_at_ns: null,
   requested_by: 'dashboard',
   failure_stage: null,
+  failure_summary: null,
   attempt_count: 0,
   next_retry_at_ns: null,
   created_at_ns: 1,

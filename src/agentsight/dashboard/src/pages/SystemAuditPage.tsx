@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { ContainmentDialog } from '../components/ContainmentDialog';
 import { ContainmentLifecycleCard } from '../components/ContainmentLifecycleCard';
 import {
-  fetchContainmentPlan,
   fetchSecurityCase,
   fetchSecurityCases,
   fetchSecurityEvents,
@@ -11,7 +10,6 @@ import {
   fetchSecuritySummary,
   reviewSecurityCase,
   type SecurityEventRecord,
-  type SecurityContainmentPlan,
   type SecurityEvidenceEvent,
   type SecurityRiskCase,
   type SecurityRiskCaseDetail,
@@ -122,11 +120,9 @@ export const SystemAuditPage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState('');
   const [reviewing, setReviewing] = useState(false);
-  const [containmentPlan, setContainmentPlan] = useState<SecurityContainmentPlan | null>(null);
-  const [containmentLoading, setContainmentLoading] = useState(false);
-  const [containmentError, setContainmentError] = useState(false);
   const [containmentDialogOpen, setContainmentDialogOpen] = useState(false);
   const caseRequestVersion = useRef(0);
+  const reviewRequestVersion = useRef(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -151,28 +147,17 @@ export const SystemAuditPage: React.FC = () => {
 
   const openCase = async (caseId: string) => {
     caseRequestVersion.current += 1;
+    reviewRequestVersion.current += 1;
     const version = caseRequestVersion.current;
+    setContainmentDialogOpen(false);
+    setSelectedCase(null);
     setDetailLoading(true);
     setError('');
-    setContainmentPlan(null);
-    setContainmentError(false);
-    setContainmentLoading(false);
+    setReviewing(false);
     try {
       const response = await fetchSecurityCase(caseId);
       if (caseRequestVersion.current !== version) return;
-      const detail = response.data;
-      setSelectedCase(detail);
-      if (containmentEligible(detail)) {
-        setContainmentLoading(true);
-        try {
-          const planResponse = await fetchContainmentPlan(caseId);
-          if (caseRequestVersion.current === version) setContainmentPlan(planResponse.data);
-        } catch {
-          if (caseRequestVersion.current === version) setContainmentError(true);
-        } finally {
-          if (caseRequestVersion.current === version) setContainmentLoading(false);
-        }
-      }
+      setSelectedCase(response.data);
     } catch (nextError) {
       if (caseRequestVersion.current === version) setError(errorText(nextError));
     } finally {
@@ -182,32 +167,49 @@ export const SystemAuditPage: React.FC = () => {
 
   const refresh = async () => {
     const selectedCaseId = selectedCase?.case_id;
+    const version = caseRequestVersion.current;
     await load();
-    if (selectedCaseId) await openCase(selectedCaseId);
+    if (selectedCaseId && caseRequestVersion.current === version) await openCase(selectedCaseId);
   };
 
-  const handleContained = async () => {
-    if (!selectedCase) return;
-    const caseId = selectedCase.case_id;
+  const handleContained = async (caseId: string) => {
+    const version = caseRequestVersion.current;
     setContainmentDialogOpen(false);
-    await Promise.all([load(), openCase(caseId)]);
+    await load();
+    if (caseRequestVersion.current === version) await openCase(caseId);
   };
 
   const review = async (
     status: 'confirmed' | 'false_positive' | 'accepted_risk' | 'resolved',
   ) => {
     if (!selectedCase) return;
+    reviewRequestVersion.current += 1;
+    const reviewVersion = reviewRequestVersion.current;
+    const caseVersion = caseRequestVersion.current;
+    const caseId = selectedCase.case_id;
     setReviewing(true);
     try {
-      const response = await reviewSecurityCase(selectedCase.case_id, status);
-      setSelectedCase({ ...selectedCase, status: response.data.status });
+      const response = await reviewSecurityCase(caseId, status);
+      if (
+        reviewRequestVersion.current !== reviewVersion
+        || caseRequestVersion.current !== caseVersion
+      ) return;
+      setSelectedCase((current) => (
+        current?.case_id === caseId ? { ...current, status: response.data.status } : current
+      ));
       setCases((current) => current.map((item) => (
-        item.case_id === selectedCase.case_id ? { ...item, status: response.data.status } : item
+        item.case_id === caseId ? { ...item, status: response.data.status } : item
       )));
     } catch (nextError) {
-      setError(errorText(nextError));
+      if (
+        reviewRequestVersion.current === reviewVersion
+        && caseRequestVersion.current === caseVersion
+      ) setError(errorText(nextError));
     } finally {
-      setReviewing(false);
+      if (
+        reviewRequestVersion.current === reviewVersion
+        && caseRequestVersion.current === caseVersion
+      ) setReviewing(false);
     }
   };
 
@@ -348,18 +350,18 @@ export const SystemAuditPage: React.FC = () => {
                     </button>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                    <button type="button" onClick={() => void review('false_positive')} className="rounded border px-3 py-1.5 text-gray-600">标记误报</button>
-                    <button type="button" onClick={() => void review('accepted_risk')} className="rounded border px-3 py-1.5 text-gray-600">接受风险</button>
-                    {!containmentPlan?.existing_action && (
-                      <button type="button" onClick={() => void review('resolved')} className="rounded border px-3 py-1.5 text-gray-600">标记已处置</button>
+                    <button type="button" disabled={reviewing} onClick={() => void review('false_positive')} className="rounded border px-3 py-1.5 text-gray-600 disabled:opacity-40">标记误报</button>
+                    <button type="button" disabled={reviewing} onClick={() => void review('accepted_risk')} className="rounded border px-3 py-1.5 text-gray-600 disabled:opacity-40">接受风险</button>
+                    {!selectedCase.containment && (
+                      <button type="button" disabled={reviewing} onClick={() => void review('resolved')} className="rounded border px-3 py-1.5 text-gray-600 disabled:opacity-40">标记已处置</button>
                     )}
                     <button type="button" onClick={() => navigate('/enforcement')} className="rounded border border-blue-200 px-3 py-1.5 text-blue-700">查看拦截策略</button>
                   </div>
-                  {(containmentEligible(selectedCase) || containmentPlan?.existing_action) && (
+                  {(containmentEligible(selectedCase) || selectedCase.containment) && (
                     <ContainmentLifecycleCard
-                      action={containmentPlan?.existing_action ?? null}
-                      loading={containmentLoading}
-                      error={containmentError}
+                      action={selectedCase.containment}
+                      loading={false}
+                      error={false}
                       canUpgrade={containmentEligible(selectedCase)}
                       reviewing={reviewing}
                       onUpgrade={() => setContainmentDialogOpen(true)}
@@ -435,7 +437,7 @@ export const SystemAuditPage: React.FC = () => {
           caseId={selectedCase.case_id}
           open={containmentDialogOpen}
           onClose={() => setContainmentDialogOpen(false)}
-          onContained={() => void handleContained()}
+          onContained={() => void handleContained(selectedCase.case_id)}
         />
       )}
     </div>
