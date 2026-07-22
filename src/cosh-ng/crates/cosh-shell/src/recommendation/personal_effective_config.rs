@@ -6,6 +6,12 @@ pub(crate) fn current_ai_configured(adapter: &CoshCoreAdapter) -> Result<bool, S
 }
 
 fn auth_state_is_configured(value: &serde_json::Value) -> Result<bool, String> {
+    if let Some(required) = value
+        .get("effective_auth_required")
+        .and_then(serde_json::Value::as_bool)
+    {
+        return Ok(!required);
+    }
     let active = value
         .get("active_provider")
         .and_then(serde_json::Value::as_str)
@@ -28,11 +34,13 @@ fn auth_state_is_configured(value: &serde_json::Value) -> Result<bool, String> {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     };
-    if provider
+    let provider_type = provider
         .get("provider_type")
-        .and_then(serde_json::Value::as_str)
-        == Some("aliyun")
-    {
+        .and_then(serde_json::Value::as_str);
+    if provider_type == Some("mock") {
+        return Ok(true);
+    }
+    if provider_type == Some("aliyun") {
         return Ok(provider
             .get("auth_source")
             .and_then(serde_json::Value::as_str)
@@ -82,5 +90,30 @@ mod tests {
 
         assert_eq!(auth_state_is_configured(&incomplete), Ok(false));
         assert!(auth_state_is_configured(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn recognizes_effective_env_only_auth_state() {
+        let env_only = serde_json::json!({
+            "active_provider": "gate4",
+            "saved_providers": [],
+            "effective_auth_required": false
+        });
+
+        assert_eq!(auth_state_is_configured(&env_only), Ok(true));
+    }
+
+    #[test]
+    fn recognizes_mock_provider_from_legacy_auth_state() {
+        let mock = serde_json::json!({
+            "active_provider": "test",
+            "saved_providers": [{
+                "provider_id": "test",
+                "provider_type": "mock",
+                "has_api_key": false
+            }]
+        });
+
+        assert_eq!(auth_state_is_configured(&mock), Ok(true));
     }
 }
