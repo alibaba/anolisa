@@ -947,6 +947,55 @@ export interface SecurityRiskCaseDetail extends SecurityRiskCase {
   evidence: SecurityEvidenceEvent[];
 }
 
+export type SecurityContainmentLifecycle =
+  | 'pending'
+  | 'active'
+  | 'expiring'
+  | 'expired'
+  | 'failed';
+
+export interface SecurityContainmentCandidate {
+  agent_id: string;
+  root_pid: number;
+  process_start_time: number;
+  display_name: string;
+}
+
+export interface SecurityContainmentAction {
+  action_id: string;
+  case_id: string;
+  binding_id: string;
+  agent_id: string;
+  root_pid: number;
+  process_start_time: number;
+  duration_secs: number | null;
+  expires_at_ns: number | null;
+  lifecycle_state: SecurityContainmentLifecycle;
+  blocked_at_ns: number | null;
+  requested_by: string;
+  failure_stage: 'attach' | 'detach' | 'reconcile' | null;
+  attempt_count: number;
+  next_retry_at_ns: number | null;
+  created_at_ns: number;
+  updated_at_ns: number;
+}
+
+export interface SecurityContainmentPlan {
+  case_id: string;
+  original_target: SecurityContainmentCandidate | null;
+  original_target_valid: boolean;
+  candidates: SecurityContainmentCandidate[];
+  default_duration_secs: number;
+  min_duration_secs: number;
+  max_duration_secs: number;
+  existing_action: SecurityContainmentAction | null;
+}
+
+export interface SecurityContainmentRequest {
+  root_pid: number;
+  duration_secs: number | null;
+}
+
 export type SecurityQueryValue = string | number | boolean | null | undefined;
 
 export interface SecurityTimeRangeParams {
@@ -1141,6 +1190,46 @@ export async function fetchSecurityCase(
   return securityFetch<SecurityRiskCaseDetail>(
     `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}`,
   );
+}
+
+export async function fetchContainmentPlan(
+  caseId: string,
+): Promise<SecurityApiResponse<SecurityContainmentPlan>> {
+  return securityFetch<SecurityContainmentPlan>(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/containment-plan`,
+  );
+}
+
+export async function containSecurityCase(
+  caseId: string,
+  request: SecurityContainmentRequest,
+): Promise<SecurityApiResponse<SecurityContainmentAction>> {
+  const response = await fetch(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/contain`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    },
+  );
+  if (response.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
+  const body = await response.json().catch(() => null) as
+    | SecurityApiResponse<SecurityContainmentAction>
+    | { error?: SecurityRestError }
+    | null;
+  if (!response.ok || !body || !('state' in body)) {
+    const error = body && 'error' in body ? body.error : undefined;
+    throw new SecurityApiClientError(response.status, error ?? {
+      code: 'containment_request_failed',
+      message: response.statusText || 'Containment request failed',
+      retryable: false,
+    });
+  }
+  return body;
 }
 
 export async function reviewSecurityCase(
