@@ -15,6 +15,7 @@ mod logging;
 mod loop_detect;
 mod metrics;
 mod migrate;
+mod process;
 mod protocol;
 mod provider;
 mod redaction;

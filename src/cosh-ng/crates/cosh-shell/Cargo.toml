@@ -14,7 +14,7 @@ name = "cosh-shell"
 path = "src/main.rs"
 
 [dependencies]
-nix = { workspace = true, features = ["dir", "fs", "term"] }
+nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
 ratatui = "0.28"
 serde.workspace = true
 serde_json.workspace = true

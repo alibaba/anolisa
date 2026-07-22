@@ -799,40 +799,30 @@ impl HookSystem {
     }
 
     async fn run_hook_cmd(command: &str, input_json: &str, timeout: Duration) -> HookOutput {
-        use tokio::io::AsyncWriteExt;
         use tokio::process::Command;
 
-        let safe_command = crate::redaction::redact_text(command);
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
+        use crate::process::{output_with_timeout, OutputError};
 
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
+        let safe_command = crate::redaction::redact_text(command);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+
+        // The deadline covers the stdin write as well: a hook that never
+        // reads stdin must not stall the session, and on timeout the whole
+        // process group is killed instead of leaking grandchildren.
+        let result = output_with_timeout(cmd, Some(input_json.as_bytes().to_vec()), timeout).await;
+
+        let output = match result {
+            Ok(o) => o,
+            Err(OutputError::Spawn(e)) => {
                 tracing::error!(target: "cosh_hook", "Failed to spawn hook '{safe_command}': {e}");
                 return HookOutput::default();
             }
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input_json.as_bytes()).await;
-            let _ = stdin.shutdown().await;
-        }
-
-        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-
-        let output = match result {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
+            Err(OutputError::Io(e)) => {
                 tracing::error!(target: "cosh_hook", "Hook '{safe_command}' execution failed: {e}");
                 return HookOutput::default();
             }
-            Err(_) => {
+            Err(OutputError::Timeout) => {
                 tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' timed out");
                 return HookOutput::default();
             }
@@ -1504,6 +1494,47 @@ mod tests {
         assert_eq!(
             result.additional_context.as_deref(),
             Some("/skills/demo/SKILL.md"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_timeout_kills_process_group() {
+        use crate::process::test_support::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let pid_file = dir.path().join("pids");
+        let script = leak_script(&marker, &pid_file);
+
+        let started = std::time::Instant::now();
+        let out = HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300)).await;
+        assert!(
+            out.decision.is_none(),
+            "timed-out hook must fall back to the default output"
+        );
+
+        let pids = read_pids(&pid_file);
+        let _cleanup = PidCleanup(pids.clone());
+        for pid in &pids {
+            assert_process_gone(*pid);
+        }
+        wait_past_marker_deadline(started);
+        assert!(!marker.exists(), "grandchild survived the hook timeout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_ignoring_stdin_respects_deadline() {
+        // Payload larger than the pipe buffer: the old implementation
+        // blocked in the stdin write before the timeout even started.
+        let payload = "x".repeat(1 << 20);
+        let started = std::time::Instant::now();
+        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300)).await;
+        assert!(out.decision.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stdin write must be bounded by the hook deadline"
         );
     }
 }

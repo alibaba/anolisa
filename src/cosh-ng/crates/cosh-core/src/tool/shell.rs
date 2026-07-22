@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::process::Command;
 
+use crate::process::{output_with_timeout, OutputError};
+
 use super::{Tool, ToolContext, ToolKind, ToolResult};
 
 pub struct ShellTool;
@@ -48,18 +50,16 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(30_000);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&ctx.cwd)
-                .output(),
-        )
-        .await;
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command).current_dir(&ctx.cwd);
+
+        // Deadline-bounded execution with process-group cleanup: a bare
+        // tokio::time::timeout would leak the child's process tree.
+        let result =
+            output_with_timeout(cmd, None, std::time::Duration::from_millis(timeout_ms)).await;
 
         match result {
-            Ok(Ok(output)) => {
+            Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let exit_code = output.status.code().unwrap_or(-1);
@@ -84,10 +84,10 @@ impl Tool for ShellTool {
                     is_error: !output.status.success(),
                 })
             }
-            Ok(Err(e)) => Err(format!("Failed to execute command: {e}")),
-            Err(_) => Ok(ToolResult::error(format!(
+            Err(OutputError::Timeout) => Ok(ToolResult::error(format!(
                 "Command timed out after {timeout_ms}ms"
             ))),
+            Err(e) => Err(format!("Failed to execute command: {e}")),
         }
     }
 }
@@ -149,6 +149,37 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_timeout_kills_process_group() {
+        use crate::process::test_support::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let pid_file = dir.path().join("pids");
+        let command = leak_script(&marker, &pid_file);
+
+        let tool = ShellTool;
+        let started = std::time::Instant::now();
+        let result = tool
+            .invoke(
+                serde_json::json!({"command": command, "timeout_ms": 300}),
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("timed out"));
+
+        let pids = read_pids(&pid_file);
+        let _cleanup = PidCleanup(pids.clone());
+        for pid in &pids {
+            assert_process_gone(*pid);
+        }
+        wait_past_marker_deadline(started);
+        assert!(!marker.exists(), "grandchild survived the tool timeout");
     }
 
     #[tokio::test]
