@@ -1,6 +1,5 @@
 //! Desired-state coordinator between AgentSight, SQLite, and the enforcer.
 
-use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -15,6 +14,10 @@ use uuid::Uuid;
 use super::{EnforcementClient, EnforcementError, EnforcementStore, EnforcementStoreError};
 use crate::IngestionReadinessError;
 use crate::ingestion_readiness::{GenerationReadiness, GenerationToken};
+
+mod reconciliation;
+
+use reconciliation::reconcile_desired_state;
 
 const INGESTION_UNAVAILABLE_MESSAGE: &str = "violation ingestion is not subscribed";
 
@@ -421,55 +424,6 @@ fn persist_violation_until_stored(
             }
         }
     }
-}
-
-fn reconcile_desired_state(
-    client: &EnforcementClient,
-    store: &EnforcementStore,
-) -> Result<(), EnforcementCoordinatorError> {
-    let desired = store.bindings()?;
-    let actual = client.bindings()?;
-    let desired_by_id: HashMap<_, _> = desired
-        .iter()
-        .map(|binding| (binding.request.binding_id, binding))
-        .collect();
-    let mut retained_actual = HashMap::new();
-
-    for binding in actual {
-        let binding_id = binding.request.binding_id;
-        let matches_active_desired = desired_by_id.get(&binding_id).is_some_and(|desired| {
-            is_active_desired(desired.state) && desired.request == binding.request
-        });
-        if matches_active_desired {
-            retained_actual.insert(binding_id, binding);
-        } else {
-            client.detach(binding_id)?;
-        }
-    }
-
-    for mut binding in desired {
-        let binding_id = binding.request.binding_id;
-        if is_active_desired(binding.state) {
-            let acknowledged = match retained_actual.remove(&binding_id) {
-                Some(actual) => actual,
-                None => client.apply(binding.request.clone())?,
-            };
-            store.upsert_binding(&acknowledged)?;
-        } else if binding.state == BindingState::Detaching {
-            binding.state = BindingState::Detached;
-            binding.message = None;
-            binding.domain_id = None;
-            store.upsert_binding(&binding)?;
-        }
-    }
-    Ok(())
-}
-
-fn is_active_desired(state: BindingState) -> bool {
-    matches!(
-        state,
-        BindingState::Pending | BindingState::Enforced | BindingState::Degraded
-    )
 }
 
 fn sleep_until_superseded(

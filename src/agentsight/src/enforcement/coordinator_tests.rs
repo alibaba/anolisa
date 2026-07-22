@@ -1,5 +1,92 @@
 use super::*;
 
+fn apply_request() -> ApplyPolicy {
+    ApplyPolicy {
+        binding_id: Uuid::new_v4(),
+        agent_id: "reconciliation-agent".into(),
+        session_id: Some("reconciliation-session".into()),
+        root_pid: 42,
+        process_start_time: 99,
+        policy_id: "reconciliation-policy".into(),
+        policy_revision: "revision-1".into(),
+        policy_dsl: "label AGENT".into(),
+    }
+}
+
+fn enforced_binding(request: ApplyPolicy, domain_id: u32) -> Binding {
+    Binding {
+        request,
+        state: BindingState::Enforced,
+        message: None,
+        domain_id: Some(domain_id),
+    }
+}
+
+#[test]
+fn remote_rejection_fails_one_binding_and_allows_following_binding() {
+    let store = EnforcementStore::open(":memory:").expect("test store should open");
+    let rejected_request = apply_request();
+    let accepted_request = apply_request();
+
+    super::reconciliation::persist_reconciled_apply(
+        &store,
+        rejected_request.clone(),
+        Err(EnforcementError::Remote {
+            code: "kernel_failure".into(),
+            message: "target process is no longer alive".into(),
+        }),
+    )
+    .expect("remote rejection should not abort reconciliation");
+    super::reconciliation::persist_reconciled_apply(
+        &store,
+        accepted_request.clone(),
+        Ok(enforced_binding(accepted_request.clone(), 7)),
+    )
+    .expect("following binding should still reconcile");
+
+    let rejected = store
+        .binding(rejected_request.binding_id)
+        .expect("rejected binding should load")
+        .expect("rejected binding should remain persisted");
+    assert_eq!(rejected.state, BindingState::Failed);
+    assert_eq!(
+        rejected.message.as_deref(),
+        Some("enforcer rejected request (kernel_failure): target process is no longer alive")
+    );
+    assert_eq!(rejected.domain_id, None);
+    assert_eq!(
+        store
+            .binding(accepted_request.binding_id)
+            .expect("accepted binding should load"),
+        Some(enforced_binding(accepted_request, 7))
+    );
+}
+
+#[test]
+fn non_remote_apply_error_still_aborts_reconciliation() {
+    let store = EnforcementStore::open(":memory:").expect("test store should open");
+    let request = apply_request();
+
+    let result = super::reconciliation::persist_reconciled_apply(
+        &store,
+        request.clone(),
+        Err(EnforcementError::Io(std::io::Error::other(
+            "fixture transport failure",
+        ))),
+    );
+
+    assert!(matches!(
+        result,
+        Err(EnforcementCoordinatorError::Client(EnforcementError::Io(_)))
+    ));
+    assert_eq!(
+        store
+            .binding(request.binding_id)
+            .expect("binding query should work"),
+        None
+    );
+}
+
 #[test]
 fn failed_start_does_not_supersede_ready_worker() {
     let coordinator = EnforcementCoordinator::new(
