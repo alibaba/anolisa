@@ -1,8 +1,10 @@
+mod command;
 mod panel;
 mod state;
 #[cfg(test)]
 mod tests;
 
+use self::command::{parse_session_command, SessionCommand};
 use self::panel::{
     close_session_panel, core_adapter, partition_protected, redraw_session_panel,
     render_current_session_panel, render_not_ready, render_session_error, render_unavailable,
@@ -27,42 +29,24 @@ pub(crate) fn render_session_command<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<bool> {
-    let mut parts = arguments.split_whitespace();
-    match parts.next() {
-        None => open_session_manager(blocks, adapter, state, output),
-        Some("status") if parts.next().is_none() => {
+    match parse_session_command(arguments) {
+        SessionCommand::OpenPicker => open_session_manager(blocks, adapter, state, output),
+        SessionCommand::Status => {
             render_session_status(blocks, adapter, state, output)?;
             Ok(true)
         }
-        Some("list") if parts.next().is_none() => {
+        SessionCommand::List => {
             render_session_list(blocks, adapter, state, output)?;
             Ok(true)
         }
-        Some("resume") => {
-            let Some(session_id) = parts.next() else {
-                return open_session_manager(blocks, adapter, state, output);
-            };
-            if parts.next().is_some() {
-                render_usage(state, output)?;
-                return Ok(true);
-            }
+        SessionCommand::Resume(session_id) => {
             select_session(session_id, blocks, adapter, state, output)?;
             Ok(true)
         }
-        Some("clear") => {
-            let requested = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
-            if requested.is_empty() {
-                render_usage(state, output)?;
-                return Ok(true);
-            }
+        SessionCommand::Clear(requested) => {
             begin_explicit_clear(requested, blocks, adapter, state, output)
         }
-        // `/resume ID` is parsed through the same command family.
-        Some(session_id) if parts.next().is_none() => {
-            select_session(session_id, blocks, adapter, state, output)?;
-            Ok(true)
-        }
-        Some(_) => {
+        SessionCommand::Usage => {
             render_usage(state, output)?;
             Ok(true)
         }

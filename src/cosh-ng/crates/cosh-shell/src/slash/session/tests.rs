@@ -2,6 +2,58 @@ use super::*;
 use crate::agent::run::{ActiveAgentRun, AgentRunOrigin};
 use crate::evidence::stream::CoshRequestStreamFilter;
 
+const SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
+const SESSION_USAGE: &str = "Usage: /session [status|list|resume <id>|clear <id>...|clear --all]";
+const SESSION_UNAVAILABLE: &str = "Session recovery requires the cosh-core backend.";
+
+#[test]
+fn malformed_session_commands_render_usage_instead_of_selecting() {
+    for arguments in [
+        "status extra",
+        "list extra",
+        "--all",
+        "resume 00000000-0000-4000-8000-000000000000 extra",
+        "clear",
+        "-reserved",
+    ] {
+        let rendered = render_session_arguments(arguments);
+        assert!(
+            rendered.contains(SESSION_USAGE),
+            "{arguments:?} did not render usage: {rendered}"
+        );
+        assert!(
+            !rendered.contains(SESSION_UNAVAILABLE),
+            "{arguments:?} entered session recovery: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn valid_resume_and_clear_all_keep_session_recovery_routes() {
+    for arguments in [SESSION_ID, "resume 00000000-0000-4000-8000-000000000000"] {
+        let rendered = render_session_arguments(arguments);
+        assert!(
+            rendered.contains(SESSION_UNAVAILABLE),
+            "{arguments:?} did not enter session recovery: {rendered}"
+        );
+        assert!(
+            !rendered.contains(SESSION_USAGE),
+            "{arguments:?} unexpectedly rendered usage: {rendered}"
+        );
+    }
+
+    let rendered = render_session_arguments("clear --all");
+    assert!(rendered.contains(SESSION_UNAVAILABLE), "{rendered}");
+    assert!(!rendered.contains(SESSION_USAGE), "{rendered}");
+}
+
+#[test]
+fn resume_without_id_keeps_picker_contract() {
+    let rendered = render_session_arguments("resume");
+    assert!(rendered.contains(SESSION_UNAVAILABLE), "{rendered}");
+    assert!(!rendered.contains(SESSION_USAGE), "{rendered}");
+}
+
 #[test]
 fn direct_resume_refuses_to_select_while_agent_run_is_active() {
     let adapter = AdapterInstance::CoshCore(CoshCoreAdapter {
@@ -33,6 +85,19 @@ fn direct_resume_refuses_to_select_while_agent_run_is_active() {
         },
         SessionRecoveryState::None
     );
+}
+
+fn render_session_arguments(arguments: &str) -> String {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    let mut output = Vec::new();
+
+    render_session_command(arguments, &[], &adapter, &mut state, &mut output)
+        .expect("render session command");
+    String::from_utf8(output).expect("UTF-8 session panel")
 }
 
 fn test_active_run() -> ActiveAgentRun {
