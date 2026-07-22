@@ -13,9 +13,13 @@ from .base import AgentSecCoreCapability
 logger = logging.getLogger("agent-sec-core")
 
 _DEFAULT_WARNING_TTL_SECONDS = 300.0
-_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+_RAW_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+_SCAN_MODE = _RAW_SCAN_MODE
 if _SCAN_MODE not in {"fast", "standard", "strict"}:
     _SCAN_MODE = "standard"
+logger.info(
+    "Prompt scanner scan mode: raw=%r, effective=%r", _RAW_SCAN_MODE, _SCAN_MODE
+)
 _USER_INPUT_SOURCE = "user_input"
 
 

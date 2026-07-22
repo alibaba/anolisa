@@ -46,11 +46,15 @@ try:
     _TIMEOUT = int(os.environ.get("PROMPT_SCANNER_TIMEOUT", "10"))
 except (TypeError, ValueError):
     _TIMEOUT = 10
-_DEFAULT_SCAN_MODE = (
-    os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
-)
+_RAW_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+_DEFAULT_SCAN_MODE = _RAW_SCAN_MODE
 if _DEFAULT_SCAN_MODE not in {"fast", "standard", "strict"}:
     _DEFAULT_SCAN_MODE = "standard"
+print(
+    f"[prompt-scanner] scan mode configured: raw={_RAW_SCAN_MODE!r}, "
+    f"effective={_DEFAULT_SCAN_MODE!r}",
+    file=sys.stderr,
+)
 _DEFAULT_SOURCE = "user_input"
 
 

@@ -39,9 +39,15 @@ from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
-_DEFAULT_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+_RAW_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+_DEFAULT_MODE = _RAW_SCAN_MODE
 if _DEFAULT_MODE not in {"fast", "standard", "strict"}:
     _DEFAULT_MODE = "standard"
+print(
+    f"[prompt-scanner] scan mode configured: raw={_RAW_SCAN_MODE!r}, "
+    f"effective={_DEFAULT_MODE!r}",
+    file=sys.stderr,
+)
 _DEFAULT_SOURCE = "user_input"
 
 

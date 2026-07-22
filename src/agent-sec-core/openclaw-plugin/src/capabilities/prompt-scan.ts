@@ -32,8 +32,11 @@ export const promptScan: SecurityCapability = {
           return undefined;
         }
 
-        const scanMode = (process.env.PROMPT_SCANNER_SCAN_MODE ?? "standard").trim().toLowerCase();
-        const validScanMode = ["fast", "standard", "strict"].includes(scanMode) ? scanMode : "standard";
+        const rawScanMode = (process.env.PROMPT_SCANNER_SCAN_MODE ?? "standard").trim().toLowerCase();
+        const validScanMode = ["fast", "standard", "strict"].includes(rawScanMode) ? rawScanMode : "standard";
+        api.logger.info(
+          `[prompt-scan] scan mode configured: raw=${JSON.stringify(rawScanMode)}, effective=${JSON.stringify(validScanMode)}`,
+        );
         const result = await callAgentSecCli(
           ["scan-prompt", "--text", text, "--mode", validScanMode, "--format", "json", "--source", "user_input"],
           { timeout: 10000, traceContext: buildTraceContext(event, ctx) },
