@@ -1,6 +1,5 @@
 //! Ingests normalized enforcer events and creates explainable risk cases.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,7 +13,11 @@ use thiserror::Error;
 use super::{
     RiskCase, RiskCaseStatus, RiskSeverity, SecurityEventFilter, SecurityStore, SecurityStoreError,
 };
+use crate::IngestionReadinessError;
 use crate::enforcement::EnforcementClient;
+use crate::ingestion_readiness::{GenerationReadiness, GenerationToken};
+
+const INGESTION_UNAVAILABLE_MESSAGE: &str = "security event ingestion is not subscribed";
 
 /// Security ingestion and correlation failures.
 #[derive(Debug, Error)]
@@ -42,8 +45,7 @@ pub enum SecurityCoordinatorError {
 pub struct SecurityCoordinator {
     client: EnforcementClient,
     store: Arc<SecurityStore>,
-    stop: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
+    ingestion_readiness: GenerationReadiness,
     last_context: Arc<Mutex<Option<EventContext>>>,
 }
 
@@ -60,8 +62,7 @@ impl SecurityCoordinator {
         Self {
             client,
             store,
-            stop: Arc::new(AtomicBool::new(false)),
-            running: Arc::new(AtomicBool::new(false)),
+            ingestion_readiness: GenerationReadiness::new(INGESTION_UNAVAILABLE_MESSAGE),
             last_context: Arc::new(Mutex::new(None)),
         }
     }
@@ -91,34 +92,42 @@ impl SecurityCoordinator {
     /// Returns [`SecurityCoordinatorError::AlreadyRunning`] for duplicate
     /// workers or a thread-spawn error.
     pub fn start(&self) -> Result<JoinHandle<()>, SecurityCoordinatorError> {
-        if self
-            .running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
+        let worker = self.ingestion_readiness.candidate();
+        if !self
+            .ingestion_readiness
+            .install_if_idle(Arc::clone(&worker))
         {
             return Err(SecurityCoordinatorError::AlreadyRunning);
         }
-        self.stop.store(false, Ordering::Release);
         let client = self.client.clone();
         let store = Arc::clone(&self.store);
-        let stop = Arc::clone(&self.stop);
-        let running = Arc::clone(&self.running);
+        let readiness = self.ingestion_readiness.clone();
+        let worker_token = Arc::clone(&worker);
         let last_context = Arc::clone(&self.last_context);
         thread::Builder::new()
             .name("agentsight-security-events".into())
             .spawn(move || {
-                subscription_loop(client, store, &stop, &last_context);
-                running.store(false, Ordering::Release);
+                let _guard = readiness.guard(Arc::clone(&worker_token));
+                subscription_loop(client, store, &readiness, &worker_token, &last_context);
             })
             .map_err(|error| {
-                self.running.store(false, Ordering::Release);
+                self.ingestion_readiness.clear_if_current(&worker);
                 error.into()
             })
     }
 
     /// Requests a running subscription worker to stop.
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::Release);
+        self.ingestion_readiness.stop();
+    }
+
+    /// Waits until the active normalized-event subscriber is acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed timeout or worker-stopped error for the observed generation.
+    pub fn wait_ingestion_ready(&self, timeout: Duration) -> Result<(), IngestionReadinessError> {
+        self.ingestion_readiness.wait_ready(timeout)
     }
 }
 
@@ -239,24 +248,32 @@ fn risk_correlation_key(
 fn subscription_loop(
     client: EnforcementClient,
     store: Arc<SecurityStore>,
-    stop: &AtomicBool,
+    readiness: &GenerationReadiness,
+    worker: &Arc<GenerationToken>,
     last_context: &Mutex<Option<EventContext>>,
 ) {
     let mut backoff = Duration::from_millis(100);
     let mut disconnected = false;
-    while !stop.load(Ordering::Acquire) {
+    while readiness.is_current(worker) {
+        readiness.mark_not_ready(worker);
         match client.subscribe_security_events() {
             Ok(mut subscription) => {
+                if !readiness.mark_ready(worker) {
+                    return;
+                }
                 if disconnected {
                     record_subscription_state(&store, last_context, true, "subscription_restored");
                     disconnected = false;
                 }
                 loop {
-                    if stop.load(Ordering::Acquire) {
+                    if !readiness.is_current(worker) {
                         return;
                     }
                     match subscription.next_event() {
                         Ok(Some(event)) => {
+                            if !readiness.is_current(worker) {
+                                return;
+                            }
                             backoff = Duration::from_millis(100);
                             *last_context
                                 .lock()
@@ -268,6 +285,7 @@ fn subscription_loop(
                         }
                         Ok(None) => {}
                         Err(error) => {
+                            readiness.mark_not_ready(worker);
                             log::warn!("security event subscription disconnected: {error}");
                             if !disconnected {
                                 record_subscription_state(
@@ -284,6 +302,7 @@ fn subscription_loop(
                 }
             }
             Err(error) => {
+                readiness.mark_not_ready(worker);
                 log::warn!("security event subscription failed: {error}");
                 if !disconnected {
                     record_subscription_state(&store, last_context, false, "subscription_lost");
@@ -291,7 +310,7 @@ fn subscription_loop(
                 }
             }
         }
-        sleep_until_retry(stop, backoff);
+        sleep_until_retry(readiness, worker, backoff);
         backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
     }
 }
@@ -358,9 +377,13 @@ fn event_context(event: &SecurityEvent) -> EventContext {
     }
 }
 
-fn sleep_until_retry(stop: &AtomicBool, duration: Duration) {
+fn sleep_until_retry(
+    readiness: &GenerationReadiness,
+    worker: &Arc<GenerationToken>,
+    duration: Duration,
+) {
     let mut remaining = duration;
-    while !stop.load(Ordering::Acquire) && !remaining.is_zero() {
+    while readiness.is_current(worker) && !remaining.is_zero() {
         let interval = remaining.min(Duration::from_millis(50));
         thread::sleep(interval);
         remaining = remaining.saturating_sub(interval);

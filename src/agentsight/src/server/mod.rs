@@ -7,6 +7,7 @@ pub mod auth;
 mod containment;
 mod enforcement;
 mod handlers;
+mod startup;
 mod token_savings;
 
 use std::path::PathBuf;
@@ -284,13 +285,38 @@ pub async fn run_server(
         Arc::clone(&security_store),
         containment_enforcer,
     ));
-    let containment_reconciler = match containment::start_reconciler(&containment) {
+    let readiness_timeout = Duration::from_millis(security_observability.timeout_ms);
+    let mut ingestion_workers = Some((enforcement_ingestion, security_ingestion));
+    let containment_reconciler = match startup::start_after_ingestion_ready(
+        || {
+            enforcement
+                .wait_ingestion_ready(readiness_timeout)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        },
+        || {
+            security_coordinator
+                .wait_ingestion_ready(readiness_timeout)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        },
+        || {
+            containment::start_reconciler(&containment)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        },
+        || {
+            if let Some((enforcement_worker, security_worker)) = ingestion_workers.take() {
+                stop_security_ingestion(&security_coordinator, security_worker);
+                stop_enforcement_ingestion(&enforcement, enforcement_worker);
+            }
+        },
+    ) {
         Ok(worker) => worker,
-        Err(error) => {
-            stop_security_ingestion(&security_coordinator, security_ingestion);
-            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
-            return Err(std::io::Error::other(error.to_string()));
-        }
+        Err(error) => return Err(error),
+    };
+    let Some((enforcement_ingestion, security_ingestion)) = ingestion_workers.take() else {
+        containment::stop_reconciler(&containment, containment_reconciler);
+        return Err(std::io::Error::other(
+            "ingestion worker handles missing after startup",
+        ));
     };
 
     // Initialize dashboard authentication

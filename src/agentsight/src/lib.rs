@@ -36,8 +36,11 @@
 
 pub mod config;
 pub mod container;
+mod ingestion_readiness;
 mod logging;
 pub mod probes;
+
+pub use ingestion_readiness::IngestionReadinessError;
 
 // Re-export config types
 pub use config::{AgentsightConfig, default_base_path};

@@ -411,9 +411,11 @@ fn coordinator_worker_ingests_the_uds_stream() {
     let store = Arc::new(SecurityStore::open_in_memory().expect("fixture store should open"));
     let coordinator = SecurityCoordinator::new(client.clone(), Arc::clone(&store));
     let coordinator_worker = coordinator.start().expect("coordinator should start");
+    coordinator
+        .wait_ingestion_ready(Duration::from_secs(2))
+        .expect("security subscription should be acknowledged");
     let request = audit_request(Uuid::new_v4());
     client.apply(request.clone()).expect("binding should apply");
-    thread::sleep(Duration::from_millis(100));
     backend
         .emit_credential_exfiltration(request.binding_id, "/root/.ssh/id_rsa", "198.51.100.10:443")
         .expect("mock chain should emit");

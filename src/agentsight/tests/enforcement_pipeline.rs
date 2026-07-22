@@ -627,12 +627,20 @@ fn health_waits_for_subscription_acknowledgement() {
     let subscription_attempted = fixture.wait_for_subscribe_attempt();
 
     let before_ack = coordinator.health().expect("backend health should work");
+    let wait_before_ack = coordinator.wait_ingestion_ready(Duration::ZERO);
     fixture.acknowledge_subscription();
-    let ready_after_ack = poll_until(|| coordinator.health().is_ok_and(|health| health.ready));
+    coordinator
+        .wait_ingestion_ready(Duration::from_secs(2))
+        .expect("acknowledged ingestion should become ready");
+    let ready_after_ack = coordinator.health().is_ok_and(|health| health.ready);
     coordinator.stop_ingestion();
     ingestion.join().expect("ingestion should stop");
 
     assert!(subscription_attempted);
+    assert!(matches!(
+        wait_before_ack,
+        Err(agentsight::IngestionReadinessError::Timeout { timeout_ms: 0 })
+    ));
     assert!(!before_ack.ready);
     assert_eq!(
         before_ack.message.as_deref(),

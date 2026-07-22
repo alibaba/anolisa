@@ -13,126 +13,14 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::{EnforcementClient, EnforcementError, EnforcementStore, EnforcementStoreError};
+use crate::IngestionReadinessError;
+use crate::ingestion_readiness::{GenerationReadiness, GenerationToken};
 
 const INGESTION_UNAVAILABLE_MESSAGE: &str = "violation ingestion is not subscribed";
 
 type WorkerTask = Box<dyn FnOnce() + Send + 'static>;
-
-struct WorkerToken {
-    _identity: (),
-}
-
-#[derive(Default)]
-struct IngestionState {
-    current: Option<Arc<WorkerToken>>,
-    ready: bool,
-    message: Option<String>,
-}
-
-#[derive(Clone)]
-struct IngestionReadiness {
-    state: Arc<Mutex<IngestionState>>,
-}
-
-impl IngestionReadiness {
-    fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(IngestionState::default())),
-        }
-    }
-
-    fn candidate(&self) -> Arc<WorkerToken> {
-        Arc::new(WorkerToken { _identity: () })
-    }
-
-    fn install(&self, worker: Arc<WorkerToken>) {
-        let mut state = self.state();
-        state.current = Some(worker);
-        state.ready = false;
-        state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
-    }
-
-    fn stop(&self) {
-        let mut state = self.state();
-        state.current = None;
-        state.ready = false;
-        state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
-    }
-
-    fn clear_if_current(&self, worker: &Arc<WorkerToken>) {
-        let mut state = self.state();
-        if state
-            .current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, worker))
-        {
-            state.current = None;
-            state.ready = false;
-            state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
-        }
-    }
-
-    fn mark_ready(&self, worker: &Arc<WorkerToken>) -> bool {
-        let mut state = self.state();
-        if state
-            .current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, worker))
-        {
-            state.ready = true;
-            state.message = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn mark_not_ready(&self, worker: &Arc<WorkerToken>) {
-        let mut state = self.state();
-        if state
-            .current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, worker))
-        {
-            state.ready = false;
-            state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
-        }
-    }
-
-    fn mark_unavailable(&self, worker: &Arc<WorkerToken>, message: String) {
-        let mut state = self.state();
-        if state
-            .current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, worker))
-        {
-            state.ready = false;
-            state.message = Some(message);
-        }
-    }
-
-    fn is_ready(&self) -> bool {
-        self.state().ready
-    }
-
-    fn status(&self) -> (bool, Option<String>) {
-        let state = self.state();
-        (state.ready, state.message.clone())
-    }
-
-    fn is_current(&self, worker: &Arc<WorkerToken>) -> bool {
-        self.state()
-            .current
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, worker))
-    }
-
-    fn state(&self) -> MutexGuard<'_, IngestionState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
+type WorkerToken = GenerationToken;
+type IngestionReadiness = GenerationReadiness;
 
 /// Coordination failures across the UDS and persistence boundaries.
 #[derive(Debug, Error)]
@@ -165,7 +53,7 @@ impl EnforcementCoordinator {
         Self {
             client,
             store,
-            ingestion_readiness: IngestionReadiness::new(),
+            ingestion_readiness: IngestionReadiness::new(INGESTION_UNAVAILABLE_MESSAGE),
             lifecycle: Arc::new(Mutex::new(())),
         }
     }
@@ -339,6 +227,7 @@ impl EnforcementCoordinator {
         let (activate, activation) = mpsc::sync_channel(0);
         let task = Box::new(move || {
             if activation.recv().is_ok() {
+                let _guard = ingestion_readiness.guard(Arc::clone(&worker_token));
                 ingest_loop(client, store, ingestion_readiness, lifecycle, worker_token);
             }
         });
@@ -357,6 +246,15 @@ impl EnforcementCoordinator {
     /// Requests the ingestion worker to stop at its next bounded read interval.
     pub fn stop_ingestion(&self) {
         self.ingestion_readiness.stop();
+    }
+
+    /// Waits until the active violation subscriber has acknowledged and reconciled state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed timeout or worker-stopped error for the observed generation.
+    pub fn wait_ingestion_ready(&self, timeout: Duration) -> Result<(), IngestionReadinessError> {
+        self.ingestion_readiness.wait_ready(timeout)
     }
 
     /// Queries backend readiness and requires an acknowledged violation subscriber.
@@ -612,7 +510,7 @@ mod tests {
 
     #[test]
     fn ancient_worker_never_becomes_current_after_replacements() {
-        let readiness = IngestionReadiness::new();
+        let readiness = IngestionReadiness::new(INGESTION_UNAVAILABLE_MESSAGE);
         let ancient = readiness.candidate();
         readiness.install(Arc::clone(&ancient));
         assert!(readiness.mark_ready(&ancient));
@@ -628,7 +526,7 @@ mod tests {
 
     #[test]
     fn superseded_worker_cannot_publish_or_revoke_current_readiness() {
-        let readiness = IngestionReadiness::new();
+        let readiness = IngestionReadiness::new(INGESTION_UNAVAILABLE_MESSAGE);
         let first = readiness.candidate();
         readiness.install(Arc::clone(&first));
         assert!(readiness.mark_ready(&first));
@@ -648,7 +546,7 @@ mod tests {
 
     #[test]
     fn health_combines_backend_and_ingestion_failures() {
-        let readiness = IngestionReadiness::new();
+        let readiness = IngestionReadiness::new(INGESTION_UNAVAILABLE_MESSAGE);
         let worker = readiness.candidate();
         readiness.install(Arc::clone(&worker));
         readiness.mark_unavailable(
