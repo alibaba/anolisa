@@ -40,6 +40,7 @@ fn assert_recorded_process_is_not_running(pid_file: &Path) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn terminate_recorded_process(pid_file: &Path) {
     let pid: i32 = fs::read_to_string(pid_file)
         .expect("read session-control pid")
@@ -542,14 +543,14 @@ exec sleep 30
     fs::set_permissions(&script, permissions).expect("chmod");
 
     let client = SessionManagementClient::new(script.display().to_string())
-        .with_timeout(Duration::from_millis(100));
+        .with_timeout(Duration::from_millis(500));
     let error = client
         .list("/tmp", 10, None)
         .expect_err("hung management process must time out");
 
     assert_eq!(error.code, "transport");
     assert!(
-        error.message.contains("exceeded 100ms"),
+        error.message.contains("exceeded 500ms"),
         "{}",
         error.message
     );
@@ -652,6 +653,7 @@ exit 0
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn session_management_deadline_survives_setsid_descendant_with_output_pipes() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -706,6 +708,7 @@ exit 0
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn session_management_deadline_survives_setsid_descendant_holding_stdin() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

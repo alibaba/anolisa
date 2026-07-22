@@ -12,6 +12,20 @@ use cosh_shell::types::{
     AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
 };
 
+fn test_workspace_scope() -> String {
+    fs::canonicalize(std::env::temp_dir())
+        .expect("canonical test workspace")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn test_workspace_child(name: &str) -> String {
+    Path::new(&test_workspace_scope())
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn mock_provider_script(name: &str, body: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -49,11 +63,13 @@ fn claude_adapter(program: &Path) -> ClaudeCodeAdapter {
 }
 
 fn cosh_core_restore_adapter(program: &Path) -> CoshCoreAdapter {
-    let mut session =
-        SessionRuntimeState::with_active("00000000-0000-4000-8000-000000000000", "/tmp");
+    let mut session = SessionRuntimeState::with_active(
+        "00000000-0000-4000-8000-000000000000",
+        test_workspace_scope(),
+    );
     session.recovery.state = SessionRecoveryState::Selected;
     session.recovery.selected_session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
-    session.recovery.selected_workspace_scope = Some("/tmp".to_string());
+    session.recovery.selected_workspace_scope = Some(test_workspace_scope());
     CoshCoreAdapter {
         program: program.display().to_string(),
         allow_model_call: true,
@@ -67,7 +83,7 @@ fn cosh_core_active_adapter(program: &Path) -> CoshCoreAdapter {
         allow_model_call: true,
         session: Arc::new(Mutex::new(SessionRuntimeState::with_active(
             "00000000-0000-4000-8000-000000000000",
-            "/tmp",
+            test_workspace_scope(),
         ))),
     }
 }
@@ -75,11 +91,11 @@ fn cosh_core_active_adapter(program: &Path) -> CoshCoreAdapter {
 fn cosh_core_active_with_unrelated_selection(program: &Path) -> CoshCoreAdapter {
     let mut session = SessionRuntimeState::with_active(
         "00000000-0000-4000-8000-000000000000",
-        "/tmp/workspace-b",
+        test_workspace_child("workspace-b"),
     );
     session.recovery.state = SessionRecoveryState::Selected;
     session.recovery.selected_session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
-    session.recovery.selected_workspace_scope = Some("/tmp/workspace-a".to_string());
+    session.recovery.selected_workspace_scope = Some(test_workspace_child("workspace-a"));
     CoshCoreAdapter {
         program: program.display().to_string(),
         allow_model_call: true,
@@ -88,6 +104,7 @@ fn cosh_core_active_with_unrelated_selection(program: &Path) -> CoshCoreAdapter 
 }
 
 fn make_request(id: &str) -> AgentRequest {
+    let workspace_scope = test_workspace_scope();
     AgentRequest {
         id: id.to_string(),
         session_id: "session-1".to_string(),
@@ -96,8 +113,8 @@ fn make_request(id: &str) -> AgentRequest {
             session_id: "session-1".to_string(),
             command: "echo test".to_string(),
             origin: Default::default(),
-            cwd: "/tmp".to_string(),
-            end_cwd: "/tmp".to_string(),
+            cwd: workspace_scope.clone(),
+            end_cwd: workspace_scope,
             started_at_ms: 0,
             ended_at_ms: 1,
             duration_ms: 1,
@@ -576,8 +593,8 @@ fn active_load_failure_preserves_unrelated_selection_for_every_runner() {
         r#"printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"errors":["session recovery failed"],"session_error_code":"not_found","session_error_phase":"load"}'"#,
     );
     let mut request = make_request("cosh-core-sync-active-not-found-with-selection");
-    request.command_block.cwd = "/tmp/workspace-b".to_string();
-    request.command_block.end_cwd = "/tmp/workspace-b".to_string();
+    request.command_block.cwd = test_workspace_child("workspace-b");
+    request.command_block.end_cwd = test_workspace_child("workspace-b");
 
     let sync = cosh_core_active_with_unrelated_selection(&script);
     let _ = sync.run(&request).expect("run sync active resume failure");

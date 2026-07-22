@@ -6,7 +6,15 @@ use crate::types::{
     AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
 };
 
+fn test_workspace_scope() -> String {
+    std::fs::canonicalize(std::env::temp_dir())
+        .expect("canonical test workspace")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn test_request() -> AgentRequest {
+    let workspace_scope = test_workspace_scope();
     AgentRequest {
         id: "test".to_string(),
         session_id: "sess".to_string(),
@@ -15,8 +23,8 @@ fn test_request() -> AgentRequest {
             session_id: "sess".to_string(),
             command: "echo test".to_string(),
             origin: Default::default(),
-            cwd: "/tmp".to_string(),
-            end_cwd: "/tmp".to_string(),
+            cwd: workspace_scope.clone(),
+            end_cwd: workspace_scope,
             started_at_ms: 0,
             ended_at_ms: 0,
             duration_ms: 0,
@@ -65,7 +73,7 @@ fn adapter_with_active_session(program: &std::path::Path) -> CoshCoreAdapter {
         allow_model_call: true,
         session: Arc::new(Mutex::new(SessionRuntimeState::with_active(
             "00000000-0000-4000-8000-000000000000",
-            "/tmp",
+            test_workspace_scope(),
         ))),
     }
 }
@@ -76,7 +84,7 @@ fn adapter_with_selected_session(program: &std::path::Path) -> CoshCoreAdapter {
         session.recovery.state = SessionRecoveryState::Selected;
         session.recovery.selected_session_id =
             Some("11111111-1111-4111-8111-111111111111".to_string());
-        session.recovery.selected_workspace_scope = Some("/tmp".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
     }
     adapter
 }
@@ -230,7 +238,7 @@ fn prepare_invocation_session_resume() {
         allow_model_call: false,
         session: Arc::new(Mutex::new(SessionRuntimeState::with_active(
             "prev-sess",
-            "/tmp",
+            test_workspace_scope(),
         ))),
     };
     let inv = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Auto);
@@ -260,7 +268,7 @@ fn prepare_invocation_ignores_failed_selected_session() {
         session.recovery.state = SessionRecoveryState::Failed;
         session.recovery.selected_session_id =
             Some("11111111-1111-4111-8111-111111111111".to_string());
-        session.recovery.selected_workspace_scope = Some("/tmp".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
     }
 
     let invocation = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Auto);
@@ -405,21 +413,24 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"s","is_error":
 
 #[test]
 fn selected_session_transitions_through_restoring_to_active() {
+    let workspace_scope = test_workspace_scope();
     let script = std::env::temp_dir().join(format!(
         "cosh-core-session-recovery-{}.sh",
         std::process::id()
     ));
     std::fs::write(
         &script,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 if [ "$1" = "--session-control" ]; then
   cat >/dev/null
-  printf '%s\n' '{"ok":true,"data":{"action":"validate","session":{"session_id":"00000000-0000-4000-8000-000000000000","workspace_scope":"/tmp","created_at_ms":1,"updated_at_ms":2,"model":"mock","message_count":2,"first_prompt":"remember","schema_version":1,"health":"ready"}}}'
+  printf '%s\n' '{{"ok":true,"data":{{"action":"validate","session":{{"session_id":"00000000-0000-4000-8000-000000000000","workspace_scope":"{workspace_scope}","created_at_ms":1,"updated_at_ms":2,"model":"mock","message_count":2,"first_prompt":"remember","schema_version":1,"health":"ready"}}}}}}'
   exit 0
 fi
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}'
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"duration_ms":1,"result":"done"}'
-"#,
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}}'
+printf '%s\n' '{{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"duration_ms":1,"result":"done"}}'
+"#
+        ),
     )
     .expect("write session recovery mock");
     let mut permissions = std::fs::metadata(&script)
@@ -435,7 +446,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"00000000-0000-
         session: Arc::default(),
     };
     let selected = adapter
-        .select_session("/tmp", "00000000-0000-4000-8000-000000000000")
+        .select_session(&workspace_scope, "00000000-0000-4000-8000-000000000000")
         .expect("select persisted session");
     assert_eq!(selected.session_id, "00000000-0000-4000-8000-000000000000");
     assert_eq!(
