@@ -21,9 +21,17 @@ Input schema::
 This script is intentionally self-contained — it does NOT import any
 ``agent_sec_cli`` package.  All it needs is the standard library and the
 ``agent-sec-cli`` on $PATH.
+
+Scan mode (controlled by ``PROMPT_SCANNER_SCAN_MODE`` env var, default:
+``standard``):
+
+- ``fast``: lightweight heuristics, lower latency.
+- ``standard``: balanced detection (default).
+- ``strict``: not implemented yet; currently behaves the same as standard.
 """
 
 import json
+import os
 import subprocess
 import sys
 
@@ -31,7 +39,9 @@ from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
-_DEFAULT_MODE = "standard"
+_DEFAULT_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+if _DEFAULT_MODE not in {"fast", "standard", "strict"}:
+    _DEFAULT_MODE = "standard"
 _DEFAULT_SOURCE = "user_input"
 
 
@@ -50,10 +60,10 @@ def _build_detail_reason(scan_result: dict) -> str:
     confidence = scan_result.get("confidence")
 
     lines = [
-        f"[prompt-scanner] 检测到安全风险",
+        "[prompt-scanner] 检测到安全风险",
         f"  攻击类型 : {threat_type or 'unknown'}",
         f"  风险等级 : {risk_level}",
-        f"  拦截环节 : 用户输入扫描 (UserPromptSubmit)",
+        "  拦截环节 : 用户输入扫描 (UserPromptSubmit)",
     ]
     if confidence is not None:
         try:

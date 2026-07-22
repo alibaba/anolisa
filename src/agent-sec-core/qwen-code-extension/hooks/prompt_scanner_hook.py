@@ -14,6 +14,13 @@ Modes (controlled by ``PROMPT_SCANNER_MODE`` env var, default: ``observe``):
 ``PROMPT_SCANNER_TIMEOUT`` controls the inner ``agent-sec-cli`` timeout in
 seconds.
 
+Scan mode (controlled by ``PROMPT_SCANNER_SCAN_MODE`` env var, default:
+``standard``):
+
+- ``fast``: lightweight heuristics, lower latency.
+- ``standard``: balanced detection (default).
+- ``strict``: not implemented yet; currently behaves the same as standard.
+
 Usage::
 
     python3 prompt_scanner_hook.py          # reads stdin, writes stdout
@@ -39,7 +46,11 @@ try:
     _TIMEOUT = int(os.environ.get("PROMPT_SCANNER_TIMEOUT", "10"))
 except (TypeError, ValueError):
     _TIMEOUT = 10
-_DEFAULT_SCAN_MODE = "standard"
+_DEFAULT_SCAN_MODE = (
+    os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+)
+if _DEFAULT_SCAN_MODE not in {"fast", "standard", "strict"}:
+    _DEFAULT_SCAN_MODE = "standard"
 _DEFAULT_SOURCE = "user_input"
 
 

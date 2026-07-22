@@ -11,6 +11,11 @@ Modes (controlled by PROMPT_SCANNER_MODE env var, default: observe):
   - deny: block prompt with reason when risk is detected.
           (agent-sec-cli's "warn" verdict is escalated to block in this mode)
 
+Scan mode (controlled by PROMPT_SCANNER_SCAN_MODE env var, default: standard):
+  - fast: lightweight heuristics, lower latency.
+  - standard: balanced detection (default).
+  - strict: not implemented yet; currently behaves the same as standard.
+
 Usage::
 
     python3 prompt_scanner_hook.py          # reads stdin, writes stdout
@@ -34,7 +39,11 @@ try:
     TIMEOUT = int(os.environ.get("PROMPT_SCANNER_TIMEOUT", "10"))
 except (ValueError, TypeError):
     TIMEOUT = 10
-_DEFAULT_SCAN_MODE = "standard"
+_DEFAULT_SCAN_MODE = (
+    os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+)
+if _DEFAULT_SCAN_MODE not in {"fast", "standard", "strict"}:
+    _DEFAULT_SCAN_MODE = "standard"
 _DEFAULT_SOURCE = "user_input"
 
 
@@ -51,7 +60,7 @@ def _block(scan_result: dict) -> None:
         "[prompt-scanner] ⛔ 安全拦截：检测到提示词注入攻击",
         f"  攻击类型 : {threat_type or 'unknown'}",
         f"  风险等级 : {risk_level}",
-        f"  拦截环节 : 用户输入扫描 (UserPromptSubmit)",
+        "  拦截环节 : 用户输入扫描 (UserPromptSubmit)",
     ]
     if confidence is not None:
         try:

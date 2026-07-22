@@ -13,7 +13,11 @@ import { buildTraceContext, callAgentSecCli } from "../utils.js";
  * 再做一次 scan-prompt，可覆盖间接注入（tool output 投毒、RAG 投毒等）。
  * 届时独立为新能力 id="prompt-scan-full"，挂 before_prompt_build。
  *
- * CLI: agent-sec-cli scan-prompt --text <prompt> --mode standard --format json --source user_input
+ * Scan mode (controlled by PROMPT_SCANNER_SCAN_MODE env var, default: standard):
+ *   - fast: lightweight heuristics, lower latency.
+ *   - standard: balanced detection (default).
+ *   - strict: not implemented yet; currently behaves the same as standard.
+ * CLI: agent-sec-cli scan-prompt --text <prompt> --mode <fast|standard|strict> --format json --source user_input
  */
 export const promptScan: SecurityCapability = {
   id: "prompt-scan",
@@ -28,8 +32,10 @@ export const promptScan: SecurityCapability = {
           return undefined;
         }
 
+        const scanMode = (process.env.PROMPT_SCANNER_SCAN_MODE ?? "standard").trim().toLowerCase();
+        const validScanMode = ["fast", "standard", "strict"].includes(scanMode) ? scanMode : "standard";
         const result = await callAgentSecCli(
-          ["scan-prompt", "--text", text, "--mode", "standard", "--format", "json", "--source", "user_input"],
+          ["scan-prompt", "--text", text, "--mode", validScanMode, "--format", "json", "--source", "user_input"],
           { timeout: 10000, traceContext: buildTraceContext(event, ctx) },
         );
 

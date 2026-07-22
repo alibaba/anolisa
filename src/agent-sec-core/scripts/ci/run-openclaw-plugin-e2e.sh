@@ -121,6 +121,7 @@ agent_sec_cli_e2e_runtime_deps=(
     "sqlalchemy>=2.0"
     "textual>=0.80"
     "typer>=0.9.0"
+    "regex>=2026.4.4"
 )
 
 sync_pilot_workdir() {

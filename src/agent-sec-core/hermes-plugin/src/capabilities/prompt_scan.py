@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -12,7 +13,9 @@ from .base import AgentSecCoreCapability
 logger = logging.getLogger("agent-sec-core")
 
 _DEFAULT_WARNING_TTL_SECONDS = 300.0
-_SCAN_MODE = "standard"
+_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
+if _SCAN_MODE not in {"fast", "standard", "strict"}:
+    _SCAN_MODE = "standard"
 _USER_INPUT_SOURCE = "user_input"
 
 
@@ -283,10 +286,10 @@ class PromptScanCapability(AgentSecCoreCapability):
         confidence = scan.get("confidence")
 
         lines = [
-            f"\U0001f6e1\ufe0f [prompt-scan] 检测到安全风险",
+            "\U0001f6e1\ufe0f [prompt-scan] 检测到安全风险",
             f"  攻击类型 : {threat_type or 'unknown'}",
             f"  风险等级 : {risk_level}",
-            f"  拦截环节 : 用户输入扫描 (pre_llm_call)",
+            "  拦截环节 : 用户输入扫描 (pre_llm_call)",
         ]
         if confidence is not None:
             try:
