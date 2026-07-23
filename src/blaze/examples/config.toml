@@ -76,6 +76,19 @@ on_load_error = "fail"
 # Default: "/var/lib/blaze/images".
 images_dir = "/var/lib/blaze/images"
 
+# Storage provider backend. Currently supported: "file".
+# Additional providers may be registered at runtime.
+provider = "file"
+
+# Number of pre-warmed storage slots to keep ready in the pool.
+# pool_size = 0           # [Reserved] Warm pool slots (not yet active)
+
+# Whether to prefork (pre-allocate) storage slots at daemon startup.
+# prefork = false         # [Reserved] Pre-start VMs in pool (not yet active)
+
+# Interval between flush-dirty sweeps.
+# flush_interval = "30s"   # [Reserved] Dirty data flush period (not yet active)
+
 # ---------------------------------------------------------------------------
 # Instance pool settings (global defaults for warm-pool recycling).
 # Per-workload pool settings are configured in each policy file.
