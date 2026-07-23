@@ -63,6 +63,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::SessionCompactNotRunningBody => "当前没有后台压缩任务。",
         MessageId::SessionCompactCancelRequestedBody => "已请求取消；后台压缩进程正在终止。",
+        MessageId::SessionCompactPendingCancelledBody => {
+            "已在启动前取消推荐的自动压缩；没有正在运行的压缩进程。\n该上下文修订不会再自动触发；上下文继续增长后仍可触发。"
+        }
         MessageId::SessionCompactCompletedTitle => "上下文已在后台压缩完成",
         MessageId::SessionCompactCompletedBody => "{before} → 约 {after} tokens（{source}）",
         MessageId::SessionCompactCompletedRetainedBody => {

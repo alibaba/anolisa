@@ -79,6 +79,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SessionCompactCancelRequestedBody => {
             "Cancellation requested; the background compactor is being terminated."
         }
+        MessageId::SessionCompactPendingCancelledBody => {
+            "Cancelled the recommended automatic compaction before it started; no compactor process was running.\nThis context revision will not retrigger automatically; further context growth still can."
+        }
         MessageId::SessionCompactCompletedTitle => "Context compacted in the background",
         MessageId::SessionCompactCompletedBody => {
             "{before} → approximately {after} tokens ({source})"

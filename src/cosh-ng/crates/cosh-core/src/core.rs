@@ -12,10 +12,7 @@ use cosh_types::audit::Outcome;
 use crate::auth::{
     apply_auth_credentials, builtin_auth_providers, is_auth_error, wait_for_auth_response,
 };
-use crate::compaction::{
-    compact_in_memory, estimate_messages_tokens, estimate_text_tokens, CompactionState,
-    ContextBudget, ModelCapability,
-};
+use crate::compaction::CompactionRuntime;
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::hook::{HookDecision, HookNotification, HookSystem};
@@ -26,22 +23,18 @@ use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message};
 use crate::tool::{ToolContext, ToolKind, ToolRegistry, ToolResult};
 use crate::truncator::OutputTruncator;
 
-/// Stable prefix identifying typed context-limit turn failures.
-pub(crate) const CONTEXT_LIMIT_ERROR_PREFIX: &str = "context_limit:";
-
 pub struct CoshCore {
     pub config: CoreConfig,
     pub provider: Box<dyn ContentGenerator>,
     pub tools: ToolRegistry,
     pub session_id: String,
     pub messages: Vec<Message>,
-    /// Active compaction projection over the transcript prefix, if any.
+    /// Compaction runtime state: the active projection over the transcript
+    /// prefix and the provider usage accounting that prices it.
     ///
     /// `messages` always stays the complete transcript; the provider only
     /// sees the projected effective context.
-    pub compaction: Option<CompactionState>,
-    /// Provider-reported prompt tokens from the most recent request.
-    pub last_prompt_tokens: Option<u64>,
+    pub compaction: CompactionRuntime,
     pub model: String,
     pub shell_context: Option<ShellContext>,
     pub extra_params: Option<serde_json::Value>,
@@ -73,8 +66,7 @@ impl CoshCore {
             tools,
             session_id: uuid::Uuid::new_v4().to_string(),
             messages: Vec::new(),
-            compaction: None,
-            last_prompt_tokens: None,
+            compaction: CompactionRuntime::default(),
             model,
             shell_context: None,
             extra_params: None,
@@ -131,8 +123,9 @@ impl CoshCore {
 
     /// Conservative runtime-prefix (`P`) estimate for budget computations.
     ///
-    /// Skill summaries need async loading, so they are covered by a fixed
-    /// reserve instead of being rendered here.
+    /// Skill summaries need async loading, so they are covered by the fixed
+    /// reserve inside [`crate::compaction::estimate_prefix_tokens`] instead
+    /// of being rendered here.
     pub(crate) fn estimate_prefix_tokens(&self) -> u64 {
         let system_prompt = ContextBuilder::build_system_prompt(
             &self.cwd(),
@@ -142,82 +135,13 @@ impl CoshCore {
             self.config.ai.output_language.as_deref(),
         );
         let declarations = serde_json::to_string(&self.tools.declarations()).unwrap_or_default();
-        estimate_text_tokens(&system_prompt) + estimate_text_tokens(&declarations) + 1024
+        crate::compaction::estimate_prefix_tokens(&system_prompt, &declarations)
     }
 
-    /// Current effective-context size in tokens.
-    ///
-    /// Keeps the larger of the local estimate and the provider-reported
-    /// input size so estimation error can never under-report pressure.
+    /// Current effective-context size in tokens under the active projection.
     pub(crate) fn effective_history_tokens(&self, prefix_tokens: u64) -> u64 {
-        let estimated = estimate_messages_tokens(&crate::compaction::effective_messages(
-            &self.messages,
-            self.compaction.as_ref(),
-        ));
-        match self.last_prompt_tokens {
-            Some(reported) => estimated.max(reported.saturating_sub(prefix_tokens)),
-            None => estimated,
-        }
-    }
-
-    /// Emergency context preflight executed before every provider request.
-    ///
-    /// When the next request would cross the emergency threshold, compacts
-    /// synchronously at this complete exchange boundary. Returns a typed
-    /// `context_limit:` error instead of submitting an oversized request
-    /// when no safe split reclaims enough context.
-    async fn context_preflight<W: Write>(
-        &mut self,
-        prefix_tokens: u64,
-        writer: &mut W,
-    ) -> Result<(), String> {
-        let policy = self.config.session.compaction.clone();
-        if !policy.enabled {
-            return Ok(());
-        }
-        let capability =
-            ModelCapability::resolve(&policy, self.config.agent.session_token_limit, &self.model);
-        let budget = ContextBudget::compute(capability, prefix_tokens, &policy);
-        if !budget.over_emergency(self.effective_history_tokens(prefix_tokens)) {
-            return Ok(());
-        }
-        self.emit(
-            writer,
-            &OutputMessage::system_status("compaction_emergency_started"),
-        );
-        let candidate = compact_in_memory(
-            &self.messages,
-            self.compaction.as_ref(),
-            self.provider.as_ref(),
-            &self.model,
-            &self.config,
-            budget.target_tokens,
-        )
-        .await;
-        if let Some(candidate) = candidate {
-            self.compaction = Some(candidate);
-            // The last provider-reported usage measured the pre-compaction
-            // context and must not suppress the shrunken estimate.
-            self.last_prompt_tokens = None;
-        }
-        let history_tokens = self.effective_history_tokens(prefix_tokens);
-        if budget.over_emergency(history_tokens) {
-            self.emit(
-                writer,
-                &OutputMessage::system_status("compaction_emergency_failed"),
-            );
-            return Err(format!(
-                "{CONTEXT_LIMIT_ERROR_PREFIX} effective context (~{history_tokens} tokens) \
-                 exceeds the emergency threshold ({} of {} usable history tokens) and no safe \
-                 split reclaimed enough context; compact manually or start a new session",
-                budget.emergency_tokens, budget.usable_history
-            ));
-        }
-        self.emit(
-            writer,
-            &OutputMessage::system_status("compaction_emergency_completed"),
-        );
-        Ok(())
+        self.compaction
+            .effective_history_tokens(&self.messages, prefix_tokens)
     }
 
     fn classify_tool(&self, tool_name: &str, _params: &serde_json::Value) -> Outcome {
@@ -390,10 +314,12 @@ impl CoshCore {
             self.config.ai.output_language.as_deref(),
         );
         // Runtime prefix estimate (P): system prompt + serialized tool
-        // declarations + a reserve for hook context injected mid-run.
-        let prefix_tokens = estimate_text_tokens(&system_prompt)
-            + estimate_text_tokens(&serde_json::to_string(&tool_decls).unwrap_or_default())
-            + 1024;
+        // declarations + the compaction module's reserve for hook context
+        // injected mid-run.
+        let prefix_tokens = crate::compaction::estimate_prefix_tokens(
+            &system_prompt,
+            &serde_json::to_string(&tool_decls).unwrap_or_default(),
+        );
 
         let max_turns = self.config.agent.max_turns;
 
@@ -402,10 +328,18 @@ impl CoshCore {
             // The loop top is always a complete model/tool exchange boundary
             // with no pending approval or user question, so an emergency
             // compaction here can never split an unfinished interaction.
-            self.context_preflight(prefix_tokens, writer).await?;
+            crate::compaction::run_context_preflight(
+                &mut self.compaction,
+                &self.messages,
+                self.provider.as_ref(),
+                &self.model,
+                &self.config,
+                prefix_tokens,
+                writer,
+            )
+            .await?;
 
-            let mut provider_messages =
-                crate::compaction::effective_messages(&self.messages, self.compaction.as_ref());
+            let mut provider_messages = self.compaction.effective_messages(&self.messages);
             crate::redaction::redact_messages(&mut provider_messages);
 
             // ─── Hook: BeforeModel ───
@@ -546,7 +480,9 @@ impl CoshCore {
                         total_tokens,
                     } => {
                         usage_info = Some((prompt_tokens, completion_tokens, total_tokens));
-                        self.last_prompt_tokens = Some(prompt_tokens as u64);
+                        // Explicit hand-off: provider usage feeds compaction
+                        // thresholds through the runtime's accounting API.
+                        self.compaction.note_provider_usage(prompt_tokens as u64);
                         // ─── SLS: token usage ───
                         self.metrics.tokens_input += prompt_tokens as u64;
                         self.metrics.tokens_output += completion_tokens as u64;

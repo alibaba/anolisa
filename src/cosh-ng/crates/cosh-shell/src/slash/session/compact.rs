@@ -321,23 +321,38 @@ fn render_compaction_status<W: Write>(state: &InlineState, output: &mut W) -> st
 }
 
 fn cancel_compaction<W: Write>(state: &mut InlineState, output: &mut W) -> std::io::Result<()> {
-    let signalled = match state.control.session_mut().compaction_mut().active.as_mut() {
-        Some(active) => {
-            // Full cancellation path: SIGTERM the process group now; the
-            // completion poll escalates to SIGKILL after the grace period,
-            // reaps the child, and renders the cancelled completion.
-            active.request_termination(TerminationReason::UserCancel);
-            true
-        }
-        None => false,
-    };
-    if !signalled {
+    let compaction = state.control.session_mut().compaction_mut();
+    // A recommendation that has not started yet is cancelled in the same
+    // pass: taking it atomically records its suppression marker and releases
+    // the Agent compaction gate, so the same session + generation + revision
+    // cannot retrigger while a new revision still can. Any user requests
+    // queued behind the gate resume at the next safe-boundary poll.
+    let pending_cancelled = compaction.cancel_pending_auto();
+    if let Some(active) = compaction.active.as_mut() {
+        // Full cancellation path: SIGTERM the process group now; the
+        // completion poll escalates to SIGKILL after the grace period,
+        // reaps the child, and renders the cancelled completion.
+        active.request_termination(TerminationReason::UserCancel);
         return render_notice_panel(
             output,
             state.i18n().t(MessageId::SessionCompactTitle),
             vec![state
                 .i18n()
-                .t(MessageId::SessionCompactNotRunningBody)
+                .t(MessageId::SessionCompactCancelRequestedBody)
+                .to_string()],
+            None,
+        );
+    }
+    if pending_cancelled {
+        // No compactor process exists yet, so nothing is terminated — the
+        // notice must say the recommendation was withdrawn, not that a
+        // process is being killed.
+        return render_notice_panel(
+            output,
+            state.i18n().t(MessageId::SessionCompactTitle),
+            vec![state
+                .i18n()
+                .t(MessageId::SessionCompactPendingCancelledBody)
                 .to_string()],
             None,
         );
@@ -347,7 +362,7 @@ fn cancel_compaction<W: Write>(state: &mut InlineState, output: &mut W) -> std::
         state.i18n().t(MessageId::SessionCompactTitle),
         vec![state
             .i18n()
-            .t(MessageId::SessionCompactCancelRequestedBody)
+            .t(MessageId::SessionCompactNotRunningBody)
             .to_string()],
         None,
     )
@@ -377,16 +392,22 @@ pub(crate) fn poll_background_compaction<W: Write>(
         .take_completion()
     {
         // Suppress retriggering for the same context revision after an
-        // automatic attempt fails or is cancelled.
+        // automatic attempt fails or is cancelled. This *adds* the revision to
+        // the suppressed set rather than replacing it: a `/session compact
+        // cancel` that suppressed a newer pending recommendation before
+        // terminating this compactor must keep that suppression intact, so the
+        // cancelled pending revision cannot re-arm the gate when re-emitted.
         if completion.origin == CompactionOrigin::Auto
             && (completion.cancelled
                 || matches!(completion.outcome, CompactionOutcome::Failed { .. }))
         {
-            state
-                .control
-                .session_mut()
-                .compaction_mut()
-                .suppressed_auto_marker = completion.revision_marker.clone();
+            if let Some(marker) = completion.revision_marker.clone() {
+                state
+                    .control
+                    .session_mut()
+                    .compaction_mut()
+                    .suppress_auto_marker(marker);
+            }
         }
         render_completion(&completion, state, output)?;
         crate::slash::prompt::write_shell_prompt(state, output)?;

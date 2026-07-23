@@ -12,6 +12,13 @@ use super::process::{
     CompactionOutcome, SuppressionMarker, TerminationReason,
 };
 
+/// Upper bound on retained suppression markers (see
+/// [`CompactionRuntime::suppressed_auto_markers`]). Only a handful are ever
+/// live at once — an active compactor plus a newer pending recommendation —
+/// so this is a generous backstop against unbounded growth over a long
+/// session, not a functional limit.
+const MAX_SUPPRESSED_AUTO_MARKERS: usize = 16;
+
 /// Automatic trigger recommendation reported by cosh-core.
 ///
 /// Bound to the exact session and context revision the recommendation was
@@ -54,11 +61,21 @@ pub(crate) struct CompactionRuntime {
     pub(super) active: Option<ActiveCompaction>,
     pending_completion: Option<CompactionCompletion>,
     pending_auto: Option<AutoCompactionRequest>,
-    // After an automatic attempt fails or is cancelled, its per-session
-    // revision marker is suppressed so the same session+revision cannot
-    // retrigger a loop (a different session, generation, or revision still
-    // may).
-    pub(super) suppressed_auto_marker: Option<SuppressionMarker>,
+    /// Per-session revision markers suppressed after an automatic attempt was
+    /// cancelled, failed, or failed to spawn: a re-emitted recommendation for
+    /// the same session + generation + revision is dropped so it cannot
+    /// retrigger a loop (a different session, generation, or revision still
+    /// may).
+    ///
+    /// This is a set, not a single slot, because an active compactor and a
+    /// newer pending recommendation can both need suppression at once: one
+    /// `/session compact cancel` suppresses the pending revision immediately,
+    /// and the active compactor's later cancelled completion must *add* its own
+    /// revision without clobbering the pending one — otherwise the cancelled
+    /// pending revision would re-arm the gate the moment it was re-emitted.
+    /// Bounded by [`MAX_SUPPRESSED_AUTO_MARKERS`]; the oldest revision is
+    /// evicted first.
+    pub(super) suppressed_auto_markers: Vec<SuppressionMarker>,
 }
 
 impl CompactionRuntime {
@@ -83,6 +100,28 @@ impl CompactionRuntime {
         self.pending_completion.is_some()
     }
 
+    /// Records `marker` as suppressed so a re-emitted recommendation for the
+    /// same session + generation + revision is dropped.
+    ///
+    /// Idempotent (a repeated marker is not stored twice) and bounded by
+    /// [`MAX_SUPPRESSED_AUTO_MARKERS`]: once the cap is reached the oldest
+    /// suppressed revision is evicted, so a long-lived session cannot grow the
+    /// set without limit.
+    pub(super) fn suppress_auto_marker(&mut self, marker: SuppressionMarker) {
+        if self.suppressed_auto_markers.contains(&marker) {
+            return;
+        }
+        if self.suppressed_auto_markers.len() >= MAX_SUPPRESSED_AUTO_MARKERS {
+            self.suppressed_auto_markers.remove(0);
+        }
+        self.suppressed_auto_markers.push(marker);
+    }
+
+    /// Whether `marker` is currently suppressed.
+    pub(super) fn is_auto_marker_suppressed(&self, marker: &SuppressionMarker) -> bool {
+        self.suppressed_auto_markers.contains(marker)
+    }
+
     /// Records a strictly validated `compaction_recommended_v1` payload.
     ///
     /// Payload (already stripped of its prefix):
@@ -90,6 +129,10 @@ impl CompactionRuntime {
     /// is validated — exactly five fields, a canonical UUID session id, and
     /// four `u64` values — and anything malformed is dropped (fail closed) so
     /// a corrupt status can never bind a compaction to the wrong session.
+    ///
+    /// A payload naming the currently suppressed session + generation +
+    /// revision is also dropped: a cancelled or failed automatic attempt must
+    /// not re-arm the compaction gate for the same context revision.
     pub(crate) fn note_recommendation(&mut self, payload: &str) {
         let fields: Vec<&str> = payload.split(':').collect();
         if fields.len() != 5 {
@@ -107,13 +150,32 @@ impl CompactionRuntime {
         ) else {
             return;
         };
-        self.pending_auto = Some(AutoCompactionRequest {
+        let request = AutoCompactionRequest {
             session_id: session_id.to_string(),
             generation,
             projection_revision,
             history_tokens,
             usable_history,
-        });
+        };
+        if self.is_auto_marker_suppressed(&request.suppression_marker()) {
+            return;
+        }
+        self.pending_auto = Some(request);
+    }
+
+    /// Atomically cancels a recommendation that has not started yet.
+    ///
+    /// Takes the pending request and records its suppression marker in one
+    /// step, so the same session + generation + revision can neither start at
+    /// the next idle boundary nor re-arm through a re-emitted status. Returns
+    /// `false` when nothing was pending. No process exists at this point, so
+    /// there is nothing to signal or reap.
+    pub(super) fn cancel_pending_auto(&mut self) -> bool {
+        let Some(request) = self.pending_auto.take() else {
+            return false;
+        };
+        self.suppress_auto_marker(request.suppression_marker());
+        true
     }
 
     /// Harvests a finished compactor without rendering anything, and drives
@@ -301,9 +363,7 @@ pub(super) fn maybe_start_pending_auto<W: Write>(
         .control
         .session()
         .compaction()
-        .suppressed_auto_marker
-        .as_ref()
-        == Some(&marker)
+        .is_auto_marker_suppressed(&marker)
     {
         return Ok(());
     }
@@ -364,7 +424,7 @@ pub(super) fn maybe_start_pending_auto<W: Write>(
                 .control
                 .session_mut()
                 .compaction_mut()
-                .suppressed_auto_marker = Some(marker);
+                .suppress_auto_marker(marker);
             render_notice_panel(
                 output,
                 state.i18n().t(MessageId::SessionErrorTitle),

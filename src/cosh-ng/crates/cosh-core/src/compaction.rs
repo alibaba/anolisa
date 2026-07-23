@@ -10,12 +10,16 @@
 mod boundary;
 mod budget;
 mod engine;
+mod preflight;
 mod projection;
+mod runtime;
 mod summarize;
 
 pub use budget::{ContextBudget, ModelCapability};
 pub use projection::CompactionState;
+pub use runtime::CompactionRuntime;
 
-pub(crate) use budget::{estimate_messages_tokens, estimate_text_tokens};
-pub(crate) use engine::{compact_in_memory, run_compact_cli};
-pub(crate) use projection::{effective_messages, sanitize_loaded_state};
+pub(crate) use engine::run_compact_cli;
+pub(crate) use preflight::run_context_preflight;
+pub(crate) use projection::sanitize_loaded_state;
+pub(crate) use runtime::estimate_prefix_tokens;

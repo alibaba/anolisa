@@ -11,69 +11,35 @@ use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::runtime::state::InlineState;
 use crate::types::{ShellEvent, ShellEventKind};
 
-/// Spawns a long-lived placeholder process in its own group so tests can
-/// exercise cancellation and drop-time reaping without a real cosh-core.
-fn fake_active(
-    receiver: mpsc::Receiver<CompactionOutcome>,
-    sleep_secs: &str,
-) -> (ActiveCompaction, u32) {
-    let mut command = std::process::Command::new("sleep");
-    command
-        .arg(sleep_secs)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    // The child handle is owned exclusively by the ActiveCompaction, matching
-    // production: reaping happens through `poll`/`Drop`, never on a side
-    // thread, so a signal can never target a recycled PID.
-    let child = command.spawn().expect("spawn placeholder");
-    let pid = child.id();
+// These are pure state-machine tests: no test here may spawn a subprocess
+// (enforced by scripts/check-layout.sh). Real SIGTERM/SIGKILL delivery,
+// process-group reaping, and shell-exit cleanup are covered against a real
+// compactor child in `tests/raw_cli/compaction.rs`.
+
+/// Process-free active compaction: the state machine is driven entirely
+/// through the receiver, the deadline, and the termination fields, with no
+/// child to signal (`terminate_and_reap` is a no-op on `None`).
+fn childless_active(receiver: mpsc::Receiver<CompactionOutcome>) -> ActiveCompaction {
     let now = Instant::now();
-    (
-        ActiveCompaction {
-            session_id: "00000000-0000-4000-8000-000000000000".to_string(),
-            workspace_scope: "/tmp".to_string(),
-            started_at: now,
-            deadline: now + super::process::COMPACTOR_DEADLINE,
-            origin: CompactionOrigin::Manual,
-            revision_marker: None,
-            termination: None,
-            stderr_tail: crate::adapter::StderrTail::new(1024),
-            child: Arc::new(Mutex::new(Some(child))),
-            receiver,
-        },
-        pid,
-    )
-}
-
-fn process_alive(pid: u32) -> bool {
-    unsafe { nix::libc::kill(pid as i32, 0) == 0 }
-}
-
-fn wait_for_exit(pid: u32) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if !process_alive(pid) {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    ActiveCompaction {
+        session_id: "00000000-0000-4000-8000-000000000000".to_string(),
+        workspace_scope: "/tmp".to_string(),
+        started_at: now,
+        deadline: now + super::process::COMPACTOR_DEADLINE,
+        origin: CompactionOrigin::Manual,
+        revision_marker: None,
+        termination: None,
+        stderr_tail: crate::adapter::StderrTail::new(1024),
+        child: Arc::new(Mutex::new(None)),
+        receiver,
     }
-    false
 }
 
-fn state_with_active_compaction(
-    sleep_secs: &str,
-) -> (InlineState, u32, mpsc::Sender<CompactionOutcome>) {
+fn state_with_childless_compaction() -> (InlineState, mpsc::Sender<CompactionOutcome>) {
     let (sender, receiver) = mpsc::channel();
-    let (active, pid) = fake_active(receiver, sleep_secs);
     let mut state = InlineState::default();
-    state.control.session_mut().compaction_mut().active = Some(active);
-    (state, pid, sender)
+    state.control.session_mut().compaction_mut().active = Some(childless_active(receiver));
+    (state, sender)
 }
 
 fn natural_language_event(input: &str) -> ShellEvent {
@@ -123,7 +89,7 @@ fn duplicate_compact_is_rejected_while_running() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     let mut output = Vec::new();
 
     render_session_compact_command(None, &[], &adapter, &mut state, &mut output)
@@ -131,22 +97,17 @@ fn duplicate_compact_is_rejected_while_running() {
 
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(rendered.contains("already running"), "{rendered}");
-    // Cleanup: dropping state kills the placeholder group.
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
 fn conflicting_session_mutations_are_rejected_during_compaction() {
-    let (state, pid, _sender) = state_with_active_compaction("30");
+    let (state, _sender) = state_with_childless_compaction();
     assert!(!super::super::panel::session_management_idle(&state));
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
 fn status_reports_running_and_idle_states() {
-    let (state, pid, _sender) = state_with_active_compaction("30");
+    let (state, _sender) = state_with_childless_compaction();
     let mut output = Vec::new();
     render_compaction_status(&state, &mut output).expect("render status");
     let rendered = String::from_utf8(output).expect("UTF-8");
@@ -155,8 +116,6 @@ fn status_reports_running_and_idle_states() {
         rendered.contains("00000000-0000-4000-8000-000000000000"),
         "{rendered}"
     );
-    drop(state);
-    assert!(wait_for_exit(pid));
 
     let idle = InlineState::default();
     let mut output = Vec::new();
@@ -166,20 +125,25 @@ fn status_reports_running_and_idle_states() {
 }
 
 #[test]
-fn cancel_terminates_the_compactor_process_group() {
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+fn cancel_requests_termination_of_the_active_compactor() {
+    let (mut state, _sender) = state_with_childless_compaction();
     let mut output = Vec::new();
 
     cancel_compaction(&mut state, &mut output).expect("render cancel notice");
 
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(rendered.contains("Cancellation requested"), "{rendered}");
-    // Cancellation only signals the group; the child is reaped through the
-    // single owning handle on `poll`/`Drop`, never on a side thread. Dropping
-    // the runtime performs that reap, after which the PID is gone (a still
-    // un-reaped zombie would keep `kill(pid, 0)` succeeding).
-    drop(state);
-    assert!(wait_for_exit(pid));
+    // The user cancel arms the termination state machine; actual SIGTERM
+    // delivery, SIGKILL escalation, and process-group reaping against a real
+    // child are verified in `tests/raw_cli/compaction.rs`.
+    assert!(state
+        .control
+        .session()
+        .compaction()
+        .active
+        .as_ref()
+        .expect("still active during grace")
+        .cancel_requested());
 
     let mut idle = InlineState::default();
     let mut output = Vec::new();
@@ -189,18 +153,8 @@ fn cancel_terminates_the_compactor_process_group() {
 }
 
 #[test]
-fn shell_exit_reaps_the_compactor_via_drop() {
-    let (state, pid, _sender) = state_with_active_compaction("30");
-    assert!(process_alive(pid));
-    drop(state);
-    assert!(wait_for_exit(pid));
-}
-
-#[test]
 fn completion_is_deferred_while_foreground_command_is_active() {
-    // A zero-length placeholder exits on its own; poll marks it finished, so
-    // no Drop-time signal targets the (already reaped) group.
-    let (mut state, pid, sender) = state_with_active_compaction("0");
+    let (mut state, sender) = state_with_childless_compaction();
     sender
         .send(CompactionOutcome::Committed {
             tokens_before: 74_210,
@@ -218,7 +172,6 @@ fn completion_is_deferred_while_foreground_command_is_active() {
     poll_background_compaction(&mut state, &mut output, &adapter, true).expect("poll while busy");
     assert!(output.is_empty());
     assert!(!compaction_active(&state));
-    assert!(wait_for_exit(pid));
 
     // Next safe prompt boundary: completion renders and prompt is restored.
     let mut output = Vec::new();
@@ -236,7 +189,7 @@ fn completion_is_deferred_while_foreground_command_is_active() {
 
 #[test]
 fn cancelled_completion_reports_unchanged_projection() {
-    let (mut state, pid, sender) = state_with_active_compaction("0");
+    let (mut state, sender) = state_with_childless_compaction();
     state
         .control
         .session_mut()
@@ -259,15 +212,14 @@ fn cancelled_completion_reports_unchanged_projection() {
     assert!(rendered.contains("cancelled"), "{rendered}");
     // The safe wording must not claim the projection is unchanged.
     assert!(rendered.contains("transcript is unchanged"), "{rendered}");
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
-fn disconnected_reader_becomes_a_transport_failure_and_reaps() {
+fn disconnected_reader_becomes_a_transport_failure() {
     // If the reader thread vanishes without sending a result, the channel
-    // disconnects; poll must turn that into a typed transport failure, reap
-    // the child, and stop reporting the compaction active — never hang.
-    let (mut state, pid, sender) = state_with_active_compaction("0");
+    // disconnects; poll must turn that into a typed transport failure and
+    // stop reporting the compaction active — never hang.
+    let (mut state, sender) = state_with_childless_compaction();
     drop(sender);
 
     let adapter = AdapterInstance::Fake(FakeAgentAdapter);
@@ -276,7 +228,6 @@ fn disconnected_reader_becomes_a_transport_failure_and_reaps() {
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(rendered.contains("transport"), "{rendered}");
     assert!(!compaction_active(&state));
-    assert!(wait_for_exit(pid));
 }
 
 /// Internal, non-intercept start paths (auto failure analysis, hooks,
@@ -293,7 +244,7 @@ fn internal_agent_run_is_suppressed_during_compaction() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     let request = AgentRequest {
         id: "auto-failure-1".to_string(),
         session_id: "shell-session".to_string(),
@@ -342,8 +293,6 @@ fn internal_agent_run_is_suppressed_during_compaction() {
     assert!(state.agent_run.active.is_none());
     assert!(state.agent_run.queued_requests.is_empty());
     assert!(output.is_empty());
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -358,7 +307,7 @@ fn suppressed_failed_command_analysis_is_not_marked_analyzed() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     state.analysis_mode = AnalysisMode::Auto;
     let block = CommandBlock {
         id: "blk-suppressed".to_string(),
@@ -404,8 +353,6 @@ fn suppressed_failed_command_analysis_is_not_marked_analyzed() {
     );
     assert!(state.agent_run.active.is_none());
     assert!(state.agent_run.queued_requests.is_empty());
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -414,7 +361,7 @@ fn agent_requests_receive_paused_notice_during_compaction() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     let mut output = Vec::new();
 
     render_intercept_agent_guidance(
@@ -430,8 +377,6 @@ fn agent_requests_receive_paused_notice_during_compaction() {
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(rendered.contains("paused"), "{rendered}");
     assert!(state.agent_run.active.is_none());
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -578,7 +523,7 @@ fn user_requests_queue_fifo_during_active_compaction() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     let mut output = Vec::new();
 
     for id in ["user-1", "user-2"] {
@@ -603,8 +548,6 @@ fn user_requests_queue_fifo_during_active_compaction() {
         .map(|pending| pending.request.id.as_str())
         .collect();
     assert_eq!(ids, ["user-1", "user-2"]);
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -613,7 +556,7 @@ fn auto_failure_suppresses_the_session_scoped_revision_marker() {
     // the session id, so the same revision on the same session will not
     // retrigger — but a different session is unaffected.
     let (sender, receiver) = mpsc::channel();
-    let (mut active, pid) = fake_active(receiver, "0");
+    let mut active = childless_active(receiver);
     active.origin = CompactionOrigin::Auto;
     active.revision_marker = Some(super::process::SuppressionMarker {
         session_id: "00000000-0000-4000-8000-000000000000".to_string(),
@@ -633,30 +576,25 @@ fn auto_failure_suppresses_the_session_scoped_revision_marker() {
     let mut output = Vec::new();
     poll_background_compaction(&mut state, &mut output, &adapter, false).expect("poll");
 
-    let suppressed = state
-        .control
-        .session()
-        .compaction()
-        .suppressed_auto_marker
-        .clone()
-        .expect("suppression marker recorded");
-    assert_eq!(
-        suppressed.session_id,
-        "00000000-0000-4000-8000-000000000000"
+    let compaction = state.control.session().compaction();
+    assert!(
+        compaction.is_auto_marker_suppressed(&super::process::SuppressionMarker {
+            session_id: "00000000-0000-4000-8000-000000000000".to_string(),
+            generation: 1,
+            projection_revision: 0,
+        }),
+        "failed revision was not suppressed"
     );
-    assert_eq!(suppressed.generation, 1);
-    assert_eq!(suppressed.projection_revision, 0);
     // A different session with the same generation/revision is a distinct
     // identity and must not be suppressed by this failure.
-    assert_ne!(
-        suppressed,
-        super::process::SuppressionMarker {
+    assert!(
+        !compaction.is_auto_marker_suppressed(&super::process::SuppressionMarker {
             session_id: "11111111-1111-4111-8111-111111111111".to_string(),
             generation: 1,
             projection_revision: 0,
-        }
+        }),
+        "a different session was wrongly suppressed"
     );
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -664,7 +602,7 @@ fn completion_is_rendered_before_a_held_user_request_resumes() {
     use crate::agent::run::{AgentRunOrigin, AgentStartIntent, PendingAgentRequest};
 
     // A user request was held back in the queue while the compaction ran.
-    let (mut state, pid, sender) = state_with_active_compaction("0");
+    let (mut state, sender) = state_with_childless_compaction();
     state
         .agent_run
         .queued_requests
@@ -694,7 +632,6 @@ fn completion_is_rendered_before_a_held_user_request_resumes() {
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(rendered.contains("74210"), "{rendered}");
     assert!(state.agent_run.queued_requests.is_empty());
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -704,7 +641,7 @@ fn pending_completion_blocks_agent_start_until_rendered() {
         AgentStartIntent,
     };
 
-    let (mut state, pid, sender) = state_with_active_compaction("0");
+    let (mut state, sender) = state_with_childless_compaction();
     sender
         .send(CompactionOutcome::Committed {
             tokens_before: 74_210,
@@ -765,14 +702,13 @@ fn pending_completion_blocks_agent_start_until_rendered() {
         .compaction()
         .has_pending_completion());
     assert!(state.agent_run.queued_requests.is_empty());
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
 fn natural_language_during_compaction_enqueues_once_then_resumes() {
     // A running compaction whose result has not arrived yet keeps the Agent
     // paused (the receiver stays empty until we send an outcome).
-    let (mut state, pid, sender) = state_with_active_compaction("0");
+    let (mut state, sender) = state_with_childless_compaction();
     let adapter = AdapterInstance::Fake(FakeAgentAdapter);
     let events = [natural_language_event("please analyze the memory usage")];
 
@@ -801,7 +737,6 @@ fn natural_language_during_compaction_enqueues_once_then_resumes() {
     poll_background_compaction(&mut state, &mut resume_output, &adapter, false)
         .expect("resume poll");
     assert!(state.agent_run.queued_requests.is_empty());
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -816,7 +751,7 @@ fn user_request_is_rejected_with_notice_when_queue_is_full() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     // Fill the queue to capacity.
     for index in 0..MAX_QUEUED_AGENT_REQUESTS {
         state
@@ -850,8 +785,6 @@ fn user_request_is_rejected_with_notice_when_queue_is_full() {
         MAX_QUEUED_AGENT_REQUESTS
     );
     assert!(state.agent_run.active.is_none());
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 fn fill_user_queue_to_capacity(state: &mut InlineState) {
@@ -883,7 +816,7 @@ fn wrapper_surfaces_queue_full_notice_for_user_request() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     fill_user_queue_to_capacity(&mut state);
     let mut output = Vec::new();
 
@@ -905,21 +838,17 @@ fn wrapper_surfaces_queue_full_notice_for_user_request() {
         MAX_QUEUED_AGENT_REQUESTS
     );
     assert!(state.agent_run.active.is_none());
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
 fn queue_full_notice_title_depends_on_compaction() {
     // While a compaction is pausing the Agent, the compaction-framed title is
     // used.
-    let (state, pid, _sender) = state_with_active_compaction("30");
+    let (state, _sender) = state_with_childless_compaction();
     let mut output = Vec::new();
     render_agent_queue_full_notice(&state, &mut output).expect("render");
     let compacting = String::from_utf8(output).expect("UTF-8");
     assert!(compacting.contains("compaction"), "{compacting}");
-    drop(state);
-    assert!(wait_for_exit(pid));
 
     // With no compaction (an ordinary busy Agent), the dedicated queue-full
     // title is used — not the "queued" title (the request was NOT queued) and
@@ -944,7 +873,7 @@ fn control_protocol_response_is_guaranteed_a_queue_slot() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     fill_user_queue_to_capacity(&mut state);
     assert_eq!(
         state.agent_run.queued_requests.len(),
@@ -976,8 +905,6 @@ fn control_protocol_response_is_guaranteed_a_queue_slot() {
     // No queue-full notice was shown for the guaranteed response.
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(!rendered.contains("Too many"), "{rendered}");
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -992,7 +919,7 @@ fn user_confirmed_analysis_queue_full_reverts_and_notifies() {
         program: "/must-not-be-started".to_string(),
         ..CoshCoreAdapter::default()
     });
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+    let (mut state, _sender) = state_with_childless_compaction();
     state.analysis_mode = AnalysisMode::Auto;
     fill_user_queue_to_capacity(&mut state);
     let block = CommandBlock {
@@ -1035,8 +962,6 @@ fn user_confirmed_analysis_queue_full_reverts_and_notifies() {
     assert!(!state.analyzed_blocks.contains(&block.id));
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(rendered.contains("Too many"), "{rendered}");
-    drop(state);
-    assert!(wait_for_exit(pid));
 }
 
 #[test]
@@ -1328,29 +1253,6 @@ fn unknown_token_source_fails_the_success_envelope() {
     }
 }
 
-/// Process-free compaction fixture: the state machine can be driven entirely
-/// through the receiver, the deadline, and the termination fields, with no
-/// child to signal (`terminate_and_reap` is a no-op on `None`).
-fn state_with_childless_compaction() -> (InlineState, mpsc::Sender<CompactionOutcome>) {
-    let (sender, receiver) = mpsc::channel();
-    let now = Instant::now();
-    let active = ActiveCompaction {
-        session_id: "00000000-0000-4000-8000-000000000000".to_string(),
-        workspace_scope: "/tmp".to_string(),
-        started_at: now,
-        deadline: now + super::process::COMPACTOR_DEADLINE,
-        origin: CompactionOrigin::Manual,
-        revision_marker: None,
-        termination: None,
-        stderr_tail: crate::adapter::StderrTail::new(1024),
-        child: Arc::new(Mutex::new(None)),
-        receiver,
-    };
-    let mut state = InlineState::default();
-    state.control.session_mut().compaction_mut().active = Some(active);
-    (state, sender)
-}
-
 fn force_deadline_elapsed(state: &mut InlineState) {
     state
         .control
@@ -1429,9 +1331,9 @@ fn deadline_timeout_yields_one_typed_completion_and_resumes_queue() {
         assert!(termination.kill_at <= Instant::now() + TERMINATION_GRACE);
     }
 
-    // Grace expires with no result: the next safe-boundary poll kills, reaps,
-    // renders exactly one typed timeout failure, and resumes the held user
-    // request — the Agent gate is fully reopened.
+    // Grace expires with no result: the next safe-boundary poll finishes the
+    // termination state machine, renders exactly one typed timeout failure,
+    // and resumes the held user request — the Agent gate is fully reopened.
     force_grace_elapsed(&mut state);
     let adapter = AdapterInstance::Fake(FakeAgentAdapter);
     let mut output = Vec::new();
@@ -1465,26 +1367,8 @@ fn deadline_timeout_yields_one_typed_completion_and_resumes_queue() {
 }
 
 #[test]
-fn deadline_timeout_kills_and_reaps_a_real_child() {
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
-    force_deadline_elapsed(&mut state);
-    // Deadline poll signals the group; `sleep` honours SIGTERM and exits.
-    state.control.session_mut().compaction_mut().poll();
-    force_grace_elapsed(&mut state);
-
-    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-    let mut output = Vec::new();
-    poll_background_compaction(&mut state, &mut output, &adapter, false).expect("boundary poll");
-    let rendered = String::from_utf8(output).expect("UTF-8");
-    assert!(rendered.contains("timeout"), "{rendered}");
-    assert!(!compaction_active(&state));
-    // The child was reaped through the single owning handle — no zombie.
-    assert!(wait_for_exit(pid));
-}
-
-#[test]
-fn cancel_escalates_to_kill_and_renders_cancelled_once() {
-    let (mut state, pid, _sender) = state_with_active_compaction("30");
+fn cancel_grace_expiry_renders_cancelled_once() {
+    let (mut state, _sender) = state_with_childless_compaction();
     let mut cancel_output = Vec::new();
     cancel_compaction(&mut state, &mut cancel_output).expect("cancel");
     assert!(String::from_utf8(cancel_output)
@@ -1496,8 +1380,9 @@ fn cancel_escalates_to_kill_and_renders_cancelled_once() {
         assert!(active.cancel_requested());
     }
 
-    // The grace period elapses without a result (the placeholder never writes
-    // one): the poll escalates to SIGKILL, reaps, and reports `cancelled`.
+    // The grace period elapses without a result (the compactor never writes
+    // one): the poll escalates past the grace window and reports `cancelled`.
+    // Real SIGKILL delivery and reaping are verified in raw_cli.
     force_grace_elapsed(&mut state);
     let adapter = AdapterInstance::Fake(FakeAgentAdapter);
     let mut output = Vec::new();
@@ -1506,7 +1391,6 @@ fn cancel_escalates_to_kill_and_renders_cancelled_once() {
     assert!(rendered.contains("cancelled"), "{rendered}");
     assert!(rendered.contains("transcript is unchanged"), "{rendered}");
     assert!(!compaction_active(&state));
-    assert!(wait_for_exit(pid));
 
     // Exactly-once: a second poll renders nothing further.
     let mut second = Vec::new();
@@ -1614,7 +1498,7 @@ fn structured_engine_failure_during_grace_is_reported_verbatim() {
 
 #[test]
 fn pending_completion_blocks_session_mutations_until_rendered() {
-    let (mut state, pid, sender) = state_with_active_compaction("0");
+    let (mut state, sender) = state_with_childless_compaction();
     sender
         .send(CompactionOutcome::Committed {
             tokens_before: 74_210,
@@ -1633,7 +1517,6 @@ fn pending_completion_blocks_session_mutations_until_rendered() {
         .session()
         .compaction()
         .has_pending_completion());
-    assert!(wait_for_exit(pid));
 
     // Session mutations must stay blocked across the whole window.
     assert!(!super::super::panel::session_management_idle(&state));
@@ -1711,9 +1594,229 @@ fn recommended_compaction_blocks_mutations_but_not_its_own_start() {
         .control
         .session()
         .compaction()
-        .suppressed_auto_marker
-        .is_some());
+        .is_auto_marker_suppressed(&super::process::SuppressionMarker {
+            session_id: "00000000-0000-4000-8000-000000000000".to_string(),
+            generation: 1,
+            projection_revision: 0,
+        }));
     assert!(String::from_utf8(output)
         .expect("UTF-8")
         .contains("Failed to start the background compactor"));
+}
+
+#[test]
+fn cancel_pending_auto_releases_gate_and_suppresses_revision() {
+    let mut state = InlineState::default();
+    note_compaction_recommendation(&mut state, RECOMMENDATION);
+    assert!(state.control.session().compaction().has_pending_auto());
+    assert!(compaction_pending_or_active(&state));
+
+    let mut output = Vec::new();
+    cancel_compaction(&mut state, &mut output).expect("cancel pending recommendation");
+
+    // The recommendation is removed atomically and the Agent compaction gate
+    // is released immediately — no completion poll is needed first.
+    assert!(!state.control.session().compaction().has_pending_auto());
+    assert!(!compaction_pending_or_active(&state));
+    assert!(super::super::panel::session_management_idle(&state));
+
+    // The suppression marker binds the exact session + generation + revision
+    // the cancelled recommendation named.
+    assert!(state
+        .control
+        .session()
+        .compaction()
+        .is_auto_marker_suppressed(&super::process::SuppressionMarker {
+            session_id: "00000000-0000-4000-8000-000000000000".to_string(),
+            generation: 1,
+            projection_revision: 0,
+        }));
+
+    // The notice is truthful: nothing was running, so it must not claim a
+    // process is being terminated.
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(
+        rendered.contains("Cancelled the recommended automatic compaction"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("being terminated"), "{rendered}");
+    assert!(!rendered.contains("Cancellation requested"), "{rendered}");
+}
+
+#[test]
+fn cancelled_pending_revision_is_suppressed_but_new_revision_retriggers() {
+    let mut state = InlineState::default();
+    note_compaction_recommendation(&mut state, RECOMMENDATION);
+    let mut output = Vec::new();
+    cancel_compaction(&mut state, &mut output).expect("cancel pending recommendation");
+
+    // A re-emitted status for the same session + generation + revision must
+    // not re-arm the pending recommendation (or the Agent gate).
+    note_compaction_recommendation(&mut state, RECOMMENDATION);
+    assert!(!state.control.session().compaction().has_pending_auto());
+    assert!(!compaction_pending_or_active(&state));
+
+    // A new projection revision is a different identity and may trigger.
+    note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:1:200000:100000",
+    );
+    assert!(state.control.session().compaction().has_pending_auto());
+}
+
+#[test]
+fn cancel_pending_auto_resumes_queued_user_request_at_safe_boundary() {
+    use crate::agent::run::{AgentRunOrigin, AgentStartIntent, PendingAgentRequest};
+
+    // A user request was queued behind the recommended compaction.
+    let mut state = InlineState::default();
+    note_compaction_recommendation(&mut state, RECOMMENDATION);
+    state
+        .agent_run
+        .queued_requests
+        .push_back(PendingAgentRequest {
+            request: gate_request("held-behind-recommendation"),
+            origin: AgentRunOrigin::Standard,
+            intent: AgentStartIntent::UserInitiated,
+            class: crate::agent::run::PendingRequestClass::Normal,
+            selectable_after_event_index: None,
+            before_held_text: false,
+        });
+
+    let mut output = Vec::new();
+    cancel_compaction(&mut state, &mut output).expect("cancel pending recommendation");
+
+    // The next safe-boundary poll finds nothing pending or active and resumes
+    // the held request — the user's intent is not lost with the cancellation.
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut resume_output = Vec::new();
+    poll_background_compaction(&mut state, &mut resume_output, &adapter, false)
+        .expect("resume poll");
+    assert!(state.agent_run.queued_requests.is_empty(), "queue resumed");
+}
+
+#[test]
+fn cancel_with_active_compactor_also_clears_pending_auto() {
+    // A fresh recommendation can arrive while a compactor is already running;
+    // one cancel must stop both, otherwise the pending attempt would restart
+    // compaction right after the user cancelled it.
+    let (mut state, _sender) = state_with_childless_compaction();
+    note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:5:200000:100000",
+    );
+
+    let mut output = Vec::new();
+    cancel_compaction(&mut state, &mut output).expect("cancel");
+
+    // The running compactor is being terminated (and says so)…
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(rendered.contains("Cancellation requested"), "{rendered}");
+    assert!(state
+        .control
+        .session()
+        .compaction()
+        .active
+        .as_ref()
+        .expect("active")
+        .cancel_requested());
+    // …and the not-yet-started recommendation is removed and suppressed.
+    assert!(!state.control.session().compaction().has_pending_auto());
+    assert!(state
+        .control
+        .session()
+        .compaction()
+        .is_auto_marker_suppressed(&super::process::SuppressionMarker {
+            session_id: "00000000-0000-4000-8000-000000000000".to_string(),
+            generation: 1,
+            projection_revision: 5,
+        }));
+}
+
+#[test]
+fn cancelled_pending_survives_active_auto_cancellation_completion() {
+    // Regression: an automatic compactor (revision A) is running when a newer
+    // recommendation (revision B) arrives. One `/session compact cancel` must
+    // suppress BOTH — B immediately, A when its cancelled completion is
+    // harvested — and the active compactor's completion must ADD its own
+    // revision rather than clobber B's suppression. Otherwise re-emitting B
+    // after the poll would restart the very compaction the user cancelled.
+    const SESSION: &str = "00000000-0000-4000-8000-000000000000";
+    let marker = |revision: u64| super::process::SuppressionMarker {
+        session_id: SESSION.to_string(),
+        generation: 1,
+        projection_revision: revision,
+    };
+
+    // Active AUTO compactor bound to revision A (generation 1, revision 2).
+    let (sender, receiver) = mpsc::channel();
+    let mut active = childless_active(receiver);
+    active.origin = CompactionOrigin::Auto;
+    active.revision_marker = Some(marker(2));
+    let mut state = InlineState::default();
+    state.control.session_mut().compaction_mut().active = Some(active);
+
+    // A newer recommendation (revision B = generation 1, revision 3) is pending
+    // while the compactor for revision A is still running.
+    note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:3:200000:100000",
+    );
+    assert!(state.control.session().compaction().has_pending_auto());
+
+    // One cancel stops both: revision B is suppressed now, revision A's
+    // compactor is terminated.
+    let mut cancel_output = Vec::new();
+    cancel_compaction(&mut state, &mut cancel_output).expect("cancel");
+    assert!(String::from_utf8(cancel_output)
+        .expect("UTF-8")
+        .contains("Cancellation requested"));
+    assert!(!state.control.session().compaction().has_pending_auto());
+
+    // The active compactor reports its cancelled completion; the poll harvests
+    // it, adds revision A to the suppressed set, and renders the notice.
+    sender
+        .send(CompactionOutcome::Failed {
+            code: "transport".to_string(),
+            message: "terminated".to_string(),
+        })
+        .expect("queue cancelled outcome");
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut poll_output = Vec::new();
+    poll_background_compaction(&mut state, &mut poll_output, &adapter, false).expect("poll");
+    assert!(String::from_utf8(poll_output)
+        .expect("UTF-8")
+        .contains("cancelled"));
+    assert!(!compaction_active(&state));
+
+    // Re-emitting the cancelled PENDING revision B must NOT re-trigger: A's
+    // completion did not clobber B's suppression marker.
+    note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:3:200000:100000",
+    );
+    assert!(
+        !state.control.session().compaction().has_pending_auto(),
+        "cancelled pending revision retriggered compaction"
+    );
+
+    // The active revision A stays suppressed too.
+    assert!(state
+        .control
+        .session()
+        .compaction()
+        .is_auto_marker_suppressed(&marker(2)));
+    assert!(state
+        .control
+        .session()
+        .compaction()
+        .is_auto_marker_suppressed(&marker(3)));
+
+    // A genuinely new projection revision is a distinct identity and still
+    // triggers normally.
+    note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:4:200000:100000",
+    );
+    assert!(state.control.session().compaction().has_pending_auto());
 }

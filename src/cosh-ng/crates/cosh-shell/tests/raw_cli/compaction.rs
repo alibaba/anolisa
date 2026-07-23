@@ -5,6 +5,11 @@ const SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 /// Mock cosh-core covering all three invocation shapes the shell uses during
 /// a compaction lifecycle: `--session-control` (resume validation), the
 /// stream-json agent protocol, and the background `--compact` compactor.
+///
+/// `mode` selects the `--compact` child's behaviour:
+/// - `ok`: commits a structured envelope after one second;
+/// - `hang`: traps SIGTERM and sleeps, so only SIGKILL can end it;
+/// - `slow`: sleeps without trapping signals, so SIGTERM ends it promptly.
 struct CompactionFixture {
     home: std::path::PathBuf,
     workspace: std::path::PathBuf,
@@ -14,9 +19,7 @@ struct CompactionFixture {
 }
 
 impl CompactionFixture {
-    /// `hang_compactor`: the `--compact` child traps SIGTERM and sleeps, so
-    /// only the SIGKILL escalation can end it.
-    fn new(label: &str, hang_compactor: bool) -> Self {
+    fn new(label: &str, mode: &str) -> Self {
         let home = temp_shell_home(&format!("compaction-{label}"));
         let workspace = home.join("workspace");
         let bin = home.join("bin");
@@ -29,10 +32,7 @@ impl CompactionFixture {
             .replace("__WORKSPACE__", &workspace.to_string_lossy())
             .replace("__COMPACT_ARGS__", &compact_args.to_string_lossy())
             .replace("__COMPACT_PID__", &compact_pid.to_string_lossy())
-            .replace(
-                "__COMPACT_MODE__",
-                if hang_compactor { "hang" } else { "ok" },
-            );
+            .replace("__COMPACT_MODE__", mode);
         write_executable(&core, &script);
         Self {
             home,
@@ -40,6 +40,33 @@ impl CompactionFixture {
             core,
             compact_args,
             compact_pid,
+        }
+    }
+
+    /// Reads the recorded compactor PID once the fixture has written it.
+    fn compactor_pid(&self) -> i32 {
+        fs::read_to_string(&self.compact_pid)
+            .expect("compactor pid recorded")
+            .trim()
+            .parse()
+            .expect("parse compactor pid")
+    }
+
+    /// Waits until the recorded compactor PID is gone, panicking after
+    /// `deadline` — a still-signalable PID means the child leaked.
+    fn assert_compactor_exits_within(&self, deadline: Duration, context: &str) {
+        let pid = self.compactor_pid();
+        let bound = std::time::Instant::now() + deadline;
+        loop {
+            let alive = unsafe { nix::libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < bound,
+                "compactor {pid} survived: {context}"
+            );
+            thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -69,7 +96,7 @@ impl CompactionFixture {
 /// once.
 #[test]
 fn raw_cli_manual_compaction_keeps_shell_usable_and_resumes_agent() {
-    let fixture = CompactionFixture::new("manual", false);
+    let fixture = CompactionFixture::new("manual", "ok");
     let resume = format!("/session resume {SESSION_ID}\n");
     let output = fixture.run(vec![
         (resume.into_bytes(), Duration::ZERO),
@@ -131,7 +158,7 @@ fn raw_cli_manual_compaction_keeps_shell_usable_and_resumes_agent() {
 /// the background commit.
 #[test]
 fn raw_cli_automatic_compaction_chain_binds_revision_and_resumes_once() {
-    let fixture = CompactionFixture::new("auto", false);
+    let fixture = CompactionFixture::new("auto", "ok");
     let resume = format!("/session resume {SESSION_ID}\n");
     let output = fixture.run(vec![
         (resume.into_bytes(), Duration::ZERO),
@@ -179,7 +206,7 @@ fn raw_cli_automatic_compaction_chain_binds_revision_and_resumes_once() {
 /// completion, and the shell stays usable.
 #[test]
 fn raw_cli_cancel_escalates_to_sigkill_for_term_ignoring_compactor() {
-    let fixture = CompactionFixture::new("cancel", true);
+    let fixture = CompactionFixture::new("cancel", "hang");
     let resume = format!("/session resume {SESSION_ID}\n");
     let mut chunks = vec![
         (resume.into_bytes(), Duration::ZERO),
@@ -208,23 +235,72 @@ fn raw_cli_cancel_escalates_to_sigkill_for_term_ignoring_compactor() {
     assert!(output.contains("cancelled"), "{output}");
     assert!(output.contains("after-cancel-shell-ok"), "{output}");
     // The TERM-ignoring compactor is gone: SIGKILL escalation reaped it.
-    let pid: i32 = fs::read_to_string(&fixture.compact_pid)
-        .expect("compactor pid recorded")
-        .trim()
-        .parse()
-        .expect("parse compactor pid");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let alive = unsafe { nix::libc::kill(pid, 0) } == 0;
-        if !alive {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "TERM-ignoring compactor {pid} survived cancellation"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
+    fixture.assert_compactor_exits_within(
+        Duration::from_secs(5),
+        "TERM-ignoring compactor survived cancellation",
+    );
+    let _ = fs::remove_dir_all(&fixture.home);
+}
+
+/// Cancellation against a compactor that honours SIGTERM: the very first
+/// signal to the process group ends the child (and its `sleep` descendant)
+/// well before the SIGKILL grace period, the cancelled completion renders,
+/// and no zombie is left behind.
+#[test]
+fn raw_cli_cancel_sigterm_stops_term_honoring_compactor() {
+    let fixture = CompactionFixture::new("cancel-term", "slow");
+    let resume = format!("/session resume {SESSION_ID}\n");
+    let output = fixture.run(vec![
+        (resume.into_bytes(), Duration::ZERO),
+        (b"/session compact\n".to_vec(), Duration::from_millis(700)),
+        (
+            b"/session compact cancel\n".to_vec(),
+            Duration::from_millis(700),
+        ),
+        // Ticks drive the background poll so the cancelled completion is
+        // harvested and rendered at safe prompt boundaries.
+        (b"echo tick-0\n".to_vec(), Duration::from_millis(1_200)),
+        (b"echo tick-1\n".to_vec(), Duration::from_millis(1_200)),
+        (
+            b"echo after-term-cancel-ok\n".to_vec(),
+            Duration::from_millis(600),
+        ),
+        (b"exit\n".to_vec(), Duration::from_millis(400)),
+    ]);
+
+    assert!(output.contains("Cancellation requested"), "{output}");
+    assert!(output.contains("cancelled"), "{output}");
+    assert!(output.contains("after-term-cancel-ok"), "{output}");
+    // SIGTERM (not the 5s SIGKILL escalation) ended the group: the child is
+    // already gone by the time the shell exits.
+    fixture.assert_compactor_exits_within(
+        Duration::from_secs(2),
+        "TERM-honoring compactor outlived the SIGTERM cancellation",
+    );
+    let _ = fs::remove_dir_all(&fixture.home);
+}
+
+/// Shell exit while a compactor is still running: dropping the runtime
+/// terminates and reaps the compactor process group, so no background child
+/// outlives the shell.
+#[test]
+fn raw_cli_shell_exit_terminates_running_compactor() {
+    let fixture = CompactionFixture::new("exit", "slow");
+    let resume = format!("/session resume {SESSION_ID}\n");
+    let output = fixture.run(vec![
+        (resume.into_bytes(), Duration::ZERO),
+        (b"/session compact\n".to_vec(), Duration::from_millis(700)),
+        // Exit while the slow compactor is still sleeping.
+        (b"exit\n".to_vec(), Duration::from_millis(900)),
+    ]);
+
+    assert!(
+        output.contains("Compaction is running in the background"),
+        "{output}"
+    );
+    // The shell has exited; the Drop-path group termination must have ended
+    // the compactor — an orphan here would keep running for ~30s.
+    fixture.assert_compactor_exits_within(Duration::from_secs(3), "compactor outlived shell exit");
     let _ = fs::remove_dir_all(&fixture.home);
 }
 
@@ -255,6 +331,15 @@ case " $* " in
     if [ "__COMPACT_MODE__" = "hang" ]; then
       trap '' TERM
       printf 'compactor fixture ignoring TERM\n' >&2
+      i=0
+      while [ "$i" -lt 300 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      exit 1
+    fi
+    if [ "__COMPACT_MODE__" = "slow" ]; then
+      # No trap: SIGTERM to the process group ends this loop immediately.
       i=0
       while [ "$i" -lt 300 ]; do
         sleep 0.1

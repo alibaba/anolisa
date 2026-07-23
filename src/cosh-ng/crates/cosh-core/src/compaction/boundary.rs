@@ -169,7 +169,7 @@ pub(crate) fn select_compacted_through(
     let last_candidate = runs.len() - preserve;
     for span in &runs[1..=last_candidate] {
         let cut = span.start;
-        let retained = super::estimate_messages_tokens(&messages[cut..]);
+        let retained = super::budget::estimate_messages_tokens(&messages[cut..]);
         if retained <= target_tokens {
             return Ok(Some(cut));
         }

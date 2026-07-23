@@ -55,6 +55,7 @@ macro_rules! session_compaction_ids {
             SessionCompactDuplicateBody,
             SessionCompactNotRunningBody,
             SessionCompactCancelRequestedBody,
+            SessionCompactPendingCancelledBody,
             SessionCompactCompletedTitle,
             SessionCompactCompletedBody,
             SessionCompactCompletedRetainedBody,

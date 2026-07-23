@@ -84,7 +84,9 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     engine.extra_params = extra_params;
     engine.session_id = session.record.session_id.to_string();
     engine.messages = session.record.messages.clone();
-    engine.compaction = session.record.compaction.clone();
+    engine
+        .compaction
+        .load_state(session.record.compaction.clone());
     if !session.record.model.is_empty() {
         engine.model = session.record.model.clone();
     }
@@ -440,7 +442,7 @@ impl SessionRuntime {
         self.record.model = engine.model.clone();
         // Emergency in-run compaction updates the projection in memory; it
         // commits together with the transcript it belongs to.
-        self.record.compaction = engine.compaction.clone();
+        self.record.compaction = engine.compaction.state().cloned();
         store.persist(&mut self.record)
     }
 

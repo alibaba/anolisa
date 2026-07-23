@@ -314,6 +314,55 @@ if [ -f "$source_heavy_inventory" ]; then
 fi
 source_heavy_pattern='/bin/sleep|mock_provider_script|write mock provider|let child = match Command::new\("bash"\)|let child = match Command::new\(&tokens\[0\]\)|openpty\(None, None\)|nix::pty::openpty\(None, None\)|cosh_hook_test'
 source_heavy_hits="$(rg -n "$source_heavy_pattern" crates/cosh-shell/src 2>/dev/null || true)"
+# Broadened subprocess-spawn detection for test-scoped source code. The named
+# markers above can be sidestepped by spawning any other binary (e.g.
+# `Command::new("sleep")`), so every process-spawn primitive inside test code
+# is treated as a heavy-test risk: dedicated test files by path, plus
+# `#[cfg(test)]` module regions embedded in production files (brace-tracked so
+# production spawns in the same file stay allowed).
+test_path_pattern='/tests(/|\.rs$)|_tests\.rs$|/runtime_tests(/|\.rs$)|/hook_tests\.rs$'
+# Bracket classes keep the pattern valid for both rg and awk dynamic regexes.
+test_spawn_pattern='Command::new[(]|process::Command|CommandExt|libc::fork|posix_spawn|[.]pre_exec[(]'
+dedicated_test_spawns="$(
+  find crates/cosh-shell/src -type f -name '*.rs' |
+    grep -E "$test_path_pattern" |
+    xargs -r rg -n "$test_spawn_pattern" 2>/dev/null || true
+)"
+inline_test_spawns="$(
+  find crates/cosh-shell/src -type f -name '*.rs' |
+    grep -Ev "$test_path_pattern" |
+    while read -r source_file; do
+      awk -v spawn_re="$test_spawn_pattern" -v fname="$source_file" '
+        function braces(str, ch,   n) { n = split(str, scratch, ch); return n - 1 }
+        {
+          line = $0
+          if (in_test) {
+            if (line ~ spawn_re) print fname ":" FNR ":" line
+            depth += braces(line, "{") - braces(line, "}")
+            if (depth <= 0) in_test = 0
+            next
+          }
+          if (pending && line ~ /(^|[[:space:]])mod[[:space:]]/) {
+            pending = 0
+            if (line ~ /\{/) {
+              in_test = 1
+              depth = braces(line, "{") - braces(line, "}")
+              if (line ~ spawn_re) print fname ":" FNR ":" line
+              if (depth <= 0) in_test = 0
+            }
+            next
+          }
+          if (line ~ /#\[cfg\(test\)\]/) { pending = 1; next }
+          if (pending && line !~ /^[[:space:]]*#\[/ && line !~ /^[[:space:]]*$/) pending = 0
+        }
+      ' "$source_file"
+    done
+)"
+source_heavy_hits="$(
+  printf '%s\n%s\n%s\n' "$source_heavy_hits" "$dedicated_test_spawns" "$inline_test_spawns" |
+    sed '/^[[:space:]]*$/d' |
+    sort -u
+)"
 if [ -n "$source_heavy_hits" ]; then
   source_heavy_counts="$(printf '%s\n' "$source_heavy_hits" | cut -d: -f1 | sort | uniq -c | awk '{ print $1 " " $2 }')"
   registered_source_heavy=""
