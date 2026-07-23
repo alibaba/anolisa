@@ -21,13 +21,22 @@ pub(super) fn ordered_list_item(line: &str) -> Option<(&str, &str)> {
     Some((&trimmed[..marker_end + 2], &trimmed[marker_end + 2..]))
 }
 
-pub(super) fn wrap_plain_line(line: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_plain_line(line: &str, width: usize) -> Vec<String> {
     if line.trim().is_empty() {
         return vec![String::new()];
     }
 
     let (first_prefix, rest_prefix, text) = split_prefix(line);
     wrap_with_prefix(text, &first_prefix, &rest_prefix, width)
+}
+
+pub(crate) fn wrap_plain_line_with_prefix(
+    text: &str,
+    first_prefix: &str,
+    rest_prefix: &str,
+    width: usize,
+) -> Vec<String> {
+    wrap_with_prefix(text, first_prefix, rest_prefix, width)
 }
 
 pub(super) fn compact_rendered_lines(lines: Vec<String>) -> Vec<String> {
@@ -210,7 +219,7 @@ pub(super) fn strip_ansi_escape(text: &str) -> String {
     stripped
 }
 
-pub(super) fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(strip_ansi_escape(text)).width()
 }
 

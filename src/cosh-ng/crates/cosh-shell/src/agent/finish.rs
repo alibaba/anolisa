@@ -9,6 +9,7 @@ use crate::agent::run::{
     has_queued_run_before_held_text, start_agent_run_with_origin, start_pending_agent_run,
     ActiveAgentRun, PendingRequestClass,
 };
+use crate::question::terminal::cleanup_question_for_terminal_owner;
 use crate::recommendation::personal_integration::record_finished_agent_run;
 use crate::runtime::evidence_requests::{
     record_cosh_requests_from_active_run, render_pending_evidence_requests,
@@ -24,6 +25,7 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         return Ok(());
     };
 
+    cleanup_question_for_terminal_owner(state, output, &active_run.request.id)?;
     active_run.status_animation.clear(output)?;
     if !active_run.held_events.is_empty() {
         if state_has_pending_interaction(state) || has_queued_run_before_held_text(state) {

@@ -17,6 +17,7 @@ fn question_capture_custom_option_waits_for_text_before_submit() {
         vec![
             RawInputEvent::CardFocus("q-1".to_string(), 1),
             RawInputEvent::CardFocus("q-1".to_string(), 2),
+            RawInputEvent::QuestionSubmitAttempt("q-1".to_string()),
         ]
     );
     assert_eq!(
@@ -25,6 +26,68 @@ fn question_capture_custom_option_waits_for_text_before_submit() {
             RawInputEvent::CardInput("q-1".to_string(), "红色".to_string()),
             RawInputEvent::CardAnswer("红色".to_string())
         ]
+    );
+}
+
+#[test]
+fn question_capture_preserves_answer_for_delivery_retry() {
+    let capture = RawInputCapture::Question {
+        id: "q-retry".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"main\n").last(),
+        Some(&RawInputEvent::CardAnswer("main".to_string()))
+    );
+    assert_eq!(
+        state.consume(&capture, b"\n"),
+        vec![RawInputEvent::CardAnswer("main".to_string())]
+    );
+}
+
+#[test]
+fn question_capture_custom_option_empty_submit_emits_attempt() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 2,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\t\t\n"),
+        vec![
+            RawInputEvent::CardFocus("q-1".to_string(), 1),
+            RawInputEvent::CardFocus("q-1".to_string(), 2),
+            RawInputEvent::QuestionSubmitAttempt("q-1".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn question_capture_multiple_empty_submit_emits_attempt() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 2,
+        allow_free_text: true,
+        multiple: true,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\n"),
+        vec![RawInputEvent::QuestionSubmitAttempt("q-1".to_string())]
     );
 }
 

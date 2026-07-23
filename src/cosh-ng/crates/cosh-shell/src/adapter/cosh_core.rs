@@ -23,6 +23,8 @@ use super::{
     ProviderRunOutcome, ProviderStdinMode,
 };
 
+pub(super) mod question_ingress;
+pub(super) mod question_writer;
 mod recovery;
 mod session;
 

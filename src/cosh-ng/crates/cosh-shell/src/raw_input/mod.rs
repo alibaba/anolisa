@@ -55,6 +55,7 @@ pub(crate) enum RawInputEvent {
     CardDetails(String),
     CardCancel(String),
     CardAnswer(String),
+    QuestionSubmitAttempt(String),
     CardSecretAnswer(String),
     QuestionCancel(String),
     EvidenceSend(String),

@@ -9,8 +9,8 @@ use crate::auth::provider_display::auth_required_providers_for_display;
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
     AgentEvent, AuthFieldInfo, AuthProviderInfo, AuthResponse, GovernedEvent, NoticePanelModel,
-    QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer, RawInputCapture, ShellEvent,
-    ShellEventKind,
+    QuestionInputFeedback, QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer,
+    RawInputCapture, ShellEvent, ShellEventKind,
 };
 use crate::runtime::state::InlineState;
 
@@ -925,6 +925,7 @@ fn render_current_auth_panel<W: std::io::Write>(
                 custom_answer: "",
                 allow_free_text: false,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::Disabled,
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
@@ -943,6 +944,7 @@ fn render_current_auth_panel<W: std::io::Write>(
                 custom_answer: "",
                 allow_free_text: false,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::Disabled,
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
@@ -959,6 +961,7 @@ fn render_current_auth_panel<W: std::io::Write>(
                 custom_answer: "",
                 allow_free_text: false,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::Disabled,
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
@@ -1001,6 +1004,7 @@ fn render_current_auth_panel<W: std::io::Write>(
                 custom_answer: "",
                 allow_free_text: true,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::Disabled,
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
@@ -1027,6 +1031,7 @@ fn render_current_auth_panel<W: std::io::Write>(
                 custom_answer: "",
                 allow_free_text: false,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::Disabled,
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
@@ -1044,6 +1049,8 @@ fn clear_active_auth_panel<W: std::io::Write>(
     let height = state.questions.active_panel_height;
     if height == 0 {
         state.questions.active_panel_id = None;
+        state.questions.active_panel_cursor_row = None;
+        state.questions.active_panel_width = None;
         return Ok(());
     }
     write!(output, "\x1b[{height}A")?;
@@ -1059,6 +1066,8 @@ fn clear_active_auth_panel<W: std::io::Write>(
     write!(output, "\r")?;
     state.questions.active_panel_id = None;
     state.questions.active_panel_height = 0;
+    state.questions.active_panel_cursor_row = None;
+    state.questions.active_panel_width = None;
     Ok(())
 }
 

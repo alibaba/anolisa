@@ -67,9 +67,9 @@ pub(crate) use crate::ui::{
     ActivityToolRowModel, AgentStatusAnimation, ApprovalDetailsPanelModel,
     ApprovalJournalEntryModel, ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel,
     ApprovalReceiptPanelModel, CommandAssessmentSummaryModel, HealthBannerModel, HookWarningView,
-    MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel,
-    RatatuiInlineRenderer, RecommendationActionPanelModel, RecommendationPanelModel,
-    ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
+    MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel, QuestionInputFeedback,
+    QuestionPanelModel, RatatuiInlineRenderer, RecommendationActionPanelModel,
+    RecommendationPanelModel, ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
 };
 
 #[cfg(test)]

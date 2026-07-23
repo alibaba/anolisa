@@ -116,7 +116,7 @@ impl RatatuiInlineRenderer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_activity_panel(&i18n, model, area, &mut buffer);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -183,7 +183,7 @@ impl RatatuiInlineRenderer {
                 out.extend(styled_tool_invocation_card_lines(
                     &card,
                     self.panel_standard_width(),
-                    self.styled,
+                    self.styles_enabled(),
                     card.debug_ref.is_some(),
                 ));
             }
@@ -222,7 +222,7 @@ impl RatatuiInlineRenderer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_activity_details_panel(&i18n, model, area, &mut buffer);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)

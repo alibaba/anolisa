@@ -184,10 +184,20 @@ impl CardInputState {
                     idx += 1;
                 }
                 b'\r' | b'\n' => {
-                    if let Some(event) = self.submit(capture) {
+                    let event = self.submit(capture);
+                    let preserve_for_retry = matches!(
+                        (&event, capture),
+                        (
+                            Some(RawInputEvent::CardAnswer(_)),
+                            RawInputCapture::Question { secret: false, .. }
+                        )
+                    );
+                    if let Some(event) = event {
                         events.push(event);
                     }
-                    self.free_text.clear();
+                    if !preserve_for_retry {
+                        self.free_text.clear();
+                    }
                     idx += 1;
                 }
                 0x7f | 0x08 => {
@@ -410,7 +420,7 @@ impl CardInputState {
     fn submit(&self, capture: &RawInputCapture) -> Option<RawInputEvent> {
         match capture {
             RawInputCapture::Question {
-                id: _,
+                id,
                 option_count,
                 allow_free_text,
                 multiple,
@@ -435,7 +445,7 @@ impl CardInputState {
                         ));
                     }
                     if self.selected_options.is_empty() {
-                        return None;
+                        return Some(empty_question_submission(id, *secret));
                     }
                     return Some(card_answer_event(
                         &selected_options_answer(&self.selected_options),
@@ -451,8 +461,11 @@ impl CardInputState {
                 if !answer.is_empty() {
                     return Some(card_answer_event(answer, *secret));
                 }
+                if *allow_free_text && self.selected == *option_count {
+                    return Some(empty_question_submission(id, *secret));
+                }
                 if *allow_free_text && *option_count == 0 {
-                    return Some(card_answer_event("", *secret));
+                    return Some(empty_question_submission(id, *secret));
                 }
                 None
             }
@@ -559,6 +572,14 @@ fn card_answer_event(answer: &str, secret: bool) -> RawInputEvent {
         RawInputEvent::CardSecretAnswer(answer.to_string())
     } else {
         RawInputEvent::CardAnswer(answer.to_string())
+    }
+}
+
+fn empty_question_submission(id: &str, secret: bool) -> RawInputEvent {
+    if secret {
+        RawInputEvent::CardSecretAnswer(String::new())
+    } else {
+        RawInputEvent::QuestionSubmitAttempt(id.to_string())
     }
 }
 

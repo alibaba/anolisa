@@ -91,3 +91,16 @@ macro_rules! compaction_queue_ids {
         );
     };
 }
+
+macro_rules! question_hardening_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentQuestionUnavailableTitle,
+            AgentQuestionUnavailableBody,
+            AgentAnswerDeliveryUnknownTitle,
+            AgentAnswerDeliveryUnknownBody,
+        );
+    };
+}

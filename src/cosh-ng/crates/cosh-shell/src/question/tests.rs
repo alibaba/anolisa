@@ -1,4 +1,107 @@
 use super::*;
+use crate::question::answer::{resolve_pending_question_answer, QuestionAnswerResolution};
+use crate::question::terminal::redraw_active_question_if_width_changed;
+
+fn record_test_question(
+    state: &mut InlineState,
+    options: Vec<String>,
+    allow_free_text: bool,
+    selection_mode: QuestionSelectionMode,
+) {
+    let events = vec![GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
+        event: AgentEvent::UserQuestion {
+            run_id: "run-test".to_string(),
+            provider_request_id: Some("provider-question".to_string()),
+            question: "Choose".to_string(),
+            options,
+            allow_free_text,
+            selection_mode,
+        },
+        reason: "display".to_string(),
+        display_text: String::new(),
+        auto_execute: false,
+    }];
+    record_user_questions(state, &events, AgentRunOrigin::Standard, Some("owner"));
+}
+
+fn card_answer(input: &str) -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("session", input);
+    event.component = Some("card".to_string());
+    event.message = Some("answer".to_string());
+    event.input = Some(input.to_string());
+    event
+}
+
+#[test]
+fn answer_resolution_distinguishes_empty_invalid_and_no_pending() {
+    let mut state = InlineState::default();
+    assert!(matches!(
+        resolve_pending_question_answer(&card_answer(""), 1, &mut state),
+        QuestionAnswerResolution::NoPending
+    ));
+
+    record_test_question(&mut state, Vec::new(), true, QuestionSelectionMode::Single);
+    assert!(matches!(
+        resolve_pending_question_answer(&card_answer(""), 2, &mut state),
+        QuestionAnswerResolution::EmptyAnswer
+    ));
+    assert_eq!(state.questions.pending_id.as_deref(), Some("q-1"));
+
+    state = InlineState::default();
+    record_test_question(
+        &mut state,
+        vec!["One".to_string()],
+        false,
+        QuestionSelectionMode::Single,
+    );
+    assert!(matches!(
+        resolve_pending_question_answer(&card_answer("2"), 3, &mut state),
+        QuestionAnswerResolution::InvalidAnswer
+    ));
+    assert_eq!(state.questions.pending_id.as_deref(), Some("q-1"));
+}
+
+#[test]
+fn stale_empty_submission_does_not_mutate_the_next_pending_question() {
+    let mut state = InlineState::default();
+    record_test_question(&mut state, Vec::new(), true, QuestionSelectionMode::Single);
+    let mut event = ShellEvent::user_input_intercepted("session", "q-old");
+    event.component = Some("card".to_string());
+    event.message = Some("question_submit_empty".to_string());
+    event.input = Some("q-old".to_string());
+
+    assert!(matches!(
+        resolve_pending_question_answer(&event, 1, &mut state),
+        QuestionAnswerResolution::Ignored
+    ));
+    assert_eq!(state.questions.pending_id.as_deref(), Some("q-1"));
+}
+
+#[test]
+fn answer_resolution_distinguishes_selection_and_request_build_failure() {
+    let mut state = InlineState::default();
+    record_test_question(
+        &mut state,
+        vec!["One".to_string()],
+        true,
+        QuestionSelectionMode::Multiple,
+    );
+    assert!(matches!(
+        resolve_pending_question_answer(&card_answer(""), 1, &mut state),
+        QuestionAnswerResolution::SelectionRequired
+    ));
+    assert_eq!(state.questions.pending_id.as_deref(), Some("q-1"));
+
+    let mut event = card_answer("1");
+    event.kind = ShellEventKind::CommandStarted;
+    assert!(matches!(
+        resolve_pending_question_answer(&event, 2, &mut state),
+        QuestionAnswerResolution::RequestBuildFailed
+    ));
+    assert_eq!(state.questions.pending_id.as_deref(), Some("q-1"));
+}
 
 #[test]
 fn record_user_questions_localizes_empty_question_fallback() {
@@ -22,9 +125,11 @@ fn record_user_questions_localizes_empty_question_fallback() {
         auto_execute: false,
     }];
 
-    let ids = record_user_questions(&mut state, &events, AgentRunOrigin::InsightPrompt, None);
+    let (ids, rejection) =
+        record_user_questions(&mut state, &events, AgentRunOrigin::InsightPrompt, None);
 
     assert_eq!(ids, vec!["q-1".to_string()]);
+    assert_eq!(rejection, None);
     assert_eq!(state.questions.items[0].question, "Agent 需要你的输入");
     assert_eq!(
         state.questions.items[0].origin,
@@ -414,4 +519,34 @@ fn full_queue_blocks_answer_that_must_queue_behind_a_foreign_run() {
     assert!(state.agent_run.active.is_some());
     let rendered = String::from_utf8(output).expect("UTF-8");
     assert!(rendered.contains("still pending"), "{rendered}");
+}
+
+#[test]
+fn terminal_resize_reflows_and_reanchors_the_pending_question() {
+    let mut state = InlineState::default();
+    record_test_question(&mut state, Vec::new(), true, QuestionSelectionMode::Single);
+    state.questions.items[0].question =
+        "Choose a sufficiently long answer so the narrow card must wrap onto additional rows"
+            .to_string();
+    state.questions.active_panel_id = Some("q-1".to_string());
+    state.questions.active_panel_height = 4;
+    state.questions.active_panel_cursor_row = Some(2);
+    state.questions.active_panel_width = Some(100);
+    let previous_height = state.questions.active_panel_height;
+    let mut output = Vec::new();
+
+    assert!(redraw_active_question_if_width_changed(
+        &mut state,
+        &mut output,
+        RatatuiInlineRenderer::with_width(40),
+    )
+    .expect("resize redraw"));
+
+    assert_eq!(state.questions.active_panel_width, Some(40));
+    assert!(state.questions.active_panel_height >= previous_height);
+    assert_eq!(state.questions.active_panel_id.as_deref(), Some("q-1"));
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(rendered.starts_with("\u{1b}[2B\r\u{1b}[4A"), "{rendered:?}");
+    assert!(rendered.contains("\u{1b}[2K"), "{rendered:?}");
+    assert!(rendered.contains("Type your answer"), "{rendered:?}");
 }

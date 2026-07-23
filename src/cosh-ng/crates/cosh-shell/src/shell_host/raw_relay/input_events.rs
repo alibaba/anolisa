@@ -111,6 +111,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
             RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
             RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
+            RawInputEvent::QuestionSubmitAttempt(id) => {
+                parser.push_card_event("question_submit_empty", &id)
+            }
             RawInputEvent::CardSecretAnswer(answer) => {
                 parser.push_secret_card_event("answer", &answer)
             }

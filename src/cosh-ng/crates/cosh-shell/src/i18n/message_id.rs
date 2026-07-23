@@ -79,4 +79,6 @@ collect_message_ids!([
     session_compaction_ids,
     compaction_queue_ids,
     slash_parse_error_ids,
+    question_hardening_ids,
+    question_interaction_ids,
 ],);

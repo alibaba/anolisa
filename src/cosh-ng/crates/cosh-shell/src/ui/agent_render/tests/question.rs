@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::display_width;
 
 #[test]
 fn question_panel_renders_options_with_compact_instructions() {
@@ -18,6 +19,7 @@ fn question_panel_renders_options_with_compact_instructions() {
             custom_answer: "",
             allow_free_text: false,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -53,6 +55,7 @@ fn question_panel_uses_zh_labels_without_translating_options() {
             custom_answer: "",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -86,6 +89,7 @@ fn question_panel_renders_multiple_choice_toggles() {
             custom_answer: "",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Multiple,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -118,6 +122,7 @@ fn question_panel_keeps_cjk_and_emoji_borders_aligned() {
             custom_answer: "重点看中文路径和表格边线",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Multiple,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -148,6 +153,7 @@ fn question_panel_wraps_long_question_and_options_without_dropping_tail() {
             custom_answer: "",
             allow_free_text: false,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -157,7 +163,7 @@ fn question_panel_wraps_long_question_and_options_without_dropping_tail() {
     assert!(text.contains("control"), "{text}");
     assert!(text.contains("same"), "{text}");
     assert!(text.contains("provider session"), "{text}");
-    assert!(text.contains("│        provider session"), "{text}");
+    assert!(text.contains("│       provider session"), "{text}");
     assert!(text.contains("│       any tool request"), "{text}");
     assert!(text.contains("before"), "{text}");
     assert!(text.contains("any tool request"), "{text}");
@@ -181,6 +187,7 @@ fn question_panel_free_text_only_omits_fake_option_section() {
             custom_answer: "",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -192,8 +199,8 @@ fn question_panel_free_text_only_omits_fake_option_section() {
     );
     assert!(text.contains("Type answer"), "{text}");
     assert!(text.contains("Enter send"), "{text}");
-    assert!(!text.contains("Answer:"), "{text}");
-    assert!(!text.contains("Type an answer"), "{text}");
+    assert!(text.contains("Answer:"), "{text}");
+    assert!(text.contains("Type your answer..."), "{text}");
     assert!(!text.contains("[1]"), "{text}");
     assert_rendered_width(&text, 90);
 }
@@ -211,6 +218,7 @@ fn question_panel_free_text_only_renders_input_value() {
             custom_answer: "我的爱好是撸猫",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -218,6 +226,190 @@ fn question_panel_free_text_only_renders_input_value() {
     assert!(!text.contains("[1]"), "{text}");
     assert!(text.contains("输入回答"), "{text}");
     assert_rendered_width(&text, 90);
+}
+
+#[test]
+fn question_panel_required_ghost_replaces_default_in_place() {
+    let renderer = RatatuiInlineRenderer::with_width(90);
+    let model = QuestionPanelModel {
+        id: "q-4",
+        question: "What should I inspect?",
+        options: &[],
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::Required,
+    };
+
+    let text = renderer.question_panel_lines(model.clone()).join("\n");
+    let cursor = renderer
+        .question_cursor_placement(&model)
+        .expect("free-text cursor");
+
+    assert!(text.contains("Please enter an answer"), "{text}");
+    assert!(!text.contains("Type your answer..."), "{text}");
+    assert_eq!(cursor.column, 10);
+}
+
+#[test]
+fn question_panel_whitespace_input_keeps_required_ghost_and_cursor_anchor() {
+    let renderer = RatatuiInlineRenderer::with_width(90);
+    let model = QuestionPanelModel {
+        id: "q-space",
+        question: "What should I inspect?",
+        options: &[],
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "   ",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::Required,
+    };
+
+    let text = renderer.question_panel_lines(model.clone()).join("\n");
+    assert!(text.contains("Please enter an answer"), "{text}");
+    let cursor = renderer.question_cursor_placement(&model).unwrap();
+    assert_eq!((cursor.row, cursor.column), (2, 10));
+}
+
+#[test]
+fn question_cursor_tracks_the_end_of_real_input() {
+    let renderer = RatatuiInlineRenderer::with_width(90);
+    let model = QuestionPanelModel {
+        id: "q-editing",
+        question: "What should I inspect?",
+        options: &[],
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "main",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+
+    let cursor = renderer.question_cursor_placement(&model).unwrap();
+    assert_eq!((cursor.row, cursor.column), (2, 14));
+    let text = renderer.question_panel_lines(model).join("\n");
+    assert!(text.contains("Answer: main"), "{text}");
+    assert!(!text.contains("Type your answer"), "{text}");
+}
+
+#[test]
+fn question_cursor_uses_display_width_on_the_final_wrapped_row() {
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let model = QuestionPanelModel {
+        id: "q-wrapped-cjk",
+        question: "Continue?",
+        options: &[],
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "你好🙂你好🙂你好🙂你好🙂你好🙂",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+
+    let cursor = renderer.question_cursor_placement(&model).unwrap();
+    assert!(cursor.row > 2);
+    let lines = renderer.question_panel_lines(model);
+    let input_row = lines[cursor.row]
+        .strip_suffix('│')
+        .expect("styled panel border")
+        .trim_end();
+    assert_eq!(cursor.column, display_width(input_row));
+    let text = lines.join("\n");
+    assert_box_lines_aligned(&text, 40);
+}
+
+#[test]
+fn custom_option_cursor_matches_long_unbroken_rendered_input() {
+    for answer in [
+        "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+        "你好世界你好世界你好世界你好世界你好世界",
+        "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂",
+    ] {
+        let renderer = RatatuiInlineRenderer::with_width(40);
+        let options = vec!["Red".to_string()];
+        let model = QuestionPanelModel {
+            id: "q-custom-wrapped",
+            question: "Choose or type",
+            options: &options,
+            selected_option: 1,
+            selected_options: &[],
+            custom_answer: answer,
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
+        };
+
+        let cursor = renderer.question_cursor_placement(&model).unwrap();
+        let lines = renderer.question_panel_lines(model);
+        let instruction_row = lines
+            .iter()
+            .position(|line| line.contains("Keys:"))
+            .expect("instruction row");
+        assert_eq!(cursor.row + 1, instruction_row, "{answer:?}\n{lines:#?}");
+        let input_row = lines[cursor.row]
+            .strip_suffix('│')
+            .expect("styled panel border")
+            .trim_end();
+        assert_eq!(
+            cursor.column,
+            display_width(input_row),
+            "{answer:?}\n{lines:#?}"
+        );
+    }
+}
+
+#[test]
+fn plain_tty_question_cursor_uses_plain_panel_columns() {
+    let renderer = RatatuiInlineRenderer {
+        width: 90,
+        plain: true,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let model = QuestionPanelModel {
+        id: "q-plain",
+        question: "What should I inspect?",
+        options: &[],
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::None,
+    };
+    let cursor = renderer.question_cursor_placement(&model).unwrap();
+    assert_eq!((cursor.row, cursor.column), (2, 8));
+    assert!(renderer.question_panel_lines(model)[2].starts_with("Answer: ["));
+}
+
+#[test]
+fn question_panel_multiple_empty_feedback_replaces_heading() {
+    let renderer = RatatuiInlineRenderer::with_width(90);
+    let options = vec!["Lint".to_string(), "Unit tests".to_string()];
+    let text = renderer
+        .question_panel_lines(QuestionPanelModel {
+            id: "q-5",
+            question: "Choose checks",
+            options: &options,
+            selected_option: 0,
+            selected_options: &[],
+            custom_answer: "",
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Multiple,
+            input_feedback: QuestionInputFeedback::SelectionRequired,
+        })
+        .join("\n");
+
+    assert!(
+        text.contains("Select at least one option or enter an answer"),
+        "{text}"
+    );
+    assert!(!text.contains("Select one or more:"), "{text}");
 }
 
 #[test]
@@ -243,6 +435,7 @@ fn question_panel_write_preserves_ratatui_styles_for_terminal_output() {
                 custom_answer: "",
                 allow_free_text: false,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::None,
             },
         )
         .expect("render question panel");
@@ -253,6 +446,90 @@ fn question_panel_write_preserves_ratatui_styles_for_terminal_output() {
     assert!(clean.contains("Agent question"), "{clean}");
     assert!(!clean.contains("Agent question q-1"), "{clean}");
     assert!(clean.contains("[2]"), "{clean}");
+}
+
+#[test]
+fn question_panel_default_ghost_is_dim_gray() {
+    let renderer = RatatuiInlineRenderer {
+        width: 90,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let mut output = Vec::new();
+    renderer
+        .write_question_panel(
+            &mut output,
+            QuestionPanelModel {
+                id: "q-default-style",
+                question: "What should I inspect?",
+                options: &[],
+                selected_option: 0,
+                selected_options: &[],
+                custom_answer: "",
+                allow_free_text: true,
+                selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::None,
+            },
+        )
+        .unwrap();
+    let output = String::from_utf8(output).unwrap();
+
+    assert!(output.contains("Type your answer..."), "{output:?}");
+    assert!(output.contains("\u{1b}[0;2;90m"), "{output:?}");
+}
+
+#[test]
+fn disabled_question_input_visual_has_no_ghost_or_cursor() {
+    let renderer = RatatuiInlineRenderer::with_width(90);
+    let model = QuestionPanelModel {
+        id: "auth-secret",
+        question: "Enter a secret",
+        options: &[],
+        selected_option: 0,
+        selected_options: &[],
+        custom_answer: "",
+        allow_free_text: true,
+        selection_mode: QuestionSelectionMode::Single,
+        input_feedback: QuestionInputFeedback::Disabled,
+    };
+
+    assert!(renderer.question_cursor_placement(&model).is_none());
+    let text = renderer.question_panel_lines(model).join("\n");
+    assert!(!text.contains("Type your answer"), "{text}");
+    assert!(!text.contains('›'), "{text}");
+}
+
+#[test]
+fn question_panel_other_required_ghost_is_dim_yellow() {
+    let renderer = RatatuiInlineRenderer {
+        width: 100,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let options = vec!["Green".to_string()];
+    let mut output = Vec::new();
+    renderer
+        .write_question_panel(
+            &mut output,
+            QuestionPanelModel {
+                id: "q-other-style",
+                question: "Choose",
+                options: &options,
+                selected_option: 1,
+                selected_options: &[],
+                custom_answer: "   ",
+                allow_free_text: true,
+                selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::Required,
+            },
+        )
+        .unwrap();
+    let output = String::from_utf8(output).unwrap();
+
+    assert!(output.contains("Please enter an answer"), "{output:?}");
+    assert!(output.contains("\u{1b}[0;2;33m"), "{output:?}");
 }
 
 #[test]
@@ -269,6 +546,7 @@ fn plain_question_panel_keeps_compact_card_instructions() {
             custom_answer: "",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -301,6 +579,7 @@ fn plain_question_panel_wraps_long_question_and_options() {
             custom_answer: "",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -348,6 +627,7 @@ fn question_panel_renders_custom_answer_as_selectable_option() {
             custom_answer: "",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 
@@ -374,6 +654,7 @@ fn question_panel_renders_custom_answer_input_value() {
             custom_answer: "红色",
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
+            input_feedback: QuestionInputFeedback::None,
         })
         .join("\n");
 

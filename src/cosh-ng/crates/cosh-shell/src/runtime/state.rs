@@ -410,9 +410,12 @@ pub(crate) struct QuestionState {
     pub(crate) pending_id: Option<String>,
     pub(crate) active_panel_id: Option<String>,
     pub(crate) active_panel_height: usize,
+    pub(crate) active_panel_cursor_row: Option<usize>,
+    pub(crate) active_panel_width: Option<u16>,
     pub(crate) handled_focus: HashSet<String>,
     pub(crate) handled_answers: HashSet<String>,
     pub(crate) handled_cancellations: HashSet<String>,
+    pub(crate) question_protocol_failure_reported: bool,
 }
 
 #[derive(Default)]

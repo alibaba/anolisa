@@ -2,6 +2,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::question::runtime::pending_question_capture;
+use crate::question::terminal::redraw_active_question_if_width_changed;
 use crate::runtime::prelude::*;
 use crate::runtime::state::{ApprovalRequestStatus, CoshApprovalMode, InlineState};
 
@@ -23,6 +24,11 @@ fn render_raw_inline_events<W: Write>(
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
     let mut terminal_output = CrLfWriter::new(output);
+    redraw_active_question_if_width_changed(
+        inline_state,
+        &mut terminal_output,
+        RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
+    )?;
     let snapshot = ShellEventSnapshot::new(events);
     let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,

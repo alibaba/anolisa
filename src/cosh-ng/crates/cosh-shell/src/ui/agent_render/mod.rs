@@ -47,14 +47,14 @@ pub use health::HealthBannerModel;
 pub(crate) use health::{health_uses_startup_row, primary_health_prompt_suggestion};
 use markdown::MarkdownRenderModel;
 pub use notice::NoticePanelModel;
-pub use question::{QuestionAnswerPanelModel, QuestionPanelModel};
+pub use question::{
+    QuestionAnswerPanelModel, QuestionCursorPlacement, QuestionInputFeedback, QuestionPanelModel,
+};
 pub use recommendation::{RecommendationActionPanelModel, RecommendationPanelModel};
 pub use status::AgentStatusAnimation;
 pub use stream::{MarkdownStreamBlock, StreamingAgentBlock};
-use wrap::{
-    char_width, compact_rendered_lines, display_width, line_to_string, strip_ansi_escape,
-    wrap_plain_line,
-};
+use wrap::{char_width, compact_rendered_lines, line_to_string, strip_ansi_escape};
+pub(crate) use wrap::{display_width, wrap_plain_line, wrap_plain_line_with_prefix};
 
 const DEFAULT_WIDTH: u16 = 100;
 const MIN_WIDTH: u16 = 40;
@@ -63,8 +63,8 @@ const MAX_WIDTH: u16 = 160;
 #[derive(Debug, Clone)]
 pub struct RatatuiInlineRenderer {
     width: u16,
-    plain: bool,
-    styled: bool,
+    pub(crate) plain: bool,
+    pub(crate) styled: bool,
     language: crate::Language,
 }
 
@@ -84,7 +84,7 @@ impl RatatuiInlineRenderer {
         Self {
             width,
             plain: plain_output_requested(),
-            styled: stdout_is_tty,
+            styled: stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
             language: crate::Language::EnUs,
         }
     }
@@ -112,7 +112,7 @@ impl RatatuiInlineRenderer {
         self
     }
 
-    fn i18n(&self) -> crate::I18n {
+    pub(crate) fn i18n(&self) -> crate::I18n {
         crate::I18n::new(self.language)
     }
 
@@ -178,7 +178,7 @@ impl RatatuiInlineRenderer {
     ) -> io::Result<()> {
         let model =
             MarkdownRenderModel::parse_with_language(text, self.content_width(), self.language);
-        if self.styled && !self.plain {
+        if self.styles_enabled() && !self.plain {
             let mut body = model.styled_lines();
             if let Some(footer) = footer {
                 body.extend(
@@ -342,7 +342,7 @@ impl RatatuiInlineRenderer {
             .wrap(Wrap { trim: true })
             .render(inner, &mut buffer);
 
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -383,7 +383,7 @@ impl RatatuiInlineRenderer {
         buffer_to_styled_lines(&buffer, area)
     }
 
-    fn panel_standard_width(&self) -> u16 {
+    pub(crate) fn panel_standard_width(&self) -> u16 {
         self.width.clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
@@ -406,9 +406,13 @@ impl RatatuiInlineRenderer {
             _ => std::io::stdout().is_terminal() && !running_under_cargo_test(),
         }
     }
+
+    pub(super) fn styles_enabled(&self) -> bool {
+        self.styled
+    }
 }
 
-fn buffer_to_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
+pub(crate) fn buffer_to_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
     (0..area.height)
         .map(|y| {
             let mut line = String::new();
@@ -425,7 +429,7 @@ fn buffer_to_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
         .collect()
 }
 
-fn buffer_to_styled_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
+pub(crate) fn buffer_to_styled_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
     (0..area.height)
         .map(|y| styled_buffer_row(buffer, area, y))
         .collect()
@@ -481,6 +485,9 @@ fn push_ansi_style(line: &mut String, style: RenderCellStyle) {
     let mut codes = vec!["0".to_string()];
     if style.modifier.contains(Modifier::BOLD) {
         codes.push("1".to_string());
+    }
+    if style.modifier.contains(Modifier::DIM) {
+        codes.push("2".to_string());
     }
     if style.modifier.contains(Modifier::REVERSED) {
         codes.push("7".to_string());

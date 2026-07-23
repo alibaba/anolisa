@@ -127,6 +127,78 @@ fn raw_cli_agent_free_text_question_echoes_input_before_submit() {
 }
 
 #[test]
+fn raw_cli_agent_free_text_empty_submit_stays_on_card() {
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? ask free question\n"),
+            ("Type answer | Enter send", b"\n"),
+            ("Please enter an answer", b"main\n"),
+            ("Got your answer: main", b"exit\n"),
+        ],
+    );
+
+    assert!(output.contains("Type your answer..."), "{output}");
+    assert!(output.contains("Please enter an answer"), "{output}");
+    assert!(!output.contains("No pending question"), "{output}");
+    assert!(output.contains("Answer: main"), "{output}");
+    assert!(output.contains("Got your answer: main"), "{output}");
+    assert!(
+        !output.contains("Got your answer: Type your answer"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_agent_question_no_color_keeps_box_placeholder() {
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[("NO_COLOR", "1"), ("TERM", "xterm-256color")],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? ask free question\n"),
+            ("Type answer | Enter send", b"\n"),
+            ("Please enter an answer", b"main\n"),
+            ("Got your answer: main", b"exit\n"),
+        ],
+    );
+
+    assert!(output.contains("╭ Agent question"), "{output}");
+    assert!(output.contains("Type your answer..."), "{output}");
+    assert!(output.contains("Please enter an answer"), "{output}");
+    assert!(!output.contains("\u{1b}[3"), "{output}");
+    assert!(output.contains("Got your answer: main"), "{output}");
+}
+
+#[test]
+fn raw_cli_agent_multiple_empty_submit_stays_on_card() {
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? ask multi question\n"),
+            ("Space toggle | Enter send", b"\n"),
+            ("Select at least one option or enter an answer", b" \n"),
+            ("Got your answer: Lint", b"exit\n"),
+        ],
+    );
+
+    assert!(
+        output.contains("Select at least one option or enter an answer"),
+        "{output}"
+    );
+    assert!(!output.contains("No pending question"), "{output}");
+    assert!(output.contains("Answer: Lint"), "{output}");
+    assert!(output.contains("Got your answer: Lint"), "{output}");
+}
+
+#[test]
 fn raw_cli_agent_question_ctrl_c_cancels_card_without_answer_turn() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
@@ -153,18 +225,16 @@ fn raw_cli_zsh_question_card_capture_does_not_leak_to_shell() {
         return;
     }
 
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &["--shell", "zsh"],
         &[("COSH_SHELL_ISOLATED", "1"), ("TERM", "xterm-256color")],
-        vec![
-            (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
-            (
-                b"echo after-zsh-question\n".to_vec(),
-                Duration::from_millis(300),
-            ),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? ask question\n"),
+            ("Left/Right move | Enter send", b"\x1b[C\n"),
+            ("Got your answer: Blue", b"echo after-zsh-question\n"),
+            ("after-zsh-question", b"exit\n"),
         ],
     );
 

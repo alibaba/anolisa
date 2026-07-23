@@ -1038,6 +1038,59 @@ exit 1"#,
 }
 
 #[test]
+fn cosh_core_pending_question_nonzero_exit_reports_only_protocol_failure() {
+    let script = mock_provider_script(
+        "cosh-core-question-then-nonzero",
+        r#"read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock"}'
+read -r user_message
+printf '%s\n' '{"type":"control_request","request_id":"ask-pending","request":{"subtype":"ask_user","question":"Choose","options":[{"label":"One"}],"allow_free_text":false,"multi_select":false}}'
+printf '%s\n' 'provider stderr must stay hidden' >&2
+exit 7"#,
+    );
+    let adapter = cosh_core_active_adapter(&script);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-question-nonzero"),
+        CoshApprovalMode::Auto,
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut events = Vec::new();
+    let mut errors = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "provider did not finish");
+        match handle.poll_event_timeout(Duration::from_millis(100)) {
+            Ok(AgentRunPoll::Event(event)) => events.push(event),
+            Ok(AgentRunPoll::Timeout) => {}
+            Ok(AgentRunPoll::Finished) => break,
+            Err(error) => errors.push(error.message),
+        }
+    }
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::UserQuestion { .. })),
+        "question was not emitted: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentFailed { .. })),
+        "generic process failure must not precede protocol failure: {events:?}"
+    );
+    assert_eq!(
+        errors,
+        vec!["cosh-core-question-protocol:premature-completion"]
+    );
+    assert!(
+        !format!("{events:?}{errors:?}").contains("provider stderr must stay hidden"),
+        "provider stderr leaked through the protocol failure"
+    );
+    let _ = fs::remove_file(script);
+}
+
+#[test]
 fn structured_session_failure_is_finalized_before_read_error_for_every_runner() {
     let script = mock_provider_script(
         "cosh-core-persist-conflict-invalid-utf8",
