@@ -41,6 +41,16 @@ const FAILURE_LABELS: Record<string, string> = {
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
+/** 从 ApiRequestError 中提取用户友好的错误信息，避免暴露完整 API URL */
+function userFacingError(e: unknown): string {
+  if (e instanceof ApiRequestError) {
+    const serverMsg = (e.body?.message ?? e.body?.error) as string | undefined;
+    if (serverMsg) return serverMsg;
+    return `请求失败 (${e.status})`;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
 const H = (s: string) => (
   <span
     className="[&_code]:bg-gray-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-xs [&_code]:text-gray-800"
@@ -856,7 +866,7 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
       .catch((e) => {
         handleDimError(e);
         setProgress((prev) => ({ ...prev, accuracy: 'error' }));
-        setAnalyzeError(`准确性分析失败: ${e instanceof Error ? e.message : String(e)}`);
+        setAnalyzeError(`准确性分析失败: ${userFacingError(e)}`);
       });
   }, [sessionId, handleDimError]);
 
@@ -979,7 +989,7 @@ function SessionListView({ onOpenSettings }: { onOpenSettings: () => void }) {
         // 最近活跃在前
         setSessions([...data].sort((a, b) => b.last_seen_ns - a.last_seen_ns));
       })
-      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); })
+      .catch((e) => { if (!cancelled) setError(userFacingError(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [rangeHours]);
