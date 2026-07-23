@@ -67,6 +67,11 @@ cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 cosh-cli audit check --action "rm -rf /var/log"
 # → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
 
+# Inspect and export the unified production audit timeline
+cosh-cli audit status
+cosh-cli audit events --since 2h --limit 100
+cosh-cli audit export --since 2h --output ./audit-incident
+
 # Resume an Agent conversation in the current workspace
 cosh-shell --resume              # Open the interactive session picker
 cosh-shell --resume <session-id> # Select a known provider session
@@ -80,6 +85,12 @@ restored. Records default to `~/.copilot-shell/cosh-core/sessions/`; change the
 root with `session.persist_dir`. Project session settings and relative store
 paths are resolved from the workspace cosh-shell sends to Core. See the
 [session recovery guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-recovery.md).
+
+Core and Shell also write a redacted, versioned audit timeline under
+`$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. The existing
+SLS/metrics export is unchanged. See the
+[audit operations guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/cli/audit.md)
+for configuration, retention, tracing, and incident export.
 
 ## Command reference
 
@@ -101,6 +112,9 @@ paths are resolved from the workspace cosh-shell sends to Core. See the
 | `cosh-cli checkpoint diff` | `cosh-cli checkpoint diff --workspace /path --from a --to b` | ws-ckpt daemon |
 | `cosh-cli audit check` | `cosh-cli audit check --action "rm -rf /"` | Policy engine |
 | `cosh-cli audit log` | `cosh-cli audit log --session abc123` | Policy engine |
+| `cosh-cli audit status/events/trace` | `cosh-cli audit trace <id>` | Unified audit store |
+| `cosh-cli audit export` | `cosh-cli audit export --since 2h --output ./incident` | Redacted incident bundle |
+| `cosh-cli audit prune --dry-run` | `cosh-cli audit prune --dry-run` | Retention preview |
 | `cosh-cli audit policy show` | `cosh-cli audit policy show` | Policy engine |
 
 ## Output format

@@ -25,6 +25,7 @@ pub(crate) enum ActivityPresentation {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeActivityRow {
     pub(crate) id: String,
+    pub(crate) audit_ref: Option<String>,
     pub(crate) run_id: String,
     pub(crate) kind: ActivityKind,
     pub(crate) status: String,
@@ -247,6 +248,7 @@ pub(crate) fn record_activity_rows_with_policy(
                 tool_name,
                 tool_input,
                 tool_use_id,
+                audit_ref,
                 ..
             } => {
                 state.control.record_provider_tool_command_from_input(
@@ -266,6 +268,7 @@ pub(crate) fn record_activity_rows_with_policy(
                     tool_name,
                     tool_input,
                     tool_use_id,
+                    audit_ref.as_deref(),
                     policy.shell_evidence_tool_available,
                 );
                 let input_str = serde_json::to_string(tool_input).unwrap_or_default();
@@ -439,6 +442,7 @@ fn provider_native_shell_auto_approved_row(
     let preview = legacy_activity_summary_preview(&format!("$ {command}"), 120);
     RuntimeActivityRow {
         id: id.clone(),
+        audit_ref: None,
         run_id: run_id.to_string(),
         kind: ActivityKind::Tool,
         status: "auto-approved".to_string(),
@@ -470,6 +474,7 @@ fn provider_tool_call_row(
         terminal_output_misroute_detail(tool_name, input, shell_evidence_tool_available);
     RuntimeActivityRow {
         id: id.clone(),
+        audit_ref: None,
         run_id: run_id.to_string(),
         kind: ActivityKind::Tool,
         status: "called".to_string(),
@@ -500,6 +505,7 @@ fn provider_tool_request_row(
     tool_name: &str,
     tool_input: &serde_json::Value,
     tool_use_id: &str,
+    audit_ref: Option<&str>,
     shell_evidence_tool_available: bool,
 ) -> RuntimeActivityRow {
     let id = next_activity_id(state, "tool");
@@ -511,6 +517,7 @@ fn provider_tool_request_row(
         terminal_output_misroute_detail(tool_name, &input_str, shell_evidence_tool_available);
     RuntimeActivityRow {
         id: id.clone(),
+        audit_ref: audit_ref.map(str::to_string),
         run_id: run_id.to_string(),
         kind: ActivityKind::Tool,
         status: "requested".to_string(),
@@ -525,7 +532,8 @@ fn provider_tool_request_row(
             ],
         ),
         detail: format!(
-            "evidence: ProviderToolRequest\nprovider: provider_control_protocol\nexecution_path: provider_control_protocol\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: {tool_name}\ninput_preview: {preview}{misroute_detail}\nagent_result_visibility: provider_native_result"
+            "evidence: ProviderToolRequest\nprovider: provider_control_protocol\nexecution_path: provider_control_protocol\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: {tool_name}\naudit_ref: {}\ninput_preview: {preview}{misroute_detail}\nagent_result_visibility: provider_native_result",
+            audit_ref.unwrap_or("<none>")
         ),
         presentation: Some(ActivityPresentation::Tool(presentation)),
     }
@@ -634,6 +642,7 @@ fn tool_completed_row(
     }
     RuntimeActivityRow {
         id,
+        audit_ref: None,
         run_id: run_id.to_string(),
         kind: ActivityKind::Tool,
         status: status.to_string(),
@@ -725,6 +734,7 @@ pub(crate) fn record_approved_shell_handoff_blocks(
             .insert(evidence.command_block_id.clone());
         state.activity.rows.push(RuntimeActivityRow {
             id: id.clone(),
+            audit_ref: None,
             run_id: handoff_request.run_id.clone(),
             kind: ActivityKind::ShellHandoff,
             status: evidence.status.to_string(),
@@ -821,6 +831,7 @@ fn tool_output_row(
     let provider_shell_tool = state.control.provider_tool_is_shell(run_id, tool_id);
     RuntimeActivityRow {
         id: id.clone(),
+        audit_ref: None,
         run_id: run_id.to_string(),
         kind: ActivityKind::ToolOutput,
         status: "captured".to_string(),

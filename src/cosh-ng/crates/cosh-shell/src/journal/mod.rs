@@ -4,6 +4,8 @@ use std::path::Path;
 
 use crate::types::ShellEvent;
 
+pub(crate) mod audit;
+
 pub fn write_shell_events(path: impl AsRef<Path>, events: &[ShellEvent]) -> io::Result<()> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(true).write(true);

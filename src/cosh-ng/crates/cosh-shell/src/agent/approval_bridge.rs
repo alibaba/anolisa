@@ -5,6 +5,7 @@ use crate::approval::broker::{
     provider_deny_response, ApprovalExecutionMetadata, ApprovalOutcome, ApprovalOutcomeInput,
     ProviderApprovalStatus, ProviderResponseInput,
 };
+use crate::approval::journal::approval_audit_input;
 use crate::approval::provider::mark_provider_approval_resolved;
 use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::prelude::*;
@@ -388,6 +389,15 @@ fn apply_auto_approved_request_outcome<W: Write>(
     title: MessageId,
     output: &mut W,
 ) -> std::io::Result<AutoApprovalFlow> {
+    if request.status != ApprovalRequestStatus::Approved {
+        render_approval_resolution(
+            state,
+            request,
+            MessageId::ApprovalResolutionBlockedTitle,
+            output,
+        )?;
+        return Ok(AutoApprovalFlow::Handled);
+    }
     // DR-6: When hooks had something to say but the tool is auto-approved,
     // render an independent hook notice panel before the tool call header
     // so that the user is aware of the hook's intervention.
@@ -411,6 +421,24 @@ fn apply_auto_approved_request_outcome<W: Write>(
         )?;
     }
     let outcome = approval_outcome_for_auto_request(request);
+    if outcome == ApprovalOutcome::ForegroundShellHandoff {
+        let authorized = state
+            .audit
+            .as_mut()
+            .map(|audit| audit.authorize_host_execution(approval_audit_input(request)))
+            .transpose();
+        if authorized.is_err() {
+            request.status = ApprovalRequestStatus::Blocked;
+            request.execution_path = Some("blocked_audit_required");
+            render_approval_resolution(
+                state,
+                request,
+                MessageId::ApprovalResolutionBlockedTitle,
+                output,
+            )?;
+            return Ok(AutoApprovalFlow::Handled);
+        }
+    }
     if outcome == ApprovalOutcome::ProviderNativeShellFallback {
         mark_provider_native_shell_execution(state, request);
     }
@@ -618,6 +646,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: vec![
@@ -778,6 +807,7 @@ mod tests {
     ) -> RuntimeApprovalRequest {
         RuntimeApprovalRequest {
             id: "req-1".to_string(),
+            audit_ref: None,
             run_id: "run-1".to_string(),
             origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),

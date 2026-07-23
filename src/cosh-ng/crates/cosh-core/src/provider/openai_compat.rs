@@ -170,7 +170,10 @@ impl ContentGenerator for OpenAICompatProvider {
                     }
 
                     if cancelled.load(Ordering::SeqCst) {
-                        return None;
+                        return Some((
+                            GenerateEvent::Cancelled,
+                            (stream, buf, cancelled, pending, thinking_field),
+                        ));
                     }
 
                     if let Some(line_end) = buf.find('\n') {

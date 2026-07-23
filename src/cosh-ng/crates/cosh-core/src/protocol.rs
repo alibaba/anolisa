@@ -317,6 +317,8 @@ pub enum CoreControlRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         tool_use_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        audit_ref: Option<String>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         hook_requires_approval: bool,
     },
@@ -652,6 +654,25 @@ impl OutputMessage {
         tool_use_id: &str,
         hook_requires_approval: bool,
     ) -> Self {
+        Self::can_use_tool_with_audit_ref(
+            request_id,
+            tool_name,
+            input,
+            tool_use_id,
+            hook_requires_approval,
+            None,
+        )
+    }
+
+    /// Builds a Tool approval request linked to a persisted audit event.
+    pub fn can_use_tool_with_audit_ref(
+        request_id: &str,
+        tool_name: &str,
+        input: Value,
+        tool_use_id: &str,
+        hook_requires_approval: bool,
+        audit_ref: Option<String>,
+    ) -> Self {
         Self::ControlRequest {
             request_id: request_id.to_string(),
             request: CoreControlRequest::CanUseTool {
@@ -660,6 +681,7 @@ impl OutputMessage {
                 description: None,
                 tool_use_id: tool_use_id.to_string(),
                 hook_requires_approval,
+                audit_ref,
             },
         }
     }
@@ -1001,6 +1023,20 @@ mod tests {
         assert!(v.get("request").unwrap().get("input").is_some());
         // cosh-shell checks: v["request"]["tool_use_id"]
         assert!(v.get("request").unwrap().get("tool_use_id").is_some());
+    }
+
+    #[test]
+    fn can_use_tool_carries_real_optional_audit_reference() {
+        let msg = OutputMessage::can_use_tool_with_audit_ref(
+            "req-1",
+            "Bash",
+            serde_json::json!({"command": "echo ok"}),
+            "toolu-1",
+            false,
+            Some("audit-event-1".to_string()),
+        );
+        let value = serde_json::to_value(msg).unwrap();
+        assert_eq!(value["request"]["audit_ref"], "audit-event-1");
     }
 
     #[test]

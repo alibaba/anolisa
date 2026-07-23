@@ -11,6 +11,10 @@ use crate::runtime::prelude::*;
 #[cfg(test)]
 use crate::types::HookFinding;
 
+mod command;
+
+use command::render_command_details;
+
 const DETAILS_AGENT_DEFAULT_LINES: usize = 120;
 const DETAILS_AGENT_MAX_LINES: usize = 300;
 const DETAILS_AGENT_MAX_BYTES: usize = 12 * 1024;
@@ -315,50 +319,6 @@ fn command_block_by_details_id<'a>(
     blocks.iter().find(|block| block.id == id)
 }
 
-fn render_command_details<W: Write>(
-    state: &InlineState,
-    block: &CommandBlock,
-    output: &mut W,
-) -> std::io::Result<()> {
-    let output_id = block
-        .output
-        .terminal_output_ref
-        .as_ref()
-        .map(|_| terminal_output_id(&block.session_id, &block.id))
-        .unwrap_or_else(|| "<none>".to_string());
-    let output_excerpt_status = output_excerpt_status_for_block(block);
-    let title = match state.language {
-        Language::ZhCn => "命令详情",
-        Language::EnUs => "Command details",
-    };
-    let status = match block.status {
-        CommandStatus::Completed => "completed",
-        CommandStatus::Failed => "failed",
-    };
-    RatatuiInlineRenderer::for_terminal().write_notice_panel(
-        output,
-        NoticePanelModel {
-            title,
-            body: vec![
-                format!("command_id: {}", block.id),
-                format!("session_id: {}", block.session_id),
-                format!("command: {}", block.command),
-                format!("cwd: {}", block.cwd),
-                format!("end_cwd: {}", block.end_cwd),
-                format!("status: {status}"),
-                format!("exit_code: {}", block.exit_code),
-                format!("duration_ms: {}", block.duration_ms),
-                format!("output_id: {output_id}"),
-                format!("output_bytes: {}", block.output.terminal_output_bytes),
-                format!("output_excerpt_status: {output_excerpt_status}"),
-                "redaction_status: not_requested".to_string(),
-                "excerpt_status: not_requested".to_string(),
-            ],
-            footer: None,
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +361,7 @@ mod tests {
         let mut state = InlineState::default();
         state.activity.rows.push(RuntimeActivityRow {
             id: "tool-1".to_string(),
+            audit_ref: None,
             run_id: "run-1".to_string(),
             kind: ActivityKind::Tool,
             status: "called".to_string(),
@@ -680,6 +641,7 @@ mod tests {
                 terminal_output_bytes: 123,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         }
     }
 

@@ -152,6 +152,23 @@ analysis_mode = "smart"
 approval_mode = "auto"
 ```
 
+## Audit Configuration
+
+Audit uses the existing configuration files, but its authority order is intentionally stricter:
+`/etc/copilot-shell/config.toml` is authoritative when it contains `[audit]`; otherwise the user
+file is used. Project `[audit]` tables are ignored.
+
+```toml
+[audit]
+mode = "best_effort" # best_effort | required
+retention_days = 30
+max_disk_bytes = 1073741824
+```
+
+`COSH_AUDIT_DIR` overrides only the storage root. Without it, storage uses
+`$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. See the
+[audit operations guide](cli/audit.md) for failure and retention behavior.
+
 ## Environment Variable Overrides
 
 | Environment Variable | Purpose | Mapped Configuration |
@@ -166,6 +183,7 @@ approval_mode = "auto"
 | `COSH_SHELL_ADAPTER` | Shell adapter | `shell.adapter_default` |
 | `COSH_SHELL_DEBUG` | Maps to debug level | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell language | — |
+| `COSH_AUDIT_DIR` | Unified audit storage root | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | Alibaba Cloud AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Alibaba Cloud SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | Provider resolution chain |

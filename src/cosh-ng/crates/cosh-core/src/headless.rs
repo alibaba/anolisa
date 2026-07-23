@@ -70,7 +70,6 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
             return Ok(2);
         }
     }
-
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
@@ -94,9 +93,13 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     let extra_params = resolved.extra_params.clone();
     session.finalize_model(&resolved.model, args.model.is_some());
 
-    let mut engine = CoshCore::new(config, provider, tools);
+    let mut engine = CoshCore::new_with_session_id(
+        config,
+        provider,
+        tools,
+        session.record.session_id.to_string(),
+    );
     engine.extra_params = extra_params;
-    engine.session_id = session.record.session_id.to_string();
     engine.messages = session.record.messages.clone();
     engine
         .compaction
@@ -260,6 +263,9 @@ where
                     .hook_system
                     .fire_session_start(&engine.session_id, &cwd_str)
                     .await;
+                engine
+                    .audit
+                    .record_session_hook_decision("session_start", "observed");
                 for n in &ss_result.notifications {
                     engine.emit(
                         writer,

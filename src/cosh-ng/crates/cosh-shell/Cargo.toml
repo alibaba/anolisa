@@ -14,11 +14,14 @@ name = "cosh-shell"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { workspace = true, features = ["clock", "serde"] }
 nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
 ratatui = "0.28"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 toml.workspace = true
+uuid.workspace = true
 wait-timeout = "0.2"
 qrcode = { version = "0.14", default-features = false }
 regex.workspace = true

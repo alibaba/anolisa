@@ -485,6 +485,7 @@ impl AgentAdapter for FakeAgentAdapter {
                         tool_input: serde_json::json!({ "command": "git status" }),
                         tool_use_id: "toolu-1".to_string(),
                         hook_requires_approval: false,
+                        audit_ref: None,
                     },
                     AgentEvent::ToolOutputDelta {
                         run_id: run_id.clone(),

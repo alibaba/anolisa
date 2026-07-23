@@ -4,6 +4,18 @@ pub(crate) use super::structured_events::{
 use crate::agent::heartbeat::{remember_agent_activity, render_agent_pending_tool_status};
 use crate::agent::run::ActiveAgentRun;
 use crate::runtime::prelude::*;
+
+mod classification;
+
+use classification::{
+    event_updates_pending_tool_status, is_interaction_governed_event,
+    should_render_governance_block,
+};
+
+pub(super) fn event_may_render_structured_surface(event: &GovernedEvent) -> bool {
+    classification::event_may_render_structured_surface(event)
+}
+
 pub(crate) fn render_active_agent_event<W: Write>(
     active_run: &mut ActiveAgentRun,
     event: AgentEvent,
@@ -96,29 +108,6 @@ pub(crate) fn active_run_has_unrendered_interaction(active_run: &ActiveAgentRun)
     active_run.governed_events[active_run.rendered_governed_event_count..]
         .iter()
         .any(is_interaction_governed_event)
-}
-
-fn is_interaction_governed_event(event: &GovernedEvent) -> bool {
-    matches!(
-        event.event,
-        AgentEvent::UserQuestion { .. }
-            | AgentEvent::AuthRequired { .. }
-            | AgentEvent::Action { .. }
-            | AgentEvent::ToolPermissionRequest { .. }
-    )
-}
-
-pub(super) fn event_may_render_structured_surface(event: &GovernedEvent) -> bool {
-    is_interaction_governed_event(event)
-        || should_render_governance_block(event)
-        || matches!(
-            event.event,
-            AgentEvent::ToolCompleted { .. } | AgentEvent::ShellEvidenceRequest { .. }
-        )
-}
-
-fn event_updates_pending_tool_status(event: &GovernedEvent) -> bool {
-    matches!(event.event, AgentEvent::ToolCall { .. })
 }
 
 pub(crate) fn render_held_events_into_active_run<W: Write>(
@@ -230,23 +219,6 @@ pub(crate) fn flush_held_agent_events<W: Write>(
     stream.finish(output, None)?;
     output.flush()?;
     Ok(())
-}
-
-fn should_render_governance_block(event: &GovernedEvent) -> bool {
-    match &event.event {
-        AgentEvent::StatusChanged { .. } => false,
-        AgentEvent::Recommendation { .. } => false,
-        AgentEvent::ToolCall { .. }
-        | AgentEvent::UserQuestion { .. }
-        | AgentEvent::Action { .. }
-        | AgentEvent::ToolPermissionRequest { .. } => false,
-        AgentEvent::AgentFailed { .. } | AgentEvent::AgentCancelled { .. } => true,
-        AgentEvent::ToolOutputDelta { .. } | AgentEvent::ToolCompleted { .. } => false,
-        AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
-        AgentEvent::AuthRequired { .. } => false,
-        AgentEvent::ShellEvidenceRequest { .. } => false,
-        AgentEvent::HookNotification { .. } => true,
-    }
 }
 
 #[cfg(test)]
@@ -570,6 +542,7 @@ pub(super) mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

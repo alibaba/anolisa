@@ -265,6 +265,7 @@ fn internal_agent_run_is_suppressed_during_compaction() {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -326,6 +327,7 @@ fn suppressed_failed_command_analysis_is_not_marked_analyzed() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let blocks = vec![block.clone()];
     let mut output = Vec::new();
@@ -431,6 +433,7 @@ fn gate_request(id: &str) -> crate::types::AgentRequest {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -939,6 +942,7 @@ fn user_confirmed_analysis_queue_full_reverts_and_notifies() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let blocks = vec![block.clone()];
     let mut output = Vec::new();

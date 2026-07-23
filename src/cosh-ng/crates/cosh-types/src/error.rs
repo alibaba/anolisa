@@ -31,6 +31,10 @@ pub enum ErrorCode {
     AuditPolicyError = 401,
     AuditLogError = 402,
     AuditActionMalformed = 403,
+    AuditUnavailable = 404,
+    AuditCorrupt = 405,
+    AuditCursorInvalid = 406,
+    AuditExportError = 407,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

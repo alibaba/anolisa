@@ -482,6 +482,7 @@ fn control_shell_permission_uses_same_command_assessment_risk() {
             tool_input: serde_json::json!({ "command": "ps aux --sort=-%mem | head -20" }),
             tool_use_id: "toolu-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     };
 
@@ -516,6 +517,7 @@ fn control_shell_permission_missing_command_blocks_as_unsafe_binding() {
             tool_input: serde_json::json!({ "description": "missing command" }),
             tool_use_id: "toolu-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     };
 
@@ -788,6 +790,7 @@ fn provider_tool_request(
 ) -> RuntimeApprovalRequest {
     RuntimeApprovalRequest {
         id: "req-1".to_string(),
+        audit_ref: None,
         run_id: "run-1".to_string(),
         origin: AgentRunOrigin::Standard,
         session_id: "sess-1".to_string(),
@@ -838,6 +841,7 @@ fn active_run_for_approval_test() -> (std::path::PathBuf, ActiveAgentRun) {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -949,6 +953,7 @@ fn governed_provider_tool_permission(request_id: &str, tool_use_id: &str) -> Gov
             tool_input: serde_json::json!({ "command": "df -h" }),
             tool_use_id: tool_use_id.to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     }
 }

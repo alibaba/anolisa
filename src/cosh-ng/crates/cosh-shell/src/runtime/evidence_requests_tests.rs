@@ -26,6 +26,7 @@ fn output_request_injects_bounded_excerpt_without_path() {
         }),
         ignored_multiple_request_blocks: false,
         audit_id: None,
+        audit_ref: None,
     };
 
     let agent_request =
@@ -70,6 +71,7 @@ fn output_request_marks_capture_truncated_status() {
         }),
         ignored_multiple_request_blocks: false,
         audit_id: None,
+        audit_ref: None,
     };
 
     let agent_request =
@@ -95,6 +97,7 @@ fn history_request_injects_index_without_output_contents() {
         kind: RuntimeEvidenceRequestKind::History,
         ignored_multiple_request_blocks: false,
         audit_id: None,
+        audit_ref: None,
     };
 
     let agent_request =
@@ -303,6 +306,7 @@ fn evidence_follow_ups_keep_session_and_plain_user_payload() {
         kind: RuntimeEvidenceRequestKind::History,
         ignored_multiple_request_blocks: false,
         audit_id: None,
+        audit_ref: None,
     };
     let output_request = RuntimeEvidenceRequest {
         id: "evidence-2".to_string(),
@@ -314,6 +318,7 @@ fn evidence_follow_ups_keep_session_and_plain_user_payload() {
         }),
         ignored_multiple_request_blocks: false,
         audit_id: None,
+        audit_ref: None,
     };
 
     let history =
@@ -425,6 +430,7 @@ fn command_block(output_ref: &str) -> CommandBlock {
         started_at_ms: 1,
         ended_at_ms: 11,
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 
@@ -513,6 +519,7 @@ fn evidence_send_restores_card_when_queue_is_full() {
             kind: RuntimeEvidenceRequestKind::History,
             ignored_multiple_request_blocks: false,
             audit_id: None,
+            audit_ref: None,
         },
         0,
     )
@@ -539,6 +546,7 @@ fn evidence_send_restores_card_when_queue_is_full() {
             kind: RuntimeEvidenceRequestKind::History,
             ignored_multiple_request_blocks: false,
             audit_id: None,
+            audit_ref: None,
         });
 
     let adapter = AdapterInstance::CoshCore(CoshCoreAdapter {
@@ -590,6 +598,7 @@ fn evidence_send_during_compaction_keeps_the_card_and_shows_paused_notice() {
             kind: RuntimeEvidenceRequestKind::History,
             ignored_multiple_request_blocks: false,
             audit_id: None,
+            audit_ref: None,
         });
 
     // A bogus program proves no model process is launched: the send is

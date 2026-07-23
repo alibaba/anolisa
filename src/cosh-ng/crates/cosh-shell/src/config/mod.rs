@@ -1,3 +1,4 @@
+pub(crate) mod audit;
 mod hook_feedback;
 mod language;
 mod load;

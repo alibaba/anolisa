@@ -1,5 +1,6 @@
 use crate::runtime::mode::render_mode_command;
 use crate::runtime::prelude::*;
+use crate::slash::audit::render_audit_command;
 use crate::slash::config::render_config_command;
 use crate::slash::debug::render_debug_command;
 use crate::slash::extensions::render_extensions_command;
@@ -27,6 +28,10 @@ pub(super) fn render_slash_command<W: Write>(
         SlashCommand::Auth => {
             crate::auth::runtime::trigger_auth_from_slash(adapter, state, output)?;
             Ok(false)
+        }
+        SlashCommand::Audit(arguments) => {
+            render_audit_command(arguments, state, output)?;
+            Ok(true)
         }
         SlashCommand::Help => {
             render_help(state, output)?;

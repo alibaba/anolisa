@@ -279,6 +279,7 @@ fn terminal_events(events: &[GovernedEvent]) -> Vec<AgentEvent> {
                     tool_input: serde_json::Value::Null,
                     tool_use_id: String::new(),
                     hook_requires_approval: false,
+                    audit_ref: None,
                 })
             }
             AgentEvent::AgentCompleted { .. } => Some(AgentEvent::AgentCompleted {

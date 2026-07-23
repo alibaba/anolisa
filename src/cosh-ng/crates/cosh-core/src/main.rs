@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+mod audit;
 mod auth;
 mod cli;
 mod compaction;

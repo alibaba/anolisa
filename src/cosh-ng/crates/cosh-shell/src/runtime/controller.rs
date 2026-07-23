@@ -23,6 +23,9 @@ fn render_raw_inline_events<W: Write>(
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    if let Some(audit) = inline_state.audit.as_mut() {
+        audit.observe_shell_events(events);
+    }
     let mut terminal_output = CrLfWriter::new(output);
     redraw_active_question_if_width_changed(
         inline_state,
@@ -550,6 +553,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

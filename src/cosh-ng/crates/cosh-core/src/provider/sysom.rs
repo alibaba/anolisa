@@ -334,7 +334,10 @@ impl SysomProvider {
             (byte_stream, String::new(), cancelled, state),
             |(mut stream, mut buf, cancelled, mut state)| async move {
                 loop {
-                    if cancelled.load(Ordering::SeqCst) || state.stream_ended {
+                    if cancelled.load(Ordering::SeqCst) {
+                        return Some((GenerateEvent::Cancelled, (stream, buf, cancelled, state)));
+                    }
+                    if state.stream_ended {
                         return None;
                     }
 

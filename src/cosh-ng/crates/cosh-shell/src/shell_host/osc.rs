@@ -7,8 +7,8 @@ use serde::Deserialize;
 
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use crate::types::{
-    CommandOrigin, ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
-    SESSION_OUTPUT_REF_MAX_BYTES,
+    CommandOrigin, ShellCommandAuditIdentity, ShellEnvironmentSnapshot, ShellEvent, ShellEventKind,
+    ShellHandoffRequest, SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
 #[cfg(test)]
@@ -35,6 +35,7 @@ struct CurrentCommand {
     command: String,
     cwd: String,
     origin: CommandOrigin,
+    audit_identity: Option<ShellCommandAuditIdentity>,
     started_at_ms: u64,
     output_start: usize,
     shell_environment_generation: Option<u64>,
@@ -67,6 +68,7 @@ pub(super) struct OscParser {
 struct PendingCommandOrigin {
     command: String,
     origin: CommandOrigin,
+    audit_identity: ShellCommandAuditIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +125,11 @@ impl OscParser {
         self.pending_command_origin = Some(PendingCommandOrigin {
             command: request.command.clone(),
             origin: command_origin_from_handoff_request(request),
+            audit_identity: ShellCommandAuditIdentity {
+                run_id: request.run_id.clone(),
+                request_id: request.request_id.clone(),
+                tool_use_id: request.tool_use_id.clone(),
+            },
         });
     }
 
@@ -177,6 +184,7 @@ impl OscParser {
                     message: Some(format!("marker parse failed: {err}")),
                     command_origin: None,
                     shell_environment_generation: None,
+                    audit_identity: None,
                 }),
             }
         }
@@ -225,12 +233,13 @@ impl OscParser {
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
-                let origin = self.consume_pending_command_origin(&command);
+                let (origin, audit_identity) = self.consume_pending_command_origin(&command);
                 self.current = Some(CurrentCommand {
                     id: command_id.clone(),
                     command: command.clone(),
                     cwd: cwd.clone(),
                     origin,
+                    audit_identity: audit_identity.clone(),
                     started_at_ms: timestamp,
                     output_start: self.clean.len(),
                     shell_environment_generation: marker
@@ -246,6 +255,7 @@ impl OscParser {
                     .current
                     .as_ref()
                     .and_then(|current| current.shell_environment_generation);
+                event.audit_identity = audit_identity;
                 self.events.push(event);
             }
             "precmd" => {
@@ -271,6 +281,7 @@ impl OscParser {
                         message: None,
                         command_origin: None,
                         shell_environment_generation: None,
+                        audit_identity: None,
                     });
                     return Ok(());
                 };
@@ -305,6 +316,7 @@ impl OscParser {
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
                 event.terminal_output_bytes = Some(output.len() as u64);
                 event.command_origin = Some(current.origin);
+                event.audit_identity = current.audit_identity;
                 event.shell_environment_generation = current.shell_environment_generation;
                 self.events.push(event);
             }
@@ -369,14 +381,17 @@ impl OscParser {
         }
     }
 
-    fn consume_pending_command_origin(&mut self, command: &str) -> CommandOrigin {
+    fn consume_pending_command_origin(
+        &mut self,
+        command: &str,
+    ) -> (CommandOrigin, Option<ShellCommandAuditIdentity>) {
         let Some(pending) = self.pending_command_origin.take() else {
-            return CommandOrigin::UserInteractive;
+            return (CommandOrigin::UserInteractive, None);
         };
         if pending.command == command {
-            pending.origin
+            (pending.origin, Some(pending.audit_identity))
         } else {
-            CommandOrigin::Unknown
+            (CommandOrigin::Unknown, None)
         }
     }
 
@@ -546,6 +561,7 @@ impl OscParser {
         event.duration_ms = Some(ended_at.saturating_sub(current.started_at_ms));
         event.terminal_output_bytes = Some(output.len() as u64);
         event.command_origin = Some(current.origin);
+        event.audit_identity = current.audit_identity;
         event.shell_environment_generation = current.shell_environment_generation;
         self.events.push(event);
         Ok(())
@@ -614,6 +630,7 @@ impl OscParser {
             message: Some("input intercepted before reaching bash".to_string()),
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
         });
     }
 
@@ -676,6 +693,7 @@ impl OscParser {
             message: Some(message.to_string()),
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
         });
     }
 }
@@ -741,6 +759,7 @@ fn command_finished_event(
             }),
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
         },
     }
 }

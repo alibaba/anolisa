@@ -1009,6 +1009,7 @@ fn command_block(
             terminal_output_bytes: 24,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 

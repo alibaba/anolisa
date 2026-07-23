@@ -89,6 +89,7 @@ fn approval_state_generates_request_ids_from_owned_queue() {
     assert_eq!(state.next_request_id(), "req-1");
     state.requests.push(RuntimeApprovalRequest {
         id: "req-1".to_string(),
+        audit_ref: None,
         run_id: "run-1".to_string(),
         origin: AgentRunOrigin::Standard,
         session_id: "session-1".to_string(),
@@ -256,6 +257,7 @@ fn agent_request(id: &str) -> AgentRequest {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),

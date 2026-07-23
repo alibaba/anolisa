@@ -16,10 +16,12 @@ pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
     Auth,
+    Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Mode(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
+    #[allow(dead_code)]
     Info(SlashInfoCommand),
     Health,
     Removed(RemovedCommand<'a>),
@@ -67,7 +69,9 @@ impl<'a> SlashCommand<'a> {
                 Some(Self::Removed(RemovedCommand::ApprovalDecision(token)))
             }
             "/answer" => Some(Self::Removed(RemovedCommand::QuestionAnswer)),
-            "/audit" => Some(Self::Info(SlashInfoCommand::Audit)),
+            "/audit" => Some(Self::Audit(
+                input.strip_prefix("/audit").unwrap_or_default().trim(),
+            )),
             "/config" => {
                 let sub = parts.next();
                 let value = parts.next();
@@ -138,6 +142,7 @@ fn parser_owned_command(token: &str) -> bool {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SlashInfoCommand {
+    #[allow(dead_code)]
     Audit,
     Config,
 }

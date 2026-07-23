@@ -7,7 +7,7 @@ use crate::approval::handoff::{
     fallback_bash_execution_path, shell_handoff_command_from_request, trust_key_from_command,
     ApprovedBashExecutionPath,
 };
-use crate::approval::journal::approval_journal_entry;
+use crate::approval::journal::{approval_audit_input, approval_journal_entry};
 use crate::approval::provider::provider_approval_status;
 use crate::runtime::prelude::*;
 
@@ -22,18 +22,15 @@ pub(crate) fn apply_approval_decision(
     request_index: usize,
     kind: ApprovalCommandKind,
 ) -> Option<AppliedApprovalDecision> {
-    let (status, title) = match kind {
+    let mut trust_key = None;
+    let (status, mut title) = match kind {
         ApprovalCommandKind::Approve => {
             approval_status_for_allowed_request(&state.approvals.requests[request_index])
         }
         ApprovalCommandKind::AlwaysTrust => {
             let (status, _) =
                 approval_status_for_allowed_request(&state.approvals.requests[request_index]);
-            if let Some(key) =
-                trust_key_from_command(&state.approvals.requests[request_index].preview)
-            {
-                state.control.trust_session_command(key);
-            }
+            trust_key = trust_key_from_command(&state.approvals.requests[request_index].preview);
             (status, MessageId::ApprovalResolutionTrustedTitle)
         }
         ApprovalCommandKind::Deny => (
@@ -56,13 +53,44 @@ pub(crate) fn apply_approval_decision(
         request_is_executable_bash_tool(&state.approvals.requests[request_index]),
     );
     apply_approval_execution_metadata(&mut state.approvals.requests[request_index], metadata);
-    let request = state.approvals.requests[request_index].clone();
+    let mut request = state.approvals.requests[request_index].clone();
+    let audit_result = state
+        .audit
+        .as_mut()
+        .map(|audit| audit.record_approval_resolved(approval_audit_input(&request)))
+        .transpose();
+    if audit_result.is_err() && request.status == ApprovalRequestStatus::Approved {
+        request.status = ApprovalRequestStatus::Blocked;
+        request.execution_path = Some("blocked_audit_required");
+        state.approvals.requests[request_index] = request.clone();
+        title = MessageId::ApprovalResolutionBlockedTitle;
+    }
+    if request.status == ApprovalRequestStatus::Approved
+        && outcome == ApprovalOutcome::ForegroundShellHandoff
+    {
+        let host_audit_result = state
+            .audit
+            .as_mut()
+            .map(|audit| audit.authorize_host_execution(approval_audit_input(&request)))
+            .transpose();
+        if host_audit_result.is_err() {
+            request.status = ApprovalRequestStatus::Blocked;
+            request.execution_path = Some("blocked_audit_required");
+            state.approvals.requests[request_index] = request.clone();
+            title = MessageId::ApprovalResolutionBlockedTitle;
+        }
+    }
+    if request.status == ApprovalRequestStatus::Approved {
+        if let Some(key) = trust_key {
+            state.control.trust_session_command(key);
+        }
+    }
     state
         .approvals
         .journal
         .push(approval_journal_entry(&request, "user"));
-    let run_approved_tool =
-        status == ApprovalRequestStatus::Approved && request_is_executable_bash_tool(&request);
+    let run_approved_tool = request.status == ApprovalRequestStatus::Approved
+        && request_is_executable_bash_tool(&request);
 
     Some(AppliedApprovalDecision {
         request,
@@ -198,6 +226,7 @@ pub(crate) fn approval_resolution_agent_request(request: &RuntimeApprovalRequest
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -283,6 +312,7 @@ mod tests {
     ) -> RuntimeApprovalRequest {
         RuntimeApprovalRequest {
             id: "req-1".to_string(),
+            audit_ref: None,
             run_id: "run-1".to_string(),
             origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),

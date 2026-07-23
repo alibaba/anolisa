@@ -380,6 +380,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "nix",
  "notify",
  "regex",
  "reqwest",
@@ -409,28 +410,33 @@ dependencies = [
  "chrono",
  "cosh-types",
  "nix",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "toml",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "cosh-shell"
 version = "0.12.0"
 dependencies = [
+ "chrono",
  "nix",
  "qrcode",
  "ratatui",
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "wait-timeout",
 ]
 

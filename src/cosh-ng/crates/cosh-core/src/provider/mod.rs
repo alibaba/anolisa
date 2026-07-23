@@ -184,6 +184,7 @@ pub enum GenerateEvent {
         total_tokens: u32,
     },
     MessageEnd,
+    Cancelled,
     Error(String),
 }
 

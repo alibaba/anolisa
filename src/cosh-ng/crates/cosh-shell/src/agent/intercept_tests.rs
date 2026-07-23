@@ -30,6 +30,7 @@ fn prompt_ghost_event(message: Option<&str>, input: Option<&str>) -> ShellEvent 
         message: message.map(str::to_string),
         command_origin: None,
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 
@@ -336,6 +337,7 @@ fn source_block() -> CommandBlock {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 

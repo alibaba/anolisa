@@ -23,6 +23,7 @@ fn failed_block(exit_code: i32, command: &str) -> CommandBlock {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 
@@ -104,6 +105,7 @@ fn failed_event(block: &CommandBlock) -> ShellEvent {
         message: None,
         command_origin: Some(block.origin),
         shell_environment_generation: block.shell_environment_generation,
+        audit_identity: None,
     }
 }
 

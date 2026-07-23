@@ -93,7 +93,6 @@ fn raw_cli_informational_slash_commands_render_feedback() {
         "fake",
         "/extensions\n\
          /config\n\
-         /audit\n\
          echo after-info-slash\n\
          exit\n",
     );
@@ -107,11 +106,6 @@ fn raw_cli_informational_slash_commands_render_feedback() {
     assert!(output.contains("language:"), "{output}");
     assert!(output.contains("debug activity: off"), "{output}");
     assert!(output.contains("Use /config language"), "{output}");
-    assert!(output.contains("Audit"), "{output}");
-    assert!(
-        output.contains("Approval decisions are available with Details actions"),
-        "{output}"
-    );
     assert!(output.contains("after-info-slash"), "{output}");
     assert!(!output.contains("bash: /skill"), "{output}");
     assert!(!output.contains("bash: /config"), "{output}");

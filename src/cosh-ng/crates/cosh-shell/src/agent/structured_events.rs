@@ -166,6 +166,7 @@ mod tests {
                 tool_input: serde_json::json!({ "command": "rm -f /tmp/example" }),
                 tool_use_id: "tool-1".to_string(),
                 hook_requires_approval: false,
+                audit_ref: None,
             },
             GovernancePolicyDecision::NeedsUserApproval,
         );

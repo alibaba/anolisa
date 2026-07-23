@@ -142,6 +142,22 @@ analysis_mode = "smart"
 approval_mode = "auto"
 ```
 
+## 审计配置
+
+审计复用现有配置文件，但采用更严格的权威顺序：
+`/etc/copilot-shell/config.toml` 包含 `[audit]` 时由系统配置完全决定；否则使用用户配置。
+项目 `[audit]` 表会被忽略。
+
+```toml
+[audit]
+mode = "best_effort" # best_effort | required
+retention_days = 30
+max_disk_bytes = 1073741824
+```
+
+`COSH_AUDIT_DIR` 只覆盖存储根目录。未设置时使用 `$XDG_STATE_HOME/cosh/audit` 或
+`~/.local/state/cosh/audit`。失败和保留行为见[审计运维指南](cli/audit.md)。
+
 ## 环境变量覆盖
 
 | 环境变量 | 作用 | 对应配置 |
@@ -156,6 +172,7 @@ approval_mode = "auto"
 | `COSH_SHELL_ADAPTER` | Shell 适配器 | `shell.adapter_default` |
 | `COSH_SHELL_DEBUG` | 映射为 debug 级别 | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell 语言 | — |
+| `COSH_AUDIT_DIR` | 统一审计存储根目录 | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | 阿里云 AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | 阿里云 SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | provider 解析链 |

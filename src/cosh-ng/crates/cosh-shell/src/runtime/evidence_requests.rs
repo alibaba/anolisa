@@ -30,6 +30,7 @@ pub(super) struct RuntimeEvidenceRequest {
     pub(super) kind: RuntimeEvidenceRequestKind,
     pub(super) ignored_multiple_request_blocks: bool,
     pub(super) audit_id: Option<String>,
+    pub(super) audit_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,7 +183,7 @@ pub(crate) fn render_evidence_request_actions<W: Write>(
             output.flush()?;
             continue;
         }
-        let Some(request) = take_pending_request(state, &action.id) else {
+        let Some(mut request) = take_pending_request(state, &action.id) else {
             continue;
         };
         state.evidence_requests.rendered.remove(&request.id);
@@ -190,6 +191,16 @@ pub(crate) fn render_evidence_request_actions<W: Write>(
             EvidenceActionKind::Send => {
                 match agent_request_from_evidence_request(blocks, &request, event_index) {
                     Ok(agent_request) => {
+                        if let Some(audit) = state.audit.as_mut() {
+                            let (evidence_type, size_category, range_category) =
+                                evidence_audit_categories(&request.kind);
+                            request.audit_ref = audit.record_evidence_accessed(
+                                evidence_type,
+                                size_category,
+                                range_category,
+                                true,
+                            );
+                        }
                         let origin = request.origin;
                         let disposition = start_agent_run_with_origin_disposition(
                             &agent_request,
@@ -252,6 +263,7 @@ fn runtime_request_from_parsed(
         kind,
         ignored_multiple_request_blocks: parsed.ignored_multiple_request_blocks,
         audit_id: None,
+        audit_ref: None,
     }
 }
 
@@ -354,9 +366,10 @@ fn render_evidence_request_card<W: Write>(
         ],
     };
     let footer = request
-        .audit_id
+        .audit_ref
         .as_ref()
-        .map(|id| format!("Details: {id}"))
+        .map(|id| format!("audit_ref: {id}"))
+        .or_else(|| request.audit_id.as_ref().map(|id| format!("Details: {id}")))
         .or_else(|| {
             request
                 .ignored_multiple_request_blocks
@@ -372,6 +385,22 @@ fn render_evidence_request_card<W: Write>(
                 footer: footer.as_deref(),
             },
         )
+}
+
+fn evidence_audit_categories(
+    kind: &RuntimeEvidenceRequestKind,
+) -> (&'static str, Option<&'static str>, Option<&'static str>) {
+    match kind {
+        RuntimeEvidenceRequestKind::History => ("command_history", Some("bounded"), None),
+        RuntimeEvidenceRequestKind::Output(request) => (
+            "command_output",
+            Some("bounded"),
+            Some(match request.direction {
+                OutputExcerptDirection::Head => "head",
+                OutputExcerptDirection::Tail => "tail",
+            }),
+        ),
+    }
 }
 
 pub(super) fn agent_request_from_evidence_request(

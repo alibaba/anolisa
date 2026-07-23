@@ -111,6 +111,7 @@ pub(crate) struct InlineState {
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
     pub(crate) personalization: PersonalizationState,
+    pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
 }
 
 #[derive(Clone)]
@@ -885,6 +886,7 @@ impl AnalysisMode {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeApprovalRequest {
     pub(crate) id: String,
+    pub(crate) audit_ref: Option<String>,
     pub(crate) run_id: String,
     pub(crate) origin: AgentRunOrigin,
     pub(crate) session_id: String,
@@ -946,6 +948,7 @@ impl ProviderShellRequestKind {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeApprovalJournalEntry {
     pub(crate) id: String,
+    pub(crate) audit_ref: Option<String>,
     pub(crate) run_id: String,
     pub(crate) source: &'static str,
     pub(crate) kind: ApprovalRequestKind,

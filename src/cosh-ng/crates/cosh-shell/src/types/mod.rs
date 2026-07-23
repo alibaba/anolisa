@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod audit;
 pub mod hooks;
 
 pub(crate) use hooks::BuiltinFactRecord;
@@ -141,6 +142,15 @@ pub enum CommandOrigin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellCommandAuditIdentity {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellEvent {
     pub kind: ShellEventKind,
     pub session_id: String,
@@ -161,6 +171,8 @@ pub struct ShellEvent {
     pub command_origin: Option<CommandOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_environment_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_identity: Option<ShellCommandAuditIdentity>,
 }
 
 impl ShellEvent {
@@ -189,6 +201,7 @@ impl ShellEvent {
             message: None,
             command_origin: Some(CommandOrigin::UserInteractive),
             shell_environment_generation: None,
+            audit_identity: None,
         }
     }
 
@@ -231,6 +244,7 @@ impl ShellEvent {
             message: None,
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
         }
     }
 
@@ -253,6 +267,7 @@ impl ShellEvent {
             message: None,
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
         }
     }
 }
@@ -295,6 +310,8 @@ pub struct CommandBlock {
     pub output: OutputRefs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_environment_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_identity: Option<ShellCommandAuditIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +497,8 @@ pub enum AgentEvent {
         tool_input: serde_json::Value,
         tool_use_id: String,
         hook_requires_approval: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_ref: Option<String>,
     },
 
     ToolOutputDelta {

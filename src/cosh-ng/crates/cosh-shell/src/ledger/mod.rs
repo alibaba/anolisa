@@ -70,6 +70,7 @@ pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
                         terminal_output_bytes: event.terminal_output_bytes.unwrap_or(0),
                     },
                     shell_environment_generation: start.shell_environment_generation,
+                    audit_identity: event.audit_identity.clone().or(start.audit_identity),
                 });
             }
             _ => {}

@@ -113,6 +113,7 @@ fn cancel_active_agent_run<W: Write>(
 
     let cancellation_details_id = state.provider_cancellation_artifacts.record_cancelled_run(
         active_run.request.id.clone(),
+        None,
         active_run.provider_name,
         active_run.handle.pending_provider_session_id(),
         active_run.handle.cancellation_artifact_store(),
@@ -402,6 +403,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

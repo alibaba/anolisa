@@ -295,6 +295,7 @@ pub fn agent_request_from_intercepted_input(
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -571,6 +572,7 @@ mod tests {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         }
     }
 

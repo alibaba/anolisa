@@ -66,6 +66,11 @@ cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 cosh-cli audit check --action "rm -rf /var/log"
 # → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
 
+# 检查并导出统一生产审计时间线
+cosh-cli audit status
+cosh-cli audit events --since 2h --limit 100
+cosh-cli audit export --since 2h --output ./audit-incident
+
 # 在当前工作空间恢复 Agent 对话
 cosh-shell --resume              # 打开交互式会话选择器
 cosh-shell --resume <session-id> # 选择已知的 provider 会话
@@ -78,6 +83,11 @@ cosh-shell --resume <session-id> # 选择已知的 provider 会话
 `session.persist_dir` 修改根目录。项目会话配置和相对存储路径均从
 cosh-shell 传给 Core 的工作空间解析。详见
 [会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)。
+
+Core 和 Shell 还会把脱敏、版本化的审计时间线写入
+`$XDG_STATE_HOME/cosh/audit` 或 `~/.local/state/cosh/audit`。既有
+SLS/metrics 导出保持不变。配置、保留、追踪和事故导出方法见
+[审计运维指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/audit.md)。
 
 ## 命令参考
 
@@ -99,6 +109,9 @@ cosh-shell 传给 Core 的工作空间解析。详见
 | `cosh-cli checkpoint diff` | `cosh-cli checkpoint diff --workspace /path --from a --to b` | ws-ckpt daemon |
 | `cosh-cli audit check` | `cosh-cli audit check --action "rm -rf /"` | 策略引擎 |
 | `cosh-cli audit log` | `cosh-cli audit log --session abc123` | 策略引擎 |
+| `cosh-cli audit status/events/trace` | `cosh-cli audit trace <id>` | 统一审计存储 |
+| `cosh-cli audit export` | `cosh-cli audit export --since 2h --output ./incident` | 脱敏事故包 |
+| `cosh-cli audit prune --dry-run` | `cosh-cli audit prune --dry-run` | 保留计划预览 |
 | `cosh-cli audit policy show` | `cosh-cli audit policy show` | 策略引擎 |
 
 ## 输出格式

@@ -450,6 +450,7 @@ pub(crate) fn record_shell_evidence_action(
     };
     let row = RuntimeActivityRow {
         id: id.clone(),
+        audit_ref: None,
         run_id: run_id.to_string(),
         kind: ActivityKind::Tool,
         status: row_status.to_string(),

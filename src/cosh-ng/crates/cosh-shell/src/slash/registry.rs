@@ -146,7 +146,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/audit",
-            usage: "/audit",
+            usage: "/audit status|trace current|export current <dir>",
             summary_id: MessageId::HelpSummaryAudit,
             group: None,
             scope: "read-only",

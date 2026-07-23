@@ -332,6 +332,7 @@ pub(super) fn start_control_protocol_claude_process(
                             tool_input,
                             tool_use_id,
                             hook_requires_approval,
+                            audit_ref,
                         } => {
                             let _ = pending_control_tool_call
                                 .borrow_mut()
@@ -357,6 +358,7 @@ pub(super) fn start_control_protocol_claude_process(
                                     tool_input,
                                     tool_use_id,
                                     hook_requires_approval,
+                                    audit_ref,
                                 },
                             );
                             return Ok(ProviderLineProgress::AwaitingApproval);

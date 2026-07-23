@@ -1,4 +1,4 @@
-use crate::approval::journal::approval_journal_entry;
+use crate::approval::journal::{approval_audit_input, approval_journal_entry};
 use crate::runtime::prelude::*;
 use crate::tools::display::{presentation_for_tool, ToolPresentation};
 
@@ -54,6 +54,18 @@ pub(crate) fn record_approval_requests(
                         }
                     });
                     request.hook_warnings = warnings;
+                }
+            }
+            let core_owned = state
+                .agent_run
+                .active
+                .as_ref()
+                .is_some_and(|run| run.provider_name == "cosh-core")
+                && request.provider_shell_request_kind.is_control_permission();
+            if !core_owned {
+                if let Some(audit) = state.audit.as_mut() {
+                    request.audit_ref =
+                        audit.record_approval_requested(approval_audit_input(&request));
                 }
             }
             ids.push(request.id.clone());
@@ -143,6 +155,7 @@ fn approval_request_from_event(
                 .unwrap_or("medium");
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
+                audit_ref: None,
                 run_id: run_id.clone(),
                 origin,
                 session_id: session_id.to_string(),
@@ -170,6 +183,7 @@ fn approval_request_from_event(
             let assessment = shell_command_assessment(command);
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
+                audit_ref: None,
                 run_id: run_id.clone(),
                 origin,
                 session_id: session_id.to_string(),
@@ -200,6 +214,7 @@ fn approval_request_from_event(
             tool_input,
             tool_use_id,
             hook_requires_approval,
+            audit_ref,
         } => {
             let input_str = serde_json::to_string(tool_input).unwrap_or_default();
             let presentation = presentation_for_tool(tool_name, &input_str);
@@ -212,6 +227,7 @@ fn approval_request_from_event(
             let tool_use_id = non_empty_tool_use_id(tool_use_id);
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
+                audit_ref: audit_ref.clone(),
                 run_id: run_id.clone(),
                 origin,
                 session_id: session_id.to_string(),
@@ -270,6 +286,24 @@ pub(crate) fn record_auto_approved_request(
     request.status = ApprovalRequestStatus::Approved;
     if request.execution_path.is_none() && request.request_id.is_some() {
         request.execution_path = Some("provider_control_protocol");
+    }
+    let core_owned = state
+        .agent_run
+        .active
+        .as_ref()
+        .is_some_and(|run| run.provider_name == "cosh-core")
+        && request.provider_shell_request_kind.is_control_permission();
+    if !core_owned {
+        if let Some(audit) = state.audit.as_mut() {
+            request.audit_ref = audit.record_approval_requested(approval_audit_input(&request));
+            if audit
+                .record_approval_resolved(approval_audit_input(&request))
+                .is_err()
+            {
+                request.status = ApprovalRequestStatus::Blocked;
+                request.execution_path = Some("blocked_audit_required");
+            }
+        }
     }
     state.approvals.requests.push(request.clone());
     state

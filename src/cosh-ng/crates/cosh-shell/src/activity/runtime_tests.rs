@@ -464,6 +464,7 @@ fn invocation_id_uses_control_tool_use_id_for_permission_requests() {
             tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
             tool_use_id: "toolu-read-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -490,6 +491,7 @@ fn invocation_id_falls_back_to_request_id_when_control_tool_use_id_is_missing() 
             tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
             tool_use_id: String::new(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -1765,6 +1767,7 @@ fn control_permission_tool_request_is_hidden_when_approval_card_handles_it() {
             }),
             tool_use_id: "toolu-write".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -1806,6 +1809,7 @@ fn matching_tool_call_is_hidden_when_control_permission_card_handles_it() {
                 }),
                 tool_use_id: "toolu-write".to_string(),
                 hook_requires_approval: false,
+                audit_ref: None,
             }),
         ],
     );
@@ -1842,6 +1846,7 @@ fn recommend_mode_keeps_visible_control_permission_row_for_matching_tool_call() 
                 tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
                 tool_use_id: "toolu-read".to_string(),
                 hook_requires_approval: false,
+                audit_ref: None,
             }),
         ],
     );
@@ -1873,6 +1878,7 @@ fn recommend_mode_keeps_control_permission_tool_request_activity_visible() {
             }),
             tool_use_id: "toolu-write".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -1942,6 +1948,7 @@ fn control_permission_shell_output_is_not_rendered_as_provider_native_transcript
                 tool_input: serde_json::json!({ "command": "ssh -V" }),
                 tool_use_id: "toolu-shell".to_string(),
                 hook_requires_approval: false,
+                audit_ref: None,
             }),
             governed(AgentEvent::ToolOutputDelta {
                 run_id: "run-1".to_string(),
@@ -2148,6 +2155,7 @@ fn shell_handoff_activity_marks_user_interrupt_status() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
 
     let ids = record_approved_shell_handoff_blocks(&mut state, &[block]);
@@ -2209,6 +2217,7 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
 
     let ids = record_approved_shell_handoff_blocks(&mut state, &[stale_block]);

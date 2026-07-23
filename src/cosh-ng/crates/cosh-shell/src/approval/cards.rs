@@ -30,6 +30,11 @@ pub(crate) fn render_approval_journal<W: Write>(
     RatatuiInlineRenderer::for_terminal()
         .with_language(state.language)
         .write_approval_journal_panel(output, ApprovalJournalPanelModel { entries: &entries })?;
+    for entry in &state.approvals.journal {
+        if let Some(audit_ref) = &entry.audit_ref {
+            writeln!(output, "audit_ref[{}]: {audit_ref}", entry.id)?;
+        }
+    }
     Ok(())
 }
 
@@ -84,6 +89,9 @@ pub(super) fn write_approval_receipt<W: Write>(
                 message,
             },
         )?;
+    if let Some(audit_ref) = &request.audit_ref {
+        writeln!(output, "audit_ref: {audit_ref}")?;
+    }
     Ok(())
 }
 
@@ -185,6 +193,9 @@ pub(crate) fn render_approval_details<W: Write>(
                 assessment: request.assessment.as_ref().map(assessment_summary_model),
             },
         )?;
+    if let Some(audit_ref) = &request.audit_ref {
+        writeln!(output, "audit_ref: {audit_ref}")?;
+    }
     Ok(())
 }
 
@@ -210,6 +221,7 @@ mod tests {
     fn approved_bash_request(execution_path: Option<&'static str>) -> RuntimeApprovalRequest {
         RuntimeApprovalRequest {
             id: "req-zh".to_string(),
+            audit_ref: None,
             run_id: "run-1".to_string(),
             origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),

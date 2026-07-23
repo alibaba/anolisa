@@ -102,16 +102,29 @@ fn pkg_manager_available() -> (&'static str, bool) {
     ("unknown", false)
 }
 
-/// Spawn `cosh-cli` with audit env vars pinned to a sandbox: log redirected to
-/// `audit_log` and any external `COSH_AUDIT_POLICY` cleared so the built-in
-/// `balanced` preset is used. Use this for any test that exercises the
-/// audit subsystem so it doesn't pollute the user's real audit log.
+/// Spawn `cosh-cli` with audit state pinned to a sandbox: redirect the log,
+/// version 1 store, isolate user policy discovery, and clear explicit policy.
+/// Use this for audit tests so they neither read nor write the user's state.
 fn cosh_bin_with_audit_sandbox(audit_log: &Path) -> Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(
+            audit_log.parent().expect("sandbox log has a parent"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .expect("set private audit sandbox mode");
+    }
     let mut cmd = cosh_bin();
     cmd.env("COSH_AUDIT_LOG", audit_log);
     if let Some(sandbox_home) = audit_log.parent() {
         cmd.env("HOME", sandbox_home);
     }
+    cmd.env(
+        "COSH_AUDIT_DIR",
+        audit_log.parent().expect("sandbox log has a parent"),
+    );
     cmd.env_remove("COSH_AUDIT_POLICY");
     cmd
 }
@@ -171,11 +184,10 @@ fn assert_audit_failure(output: &Output) -> serde_json::Value {
     json
 }
 
-fn record_audit_marker(audit_log: &Path, session: &str, marker: &str) {
-    let raw = format!("echo {marker}");
+fn record_audit_command(audit_log: &Path, session: &str, command: &str) {
     let output = cosh_bin_with_audit_sandbox(audit_log)
         .env("COSH_SESSION_ID", session)
-        .args(["audit", "check", "--action", &raw])
+        .args(["audit", "check", "--action", command])
         .output()
         .unwrap();
     let json = assert_audit_success(&output);
@@ -185,7 +197,7 @@ fn record_audit_marker(audit_log: &Path, session: &str, marker: &str) {
     );
 }
 
-fn assert_audit_log_raws(audit_log: &Path, args: &[&str], expected: &[&str]) {
+fn assert_audit_log_subjects(audit_log: &Path, args: &[&str], expected: &[&str]) {
     let output = cosh_bin_with_audit_sandbox(audit_log)
         .args(["audit", "log"])
         .args(args)
@@ -194,19 +206,22 @@ fn assert_audit_log_raws(audit_log: &Path, args: &[&str], expected: &[&str]) {
     let json = assert_audit_success(&output);
     assert_json_object_keys(&json["data"], &["entries", "total"]);
     assert_eq!(json["data"]["total"], expected.len());
-    let raws: Vec<&str> = json["data"]["entries"]
+    let subjects: Vec<&str> = json["data"]["entries"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|entry| entry["action"]["raw"].as_str().unwrap())
+        .map(|entry| entry["subject"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(raws, expected);
+    assert_eq!(subjects, expected);
 }
 
-fn audit_log_line_count(audit_log: &Path) -> usize {
-    std::fs::read_to_string(audit_log)
-        .map(|contents| contents.lines().count())
-        .unwrap_or(0)
+fn audit_event_count(audit_log: &Path) -> usize {
+    let output = cosh_bin_with_audit_sandbox(audit_log)
+        .args(["audit", "log"])
+        .output()
+        .unwrap();
+    let json = assert_audit_success(&output);
+    json["data"]["total"].as_u64().unwrap() as usize
 }
 
 // --- Help / Version ---
@@ -429,45 +444,140 @@ fn test_audit_log_starts_empty_and_grows_with_check() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["total"], 1);
     let entries = json["data"]["entries"].as_array().unwrap();
-    assert_eq!(entries[0]["action"]["operation"], "search");
-    assert_eq!(entries[0]["decision"]["outcome"], "Allow");
+    assert_eq!(entries[0]["subject"]["name"], "search");
+    assert_eq!(entries[0]["outcome"]["status"], "allowed");
+}
+
+#[test]
+fn test_audit_operational_commands_use_bounded_json_envelopes() {
+    let directory = tempfile::tempdir().unwrap();
+    let legacy_log = directory.path().join("audit.log");
+
+    let check = cosh_bin_with_audit_sandbox(&legacy_log)
+        .args([
+            "audit",
+            "check",
+            "--subsystem",
+            "pkg",
+            "--operation",
+            "search",
+        ])
+        .output()
+        .unwrap();
+    assert!(check.status.success());
+
+    let events = cosh_bin_with_audit_sandbox(&legacy_log)
+        .args([
+            "audit",
+            "events",
+            "--event",
+            "policy.decision",
+            "--limit",
+            "10",
+        ])
+        .output()
+        .unwrap();
+    assert!(events.status.success());
+    let events_json: serde_json::Value = serde_json::from_slice(&events.stdout).unwrap();
+    let returned = events_json["data"]["events"].as_array().unwrap();
+    assert_eq!(returned.len(), 1);
+    let event_id = returned[0]["event"]["event_id"].as_str().unwrap();
+
+    let trace = cosh_bin_with_audit_sandbox(&legacy_log)
+        .args(["audit", "trace", event_id])
+        .output()
+        .unwrap();
+    assert!(trace.status.success());
+    let trace_json: serde_json::Value = serde_json::from_slice(&trace.stdout).unwrap();
+    assert_eq!(trace_json["data"]["events"].as_array().unwrap().len(), 1);
+
+    let status = cosh_bin_with_audit_sandbox(&legacy_log)
+        .args(["audit", "status"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status_json: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["data"]["root_label"], "audit/v1");
+    assert_eq!(status_json["data"]["closed_segments"], 1);
+
+    let prune = cosh_bin_with_audit_sandbox(&legacy_log)
+        .args(["audit", "prune", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(prune.status.success());
+    let prune_json: serde_json::Value = serde_json::from_slice(&prune.stdout).unwrap();
+    assert!(prune_json["data"]["candidates"].is_array());
+    assert_eq!(prune_json["meta"]["dry_run"], true);
+}
+
+#[test]
+fn test_audit_export_publishes_only_the_stable_four_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let legacy_log = directory.path().join("audit.log");
+    let output = directory.path().join("incident");
+    let _ = cosh_bin_with_audit_sandbox(&legacy_log)
+        .args([
+            "audit",
+            "check",
+            "--subsystem",
+            "pkg",
+            "--operation",
+            "search",
+        ])
+        .output()
+        .unwrap();
+    let export = cosh_bin_with_audit_sandbox(&legacy_log)
+        .args(["audit", "export", "--output", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stdout)
+    );
+    let mut names = std::fs::read_dir(&output)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "SHA256SUMS",
+            "events.jsonl",
+            "manifest.json",
+            "summary.json"
+        ]
+    );
 }
 
 #[test]
 fn test_audit_log_limit_is_newest_first_for_all_sizes() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
-    record_audit_marker(&log, "selected", "alpha");
-    record_audit_marker(&log, "excluded", "beta");
-    record_audit_marker(&log, "selected", "gamma");
+    record_audit_command(&log, "selected", "echo alpha");
+    record_audit_command(&log, "excluded", "pwd");
+    record_audit_command(&log, "selected", "ls");
 
-    assert_audit_log_raws(&log, &[], &["echo alpha", "echo beta", "echo gamma"]);
-    assert_audit_log_raws(&log, &["--limit", "2"], &["echo gamma", "echo beta"]);
-    assert_audit_log_raws(&log, &["--limit", "0"], &[]);
-    assert_audit_log_raws(
-        &log,
-        &["--limit", "3"],
-        &["echo gamma", "echo beta", "echo alpha"],
-    );
-    assert_audit_log_raws(
-        &log,
-        &["--limit", "4"],
-        &["echo gamma", "echo beta", "echo alpha"],
-    );
+    assert_audit_log_subjects(&log, &[], &["echo", "pwd", "ls"]);
+    assert_audit_log_subjects(&log, &["--limit", "2"], &["ls", "pwd"]);
+    assert_audit_log_subjects(&log, &["--limit", "0"], &[]);
+    assert_audit_log_subjects(&log, &["--limit", "3"], &["ls", "pwd", "echo"]);
+    assert_audit_log_subjects(&log, &["--limit", "4"], &["ls", "pwd", "echo"]);
 }
 
 #[test]
 fn test_audit_log_applies_filters_before_limit() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
-    record_audit_marker(&log, "selected", "alpha");
-    record_audit_marker(&log, "excluded", "beta");
-    record_audit_marker(&log, "selected", "gamma");
+    record_audit_command(&log, "selected", "echo alpha");
+    record_audit_command(&log, "excluded", "pwd");
+    record_audit_command(&log, "selected", "ls");
 
-    assert_audit_log_raws(
+    assert_audit_log_subjects(
         &log,
         &["--session", "selected", "--limit", "2"],
-        &["echo gamma", "echo alpha"],
+        &["ls", "echo"],
     );
 }
 
@@ -604,7 +714,7 @@ fn test_audit_policy_explain_matches_check_for_parse_errors_without_logging() {
     ];
 
     for (action, expected_reason) in cases {
-        let before_check = audit_log_line_count(&log);
+        let before_check = audit_event_count(&log);
         let check_output = cosh_bin_with_audit_sandbox(&log)
             .args(["audit", "check", "--action", action])
             .output()
@@ -619,9 +729,9 @@ fn test_audit_policy_explain_matches_check_for_parse_errors_without_logging() {
             .as_str()
             .unwrap()
             .starts_with("builtin-balanced@"));
-        assert_eq!(audit_log_line_count(&log), before_check + 1);
+        assert_eq!(audit_event_count(&log), before_check + 1);
 
-        let before_explain = audit_log_line_count(&log);
+        let before_explain = audit_event_count(&log);
         let explain_output = cosh_bin_with_audit_sandbox(&log)
             .args(["audit", "policy", "explain", action])
             .output()
@@ -637,7 +747,7 @@ fn test_audit_policy_explain_matches_check_for_parse_errors_without_logging() {
                 "raw": action,
             })
         );
-        assert_eq!(audit_log_line_count(&log), before_explain);
+        assert_eq!(audit_event_count(&log), before_explain);
     }
 }
 
@@ -790,7 +900,7 @@ fn test_redacted_password_does_not_appear_in_log() {
         !stdout.contains("hunter2"),
         "raw password leaked into audit log output"
     );
-    assert!(stdout.contains("<redacted>"), "redacted marker missing");
+    assert!(stdout.contains("redacted"), "redaction metadata missing");
 }
 
 // --- Checkpoint: daemon unavailable graceful error ---
