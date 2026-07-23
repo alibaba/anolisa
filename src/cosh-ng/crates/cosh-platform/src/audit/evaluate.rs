@@ -247,6 +247,93 @@ mod tests {
         assert_outcome("find . -type f", Outcome::Allow);
     }
 
+    // ---- Sensitive-path guard -----------------------------------------
+
+    #[test]
+    fn balanced_require_approval_for_sensitive_system_files() {
+        for cmd in [
+            "cat /etc/passwd",
+            "cat /etc/shadow",
+            "cat /etc/gshadow",
+            "cat /etc/sudoers",
+            "head /etc/passwd",
+            "tail /etc/shadow",
+            "grep root /etc/passwd",
+            "wc /etc/passwd",
+        ] {
+            assert_outcome(cmd, Outcome::RequireApproval);
+        }
+    }
+
+    #[test]
+    fn balanced_require_approval_for_ssh_keys() {
+        for cmd in [
+            "cat ~/.ssh/id_rsa",
+            "cat ~/.ssh/id_ed25519",
+            "head ~/.ssh/config",
+            "cat /root/.ssh/authorized_keys",
+        ] {
+            assert_outcome(cmd, Outcome::RequireApproval);
+        }
+    }
+
+    #[test]
+    fn balanced_require_approval_for_proc_and_sudoersd() {
+        for cmd in [
+            "cat /proc/self/environ",
+            "cat /proc/self/cmdline",
+            "cat /etc/sudoers.d/myuser",
+        ] {
+            assert_outcome(cmd, Outcome::RequireApproval);
+        }
+    }
+
+    #[test]
+    fn balanced_require_approval_for_flag_before_sensitive_path() {
+        // Flags before the path: target would be the flag, but arg matching
+        // still catches the sensitive path in args.
+        assert_outcome("cat -n /etc/passwd", Outcome::RequireApproval);
+        assert_outcome("head -5 /etc/shadow", Outcome::RequireApproval);
+    }
+
+    #[test]
+    fn balanced_still_allows_non_sensitive_readonly() {
+        for cmd in [
+            "cat /etc/hosts",
+            "cat /tmp/test.txt",
+            "head README.md",
+            "ls -la",
+            "echo hello",
+        ] {
+            assert_outcome(cmd, Outcome::Allow);
+        }
+    }
+
+    #[test]
+    fn balanced_destructive_on_sensitive_path_still_denied() {
+        // rm /etc/passwd is Deny'd by the destructive rule before the
+        // sensitive-path guard is reached.
+        assert_outcome("rm /etc/passwd", Outcome::Deny);
+        assert_outcome("sudo cat /etc/shadow", Outcome::Deny);
+    }
+
+    #[test]
+    fn strict_require_approval_for_sensitive_paths() {
+        // Strict mode also uses RequireApproval for sensitive paths.
+        let action = parse_action_string("cat /etc/passwd").unwrap();
+        let loaded = builtin::strict();
+        let d = evaluate(&action, &loaded);
+        assert_eq!(d.outcome, Outcome::RequireApproval);
+    }
+
+    #[test]
+    fn strict_still_allows_non_sensitive_readonly() {
+        let action = parse_action_string("cat /etc/hosts").unwrap();
+        let loaded = builtin::strict();
+        let d = evaluate(&action, &loaded);
+        assert_eq!(d.outcome, Outcome::Allow);
+    }
+
     // ---- Pkg / Svc / Checkpoint ---------------------------------------
 
     #[test]

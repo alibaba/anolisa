@@ -6,6 +6,42 @@
 version = "v1-strict"
 default = "Deny"
 
+# Sensitive-path guard — deny access to sensitive system and credential
+# files. Must appear BEFORE shell-allow-readonly-singletons.
+[[rules]]
+name = "shell-sensitive-system-files"
+outcome = "RequireApproval"
+reason = "Command references sensitive system file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { one_of = [
+  "/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/sudoers"
+] } }]
+
+[[rules]]
+name = "shell-sensitive-sudoersd"
+outcome = "RequireApproval"
+reason = "Command references sensitive sudoers configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/etc/sudoers.d/*" } }]
+
+[[rules]]
+name = "shell-sensitive-proc-self"
+outcome = "RequireApproval"
+reason = "Command references process self-info"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/proc/self/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "*.ssh/*" } }]
+
 # Read-only single-token shell commands.
 [[rules]]
 name = "shell-allow-readonly-singletons"
