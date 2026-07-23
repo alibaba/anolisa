@@ -359,6 +359,7 @@ fn begin_delegated_pending(
                 pm: NativePm::Rpm,
                 package: Some(package.to_string()),
                 record_action,
+                pinned: None,
             },
             [
                 TransactionStep::planned("delegated-txn", transaction_target, operation, None),

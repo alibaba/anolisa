@@ -104,6 +104,27 @@ pub struct DelegatedRecoveryContext {
     pub package: Option<String>,
     /// Record transition intended by the interrupted operation.
     pub record_action: DelegatedRecordAction,
+    /// Version-pin contract, present only when the interrupted operation
+    /// pinned a specific artifact. Persisted so a `repair` after a crash can
+    /// validate the native transaction step against the exact NEVRA and refuse
+    /// to record a package whose installed EVR/arch does not match the pin —
+    /// the durable counterpart to the in-process check, so recovery never
+    /// falls back to whatever version happens to be present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<DelegatedPinnedArtifact>,
+}
+
+/// The exact artifact a version-pinned delegated operation resolved to,
+/// carried in the journal so crash recovery can reconstruct the pin without
+/// re-resolving the repository (which may have advanced in the meantime).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedPinnedArtifact {
+    /// Exact NEVRA the native transaction targeted.
+    pub artifact: String,
+    /// EVR the freshly installed package must match before the record commits.
+    pub evr: String,
+    /// Arch the freshly installed package must match.
+    pub arch: String,
 }
 
 /// Discriminator for rollback strategies. Each variant pairs with the
@@ -963,6 +984,7 @@ mod tests {
             pm: NativePm::Rpm,
             package: Some("copilot-shell".to_string()),
             record_action: DelegatedRecordAction::WriteManaged,
+            pinned: None,
         };
         let steps = [TransactionStep::planned(
             "delegated-txn",
@@ -994,6 +1016,7 @@ mod tests {
                     pm: NativePm::Rpm,
                     package: Some("another-package".to_string()),
                     record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: None,
                 },
                 [TransactionStep::planned(
                     "delegated-record",
@@ -1018,6 +1041,7 @@ mod tests {
             pm: NativePm::Rpm,
             package: Some("skillfs".to_string()),
             record_action: DelegatedRecordAction::WriteManaged,
+            pinned: None,
         });
         tx.persist().expect("persist malformed fixture");
 

@@ -20,8 +20,8 @@ use crate::domain::{NativePm, Observation};
 use crate::planner::{NativeProbe, RecordWrite, Step};
 use crate::providers::{DelegatedProvider, ProviderError};
 use crate::transaction::{
-    DelegatedRecordAction, DelegatedRecoveryContext, Transaction, TransactionError,
-    TransactionOutcomeStatus, TransactionStep,
+    DelegatedPinnedArtifact, DelegatedRecordAction, DelegatedRecoveryContext, Transaction,
+    TransactionError, TransactionOutcomeStatus, TransactionStep,
 };
 
 /// Journal phase label for native package-manager transactions.
@@ -40,13 +40,44 @@ pub const PHASE_RECORD: &str = "delegated-record";
 pub struct DelegatedExecutionTarget<'a> {
     pm: NativePm,
     package: Option<&'a str>,
+    /// Exact native transaction spec a version pin resolved to (an RPM NEVRA).
+    /// `None` means the transaction targets the bare `package`. When set, it
+    /// is the *only* non-bare package a [`Step::NativeTransaction`] may carry,
+    /// so the recovery contract can validate the transaction against the
+    /// subject instead of trusting whatever the plan holds.
+    transaction_spec: Option<&'a str>,
+    /// EVR the pinned candidate resolved to. When set, the freshly observed
+    /// package's EVR must match before the record is written — guarding
+    /// against the native manager installing a different build (module
+    /// stream, `Obsoletes`, solver choice) than the pin requested.
+    expected_evr: Option<&'a str>,
+    /// Arch the pinned candidate resolved to; checked together with
+    /// `expected_evr`.
+    expected_arch: Option<&'a str>,
 }
 
 impl<'a> DelegatedExecutionTarget<'a> {
     /// Builds a target from the authoritative package manager and this
     /// journal subject's resolved package, when one exists.
     pub fn new(pm: NativePm, package: Option<&'a str>) -> Self {
-        Self { pm, package }
+        Self {
+            pm,
+            package,
+            transaction_spec: None,
+            expected_evr: None,
+            expected_arch: None,
+        }
+    }
+
+    /// Pin the target to an exact resolved artifact: `spec` (a NEVRA) becomes
+    /// the only non-bare package the native transaction may carry, and the
+    /// post-install observation must match `evr`/`arch` before the record
+    /// commits.
+    pub fn with_pinned_artifact(mut self, spec: &'a str, evr: &'a str, arch: &'a str) -> Self {
+        self.transaction_spec = Some(spec);
+        self.expected_evr = Some(evr);
+        self.expected_arch = Some(arch);
+        self
     }
 }
 
@@ -121,6 +152,17 @@ pub enum ExecutionError {
     /// An observation step failed outright (query error).
     #[error("native observation failed: {0}")]
     ObserveFailed(#[source] ProviderError),
+    /// The freshly installed package's EVR/arch does not match the pinned
+    /// artifact — the native manager installed a different build than the
+    /// `--version` pin requested. The transaction committed, so the journal
+    /// stays `Partial` and the record is never written to the wrong version.
+    #[error("pinned version mismatch: expected {expected}, installed {observed}")]
+    PinnedVersionMismatch {
+        /// The EVR (and arch) the pin resolved to.
+        expected: String,
+        /// The EVR (and arch) actually observed after the transaction.
+        observed: String,
+    },
     /// The record commit failed after the native transaction succeeded. The
     /// package state is real but untracked; the journal is left `Partial`
     /// and `repair` reconciles.
@@ -206,16 +248,19 @@ pub fn execute_delegated_steps_resumed(
                 Err(source) => {
                     journal.mark_failed(idx, &source.to_string())?;
                     native_effect_may_exist |= native_failure_may_have_changed_host(&source);
-                    // Forward-only: re-observe instead of undoing. A probe
-                    // that fails too is dropped — this is diagnostics, not
-                    // a second chance to fail.
-                    let reobserved = packages
-                        .iter()
+                    // Forward-only: re-observe instead of undoing. Re-observe
+                    // the *bare* package identity, not the transaction spec — a
+                    // pinned transaction targets a NEVRA, but rpmdb is keyed by
+                    // the bare name, so `observe(NEVRA)` would spuriously read
+                    // Absent. A probe that fails too is dropped — this is
+                    // diagnostics, not a second chance to fail.
+                    let reobserved = reobservation_identities(steps, &target, packages)
+                        .into_iter()
                         .filter_map(|package| {
                             provider
-                                .observe(package, observed_at)
+                                .observe(&package, observed_at)
                                 .ok()
-                                .map(|probe| (package.clone(), probe))
+                                .map(|probe| (package, probe))
                         })
                         .collect();
                     journal.finish(fail_status(native_effect_may_exist))?;
@@ -227,7 +272,44 @@ pub fn execute_delegated_steps_resumed(
                     match provider.observe(package, observed_at) {
                         Ok(NativeProbe::Present {
                             observation: fresh, ..
-                        }) => observation = Some(fresh),
+                        }) => {
+                            // A version pin must install exactly the resolved
+                            // artifact. If the native manager landed a
+                            // different EVR/arch (module stream, Obsoletes,
+                            // solver choice), the transaction has already
+                            // committed — keep the journal `Partial` and refuse
+                            // to persist the wrong version rather than silently
+                            // accepting it (never fall back).
+                            if let Some(expected_evr) = target.expected_evr {
+                                let observed_evr =
+                                    fresh.evr.clone().unwrap_or_else(|| fresh.version.clone());
+                                let arch_ok = match (target.expected_arch, fresh.arch.as_deref()) {
+                                    (Some(want), Some(got)) => want == got,
+                                    (Some(_), None) => false,
+                                    (None, _) => true,
+                                };
+                                if observed_evr != expected_evr || !arch_ok {
+                                    let observed = format!(
+                                        "{observed_evr} ({})",
+                                        fresh.arch.as_deref().unwrap_or("unknown-arch")
+                                    );
+                                    let expected = format!(
+                                        "{expected_evr} ({})",
+                                        target.expected_arch.unwrap_or("unknown-arch")
+                                    );
+                                    journal.mark_failed(
+                                        idx,
+                                        &format!("pinned {expected} but observed {observed}"),
+                                    )?;
+                                    journal.finish(fail_status(native_effect_may_exist))?;
+                                    return Err(ExecutionError::PinnedVersionMismatch {
+                                        expected,
+                                        observed,
+                                    });
+                                }
+                            }
+                            observation = Some(fresh);
+                        }
                         Ok(probe) => {
                             let found = match probe {
                                 NativeProbe::MultipleVersions { .. } => {
@@ -305,8 +387,9 @@ fn prepare_delegated_recovery(
 /// # Errors
 ///
 /// Returns [`ExecutionError::InvalidRecoveryContract`] unless the plan has
-/// exactly one record transition and every package-bearing step contains the
-/// subject package.
+/// exactly one record transition, every `Observe` step names the subject
+/// package, and every `NativeTransaction` package is either the subject
+/// package or the target's pinned artifact spec.
 pub fn delegated_recovery_context(
     target: DelegatedExecutionTarget<'_>,
     steps: &[Step],
@@ -349,26 +432,112 @@ pub fn delegated_recovery_context(
         });
     }
     if let Some(package) = package {
-        for packages in steps.iter().filter_map(|step| match step {
-            Step::NativeTransaction { packages, .. } | Step::Observe { packages } => Some(packages),
-            _ => None,
-        }) {
-            if !packages.iter().any(|candidate| candidate == package) {
-                return Err(ExecutionError::InvalidRecoveryContract {
-                    reason: format!(
-                        "subject package '{package}' is absent from delegated step packages [{}]",
-                        packages.join(", ")
-                    ),
-                });
+        // Fail-closed identity check, validated per step kind so a version pin
+        // neither widens nor degrades what the transaction may touch:
+        //
+        // - `Observe` carries the bare package identity (what the record and
+        //   any recovery re-observe); it must be exactly the subject. A list
+        //   that also names another package would let that package's
+        //   observation overwrite the subject's and land the wrong version in
+        //   the record, so a foreign entry is rejected, not merely tolerated.
+        // - `NativeTransaction` carries the specs handed to the native manager.
+        //   With a pin, every package must be *exactly* the pinned artifact —
+        //   a bare-package transaction under a pin would let the solver pick
+        //   the latest build, so it is rejected here, before any side effect.
+        //   Without a pin, every package must be the bare subject. Either way
+        //   the step must carry at least one package.
+        for step in steps {
+            match step {
+                Step::Observe { packages } => {
+                    if packages.is_empty() || packages.iter().any(|candidate| candidate != package)
+                    {
+                        return Err(ExecutionError::InvalidRecoveryContract {
+                            reason: format!(
+                                "delegated observe packages [{}] must be exactly the subject '{package}'",
+                                packages.join(", ")
+                            ),
+                        });
+                    }
+                }
+                Step::NativeTransaction { packages, .. } => {
+                    if packages.is_empty() {
+                        return Err(ExecutionError::InvalidRecoveryContract {
+                            reason: "delegated native transaction has no packages".to_string(),
+                        });
+                    }
+                    for candidate in packages {
+                        let allowed = match target.transaction_spec {
+                            Some(spec) => candidate == spec,
+                            None => candidate == package,
+                        };
+                        if !allowed {
+                            let expectation = match target.transaction_spec {
+                                Some(spec) => format!("the pinned artifact '{spec}'"),
+                                None => format!("the subject '{package}'"),
+                            };
+                            return Err(ExecutionError::InvalidRecoveryContract {
+                                reason: format!(
+                                    "delegated native transaction package '{candidate}' does not match {expectation}"
+                                ),
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
+
+    // Persist the pin contract (spec + expected EVR/arch) so a `repair` after
+    // a crash validates the NEVRA transaction step and re-checks the installed
+    // version, instead of committing whatever is present.
+    let pinned = match (
+        target.transaction_spec,
+        target.expected_evr,
+        target.expected_arch,
+    ) {
+        (Some(artifact), Some(evr), Some(arch)) => Some(DelegatedPinnedArtifact {
+            artifact: artifact.to_string(),
+            evr: evr.to_string(),
+            arch: arch.to_string(),
+        }),
+        _ => None,
+    };
 
     Ok(DelegatedRecoveryContext {
         pm: target.pm,
         package: package.map(str::to_string),
         record_action: *record_action,
+        pinned,
     })
+}
+
+/// Bare package identities to re-observe after a failed native transaction.
+///
+/// The transaction may have targeted a NEVRA (version pin), but rpmdb is keyed
+/// by the bare name, so recovery diagnostics must probe the bare identity. The
+/// plan's `Observe` steps carry exactly that; when the plan has none
+/// (uninstall's remove), the target's subject package — or, as a last resort,
+/// the transaction packages themselves — is used.
+fn reobservation_identities(
+    steps: &[Step],
+    target: &DelegatedExecutionTarget<'_>,
+    txn_packages: &[String],
+) -> Vec<String> {
+    let observe: Vec<String> = steps
+        .iter()
+        .flat_map(|step| match step {
+            Step::Observe { packages } => packages.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    if !observe.is_empty() {
+        return observe;
+    }
+    if let Some(package) = target.package {
+        return vec![package.to_string()];
+    }
+    txn_packages.to_vec()
 }
 
 /// Whether this executor interprets `step`.
@@ -512,6 +681,219 @@ mod tests {
         assert_eq!(journal.steps[0].action, "install");
     }
 
+    /// Pinned install plan: the transaction targets the exact NEVRA, the
+    /// observation and record use the bare package.
+    fn pinned_install_steps(nevra: &str, package: &str) -> Vec<Step> {
+        vec![
+            Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: NativeAction::Install,
+                packages: vec![nevra.to_string()],
+            },
+            Step::Observe {
+                packages: vec![package.to_string()],
+            },
+            Step::WriteRecord(RecordWrite::DelegatedManaged),
+        ]
+    }
+
+    #[test]
+    fn delegated_pinned_install_transacts_nevra_but_observes_bare_package() {
+        // The pinned plan hands the exact NEVRA to dnf while re-observing the
+        // bare package; the recovery contract validates the NEVRA against the
+        // target's pinned spec (not a blanket skip).
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let query = query_present("cosh", "2.7.0");
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+        let mut sink = MemSink::default();
+        let mut journal = journal(tmp.path());
+
+        let steps = pinned_install_steps("cosh-2.7.0-1.al4.x86_64", "cosh");
+        let target = DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh"))
+            .with_pinned_artifact("cosh-2.7.0-1.al4.x86_64", "2.7.0-1.al4", "x86_64");
+        let outcome =
+            execute_delegated_steps(&steps, target, &provider, &mut sink, &mut journal, NOW)
+                .expect("pinned execution ok");
+
+        // dnf received the NEVRA; the observation and record used the bare name.
+        assert_eq!(
+            txn.calls.borrow().as_slice(),
+            &[("install".to_string(), "cosh-2.7.0-1.al4.x86_64".to_string())]
+        );
+        let (write, observation) = &sink.writes[0];
+        assert_eq!(*write, RecordWrite::DelegatedManaged);
+        assert_eq!(
+            observation.as_ref().expect("observation").evr.as_deref(),
+            Some("2.7.0-1.al4")
+        );
+        assert!(outcome.observation.is_some());
+        assert_eq!(journal.status, TransactionOutcomeStatus::Ok);
+    }
+
+    #[test]
+    fn pinned_install_refuses_record_when_observed_evr_differs() {
+        // dnf committed a different EVR than the pin requested (e.g. an
+        // Obsoletes / module-stream jump to 0.7.0). The record must not be
+        // written to the wrong version; the journal stays Partial for repair.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        // The pin targets 2.7.0, but the rpmdb reports 0.7.0 installed.
+        let query = query_present("cosh", "0.7.0");
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+        let mut sink = MemSink::default();
+        let mut journal = journal(tmp.path());
+
+        let steps = pinned_install_steps("cosh-2.7.0-1.al4.x86_64", "cosh");
+        let target = DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh"))
+            .with_pinned_artifact("cosh-2.7.0-1.al4.x86_64", "2.7.0-1.al4", "x86_64");
+        let err = execute_delegated_steps(&steps, target, &provider, &mut sink, &mut journal, NOW)
+            .expect_err("a mismatched installed EVR must fail");
+
+        match err {
+            ExecutionError::PinnedVersionMismatch { expected, observed } => {
+                assert!(expected.contains("2.7.0-1.al4"), "expected: {expected}");
+                assert!(observed.contains("0.7.0-1.al4"), "observed: {observed}");
+            }
+            other => panic!("expected PinnedVersionMismatch, got {other:?}"),
+        }
+        // The transaction committed, so the journal is Partial and no record
+        // was written — repair reconciles rather than trusting a wrong version.
+        assert!(sink.writes.is_empty(), "wrong version must not be recorded");
+        assert_eq!(journal.status, TransactionOutcomeStatus::Partial);
+    }
+
+    #[test]
+    fn pinned_transaction_failure_reobserves_the_bare_package() {
+        // A pinned transaction targets a NEVRA; on failure the forward-only
+        // re-observation must probe the bare package (rpmdb is keyed by name),
+        // not the NEVRA, or it would spuriously read Absent.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        // dnf partially landed the bare package before failing.
+        let query = query_present("cosh", "2.7.0");
+        let txn = FakeTxn {
+            fail: vec!["install"],
+            ..FakeTxn::default()
+        };
+        let provider = DelegatedProvider::new(&query, &txn);
+        let mut sink = MemSink::default();
+        let mut journal = journal(tmp.path());
+
+        let steps = pinned_install_steps("cosh-2.7.0-1.al4.x86_64", "cosh");
+        let target = DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh"))
+            .with_pinned_artifact("cosh-2.7.0-1.al4.x86_64", "2.7.0-1.al4", "x86_64");
+        let err = execute_delegated_steps(&steps, target, &provider, &mut sink, &mut journal, NOW)
+            .expect_err("failed transaction must surface");
+
+        match err {
+            ExecutionError::TransactionFailed { reobserved, .. } => {
+                // Keyed by the bare package, and it resolved to Present — the
+                // NEVRA would have read Absent from the name-keyed rpmdb.
+                assert_eq!(reobserved.len(), 1);
+                assert_eq!(reobserved[0].0, "cosh");
+                assert!(matches!(reobserved[0].1, NativeProbe::Present { .. }));
+            }
+            other => panic!("expected TransactionFailed, got {other:?}"),
+        }
+        assert!(sink.writes.is_empty());
+    }
+
+    #[test]
+    fn recovery_contract_rejects_unrelated_transaction_package() {
+        // Fail-closed: a plan whose transaction names an unrelated package must
+        // be rejected even though its Observe/record name the subject — the
+        // executor must never run a native transaction on a foreign package.
+        let unrelated = vec![
+            Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: NativeAction::Install,
+                packages: vec!["unrelated-package".to_string()],
+            },
+            Step::Observe {
+                packages: vec!["cosh".to_string()],
+            },
+            Step::WriteRecord(RecordWrite::DelegatedManaged),
+        ];
+        let err = delegated_recovery_context(
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &unrelated,
+        )
+        .expect_err("an unrelated transaction package must be rejected");
+        assert!(matches!(
+            err,
+            ExecutionError::InvalidRecoveryContract { .. }
+        ));
+    }
+
+    #[test]
+    fn recovery_contract_rejects_bare_transaction_under_a_pin() {
+        // A pinned target whose transaction degraded to the bare package would
+        // let the solver pick the latest build; the contract must reject it
+        // before any dnf call, not discover the drift only post-observation.
+        let bare_under_pin = pinned_install_steps("cosh", "cosh");
+        let target = DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh"))
+            .with_pinned_artifact("cosh-2.7.0-1.al4.x86_64", "2.7.0-1.al4", "x86_64");
+        let err = delegated_recovery_context(target, &bare_under_pin)
+            .expect_err("a bare transaction under a pin must be rejected");
+        assert!(matches!(
+            err,
+            ExecutionError::InvalidRecoveryContract { .. }
+        ));
+    }
+
+    #[test]
+    fn recovery_contract_rejects_empty_transaction() {
+        // A native transaction with no packages installs nothing yet would pass
+        // a per-package loop vacuously; reject it up front.
+        let empty = vec![
+            Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: NativeAction::Install,
+                packages: Vec::new(),
+            },
+            Step::Observe {
+                packages: vec!["cosh".to_string()],
+            },
+            Step::WriteRecord(RecordWrite::DelegatedManaged),
+        ];
+        let err = delegated_recovery_context(
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &empty,
+        )
+        .expect_err("an empty native transaction must be rejected");
+        assert!(matches!(
+            err,
+            ExecutionError::InvalidRecoveryContract { .. }
+        ));
+    }
+
+    #[test]
+    fn recovery_contract_rejects_observe_with_a_foreign_package() {
+        // An Observe listing the subject *and* a foreign package would let the
+        // foreign observation overwrite the subject's and record the wrong
+        // version; the contract must reject the mixed list.
+        let mixed = vec![
+            Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: NativeAction::Install,
+                packages: vec!["cosh".to_string()],
+            },
+            Step::Observe {
+                packages: vec!["cosh".to_string(), "foreign".to_string()],
+            },
+            Step::WriteRecord(RecordWrite::DelegatedManaged),
+        ];
+        let err = delegated_recovery_context(
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &mixed,
+        )
+        .expect_err("a mixed observe list must be rejected");
+        assert!(matches!(
+            err,
+            ExecutionError::InvalidRecoveryContract { .. }
+        ));
+    }
+
     #[test]
     fn txn_failure_is_forward_only_and_reobserves() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -619,6 +1001,7 @@ mod tests {
                 pm: NativePm::Rpm,
                 package: Some("cosh".to_string()),
                 record_action: DelegatedRecordAction::WriteManaged,
+                pinned: None,
             })
         );
     }

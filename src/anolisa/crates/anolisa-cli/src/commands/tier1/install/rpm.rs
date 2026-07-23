@@ -7,6 +7,7 @@
 //! (`dispatch.rs`, `adopt.rs`); only the identity resolution lives here.
 
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
+use anolisa_platform::rpm_select::{PinnedSelection, nevra, select_pinned_candidate};
 
 use crate::repo_config::BackendConfig;
 use crate::resolution::{
@@ -67,6 +68,73 @@ pub(crate) fn rpm_package_candidates(
         input,
         ResolutionUse::Install,
     )
+}
+
+/// A repository candidate a `--version` pin resolved to.
+///
+/// Carries both the exact transaction spec (`artifact`) and the reporting
+/// fields the dry-run/JSON surface exposes; the bare package identity stays
+/// with the caller for observation and persisted state.
+#[derive(Debug, Clone)]
+pub(crate) struct PinnedRpm {
+    /// Exact NEVRA handed to the native transaction.
+    pub(crate) artifact: String,
+    /// Upstream VERSION field the pin matched (the `--version` value).
+    pub(crate) version: String,
+    /// Full resolved EVR (`[epoch:]version-release`) of the candidate.
+    pub(crate) evr: String,
+    /// Architecture of the selected candidate (used to verify the installed
+    /// build matches the pin).
+    pub(crate) arch: String,
+    /// Source repository the candidate came from, when reported.
+    pub(crate) source_repo: Option<String>,
+}
+
+/// Why a `--version` pin could not resolve to a host-compatible candidate.
+///
+/// Kept distinct from [`crate::response::CliError`] so the caller can attach
+/// the component/package/arch context it owns when rendering the message.
+pub(crate) enum PinError {
+    /// The repository query itself failed.
+    Query(PackageQueryError),
+    /// No candidate carried the requested version for any architecture.
+    VersionAbsent,
+    /// The version exists, but only for architectures this host cannot run.
+    ArchUnsupported {
+        /// Architectures the requested version is published for.
+        offered: Vec<String>,
+    },
+}
+
+/// Resolve `requested_version` of `package` to an exact repository candidate
+/// for `host_arch`, querying the configured ANOLISA RPM repository.
+///
+/// Delegates candidate selection to
+/// [`anolisa_platform::rpm_select::select_pinned_candidate`] (VERSION-field
+/// match, host-arch/`noarch` filter, highest-EVR pick) and renders the winner
+/// to a NEVRA. Never falls back to another version.
+///
+/// # Errors
+/// See [`PinError`]: a hard query failure, an absent version, or a version
+/// published only for other architectures.
+pub(crate) fn resolve_pinned_candidate(
+    query: &dyn PackageQuery,
+    package: &str,
+    requested_version: &str,
+    host_arch: &str,
+) -> Result<PinnedRpm, PinError> {
+    let candidates = query.query_available(package).map_err(PinError::Query)?;
+    match select_pinned_candidate(&candidates, requested_version, host_arch) {
+        PinnedSelection::Selected(info) => Ok(PinnedRpm {
+            artifact: nevra(&info),
+            version: info.version.version.clone(),
+            evr: info.version.to_string(),
+            arch: info.arch.clone(),
+            source_repo: info.origin.clone(),
+        }),
+        PinnedSelection::VersionAbsent => Err(PinError::VersionAbsent),
+        PinnedSelection::ArchUnsupported { offered } => Err(PinError::ArchUnsupported { offered }),
+    }
 }
 
 pub(crate) fn rpm_package_candidates_with_index(

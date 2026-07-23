@@ -53,7 +53,9 @@ use super::owned_ops::{
 };
 use super::raw::resolve_raw;
 use super::render::repo_config_err;
-use super::rpm::{RpmTarget, rpm_package_candidates_with_index};
+use super::rpm::{
+    PinError, RpmTarget, resolve_pinned_candidate, rpm_package_candidates_with_index,
+};
 use super::types::{InstallOutcome, RawResolution, ResolveInputs};
 use super::{ANOLISA_RPM_REPO_ID, COMMAND, InstallArgs};
 
@@ -139,10 +141,35 @@ pub(crate) struct PlannedComponent {
     pub(crate) component_identity_pinned: bool,
     pub(crate) family: String,
     pub(crate) native_package: Option<String>,
+    /// Resolved candidate for a `--version`-pinned delegated install, carried
+    /// so the dry-run preview and JSON envelope report the real artifact.
+    /// `None` for unpinned installs and every owned install.
+    pub(crate) delegated_pin: Option<DelegatedPin>,
     pub(crate) scope: InstallationScope,
     pub(crate) now: String,
     pub(crate) store: StateStore,
     pub(crate) route: PlannedRoute,
+}
+
+/// Resolved metadata for a version-pinned delegated install, surfaced to the
+/// dry-run preview and the JSON envelope. Built from the repository candidate
+/// the pin selected, never from the raw `--version` argument alone.
+#[derive(Debug, Clone)]
+pub(crate) struct DelegatedPin {
+    /// The `--version` value the caller requested.
+    pub(crate) requested_version: String,
+    /// Upstream VERSION field of the selected candidate (equals
+    /// `requested_version`, restated for an unambiguous JSON contract).
+    pub(crate) resolved_version: String,
+    /// Full resolved EVR of the selected candidate.
+    pub(crate) resolved_evr: String,
+    /// Architecture of the selected candidate, checked against the freshly
+    /// installed package before the record commits.
+    pub(crate) resolved_arch: String,
+    /// Exact NEVRA handed to the native transaction.
+    pub(crate) artifact: String,
+    /// Source repository the candidate came from, when reported.
+    pub(crate) source_repo: Option<String>,
 }
 
 struct ResolvedInstallIdentity {
@@ -290,6 +317,7 @@ pub(crate) fn plan_component(
     let active_binding = store
         .find(ObjectKind::Component, &component)
         .map(|installation| installation.binding.clone());
+    let mut delegated_pin: Option<DelegatedPin> = None;
     let (target, native_package): (ProviderTarget, Option<String>) = match &active_binding {
         Some(binding) => target_for_active_record(binding, &family, args, &component),
         None if family == "raw" => {
@@ -321,11 +349,12 @@ pub(crate) fn plan_component(
                     ProviderTarget::Delegated {
                         pm: NativePm::Rpm,
                         package,
+                        artifact: None,
                     },
                     None,
                 )
             } else {
-                let (target, package, resolved_component) = resolve_fresh_delegated(
+                let fresh = resolve_fresh_delegated(
                     args,
                     &layout,
                     &env,
@@ -334,8 +363,9 @@ pub(crate) fn plan_component(
                     query,
                     &command,
                 )?;
-                component = resolved_component;
-                (target, Some(package))
+                component = fresh.component;
+                delegated_pin = fresh.pin;
+                (fresh.target, Some(fresh.package))
             }
         }
     };
@@ -409,6 +439,7 @@ pub(crate) fn plan_component(
         component_identity_pinned,
         family,
         native_package,
+        delegated_pin,
         scope,
         now,
         store,
@@ -433,6 +464,7 @@ fn execute_planned(
         component_identity_pinned,
         family,
         native_package,
+        delegated_pin,
         scope,
         now,
         store,
@@ -457,6 +489,10 @@ fn execute_planned(
                     backend: family,
                     action: "already-installed",
                     operation_id: None,
+                    requested_version: None,
+                    resolved_version: None,
+                    source_repo: None,
+                    artifact: None,
                     dry_run: ctx.dry_run,
                     plan: Vec::new(),
                 },
@@ -488,22 +524,31 @@ fn execute_planned(
         for warning in resolution.iter().flat_map(|r| r.warnings.iter()) {
             eprintln!("warning: {warning}");
         }
-        render_result(
-            ctx,
-            &InstallResultPayload {
-                component,
-                package: native_package,
-                version: resolution
-                    .as_ref()
-                    .map(|r| r.entry.version.clone())
-                    .or_else(|| args.version.clone()),
-                backend: family,
-                action: "planned",
-                operation_id: None,
-                dry_run: true,
-                plan: plan_labels,
-            },
-        )?;
+        // A pinned delegated dry-run reports the version it resolved against
+        // the repository, not the raw `--version` echo — the pin fields carry
+        // the exact candidate so the preview proves what would be installed.
+        let base_version = resolution
+            .as_ref()
+            .map(|r| r.entry.version.clone())
+            .or_else(|| args.version.clone());
+        let mut payload = InstallResultPayload {
+            component,
+            package: native_package,
+            version: base_version,
+            backend: family,
+            action: "planned",
+            operation_id: None,
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
+            dry_run: true,
+            plan: plan_labels,
+        };
+        if let Some(pin) = &delegated_pin {
+            payload = payload.with_pin(pin);
+        }
+        render_result(ctx, &payload)?;
         return Ok(InstallOutcome::Installed);
     }
 
@@ -544,6 +589,7 @@ fn execute_planned(
         &now,
         &steps,
         &plan_labels,
+        delegated_pin.as_ref(),
         &provider,
         &repo_config,
         is_root,
@@ -574,6 +620,7 @@ fn target_for_active_record(
                         .package
                         .clone()
                         .unwrap_or_else(|| component.to_string()),
+                    artifact: None,
                 }
             };
             (target, None)
@@ -590,9 +637,13 @@ fn target_for_active_record(
                     version: args.version.clone().unwrap_or_default(),
                 }
             } else {
+                // Version pins over an existing record are out of scope: the
+                // planner's active-record arms decide the outcome (I6–I9) and
+                // never re-resolve a pinned artifact.
                 ProviderTarget::Delegated {
                     pm: NativePm::Rpm,
                     package: package.clone(),
+                    artifact: None,
                 }
             };
             (target, Some(package))
@@ -698,9 +749,21 @@ fn system_probe_package(
     })
 }
 
+/// Fresh delegated resolution result: the provider target, its bare package,
+/// the resolved component name (aliases may re-map the input), and — when a
+/// `--version` was pinned — the resolved candidate metadata for reporting.
+struct FreshDelegated {
+    target: ProviderTarget,
+    package: String,
+    component: String,
+    pin: Option<DelegatedPin>,
+}
+
 /// Fresh delegated resolution: the component must resolve to exactly one
-/// ANOLISA RPM package. Returns the target, its package, and the resolved
-/// component name (aliases may re-map the input).
+/// ANOLISA RPM package. When `--version` is set, the bare package is further
+/// resolved to an exact repository candidate for the host architecture, and
+/// the resulting NEVRA becomes the native transaction's artifact spec while
+/// the bare package stays the observation/record identity.
 fn resolve_fresh_delegated(
     args: &InstallArgs,
     layout: &FsLayout,
@@ -709,7 +772,7 @@ fn resolve_fresh_delegated(
     component: &str,
     query: &dyn PackageQuery,
     command: &str,
-) -> Result<(ProviderTarget, String, String), CliError> {
+) -> Result<FreshDelegated, CliError> {
     let component_index = load_optional_component_index(layout, env, repo_config);
     let candidates = rpm_package_candidates_with_index(
         args.package.as_deref(),
@@ -732,14 +795,49 @@ fn resolve_fresh_delegated(
                 "component '{component}' is not an ANOLISA RPM component; use the ANOLISA component name and configure the repo-side component index or publish Provides: anolisa-component({component})"
             ),
         }),
-        [single] => Ok((
-            ProviderTarget::Delegated {
-                pm: NativePm::Rpm,
-                package: single.package.clone(),
-            },
-            single.package.clone(),
-            single.component.clone(),
-        )),
+        [single] => {
+            let package = single.package.clone();
+            let resolved_component = single.component.clone();
+            // A `--version` pin resolves the bare package to an exact
+            // repository candidate before any mutation; the NEVRA is the only
+            // value that reaches the native transaction. An unpinned install
+            // keeps `artifact` as `None` (repository default).
+            let (artifact, pin) = match args.version.as_deref() {
+                Some(version) => {
+                    let pinned = resolve_pinned_candidate(query, &package, version, &env.arch)
+                        .map_err(|err| {
+                            pin_error_to_cli(
+                                err,
+                                command,
+                                &resolved_component,
+                                &package,
+                                version,
+                                &env.arch,
+                            )
+                        })?;
+                    let pin = DelegatedPin {
+                        requested_version: version.to_string(),
+                        resolved_version: pinned.version.clone(),
+                        resolved_evr: pinned.evr.clone(),
+                        resolved_arch: pinned.arch.clone(),
+                        artifact: pinned.artifact.clone(),
+                        source_repo: pinned.source_repo.clone(),
+                    };
+                    (Some(pinned.artifact), Some(pin))
+                }
+                None => (None, None),
+            };
+            Ok(FreshDelegated {
+                target: ProviderTarget::Delegated {
+                    pm: NativePm::Rpm,
+                    package: package.clone(),
+                    artifact,
+                },
+                package,
+                component: resolved_component,
+                pin,
+            })
+        }
         many => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
@@ -750,6 +848,38 @@ fn resolve_fresh_delegated(
                     .join(", "),
             ),
         }),
+    }
+}
+
+/// Map a version-pin resolution failure to a CLI error. Runs during read-only
+/// planning, so every arm reports that nothing was changed and never widens
+/// the version constraint.
+fn pin_error_to_cli(
+    err: PinError,
+    command: &str,
+    component: &str,
+    package: &str,
+    version: &str,
+    arch: &str,
+) -> CliError {
+    match err {
+        PinError::Query(PackageQueryError::CommandMissing { command: bin }) => {
+            rpm_tooling_missing_error(command, &bin, component)
+        }
+        PinError::Query(err) => pkg_query_err(err, command),
+        PinError::VersionAbsent => CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "version '{version}' of component '{component}' (package '{package}') is not available in the configured ANOLISA RPM repository; nothing was changed — check `anolisa list` / the published versions and retry with an available `--version`"
+            ),
+        },
+        PinError::ArchUnsupported { offered } => CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "version '{version}' of component '{component}' (package '{package}') is not available for this host architecture '{arch}' (repository offers: {}); nothing was changed",
+                offered.join(", ")
+            ),
+        },
     }
 }
 
@@ -853,6 +983,10 @@ fn install_owned(
             backend: "raw".to_string(),
             action: "installed",
             operation_id: Some(operation_id),
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
             dry_run: false,
             plan: plan_labels.to_vec(),
         },
@@ -874,6 +1008,7 @@ fn install_delegated(
     now: &str,
     steps: &[Step],
     plan_labels: &[String],
+    delegated_pin: Option<&DelegatedPin>,
     provider: &DelegatedProvider,
     repo_config: &RepoConfig,
     is_root: bool,
@@ -928,16 +1063,17 @@ fn install_delegated(
         }),
         owned_artifact: None,
     };
+    // Pin the execution target to the resolved artifact so the executor both
+    // constrains the native transaction to the exact NEVRA and verifies the
+    // freshly installed EVR/arch before committing the record.
+    let mut exec_target = DelegatedExecutionTarget::new(NativePm::Rpm, Some(package));
+    if let Some(pin) = delegated_pin {
+        exec_target =
+            exec_target.with_pinned_artifact(&pin.artifact, &pin.resolved_evr, &pin.resolved_arch);
+    }
     let outcome = {
         let mut sink = StoreRecordSink::new(&mut store, state_path, context);
-        execute_delegated_steps(
-            steps,
-            DelegatedExecutionTarget::new(NativePm::Rpm, Some(package)),
-            provider,
-            &mut sink,
-            &mut journal,
-            now,
-        )
+        execute_delegated_steps(steps, exec_target, provider, &mut sink, &mut journal, now)
     }
     .map_err(|err| CliError::Runtime {
         command: command.to_string(),
@@ -973,19 +1109,24 @@ fn install_delegated(
     }
 
     let version = outcome.observation.as_ref().map(|o| o.version.clone());
-    render_result(
-        ctx,
-        &InstallResultPayload {
-            component: target.to_string(),
-            package: Some(package.to_string()),
-            version,
-            backend: "rpm".to_string(),
-            action: "installed",
-            operation_id: Some(operation_id),
-            dry_run: false,
-            plan: plan_labels.to_vec(),
-        },
-    )?;
+    let mut payload = InstallResultPayload {
+        component: target.to_string(),
+        package: Some(package.to_string()),
+        version,
+        backend: "rpm".to_string(),
+        action: "installed",
+        operation_id: Some(operation_id),
+        requested_version: None,
+        resolved_version: None,
+        source_repo: None,
+        artifact: None,
+        dry_run: false,
+        plan: plan_labels.to_vec(),
+    };
+    if let Some(pin) = delegated_pin {
+        payload = payload.with_pin(pin);
+    }
+    render_result(ctx, &payload)?;
     Ok(InstallOutcome::Installed)
 }
 
@@ -1272,6 +1413,12 @@ pub(crate) fn step_label(step: &Step) -> String {
 }
 
 /// JSON payload for a completed (or previewed, or idempotent) install.
+///
+/// The pin fields (`requested_version`, `resolved_version`, `source_repo`,
+/// `artifact`) are additive and only present for a version-pinned delegated
+/// install; `version` keeps its existing meaning (the effective/installed
+/// version) across every route, so the wire contract stays backward
+/// compatible.
 #[derive(Debug, Serialize)]
 struct InstallResultPayload {
     component: String,
@@ -1284,8 +1431,68 @@ struct InstallResultPayload {
     action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<String>,
+    /// `--version` value the caller requested (version-pinned installs only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_version: Option<String>,
+    /// Full resolved EVR of the pinned candidate (version-pinned only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_version: Option<String>,
+    /// Source repository the pinned candidate came from (version-pinned only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_repo: Option<String>,
+    /// Exact NEVRA handed to dnf (version-pinned only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<String>,
     dry_run: bool,
     plan: Vec<String>,
+}
+
+impl InstallResultPayload {
+    /// Copy the resolved-candidate fields from a delegated version pin. The
+    /// pin's resolved EVR becomes `resolved_version`; `version` is set to the
+    /// upstream version so the existing field stays a clear, compatible
+    /// answer for pinned installs too.
+    fn with_pin(mut self, pin: &DelegatedPin) -> Self {
+        self.requested_version = Some(pin.requested_version.clone());
+        self.resolved_version = Some(pin.resolved_evr.clone());
+        self.source_repo = pin.source_repo.clone();
+        self.artifact = Some(pin.artifact.clone());
+        if self.version.is_none() {
+            self.version = Some(pin.resolved_version.clone());
+        }
+        self
+    }
+}
+
+/// Detail lines shown above the plan in a dry-run preview.
+///
+/// For a version-pinned delegated install this makes the resolved candidate
+/// explicit — bare package, requested version, resolved EVR, exact artifact,
+/// and source repository — so the preview proves what would be installed
+/// rather than echoing the request. Unpinned/owned installs contribute no pin
+/// fields and yield an empty list (the plan alone is shown).
+fn dry_run_detail_lines(payload: &InstallResultPayload) -> Vec<String> {
+    let mut lines = Vec::new();
+    // Only a version pin populates these; guard on `artifact` so unpinned and
+    // owned dry-runs render exactly as before (plan only).
+    if payload.artifact.is_some() {
+        if let Some(package) = &payload.package {
+            lines.push(format!("package: {package}"));
+        }
+        if let Some(requested) = &payload.requested_version {
+            lines.push(format!("requested version: {requested}"));
+        }
+        if let Some(resolved) = &payload.resolved_version {
+            lines.push(format!("resolved version: {resolved}"));
+        }
+        if let Some(artifact) = &payload.artifact {
+            lines.push(format!("artifact: {artifact}"));
+        }
+        if let Some(repo) = &payload.source_repo {
+            lines.push(format!("repository: {repo}"));
+        }
+    }
+    lines
 }
 
 fn render_result(ctx: &CliContext, payload: &InstallResultPayload) -> Result<(), CliError> {
@@ -1297,6 +1504,9 @@ fn render_result(ctx: &CliContext, payload: &InstallResultPayload) -> Result<(),
     }
     if payload.dry_run {
         println!("install {} (dry-run):", payload.component);
+        for line in dry_run_detail_lines(payload) {
+            println!("  {line}");
+        }
         for label in &payload.plan {
             println!("  - {label}");
         }
@@ -1325,6 +1535,131 @@ mod tests {
     use crate::repo_config::RepoConfig;
     use anolisa_platform::fs_layout::FsLayout;
     use tempfile::tempdir;
+
+    #[test]
+    fn pinned_payload_json_exposes_requested_resolved_repo_and_artifact() {
+        // The JSON envelope for a version-pinned install must carry the
+        // requested/resolved version, the source repo, the exact artifact, and
+        // the bare package — while keeping `version` as a compatible answer.
+        let pin = DelegatedPin {
+            requested_version: "0.6.2".to_string(),
+            resolved_version: "0.6.2".to_string(),
+            resolved_evr: "0.6.2-1.alnx4".to_string(),
+            resolved_arch: "x86_64".to_string(),
+            artifact: "agentsight-0.6.2-1.alnx4.x86_64".to_string(),
+            source_repo: Some("anolisa-configured".to_string()),
+        };
+        let payload = InstallResultPayload {
+            component: "agentsight".to_string(),
+            package: Some("agentsight".to_string()),
+            version: None,
+            backend: "rpm".to_string(),
+            action: "planned",
+            operation_id: None,
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
+            dry_run: true,
+            plan: vec!["dnf install agentsight-0.6.2-1.alnx4.x86_64".to_string()],
+        }
+        .with_pin(&pin);
+
+        let json = serde_json::to_value(&payload).expect("serialize payload");
+        assert_eq!(json["component"], "agentsight");
+        assert_eq!(json["package"], "agentsight");
+        assert_eq!(json["requested_version"], "0.6.2");
+        assert_eq!(json["resolved_version"], "0.6.2-1.alnx4");
+        assert_eq!(json["source_repo"], "anolisa-configured");
+        assert_eq!(json["artifact"], "agentsight-0.6.2-1.alnx4.x86_64");
+        // `version` stays present as the upstream version (compatible field).
+        assert_eq!(json["version"], "0.6.2");
+    }
+
+    #[test]
+    fn pinned_dry_run_detail_lines_show_package_resolved_version_and_artifact() {
+        // The human dry-run contract: bare package, requested version, resolved
+        // EVR, exact artifact, and source repository, each on its own line.
+        let pin = DelegatedPin {
+            requested_version: "0.6.2".to_string(),
+            resolved_version: "0.6.2".to_string(),
+            resolved_evr: "0.6.2-1.alnx4".to_string(),
+            resolved_arch: "x86_64".to_string(),
+            artifact: "agentsight-0.6.2-1.alnx4.x86_64".to_string(),
+            source_repo: Some("anolisa-configured".to_string()),
+        };
+        let payload = InstallResultPayload {
+            component: "agentsight".to_string(),
+            package: Some("agentsight".to_string()),
+            version: None,
+            backend: "rpm".to_string(),
+            action: "planned",
+            operation_id: None,
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
+            dry_run: true,
+            plan: Vec::new(),
+        }
+        .with_pin(&pin);
+
+        assert_eq!(
+            dry_run_detail_lines(&payload),
+            vec![
+                "package: agentsight".to_string(),
+                "requested version: 0.6.2".to_string(),
+                "resolved version: 0.6.2-1.alnx4".to_string(),
+                "artifact: agentsight-0.6.2-1.alnx4.x86_64".to_string(),
+                "repository: anolisa-configured".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unpinned_dry_run_detail_lines_are_empty() {
+        // No pin → no detail lines; the unpinned/owned preview is unchanged.
+        let payload = InstallResultPayload {
+            component: "agentsight".to_string(),
+            package: Some("agentsight".to_string()),
+            version: Some("0.6.2".to_string()),
+            backend: "rpm".to_string(),
+            action: "planned",
+            operation_id: None,
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
+            dry_run: true,
+            plan: vec!["dnf install agentsight".to_string()],
+        };
+        assert!(dry_run_detail_lines(&payload).is_empty());
+    }
+
+    #[test]
+    fn unpinned_payload_json_omits_pin_fields() {
+        // Without a pin the additive fields must not appear, preserving the
+        // pre-existing wire contract for plain installs.
+        let payload = InstallResultPayload {
+            component: "agentsight".to_string(),
+            package: Some("agentsight".to_string()),
+            version: Some("0.6.2".to_string()),
+            backend: "rpm".to_string(),
+            action: "installed",
+            operation_id: None,
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
+            dry_run: false,
+            plan: Vec::new(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize payload");
+        assert!(json.get("requested_version").is_none());
+        assert!(json.get("resolved_version").is_none());
+        assert!(json.get("source_repo").is_none());
+        assert!(json.get("artifact").is_none());
+    }
 
     #[test]
     fn raw_resolution_does_not_rewrite_exact_state_identity() {

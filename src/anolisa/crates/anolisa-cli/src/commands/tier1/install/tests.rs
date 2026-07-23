@@ -635,6 +635,12 @@ pub struct FakeInstaller {
     pub install_succeeds: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
+    /// Package spec(s) each `install` call received, joined per call, so tests
+    /// can pin the exact NEVRA a version-pinned install hands to dnf.
+    pub install_specs: RefCell<Vec<String>>,
+    /// Expected `install` argument (comma-joined). When `None`, the fake
+    /// asserts the bare package name; a pinned test sets the expected NEVRA.
+    pub expected_install: Option<String>,
     /// Optional lock path probed from inside `install`.
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
@@ -655,6 +661,8 @@ impl FakeInstaller {
             install_succeeds: true,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
+            install_specs: RefCell::new(Vec::new()),
+            expected_install: None,
             lock_probe: None,
             lock_was_held: Cell::new(false),
             package_appears_under_lock_path: None,
@@ -665,6 +673,18 @@ impl FakeInstaller {
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
         self.origin = Some(repo.to_string());
+        self
+    }
+    /// Repository candidates `query_available` returns for the package, so a
+    /// version-pinned install can resolve a concrete NEVRA.
+    pub fn with_available(mut self, available: Vec<PackageInfo>) -> Self {
+        self.available = available;
+        self
+    }
+    /// Assert `install` receives this exact spec (e.g. a pinned NEVRA) instead
+    /// of the bare package name.
+    pub fn expecting_install(mut self, spec: &str) -> Self {
+        self.expected_install = Some(spec.to_string());
         self
     }
     pub fn failing_install(mut self) -> Self {
@@ -785,10 +805,15 @@ impl PackageQuery for FakeInstaller {
 impl PackageTransaction for FakeInstaller {
     fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.install_calls.set(self.install_calls.get() + 1);
+        self.install_specs.borrow_mut().push(packages.join(","));
+        let expected = self
+            .expected_install
+            .clone()
+            .unwrap_or_else(|| self.package.clone());
         assert_eq!(
-            packages,
-            [self.package.as_str()],
-            "install targeted the wrong package"
+            packages.join(","),
+            expected,
+            "install targeted the wrong package/spec"
         );
         if let Some(path) = &self.lock_probe {
             self.lock_was_held.set(matches!(
@@ -967,6 +992,35 @@ pub fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) ->
         },
         arch: arch.to_string(),
         origin: None,
+    }
+}
+
+/// Host architecture the install pipeline resolves against, so version-pinned
+/// tests build candidates the running host actually accepts (aarch64 on this
+/// CI, x86_64 elsewhere) instead of hard-coding one arch.
+pub fn host_arch() -> String {
+    anolisa_env::EnvService::detect().arch
+}
+
+/// A repository candidate for a version-pinned availability query, carrying an
+/// origin (source repo) so the resolved-candidate reporting has a value.
+pub fn available_candidate(
+    name: &str,
+    epoch: Option<&str>,
+    version: &str,
+    release: &str,
+    arch: &str,
+    origin: &str,
+) -> PackageInfo {
+    PackageInfo {
+        name: name.to_string(),
+        version: PackageVersion {
+            epoch: epoch.map(str::to_string),
+            version: version.to_string(),
+            release: Some(release.to_string()),
+        },
+        arch: arch.to_string(),
+        origin: Some(origin.to_string()),
     }
 }
 

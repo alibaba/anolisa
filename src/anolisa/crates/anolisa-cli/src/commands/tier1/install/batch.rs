@@ -952,6 +952,7 @@ mod tests {
             component_identity_pinned: false,
             family: "rpm".to_string(),
             native_package: Some(package.to_string()),
+            delegated_pin: None,
             scope: InstallationScope::System,
             now: NOW.to_string(),
             store: StateStore::empty(),

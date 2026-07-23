@@ -810,3 +810,437 @@ fn seed_tracked_rpm(ctx: &CliContext, component: &str, ownership: Ownership) -> 
         .expect("seed tracked RPM state");
     object
 }
+
+// ---- Version-pinned RPM install (issue #1682) ----------------------------
+
+/// Repo config with an rpm backend and a `package_map`, written to disk so the
+/// full install pipeline (which loads repo.toml) sees the mapping. Used by the
+/// `--package` + `--version` composition test.
+fn system_ctx_with_rpm_package_map(pairs: &[(&str, &str)]) -> (tempfile::TempDir, CliContext) {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let prefix = tmp.path().to_path_buf();
+    let layout = FsLayout::system(Some(prefix.clone()));
+    std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+    std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+    let map = pairs
+        .iter()
+        .map(|(component, package)| format!("{component} = \"{package}\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            r#"schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "https://example.com/anolisa"
+
+[backends.rpm]
+base_url = "https://repo.example/anolisa"
+gpgcheck = false
+
+[backends.rpm.package_map]
+{map}
+"#
+        ),
+    )
+    .expect("write repo.toml");
+    let ctx = ctx_with_prefix(false, Some(prefix));
+    (tmp, ctx)
+}
+
+#[test]
+fn pinned_delegated_install_passes_exact_nevra_and_records_bare_package() {
+    // The repo publishes 0.6.2 and a newer 0.7.0; pinning 0.6.2 must hand the
+    // exact 0.6.2 NEVRA to dnf, while observation and the persisted record
+    // keep the bare package identity.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "0.6.2", Some("1.al8"), &arch),
+    )
+    .with_origin("anolisa-configured")
+    .with_available(vec![
+        available_candidate(
+            "copilot-shell",
+            None,
+            "0.6.2",
+            "1.al8",
+            &arch,
+            "anolisa-configured",
+        ),
+        available_candidate(
+            "copilot-shell",
+            None,
+            "0.7.0",
+            "1.al8",
+            &arch,
+            "anolisa-configured",
+        ),
+    ])
+    .expecting_install(&format!("copilot-shell-0.6.2-1.al8.{arch}"));
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    let outcome = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect("pinned install ok");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 1, "dnf install must run once");
+    assert_eq!(
+        fake.install_specs.borrow().as_slice(),
+        &[format!("copilot-shell-0.6.2-1.al8.{arch}")],
+        "the exact pinned NEVRA must reach dnf, not the bare package"
+    );
+
+    let store = load_store(&ctx);
+    let record = store
+        .find(ObjectKind::Component, "copilot-shell")
+        .expect("component recorded");
+    match &record.binding {
+        ProviderBinding::Delegated {
+            package,
+            last_observed,
+            ..
+        } => {
+            // Identity and observation stay on the bare package — the NEVRA
+            // never leaks into persisted state.
+            assert_eq!(package.resolved_name(), Some("copilot-shell"));
+            let observed = last_observed.as_ref().expect("fresh observation");
+            assert_eq!(observed.evr.as_deref(), Some("0.6.2-1.al8"));
+        }
+        other => panic!("expected a delegated binding, got {other:?}"),
+    }
+}
+
+#[test]
+fn pinned_install_selects_highest_release_for_requested_version() {
+    // One version, several releases: the highest EVR release is the one that
+    // reaches dnf.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "0.6.2", Some("10.al8"), &arch),
+    )
+    .with_available(vec![
+        available_candidate(
+            "copilot-shell",
+            None,
+            "0.6.2",
+            "1.al8",
+            &arch,
+            "anolisa-configured",
+        ),
+        available_candidate(
+            "copilot-shell",
+            None,
+            "0.6.2",
+            "10.al8",
+            &arch,
+            "anolisa-configured",
+        ),
+        available_candidate(
+            "copilot-shell",
+            None,
+            "0.6.2",
+            "2.al8",
+            &arch,
+            "anolisa-configured",
+        ),
+    ])
+    .expecting_install(&format!("copilot-shell-0.6.2-10.al8.{arch}"));
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect("pinned install ok");
+    assert_eq!(
+        fake.install_specs.borrow().as_slice(),
+        &[format!("copilot-shell-0.6.2-10.al8.{arch}")]
+    );
+}
+
+#[test]
+fn pinned_install_missing_version_fails_before_txn_journal_and_state() {
+    // The requested version is absent (repo only has 0.7.0): the install must
+    // fail before dnf runs, before a journal is written, and before any state
+    // record — and never retry without the version constraint.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "0.7.0", Some("1.al8"), &arch),
+    )
+    .with_available(vec![available_candidate(
+        "copilot-shell",
+        None,
+        "0.7.0",
+        "1.al8",
+        &arch,
+        "anolisa-configured",
+    )]);
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect_err("a missing pinned version must fail");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(err.reason().contains("0.6.2"), "got: {}", err.reason());
+    assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "copilot-shell")
+            .is_none(),
+        "a missing version must not claim a record"
+    );
+    assert!(
+        load_journals(&layout).is_empty(),
+        "a missing version must not open a journal"
+    );
+}
+
+#[test]
+fn pinned_install_wrong_arch_fails_before_mutation() {
+    // The version exists, but only for an architecture this host cannot run.
+    // The refusal names the version and the host arch and changes nothing.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "0.6.2", Some("1.al8"), &arch),
+    )
+    .with_available(vec![available_candidate(
+        "copilot-shell",
+        None,
+        "0.6.2",
+        "1.al8",
+        "s390x",
+        "anolisa-configured",
+    )]);
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect_err("a host-incompatible version must fail");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("architecture") && err.reason().contains(&arch),
+        "message must name the host architecture: {}",
+        err.reason()
+    );
+    assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "copilot-shell")
+            .is_none()
+    );
+}
+
+#[test]
+fn pinned_delegated_dry_run_shows_resolved_candidate_without_txn_or_state() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(true);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "0.6.2", Some("1.al8"), &arch),
+    )
+    .with_available(vec![
+        available_candidate(
+            "copilot-shell",
+            None,
+            "0.6.2",
+            "1.al8",
+            &arch,
+            "anolisa-configured",
+        ),
+        available_candidate(
+            "copilot-shell",
+            None,
+            "0.7.0",
+            "1.al8",
+            &arch,
+            "anolisa-configured",
+        ),
+    ]);
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    let outcome = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, false)
+        .expect("pinned dry-run ok");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 0, "dry-run must not run dnf");
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "copilot-shell")
+            .is_none(),
+        "dry-run must not persist state"
+    );
+}
+
+#[test]
+fn pinned_dry_run_still_validates_against_the_repository() {
+    // Dry-run resolves against real repository candidates, so an absent
+    // version fails in dry-run just as it would for a real install — it does
+    // not blindly echo the request.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(true);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "0.7.0", Some("1.al8"), &arch),
+    )
+    .with_available(vec![available_candidate(
+        "copilot-shell",
+        None,
+        "0.7.0",
+        "1.al8",
+        &arch,
+        "anolisa-configured",
+    )]);
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, false)
+        .expect_err("dry-run must validate the pinned version");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(err.reason().contains("0.6.2"), "got: {}", err.reason());
+}
+
+#[test]
+fn pinned_install_handles_a_non_zero_epoch() {
+    // A non-zero epoch on the winning candidate renders into the NEVRA in the
+    // `name-epoch:version-release.arch` form dnf accepts.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let arch = host_arch();
+    let mut installs_to = pkg_info("copilot-shell", "0.6.2", Some("1.al8"), &arch);
+    installs_to.version.epoch = Some("2".to_string());
+    let fake = FakeInstaller::new("copilot-shell", installs_to)
+        .with_available(vec![available_candidate(
+            "copilot-shell",
+            Some("2"),
+            "0.6.2",
+            "1.al8",
+            &arch,
+            "anolisa-configured",
+        )])
+        .expecting_install(&format!("copilot-shell-2:0.6.2-1.al8.{arch}"));
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect("pinned install ok");
+    assert_eq!(
+        fake.install_specs.borrow().as_slice(),
+        &[format!("copilot-shell-2:0.6.2-1.al8.{arch}")]
+    );
+}
+
+#[test]
+fn pinned_install_composes_with_package_override() {
+    // `--package` selects the backend package; `--version` then pins against
+    // that package's candidates. The override NEVRA reaches dnf while the
+    // component name stays the addressed one.
+    let (_tmp, ctx) = system_ctx_with_rpm_package_map(&[("cosh", "site-copilot")]);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "site-copilot",
+        pkg_info("site-copilot", "0.6.2", Some("1.al8"), &arch),
+    )
+    .with_available(vec![available_candidate(
+        "site-copilot",
+        None,
+        "0.6.2",
+        "1.al8",
+        &arch,
+        "anolisa-configured",
+    )])
+    .expecting_install(&format!("site-copilot-0.6.2-1.al8.{arch}"));
+    let mut a = args("cosh");
+    a.backend = Some("rpm".to_string());
+    a.package = Some("site-copilot".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    install_component_with_deps("cosh", &a, &ctx, &fake, &fake, true).expect("pinned install ok");
+    assert_eq!(
+        fake.install_specs.borrow().as_slice(),
+        &[format!("site-copilot-0.6.2-1.al8.{arch}")]
+    );
+    let store = load_store(&ctx);
+    let record = store
+        .find(ObjectKind::Component, "cosh")
+        .expect("component recorded under the addressed name");
+    match &record.binding {
+        ProviderBinding::Delegated { package, .. } => {
+            assert_eq!(package.resolved_name(), Some("site-copilot"));
+        }
+        other => panic!("expected a delegated binding, got {other:?}"),
+    }
+}
+
+#[test]
+fn unpinned_delegated_install_passes_bare_package() {
+    // Regression guard: without `--version` the native transaction still
+    // receives the bare package name (repository default), unchanged by the
+    // version-pinning work.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let arch = host_arch();
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), &arch),
+    );
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect("unpinned install ok");
+    assert_eq!(
+        fake.install_specs.borrow().as_slice(),
+        &["copilot-shell".to_string()],
+        "an unpinned install must send the bare package name"
+    );
+}
+
+#[test]
+fn pinned_install_refuses_state_when_dnf_installs_a_different_evr() {
+    // End-to-end guard: the pin resolves 0.6.2, but dnf actually lands 0.7.0
+    // (module stream / Obsoletes). The command must fail toward repair and
+    // must not persist a record for the wrong version.
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let arch = host_arch();
+    // Candidate resolves to 0.6.2, but the rpmdb reports 0.7.0 after install.
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "0.7.0", Some("1.al8"), &arch),
+    )
+    .with_available(vec![available_candidate(
+        "copilot-shell",
+        None,
+        "0.6.2",
+        "1.al8",
+        &arch,
+        "anolisa-configured",
+    )])
+    .expecting_install(&format!("copilot-shell-0.6.2-1.al8.{arch}"));
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("0.6.2".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect_err("a wrong installed EVR must fail");
+    assert!(err.reason().contains("repair"), "got: {}", err.reason());
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "copilot-shell")
+            .is_none(),
+        "the wrong version must not be recorded"
+    );
+}

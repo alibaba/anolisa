@@ -1061,6 +1061,29 @@ fn recover_journal(
         .map_err(|err| probe_error(err, command, target))?
     {
         NativeProbe::Present { observation, .. } => {
+            // A pinned operation resolved a specific artifact. Recovery must
+            // hold the same guarantee as the in-process path: refuse to record
+            // a package whose installed EVR/arch differs from the pin (a
+            // different build committed before the crash, or the wrong version
+            // is present). The journal is left pending for manual reconcile —
+            // recovery never falls back to whatever is installed.
+            if let Some(pin) = &recovery.pinned {
+                let observed_evr = observation
+                    .evr
+                    .clone()
+                    .unwrap_or_else(|| observation.version.clone());
+                let arch_ok = observation.arch.as_deref() == Some(pin.arch.as_str());
+                if observed_evr != pin.evr || !arch_ok {
+                    let observed_arch = observation.arch.as_deref().unwrap_or("unknown-arch");
+                    return Err(CliError::Runtime {
+                        command: command.to_string(),
+                        reason: format!(
+                            "the interrupted {} of '{target}' pinned '{}', but package '{package}' is installed as {observed_evr} ({observed_arch}); refusing to record a different version — reconcile manually (e.g. `dnf install {}`) then re-run `anolisa repair {target}`",
+                            journal.operation, pin.artifact, pin.artifact
+                        ),
+                    });
+                }
+            }
             ensure_recovery_write_authorized(
                 &store,
                 target,
@@ -1213,27 +1236,52 @@ fn delegated_recovery_context(
                 "the explicit record transition conflicts with the journal steps",
             ));
         }
-        if let Some(package) = context.package.as_deref()
-            && journal
-                .steps
-                .iter()
-                .filter(|step| {
-                    step.phase == anolisa_core::executor::PHASE_NATIVE_TXN
-                        || step.phase == anolisa_core::executor::PHASE_OBSERVE
-                })
-                .any(|step| {
-                    !step
-                        .target
-                        .split(',')
-                        .map(str::trim)
-                        .any(|candidate| candidate == package)
-                })
-        {
-            return Err(unsafe_recovery_contract_error(
-                journal,
-                command,
-                "the explicit package identity conflicts with the journal steps",
-            ));
+        if let Some(package) = context.package.as_deref() {
+            // The observe step re-observes the bare package; the native
+            // transaction step names the pinned artifact (NEVRA) when the
+            // operation was version-pinned, otherwise the bare package.
+            //
+            // A pinned operation is never a merged batch, so both its native
+            // and observe steps must resolve to *exactly* one target — the
+            // pinned artifact and the bare package respectively. A journal
+            // whose pinned native step also lists another package is malformed
+            // and must not recover. Only an unpinned batch native step keeps
+            // membership semantics (a shared transaction names the whole
+            // batch, and this subject need only appear among them).
+            let contains = |step: &anolisa_core::transaction::TransactionStep, needle: &str| {
+                step.target
+                    .split(',')
+                    .map(str::trim)
+                    .any(|candidate| candidate == needle)
+            };
+            let resolves_exactly = |step: &anolisa_core::transaction::TransactionStep,
+                                    expected: &str| {
+                let mut targets = step
+                    .target
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|target| !target.is_empty());
+                targets.next() == Some(expected) && targets.next().is_none()
+            };
+            let conflict = journal.steps.iter().any(|step| {
+                if step.phase == anolisa_core::executor::PHASE_NATIVE_TXN {
+                    match &context.pinned {
+                        Some(pin) => !resolves_exactly(step, &pin.artifact),
+                        None => !contains(step, package),
+                    }
+                } else if step.phase == anolisa_core::executor::PHASE_OBSERVE {
+                    !resolves_exactly(step, package)
+                } else {
+                    false
+                }
+            });
+            if conflict {
+                return Err(unsafe_recovery_contract_error(
+                    journal,
+                    command,
+                    "the explicit package identity conflicts with the journal steps",
+                ));
+            }
         }
         return Ok(Some(context.clone()));
     }
@@ -1360,6 +1408,7 @@ fn delegated_recovery_context(
         pm: NativePm::Rpm,
         package,
         record_action: action,
+        pinned: None,
     }))
 }
 
@@ -2265,13 +2314,13 @@ mod tests {
     use std::path::PathBuf;
 
     use anolisa_core::domain::LifecycleStatus;
-    use anolisa_core::executor::PHASE_NATIVE_TXN;
+    use anolisa_core::executor::{PHASE_NATIVE_TXN, PHASE_OBSERVE};
     use anolisa_core::owned_executor::PHASE_FILES;
     use anolisa_core::state::{
         FileOwner, InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus,
         OwnedFile, OwnedFileKind, Ownership, RpmMetadata,
     };
-    use anolisa_core::transaction::TransactionStep;
+    use anolisa_core::transaction::{DelegatedPinnedArtifact, TransactionStep};
     use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
 
     use crate::context::InstallMode;
@@ -3677,6 +3726,7 @@ mod tests {
                     pm: NativePm::Rpm,
                     package: Some(package.to_string()),
                     record_action,
+                    pinned: None,
                 },
                 steps,
             )
@@ -3684,6 +3734,283 @@ mod tests {
         let path = journal.journal_path.clone();
         drop(journal);
         path
+    }
+
+    /// A version-pinned install journal interrupted after dnf committed but
+    /// before the record: NEVRA native step, bare observe step, and a pinned
+    /// recovery contract — exactly what the executor persists.
+    fn write_pinned_install_journal(
+        layout: &FsLayout,
+        subject: &str,
+        package: &str,
+        artifact: &str,
+        evr: &str,
+        arch: &str,
+    ) -> PathBuf {
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(layout);
+        let mut journal =
+            Transaction::begin_with_subject("install", Some(subject), state_path, &journal_dir)
+                .expect("begin journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some(package.to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: Some(DelegatedPinnedArtifact {
+                        artifact: artifact.to_string(),
+                        evr: evr.to_string(),
+                        arch: arch.to_string(),
+                    }),
+                },
+                [
+                    TransactionStep::planned(PHASE_NATIVE_TXN, artifact, "install", None),
+                    TransactionStep::planned(PHASE_OBSERVE, package, "observe", None),
+                    TransactionStep::planned(
+                        anolisa_core::executor::PHASE_RECORD,
+                        "state",
+                        "write-delegated-managed",
+                        None,
+                    ),
+                ],
+            )
+            .expect("record pinned recovery contract");
+        let path = journal.journal_path.clone();
+        drop(journal);
+        path
+    }
+
+    #[test]
+    fn pinned_install_journal_recovers_when_the_installed_evr_matches() {
+        // Crash after dnf committed the pinned artifact: repair re-observes the
+        // bare package, confirms the EVR/arch matches the durable pin, and
+        // commits the managed record for the exact version.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_pinned_install_journal(
+            &layout,
+            "cosh",
+            "copilot-shell",
+            "copilot-shell-2.6.0-1.al4.x86_64",
+            "2.6.0-1.al4",
+            "x86_64",
+        );
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.6.0", Some("1.al4"), "x86_64")),
+        );
+
+        repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect("a matching pinned install must recover");
+
+        let store = load_store(&ctx);
+        let record = store
+            .find(ObjectKind::Component, "cosh")
+            .expect("record committed");
+        match &record.binding {
+            ProviderBinding::Delegated {
+                package,
+                last_observed,
+                ..
+            } => {
+                assert_eq!(package.resolved_name(), Some("copilot-shell"));
+                assert_eq!(
+                    last_observed.as_ref().and_then(|o| o.evr.as_deref()),
+                    Some("2.6.0-1.al4")
+                );
+            }
+            other => panic!("expected a delegated binding, got {other:?}"),
+        }
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok
+        );
+    }
+
+    #[test]
+    fn pinned_install_journal_refuses_recovery_on_evr_mismatch() {
+        // Crash left a different EVR installed than the pin resolved. Recovery
+        // must refuse to record the wrong version and leave the journal pending
+        // for manual reconciliation — never fall back to what is present.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_pinned_install_journal(
+            &layout,
+            "cosh",
+            "copilot-shell",
+            "copilot-shell-2.6.0-1.al4.x86_64",
+            "2.6.0-1.al4",
+            "x86_64",
+        );
+        // rpmdb reports 2.7.0, not the pinned 2.6.0.
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.7.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("a mismatched installed EVR must not be recovered");
+        assert!(
+            err.reason().contains("2.7.0-1.al4"),
+            "got: {}",
+            err.reason()
+        );
+        assert!(
+            err.reason().contains("copilot-shell-2.6.0-1.al4.x86_64"),
+            "got: {}",
+            err.reason()
+        );
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none(),
+            "the wrong version must not be recorded"
+        );
+        // The journal stays pending so the user can reconcile and retry.
+        assert!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .is_pending(),
+            "a refused recovery must leave the journal pending"
+        );
+    }
+
+    #[test]
+    fn pinned_journal_with_a_mixed_native_target_is_not_recovered() {
+        // A pinned native step must resolve to exactly the artifact. A journal
+        // whose native target smuggles in another package alongside the NEVRA
+        // is malformed and must stay pending, not recover.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal =
+            Transaction::begin_with_subject("install", Some("cosh"), state_path, &journal_dir)
+                .expect("begin journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("copilot-shell".to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: Some(DelegatedPinnedArtifact {
+                        artifact: "copilot-shell-2.6.0-1.al4.x86_64".to_string(),
+                        evr: "2.6.0-1.al4".to_string(),
+                        arch: "x86_64".to_string(),
+                    }),
+                },
+                [
+                    TransactionStep::planned(
+                        PHASE_NATIVE_TXN,
+                        "copilot-shell-2.6.0-1.al4.x86_64,unrelated-package",
+                        "install",
+                        None,
+                    ),
+                    TransactionStep::planned(PHASE_OBSERVE, "copilot-shell", "observe", None),
+                    TransactionStep::planned(
+                        anolisa_core::executor::PHASE_RECORD,
+                        "state",
+                        "write-delegated-managed",
+                        None,
+                    ),
+                ],
+            )
+            .expect("record malformed pinned contract");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.6.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("a mixed pinned native target must not recover");
+        assert!(
+            err.reason().contains("cannot recover"),
+            "got: {}",
+            err.reason()
+        );
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+        assert!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .is_pending()
+        );
+    }
+
+    #[test]
+    fn unpinned_journal_with_a_mixed_observe_target_is_not_recovered() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal =
+            Transaction::begin_with_subject("install", Some("cosh"), state_path, &journal_dir)
+                .expect("begin journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("copilot-shell".to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: None,
+                },
+                [
+                    TransactionStep::planned(PHASE_NATIVE_TXN, "copilot-shell", "install", None),
+                    TransactionStep::planned(
+                        PHASE_OBSERVE,
+                        "copilot-shell,foreign-package",
+                        "observe",
+                        None,
+                    ),
+                    TransactionStep::planned(
+                        anolisa_core::executor::PHASE_RECORD,
+                        "state",
+                        "write-delegated-managed",
+                        None,
+                    ),
+                ],
+            )
+            .expect("record malformed unpinned contract");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.6.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("a mixed observe target must not recover");
+
+        assert!(
+            err.reason().contains("cannot recover"),
+            "got: {}",
+            err.reason()
+        );
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none(),
+            "an unsafe recovery contract must not create a record"
+        );
+        assert!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .is_pending(),
+            "an unsafe recovery contract must remain pending"
+        );
     }
 
     #[test]
@@ -3715,6 +4042,7 @@ mod tests {
             pm: NativePm::Rpm,
             package: Some("unrelated".to_string()),
             record_action: DelegatedRecordAction::Drop,
+            pinned: None,
         });
         journal
             .record_step(TransactionStep::planned(
@@ -3765,6 +4093,7 @@ mod tests {
             pm: NativePm::Rpm,
             package: Some("copilot-shell".to_string()),
             record_action: DelegatedRecordAction::Drop,
+            pinned: None,
         });
         journal
             .record_step(TransactionStep::planned(
@@ -3826,6 +4155,7 @@ mod tests {
                     pm: NativePm::Rpm,
                     package: Some("skillfs".to_string()),
                     record_action: DelegatedRecordAction::Drop,
+                    pinned: None,
                 },
                 [TransactionStep::planned(
                     anolisa_core::owned_executor::PHASE_RECORD,
@@ -3881,6 +4211,7 @@ mod tests {
             pm: NativePm::Rpm,
             package: Some("copilot-shell".to_string()),
             record_action: DelegatedRecordAction::Drop,
+            pinned: None,
         });
         fs::write(
             &journal.journal_path,
