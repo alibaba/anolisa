@@ -87,6 +87,15 @@ pub async fn auth_verify(data: web::Data<AppState>, req: actix_web::HttpRequest)
         return HttpResponse::Ok().json(json!({"authenticated": true}));
     }
 
+    // Loopback requests are trusted — consistent with AuthMiddleware bypass.
+    let is_loopback = req
+        .peer_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false);
+    if is_loopback {
+        return HttpResponse::Ok().json(json!({"authenticated": true}));
+    }
+
     // Check session cookie
     let authenticated = req
         .cookie("agentsight_session")
