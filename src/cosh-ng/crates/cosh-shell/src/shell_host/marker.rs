@@ -54,6 +54,7 @@ _COSH_AT_PROMPT=0
 _COSH_LAST_HISTORY_NO=0
 _COSH_LAST_HISTORY_COMMAND=
 _COSH_IN_PROMPT_COMMAND=0
+_COSH_LAST_NATIVE_HISTORY_FILE=
 
 _cosh_apply_internal_recovery() {
   if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
@@ -75,9 +76,9 @@ _cosh_json_escape() {
   printf '%s' "$value"
 }
 
-_cosh_emit_native_history_file_marker() {
+_cosh_native_history_file_path() {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" || -z "${HISTFILE:-}" ]]; then
-    return 0
+    return 1
   fi
 
   local history_file="$HISTFILE"
@@ -88,11 +89,17 @@ _cosh_emit_native_history_file_marker() {
     *) history_file="$PWD/$history_file" ;;
   esac
   if [[ "$history_file" != /* ]]; then
-    return 0
+    return 1
   fi
   if printf '%s' "$history_file" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-    return 0
+    return 1
   fi
+
+  printf '%s' "$history_file"
+}
+
+_cosh_emit_native_history_file_marker() {
+  local history_file="$1"
 
   printf '\033]1337;COSH;{"event":"history_file","token":"%s","session_id":"%s","history_file":"%s"}\a' \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
@@ -100,7 +107,18 @@ _cosh_emit_native_history_file_marker() {
     "$(_cosh_json_escape "$history_file")"
 }
 
-_cosh_emit_native_history_file_marker
+_cosh_maybe_emit_native_history_file_marker() {
+  local history_file
+  history_file="$(_cosh_native_history_file_path)" || return 0
+  if [[ "$history_file" == "${_COSH_LAST_NATIVE_HISTORY_FILE:-}" ]]; then
+    return 0
+  fi
+  if _cosh_emit_native_history_file_marker "$history_file"; then
+    _COSH_LAST_NATIVE_HISTORY_FILE="$history_file"
+  fi
+}
+
+_cosh_maybe_emit_native_history_file_marker
 
 _cosh_now_ms() {
   date +%s000
@@ -461,6 +479,7 @@ _cosh_run_user_prompt_command() {
 _cosh_prompt_command() {
   local status=$?
   _COSH_IN_PROMPT_COMMAND=1
+  _cosh_maybe_emit_native_history_file_marker
   _cosh_precmd_marker "$status"
   _cosh_run_user_prompt_command "$status"
   if [[ -n "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then

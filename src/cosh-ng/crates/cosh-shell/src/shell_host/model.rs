@@ -93,6 +93,15 @@ impl ShellHostConfig {
         self
     }
 
+    /// Configures a callback for trusted native Bash history-file markers.
+    pub fn with_history_file_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(PathBuf) + Send + Sync + 'static,
+    {
+        self.set_shell_history_file_observer(observer);
+        self
+    }
+
     pub(crate) fn set_shell_environment_observer<F>(&mut self, observer: F)
     where
         F: Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static,
