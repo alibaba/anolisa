@@ -149,7 +149,11 @@ pub fn disable_unit_deferred(unit: &str) -> Result<(), SystemdError> {
     }
     // Best-effort, non-blocking stop; the subsequent `disable` reports the
     // authoritative outcome, so a not-loaded/inactive unit here is ignored.
-    let _ = run_systemctl(&["stop", "--no-block", unit]);
+    // However, log unexpected stop failures (e.g. permission denied) so they
+    // are not silently swallowed.
+    if let Err(e) = run_systemctl(&["stop", "--no-block", unit]) {
+        eprintln!("warn: systemctl stop --no-block {unit} failed: {e}");
+    }
     let out = run_systemctl(&["disable", unit])?;
     if out.status.success() {
         return Ok(());

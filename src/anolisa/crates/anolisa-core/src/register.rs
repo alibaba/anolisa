@@ -431,6 +431,14 @@ impl RegistrationManager {
     /// no history entry. Uses the same lock + atomic write as the state
     /// transitions to stay TOCTOU-safe.
     pub fn do_link(&self, link_id: &str) -> Result<(), SubscriptionError> {
+        // Basic format validation: reject empty or obviously invalid ids.
+        // The CLI always generates UUIDv4, but direct API callers may pass
+        // arbitrary strings; catch the most common mistakes early.
+        if link_id.trim().is_empty() {
+            return Err(SubscriptionError::InvalidInput(
+                "link_id must not be empty".to_string(),
+            ));
+        }
         let _lock = self.acquire_lock()?;
         let (_current, existing) = self.read_state_and_record();
         let mut record = existing.unwrap_or_else(|| RegisterRecord {
@@ -609,6 +617,8 @@ pub enum SubscriptionError {
     NotRegistered,
     #[error("Please operate from the OS console.")]
     SysomManaged,
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────

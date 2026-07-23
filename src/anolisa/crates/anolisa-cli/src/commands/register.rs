@@ -43,7 +43,9 @@ pub fn handle_register_group(args: RegisterArgs, ctx: &CliContext) -> Result<(),
         None => {
             // `--yes` is still accepted for script backward-compat but ignored:
             // the deprecated forwarder no longer prompts.
-            let _ = args.yes;
+            if args.yes {
+                eprintln!("warn: --yes is deprecated and ignored; register no longer prompts");
+            }
             handle_register(ctx)
         }
         Some(RegisterCommands::Status { json }) => handle_status(&RegistrationManager::new(), json),

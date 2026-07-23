@@ -116,6 +116,10 @@ pub struct UploaderConfig {
     pub source: String,
     /// Persistent telemetry id file (UUID generated once, reused across reboots).
     pub telemetry_id_path: PathBuf,
+    /// Cached region from last successful probe; used as fallback when the
+    /// metadata API is temporarily unreachable instead of defaulting to
+    /// cn-hangzhou (which may route to the wrong SLS endpoint).
+    pub region_cache_path: PathBuf,
 }
 
 impl Default for UploaderConfig {
@@ -136,6 +140,7 @@ impl Default for UploaderConfig {
             topic: "anolisa-telemetry".to_string(),
             source: "anolisa".to_string(),
             telemetry_id_path: PathBuf::from("/var/lib/anolisa/telemetry/telemetry-id"),
+            region_cache_path: PathBuf::from("/var/lib/anolisa/telemetry/region.cache"),
         }
     }
 }
@@ -213,7 +218,25 @@ impl Uploader {
                 region_id: "cn-hangzhou".to_string(),
                 use_internal: false,
             });
-        (info.region_id, info.use_internal)
+        if info.use_internal {
+            // Successful metadata probe: persist region for future fallback.
+            let _ = fs::write(&self.config.region_cache_path, &info.region_id);
+            (info.region_id, info.use_internal)
+        } else if let Ok(cached) = fs::read_to_string(&self.config.region_cache_path) {
+            let cached = cached.trim().to_string();
+            if !cached.is_empty() {
+                // Metadata unreachable but we have a cached region from a prior
+                // successful probe; prefer it over the cn-hangzhou default.
+                eprintln!(
+                    "[anolisa] telemetry: metadata API unreachable, using cached region `{cached}`"
+                );
+                (cached, false)
+            } else {
+                (info.region_id, info.use_internal)
+            }
+        } else {
+            (info.region_id, info.use_internal)
+        }
     }
 
     /// Resolve the raw product type string for the common dimensions.
@@ -379,7 +402,10 @@ impl Uploader {
         let path = self.jsonl_path(component);
         let meta = match fs::metadata(&path) {
             Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                eprintln!("[anolisa] telemetry: {component}.jsonl not found, skipping");
+                return Ok(None);
+            }
             Err(e) => return Err(e),
         };
         let cur_inode = inode_of(&meta);
@@ -438,6 +464,7 @@ impl Uploader {
         lines.append(&mut fresh);
 
         if lines.is_empty() {
+            eprintln!("[anolisa] telemetry: {component}.jsonl has no new data");
             return Ok(None);
         }
 
@@ -628,14 +655,14 @@ pub fn build_body(
 ///
 /// SLS PutWebtracking only accepts string values inside `__logs__`; numbers,
 /// booleans, and nested structures must be serialized as strings. `null`
-/// values are dropped because they have no string representation that SLS
-/// accepts.
+/// values are preserved as the literal string `"null"` so fields like
+/// `{"error": null}` are not silently dropped.
 fn stringify_log_values(obj: Map<String, Value>) -> Map<String, Value> {
     obj.into_iter()
-        .filter_map(|(k, v)| match v {
-            Value::String(s) => Some((k, Value::String(s))),
-            Value::Null => None,
-            other => Some((k, Value::String(other.to_string()))),
+        .map(|(k, v)| match v {
+            Value::String(s) => (k, Value::String(s)),
+            Value::Null => (k, Value::String("null".to_string())),
+            other => (k, Value::String(other.to_string())),
         })
         .collect()
 }
@@ -921,6 +948,7 @@ mod tests {
             topic: "topic".to_string(),
             source: "source".to_string(),
             telemetry_id_path: dir.path().join("telemetry-id"),
+            region_cache_path: dir.path().join("region.cache"),
         })
     }
 
@@ -1013,7 +1041,7 @@ mod tests {
 
         assert_eq!(log["n"], "42");
         assert_eq!(log["b"], "true");
-        assert!(log.get("null").is_none());
+        assert_eq!(log["null"], "null");
         assert_eq!(log["s"], "keep");
     }
 
