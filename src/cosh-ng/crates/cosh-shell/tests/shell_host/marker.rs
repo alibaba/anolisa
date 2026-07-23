@@ -1,108 +1,5 @@
 use super::*;
 
-struct TemporaryWorkDir(std::path::PathBuf);
-
-impl Drop for TemporaryWorkDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-#[test]
-fn shell_host_bash_tracks_native_history_file_changes() {
-    if Command::new("bash").arg("--version").output().is_err() {
-        return;
-    }
-
-    let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-history-file-test-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    ));
-    let _cleanup = TemporaryWorkDir(work_dir.clone());
-    let home_dir = work_dir.join("home");
-    let relative_one = work_dir.join("relative-one");
-    let relative_two = work_dir.join("relative-two");
-    std::fs::create_dir_all(&home_dir).expect("home dir");
-    std::fs::create_dir_all(&relative_one).expect("first relative dir");
-    std::fs::create_dir_all(&relative_two).expect("second relative dir");
-
-    let initial_history = home_dir.join("initial-history");
-    let alternate_history = home_dir.join("alternate-history");
-    std::fs::write(
-        home_dir.join(".bashrc"),
-        format!("export HISTFILE={}\n", shell_arg(&initial_history)),
-    )
-    .expect("bashrc");
-
-    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let observer = std::sync::Arc::clone(&observed);
-    let config = ShellHostConfig::new("history-file-test", &work_dir)
-        .with_env("HOME", home_dir.display().to_string())
-        .with_history_file_observer(move |path| {
-            observer.lock().expect("history observer lock").push(path);
-        });
-    let output = run_scripted_bash(
-        &config,
-        &[
-            ScriptedInput::user_line("echo unchanged-history-file"),
-            ScriptedInput::user_line(format!("export HISTFILE={}", shell_arg(&alternate_history))),
-            ScriptedInput::user_line("echo unchanged-alternate-history-file"),
-            ScriptedInput::user_line(format!(
-                "cd {}; export HISTFILE=relative-history",
-                shell_arg(&relative_one)
-            )),
-            ScriptedInput::user_line(format!("cd {}", shell_arg(&relative_two))),
-            ScriptedInput::user_line("false"),
-        ],
-    )
-    .expect("scripted bash pty");
-
-    assert_eq!(
-        *observed.lock().expect("history observer lock"),
-        vec![
-            initial_history,
-            alternate_history,
-            relative_one.join("relative-history"),
-            relative_two.join("relative-history"),
-        ]
-    );
-
-    let ledger = ledger_from_output(&output);
-    let failed = ledger
-        .blocks
-        .iter()
-        .find(|block| block.command == "false")
-        .expect("false command block");
-    assert_eq!(failed.exit_code, 1);
-}
-
-#[test]
-fn shell_host_bash_isolated_mode_omits_history_file_markers() {
-    if Command::new("bash").arg("--version").output().is_err() {
-        return;
-    }
-
-    let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-isolated-history-file-test-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    ));
-    let _cleanup = TemporaryWorkDir(work_dir.clone());
-    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let observer = std::sync::Arc::clone(&observed);
-    let mut config = ShellHostConfig::new("isolated-history-file-test", &work_dir)
-        .with_history_file_observer(move |path| {
-            observer.lock().expect("history observer lock").push(path);
-        });
-    config.native_mode = false;
-
-    run_scripted_bash(&config, &[ScriptedInput::user_line("echo isolated")])
-        .expect("scripted isolated bash pty");
-
-    assert!(observed.lock().expect("history observer lock").is_empty());
-}
-
 #[test]
 fn shell_host_runs_bash_pty_and_emits_command_events() {
     if Command::new("bash").arg("--version").output().is_err() {
@@ -250,6 +147,120 @@ fn shell_host_owns_prompt_boundary_before_user_prompt_command() {
         !output_ref_text.contains("__cosh_prompt_noise__"),
         "{output_ref_text}"
     );
+}
+
+#[test]
+fn shell_host_bash_tracks_native_history_file_changes() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-history-file-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    let relative_one = work_dir.join("relative-one");
+    let relative_two = work_dir.join("relative-two");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::create_dir_all(&relative_one).expect("first relative dir");
+    std::fs::create_dir_all(&relative_two).expect("second relative dir");
+
+    let initial_history = home_dir.join("initial-history");
+    let alternate_history = home_dir.join("alternate-history");
+    let observed_history_files = work_dir.join("observed-history-files");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!("export HISTFILE={}\n", shell_arg(&initial_history)),
+    )
+    .expect("bashrc");
+
+    let install_marker_sink = format!(
+        "_COSH_LAST_NATIVE_HISTORY_FILE=; \
+         _cosh_emit_native_history_file_marker() {{ \
+         printf '%s\\n' \"$1\" >> {}; \
+         }}",
+        shell_arg(&observed_history_files)
+    );
+    let config = ShellHostConfig::new("history-file-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(install_marker_sink),
+            ScriptedInput::user_line("echo unchanged-history-file"),
+            ScriptedInput::user_line(format!("export HISTFILE={}", shell_arg(&alternate_history))),
+            ScriptedInput::user_line("echo unchanged-alternate-history-file"),
+            ScriptedInput::user_line(format!(
+                "cd {}; export HISTFILE=relative-history",
+                shell_arg(&relative_one)
+            )),
+            ScriptedInput::user_line(format!("cd {}", shell_arg(&relative_two))),
+            ScriptedInput::user_line("false"),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let observed = std::fs::read_to_string(&observed_history_files)
+        .expect("observed history files")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expected = [
+        initial_history,
+        alternate_history,
+        relative_one.join("relative-history"),
+        relative_two.join("relative-history"),
+    ]
+    .into_iter()
+    .map(|path| path.display().to_string())
+    .collect::<Vec<_>>();
+    assert_eq!(observed, expected);
+
+    let replayed_events = read_shell_events(&output.journal_path).expect("journal events");
+    let ledger = build_command_blocks(&replayed_events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let failed = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == "false")
+        .expect("false command block");
+    assert_eq!(failed.exit_code, 1);
+}
+
+#[test]
+fn shell_host_bash_isolated_mode_omits_history_file_markers() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-isolated-history-file-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let observed_history_files = work_dir.join("observed-history-files");
+    let install_marker_sink = format!(
+        "_COSH_LAST_NATIVE_HISTORY_FILE=; \
+         _cosh_emit_native_history_file_marker() {{ \
+         printf '%s\\n' \"$1\" >> {}; \
+         }}",
+        shell_arg(&observed_history_files)
+    );
+    let mut config = ShellHostConfig::new("isolated-history-file-test", &work_dir);
+    config.native_mode = false;
+
+    run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(install_marker_sink),
+            ScriptedInput::user_line("export HISTFILE=/tmp/isolated-history"),
+        ],
+    )
+    .expect("scripted isolated bash pty");
+
+    assert!(!observed_history_files.exists());
 }
 
 #[test]
