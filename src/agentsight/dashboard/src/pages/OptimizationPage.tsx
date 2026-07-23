@@ -878,6 +878,15 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
       });
   }, [sessionId, handleDimError]);
 
+  // 无历史结果时自动触发分析（首次进入未分析过的会话）
+  useEffect(() => {
+    if (loadingResults) return;
+    const allIdle = Object.values(progress).every((s) => s === 'idle');
+    if (allIdle) {
+      runAnalysis();
+    }
+  }, [loadingResults, progress, runAnalysis]);
+
   const running = Object.values(progress).some((s) => s === 'loading');
   const hasAnyResult = Object.values(progress).some((s) => s === 'done');
 
