@@ -410,6 +410,10 @@ def detect_cosh_ng_runtime() -> tuple | None:
       1. ``COSH_NG_VERSION`` environment variable — set by Cosh-NG when
          launching hook processes.
       2. ``COSH_RUNTIME`` environment variable set to ``cosh-ng``.
+
+    The ``(0, 0, 0)`` sentinel means "Cosh-NG detected but version unknown" —
+    callers should treat this as "unsupported version" and fail open (disable
+    compression) rather than falling back to duplicate injection.
     """
     version_str = os.environ.get("COSH_NG_VERSION", "")
     if version_str:

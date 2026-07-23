@@ -348,11 +348,7 @@ impl HookSystem {
         specific
             .get("updated_tool_response")
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                specific
-                    .get("updatedToolResponse")
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| specific.get("updatedToolResponse").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty())
     }
 
@@ -1756,14 +1752,9 @@ mod tests {
             )
             .await;
         assert_eq!(
-            result.updated_tool_response,
-            None,
+            result.updated_tool_response, None,
             "No replacement when hook doesn't emit updatedToolResponse"
         );
-        assert_eq!(
-            result.additional_context.as_deref(),
-            Some("just context"),
-        );
+        assert_eq!(result.additional_context.as_deref(), Some("just context"),);
     }
-
 }

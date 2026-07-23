@@ -334,7 +334,7 @@ def main() -> None:
             if proc.returncode == 0 and proc.stdout.strip():
                 candidate = proc.stdout.strip()
                 # Compare against actual model-visible before size
-                if len(candidate) < len(str(model_visible_before)):
+                if len(candidate) < len(tool_response):
                     compressed = candidate
                     used_resp_compression = True
             elif proc.returncode != 0:
@@ -432,7 +432,7 @@ def main() -> None:
     # Cosh-NG: use updatedToolResponse for response replacement.
     # Skip compression if it doesn't reduce model-visible size.
     if cosh_ng_detected:
-        if len(final_output) >= len(str(model_visible_before)):
+        if len(final_output) >= len(tool_response):
             _emit_attribution_or_skip(env_attribution)
 
         hook_specific = {
