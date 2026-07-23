@@ -732,14 +732,23 @@ fn resolve_fresh_delegated(
                 "component '{component}' is not an ANOLISA RPM component; use the ANOLISA component name and configure the repo-side component index or publish Provides: anolisa-component({component})"
             ),
         }),
-        [single] => Ok((
-            ProviderTarget::Delegated {
-                pm: NativePm::Rpm,
-                package: single.package.clone(),
-            },
-            single.package.clone(),
-            single.component.clone(),
-        )),
+        [single] => {
+            // An explicit --version becomes a dnf `name-version` pin in the
+            // planned transaction; refuse up front when the configured repo
+            // does not publish that version so the failure stays an argument
+            // error instead of a failed dnf transaction.
+            if let Some(version) = args.version.as_deref() {
+                verify_delegated_version_available(query, &single.package, version, command)?;
+            }
+            Ok((
+                ProviderTarget::Delegated {
+                    pm: NativePm::Rpm,
+                    package: single.package.clone(),
+                },
+                single.package.clone(),
+                single.component.clone(),
+            ))
+        }
         many => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
@@ -751,6 +760,49 @@ fn resolve_fresh_delegated(
             ),
         }),
     }
+}
+
+/// Preflight an explicit `--version` against the versions the configured
+/// RPM repository publishes: an unavailable version is refused with the
+/// published versions listed, instead of surfacing as a failed dnf
+/// transaction. An empty availability answer (no repoquery visibility)
+/// defers the verdict to the dnf transaction itself.
+fn verify_delegated_version_available(
+    query: &dyn PackageQuery,
+    package: &str,
+    version: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let available = query.query_available(package).map_err(|err| match err {
+        PackageQueryError::CommandMissing { command: bin } => {
+            rpm_tooling_missing_error(command, &bin, package)
+        }
+        err => pkg_query_err(err, command),
+    })?;
+    if available.is_empty() {
+        return Ok(());
+    }
+    // Accept the upstream version (`2.3.0`) or the full EVR spelling
+    // (`2.3.0-1.al8`) — both are valid dnf `name-version` pins.
+    let matched = available
+        .iter()
+        .any(|info| version == info.version.version || version == info.version.to_string());
+    if matched {
+        return Ok(());
+    }
+    let mut published: Vec<String> = available
+        .iter()
+        .map(|info| info.version.to_string())
+        .collect();
+    published.sort();
+    published.dedup();
+    Err(CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!(
+            "version '{version}' of package '{package}' is not available from the configured RPM repository; published versions: {}",
+            published.join(", ")
+        ),
+    })
 }
 
 /// Execute an owned install plan (I1) through the raw backend.
@@ -1402,6 +1454,51 @@ package = "agent-sec-core"
         assert_eq!(
             exact_with_mapped_package,
             ("sec-core".to_string(), "agent-sec-core".to_string())
+        );
+    }
+
+    #[test]
+    fn version_preflight_accepts_published_spellings_and_defers_when_blind() {
+        let mut fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        );
+        fake.available = vec![pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")];
+        // Both the upstream version and the full EVR spelling are valid pins.
+        for version in ["2.3.0", "2.3.0-1.al8"] {
+            verify_delegated_version_available(&fake, "copilot-shell", version, "install")
+                .unwrap_or_else(|err| panic!("'{version}' must pass preflight: {err}"));
+        }
+
+        // No repoquery visibility: the dnf transaction gives the verdict.
+        let blind = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        );
+        verify_delegated_version_available(&blind, "copilot-shell", "9.9.9", "install")
+            .expect("empty availability must defer to dnf");
+    }
+
+    #[test]
+    fn install_unpublished_raw_version_lists_published_versions() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let mut a = args("agentsight");
+        a.repo = Some(write_local_repo_component(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            &["system"],
+        ));
+        a.version = Some("9.9.9".to_string());
+
+        let err =
+            handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("published versions: 0.2.0"),
+            "the refusal must list the published raw versions: {}",
+            err.reason()
         );
     }
 

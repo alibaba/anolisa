@@ -635,6 +635,9 @@ pub struct FakeInstaller {
     pub install_succeeds: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
+    /// dnf spec the install transaction must receive; defaults to the bare
+    /// package name, `--version` tests expect the `name-version` pin.
+    pub expected_install_spec: Option<String>,
     /// Optional lock path probed from inside `install`.
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
@@ -655,6 +658,7 @@ impl FakeInstaller {
             install_succeeds: true,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
+            expected_install_spec: None,
             lock_probe: None,
             lock_was_held: Cell::new(false),
             package_appears_under_lock_path: None,
@@ -669,6 +673,10 @@ impl FakeInstaller {
     }
     pub fn failing_install(mut self) -> Self {
         self.install_succeeds = false;
+        self
+    }
+    pub fn expecting_install_spec(mut self, spec: &str) -> Self {
+        self.expected_install_spec = Some(spec.to_string());
         self
     }
     pub fn expect_lock_held(mut self, path: PathBuf) -> Self {
@@ -785,11 +793,11 @@ impl PackageQuery for FakeInstaller {
 impl PackageTransaction for FakeInstaller {
     fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.install_calls.set(self.install_calls.get() + 1);
-        assert_eq!(
-            packages,
-            [self.package.as_str()],
-            "install targeted the wrong package"
-        );
+        let expected = self
+            .expected_install_spec
+            .as_deref()
+            .unwrap_or(self.package.as_str());
+        assert_eq!(packages, [expected], "install targeted the wrong package");
         if let Some(path) = &self.lock_probe {
             self.lock_was_held.set(matches!(
                 InstallLock::acquire(path),

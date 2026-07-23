@@ -69,7 +69,8 @@ pub struct InstallArgs {
     /// With --all, stop on the first failure instead of continuing
     #[arg(long, requires = "all")]
     pub fail_fast: bool,
-    /// Install a specific version instead of the latest in the channel
+    /// Install a specific version instead of the latest (raw: distribution
+    /// index version; rpm: package version or full EVR)
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
     /// Backend override (raw | rpm | npm); defaults to repo.toml default_backend

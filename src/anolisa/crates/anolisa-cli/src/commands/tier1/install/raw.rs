@@ -24,6 +24,35 @@ use crate::response::CliError;
 use super::COMMAND;
 use super::render::{artifact_ext, artifact_type_wire, repo_config_err};
 use super::types::*;
+
+/// Fetch and parse the raw distribution index under `base_url`, filtered to
+/// artifact types the raw backend can install. Returns the parsed index and
+/// the fetched index URL for error reporting.
+///
+/// The index is always re-fetched (DownloadCache overwrites on conflict),
+/// so a republished repo is picked up without a cache flush. Shared with
+/// `list --versions`, which enumerates the same index resolution consults.
+pub(crate) fn fetch_installable_raw_index(
+    layout: &FsLayout,
+    base_url: &str,
+) -> Result<(DistributionIndex, String), CliError> {
+    let index_url = raw_index_url(base_url);
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let downloaded_index = cache
+        .fetch(&index_url, None)
+        .map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!("failed to fetch distribution index {index_url}: {err}"),
+        })?;
+    let index = DistributionIndex::load(&downloaded_index.cached_path)
+        .map(installable_raw_index)
+        .map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!("failed to parse distribution index {index_url}: {err}"),
+        })?;
+    Ok((index, index_url))
+}
+
 pub(crate) fn resolve_raw(
     ctx: &CliContext,
     layout: &FsLayout,
@@ -39,22 +68,7 @@ pub(crate) fn resolve_raw(
         warnings,
     } = inputs;
 
-    // The index is always re-fetched (DownloadCache overwrites on conflict),
-    // so a republished repo is picked up without a cache flush.
-    let index_url = raw_index_url(&base_url);
-    let cache = DownloadCache::new(layout.cache_dir.clone());
-    let downloaded_index = cache
-        .fetch(&index_url, None)
-        .map_err(|err| CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!("failed to fetch distribution index {index_url}: {err}"),
-        })?;
-    let index = DistributionIndex::load(&downloaded_index.cached_path)
-        .map(installable_raw_index)
-        .map_err(|err| CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!("failed to parse distribution index {index_url}: {err}"),
-        })?;
+    let (index, index_url) = fetch_installable_raw_index(layout, &base_url)?;
 
     // The index is keyed by the backend-native package name so that
     // `package_map` / `--package` select between alternate publications.
@@ -69,15 +83,29 @@ pub(crate) fn resolve_raw(
         pkg_base: env.pkg_base.as_deref(),
         preferred_types: &[],
     };
-    let entry = index.resolve(&query).map_err(|err| CliError::InvalidArgument {
-        command: COMMAND.to_string(),
-        reason: format!(
+    let entry = index.resolve(&query).map_err(|err| {
+        let mut reason = format!(
             "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_url}: {err}",
             version.unwrap_or("latest"),
             env.os,
             env.arch,
             ctx.install_mode.as_str(),
-        ),
+        );
+        // An explicit --version that missed gets the discoverable choices
+        // appended, mirroring the rpm path's availability preflight.
+        if version.is_some() {
+            let published = index.matching_versions(&ResolveQuery {
+                version: None,
+                ..query.clone()
+            });
+            if !published.is_empty() {
+                reason.push_str(&format!("; published versions: {}", published.join(", ")));
+            }
+        }
+        CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason,
+        }
     })?;
 
     let wire_type = artifact_type_wire(&entry.artifact_type);

@@ -468,18 +468,29 @@ fn plan_install(req: &InstallRequest, facts: &Facts) -> Result<Plan, PlanError> 
                     Step::EnableServices,
                     Step::WriteRecord(RecordWrite::Owned),
                 ])),
-                ProviderTarget::Delegated { pm, package } => Ok(Plan::execute(vec![
-                    // I2
-                    Step::NativeTransaction {
-                        pm: *pm,
-                        action: NativeAction::Install,
-                        packages: vec![package.clone()],
-                    },
-                    Step::Observe {
-                        packages: vec![package.clone()],
-                    },
-                    Step::WriteRecord(RecordWrite::DelegatedManaged),
-                ])),
+                ProviderTarget::Delegated { pm, package } => {
+                    // I2. An explicit `--version` pins the native transaction
+                    // to the dnf-style `name-version` spec. Only the
+                    // transaction carries the pin: the observe step and the
+                    // record keep the canonical package name, because the
+                    // native database is queried by name and the pinned EVR
+                    // is captured by the post-install observation.
+                    let spec = match &req.requested_version {
+                        Some(version) => format!("{package}-{version}"),
+                        None => package.clone(),
+                    };
+                    Ok(Plan::execute(vec![
+                        Step::NativeTransaction {
+                            pm: *pm,
+                            action: NativeAction::Install,
+                            packages: vec![spec],
+                        },
+                        Step::Observe {
+                            packages: vec![package.clone()],
+                        },
+                        Step::WriteRecord(RecordWrite::DelegatedManaged),
+                    ]))
+                }
             }
         }
     }
@@ -979,6 +990,30 @@ mod tests {
             steps,
             vec![
                 native_txn(NativeAction::Install),
+                observe(),
+                Step::WriteRecord(RecordWrite::DelegatedManaged),
+            ]
+        );
+    }
+
+    #[test]
+    fn i2_fresh_delegated_install_with_version_pins_the_transaction_spec() {
+        let f = facts();
+        let intent = Intent::Install(InstallRequest {
+            target: delegated_target(),
+            requested_version: Some("2.3.0".to_string()),
+        });
+        let steps = expect_steps(plan(&intent, &f));
+        assert_eq!(
+            steps,
+            vec![
+                Step::NativeTransaction {
+                    pm: NativePm::Rpm,
+                    action: NativeAction::Install,
+                    // The pin lives only in the transaction spec…
+                    packages: vec![format!("{PKG}-2.3.0")],
+                },
+                // …while observation and the record keep the bare name.
                 observe(),
                 Step::WriteRecord(RecordWrite::DelegatedManaged),
             ]

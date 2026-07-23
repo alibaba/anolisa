@@ -305,8 +305,9 @@ fn prepare_delegated_recovery(
 /// # Errors
 ///
 /// Returns [`ExecutionError::InvalidRecoveryContract`] unless the plan has
-/// exactly one record transition and every package-bearing step contains the
-/// subject package.
+/// exactly one record transition and every package-bearing step names the
+/// subject package, either bare or as a version-pinned `name-version` spec
+/// (the form the install planner emits for an explicit `--version`).
 pub fn delegated_recovery_context(
     target: DelegatedExecutionTarget<'_>,
     steps: &[Step],
@@ -353,7 +354,10 @@ pub fn delegated_recovery_context(
             Step::NativeTransaction { packages, .. } | Step::Observe { packages } => Some(packages),
             _ => None,
         }) {
-            if !packages.iter().any(|candidate| candidate == package) {
+            if !packages
+                .iter()
+                .any(|candidate| spec_names_package(candidate, package))
+            {
                 return Err(ExecutionError::InvalidRecoveryContract {
                     reason: format!(
                         "subject package '{package}' is absent from delegated step packages [{}]",
@@ -369,6 +373,18 @@ pub fn delegated_recovery_context(
         package: package.map(str::to_string),
         record_action: *record_action,
     })
+}
+
+/// True when a step's package spec denotes the subject package: either the
+/// bare name or a dnf-style version-pinned spec (`name-<version>`, with the
+/// version part starting on a digit so sibling packages sharing the name as
+/// a dash prefix, e.g. `cosh` vs `cosh-ng`, are not conflated).
+fn spec_names_package(spec: &str, package: &str) -> bool {
+    spec == package
+        || spec
+            .strip_prefix(package)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// Whether this executor interprets `step`.
@@ -510,6 +526,87 @@ mod tests {
         );
         assert_eq!(journal.steps[0].phase, PHASE_NATIVE_TXN);
         assert_eq!(journal.steps[0].action, "install");
+    }
+
+    #[test]
+    fn version_pinned_install_spec_reaches_the_txn_and_observe_keeps_the_name() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let query = query_present("cosh", "2.7.0");
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+        let mut sink = MemSink::default();
+        let mut journal = journal(tmp.path());
+
+        // The planner's I2 shape for `install --version 2.7.0`: the pin only
+        // lives in the transaction spec, observation uses the bare name.
+        let steps = vec![
+            Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: NativeAction::Install,
+                packages: vec!["cosh-2.7.0".to_string()],
+            },
+            Step::Observe {
+                packages: vec!["cosh".to_string()],
+            },
+            Step::WriteRecord(RecordWrite::DelegatedManaged),
+        ];
+        let outcome = execute_delegated_steps(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .expect("pinned execution ok");
+
+        assert_eq!(
+            txn.calls.borrow().as_slice(),
+            &[("install".to_string(), "cosh-2.7.0".to_string())]
+        );
+        let observation = outcome.observation.expect("observation absorbed");
+        assert_eq!(observation.evr.as_deref(), Some("2.7.0-1.al4"));
+        assert_eq!(journal.status, TransactionOutcomeStatus::Ok);
+    }
+
+    #[test]
+    fn recovery_context_accepts_pinned_specs_but_not_sibling_package_names() {
+        let pinned = vec![
+            Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: NativeAction::Install,
+                packages: vec!["cosh-2.7.0".to_string()],
+            },
+            Step::Observe {
+                packages: vec!["cosh".to_string()],
+            },
+            Step::WriteRecord(RecordWrite::DelegatedManaged),
+        ];
+        let context = delegated_recovery_context(
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &pinned,
+        )
+        .expect("pinned spec names the subject package");
+        assert_eq!(context.package.as_deref(), Some("cosh"));
+
+        // `cosh-ng` is a different package, not a version pin of `cosh`.
+        let sibling = vec![
+            Step::NativeTransaction {
+                pm: NativePm::Rpm,
+                action: NativeAction::Install,
+                packages: vec!["cosh-ng".to_string()],
+            },
+            Step::WriteRecord(RecordWrite::DelegatedManaged),
+        ];
+        let err = delegated_recovery_context(
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &sibling,
+        )
+        .expect_err("sibling names must not be conflated with the subject");
+        assert!(matches!(
+            err,
+            ExecutionError::InvalidRecoveryContract { .. }
+        ));
     }
 
     #[test]

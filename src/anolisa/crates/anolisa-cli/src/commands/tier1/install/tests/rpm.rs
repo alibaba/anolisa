@@ -243,6 +243,78 @@ fn delegated_install_writes_a_managed_record() {
 }
 
 #[test]
+fn delegated_install_with_version_pins_the_dnf_spec() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let mut fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
+    )
+    .expecting_install_spec("copilot-shell-2.2.0");
+    // The configured repo publishes two versions; --version selects the
+    // older one instead of the latest.
+    fake.available = vec![
+        pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    ];
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("2.2.0".to_string());
+
+    let outcome = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect("version-pinned delegated install ok");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 1, "dnf install must run once");
+
+    let store = load_store(&ctx);
+    let record = store
+        .find(ObjectKind::Component, "copilot-shell")
+        .expect("component recorded");
+    match &record.binding {
+        ProviderBinding::Delegated {
+            package,
+            last_observed,
+            ..
+        } => {
+            // The record keeps the canonical package name, not the pinned
+            // spec, so uninstall/update/repair keep addressing the rpmdb.
+            assert_eq!(package.resolved_name(), Some("copilot-shell"));
+            let observed = last_observed.as_ref().expect("fresh observation");
+            assert_eq!(observed.evr.as_deref(), Some("2.2.0-1.al8"));
+        }
+        other => panic!("expected a delegated binding, got {other:?}"),
+    }
+}
+
+#[test]
+fn delegated_install_unavailable_version_is_refused_before_dnf() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let mut fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    fake.available = vec![pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")];
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+    a.version = Some("9.9.9".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect_err("unpublished version must refuse before any transaction");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("9.9.9") && err.reason().contains("2.3.0-1.al8"),
+        "the refusal must list the published versions: {}",
+        err.reason()
+    );
+    assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "copilot-shell")
+            .is_none(),
+        "refused install must not write state"
+    );
+}
+
+#[test]
 fn delegated_install_lock_failure_precedes_dnf() {
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let layout = common::resolve_layout(&ctx);
