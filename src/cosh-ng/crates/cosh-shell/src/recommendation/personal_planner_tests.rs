@@ -303,12 +303,6 @@ fn omitted_reasons_distinguish_all_render_decisions() {
     )];
     let capacity = plan_startup(&context(), HealthResolution::Resolved(&health), &personal);
     assert_eq!(capacity.omitted_reasons[&OmittedReason::Capacity], 1);
-
-    let unavailable = RenderedStartupSuggestions::renderer_unavailable(2);
-    assert_eq!(
-        unavailable.omitted_reasons[&OmittedReason::RendererUnavailable],
-        2
-    );
 }
 
 #[test]

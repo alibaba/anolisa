@@ -57,22 +57,7 @@ pub(crate) enum OmittedReason {
     Suppressed,
     Duplicate,
     Capacity,
-    RendererUnavailable,
     HealthUnresolved,
-}
-
-impl RenderedStartupSuggestions {
-    pub(crate) fn renderer_unavailable(candidate_count: usize) -> Self {
-        let mut omitted_reasons = BTreeMap::new();
-        if candidate_count > 0 {
-            omitted_reasons.insert(OmittedReason::RendererUnavailable, candidate_count);
-        }
-        Self {
-            omitted_count: candidate_count,
-            omitted_reasons,
-            ..Self::default()
-        }
-    }
 }
 
 pub(crate) fn plan_startup(

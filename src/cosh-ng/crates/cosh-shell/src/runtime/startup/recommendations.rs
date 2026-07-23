@@ -73,10 +73,16 @@ pub(crate) fn render_startup_banner<W: Write>(
         }
         state.startup_health.rendered = true;
     }
-    write_startup_suggestion_card(state, &renderer, &suggestions, output)?;
+    write_startup_suggestion_card(
+        state,
+        &renderer,
+        suggestions.mode,
+        &suggestions.candidates,
+        output,
+    )?;
     output.flush()?;
     if let Some(report) = state.startup_health.report.as_ref() {
-        record_visible_startup_health_recommendations(report, &suggestions);
+        record_visible_startup_health_recommendations(report, &suggestions.candidates);
     }
     record_visible_personal_impressions(state, cwd);
     if recommendation_notice {
@@ -194,7 +200,7 @@ pub(crate) fn render_startup_health_banner<W: Write>(
         .unwrap_or_else(|| ".".to_string());
     let suggestions = prepare_startup_suggestions(state, &cwd);
     let show_health = !health_uses_startup_row(&report);
-    if !show_health && suggestions.is_empty() {
+    if !show_health && suggestions.candidates.is_empty() {
         return Ok(());
     }
     write!(output, "\r\x1b[2K")?;
@@ -204,22 +210,48 @@ pub(crate) fn render_startup_health_banner<W: Write>(
         renderer.write_health_banner(output, HealthBannerModel { report: &facts })?;
         writeln!(output)?;
     }
-    write_startup_suggestion_card(state, &renderer, &suggestions, output)?;
+    write_startup_suggestion_card(
+        state,
+        &renderer,
+        suggestions.mode,
+        &suggestions.candidates,
+        output,
+    )?;
     output.flush()?;
-    record_visible_startup_health_recommendations(&report, &suggestions);
+    record_visible_startup_health_recommendations(&report, &suggestions.candidates);
     record_visible_personal_impressions(state, &cwd);
     restore_startup_prompt(state, output)?;
     output.flush()
 }
 
-fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> Vec<PlannerCandidate> {
+struct PreparedStartupSuggestions {
+    mode: StartupSuggestionMode,
+    candidates: Vec<PlannerCandidate>,
+}
+
+fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> PreparedStartupSuggestions {
     let Some(report) = state.startup_health.report.clone() else {
         state.personalization.startup_suppressed = true;
-        return Vec::new();
+        return PreparedStartupSuggestions {
+            mode: StartupSuggestionMode::Hidden,
+            candidates: Vec::new(),
+        };
     };
-    let renderer_available = startup_prompt_ghost_allowed(&report);
+    let mode = startup_suggestion_mode(
+        std::env::var("COSH_SHELL_ISOLATED").is_ok(),
+        std::env::var("TERM").ok().as_deref(),
+        &report,
+    );
+    if mode == StartupSuggestionMode::Hidden {
+        state.personalization.startup_suppressed = true;
+        return PreparedStartupSuggestions {
+            mode,
+            candidates: Vec::new(),
+        };
+    }
     state.personalization.poll_ready();
-    let personal_enabled = state.analysis_mode != crate::runtime::state::AnalysisMode::Manual
+    let personal_enabled = mode == StartupSuggestionMode::Interactive
+        && state.analysis_mode != crate::runtime::state::AnalysisMode::Manual
         && !state.personalization.ai_disabled;
     let now = now_hour_bucket();
     let (personal, context, profile_generation) = if personal_enabled {
@@ -244,15 +276,22 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> Vec<Planne
         host_id: context.as_ref().and_then(|value| value.host_id.clone()),
     };
     let planned = plan_startup_for_render(state.i18n(), Some(&report), &planner_context, &personal);
-    if !renderer_available {
-        state.personalization.startup_suppressed = true;
-        let unavailable = crate::recommendation::personal_planner::RenderedStartupSuggestions::renderer_unavailable(
-            planned.visible_candidates.len(),
-        );
-        debug_assert_eq!(unavailable.omitted_count, planned.visible_candidates.len());
-        return Vec::new();
+    let visible_all = match mode {
+        StartupSuggestionMode::ReadOnly => planned
+            .visible_candidates
+            .iter()
+            .filter(|candidate| candidate.source == CandidateSource::Health)
+            .cloned()
+            .collect(),
+        StartupSuggestionMode::Interactive => planned.visible_candidates.clone(),
+        StartupSuggestionMode::Hidden => Vec::new(),
+    };
+    if mode == StartupSuggestionMode::ReadOnly {
+        return PreparedStartupSuggestions {
+            mode,
+            candidates: visible_all,
+        };
     }
-    let visible_all = planned.visible_candidates.clone();
     let visible_personal = visible_personal_candidates(&planned)
         .into_iter()
         .cloned()
@@ -304,7 +343,10 @@ fn prepare_startup_suggestions(state: &mut InlineState, cwd: &str) -> Vec<Planne
             .get(&first_id)
             .cloned();
     }
-    visible_all
+    PreparedStartupSuggestions {
+        mode,
+        candidates: visible_all,
+    }
 }
 
 pub(crate) fn record_visible_personal_impressions(state: &mut InlineState, cwd: &str) {
@@ -368,9 +410,10 @@ fn current_personal_context(
     )
 }
 
-pub(crate) fn write_startup_suggestion_card<W: Write>(
+pub(super) fn write_startup_suggestion_card<W: Write>(
     state: &InlineState,
     renderer: &RatatuiInlineRenderer,
+    mode: StartupSuggestionMode,
     suggestions: &[PlannerCandidate],
     output: &mut W,
 ) -> std::io::Result<()> {
@@ -390,11 +433,18 @@ pub(crate) fn write_startup_suggestion_card<W: Write>(
             format!("{}. [{source}] {}", index + 1, candidate.prompt_text)
         })
         .collect();
-    let footer = match (state.language, suggestions.len() > 1) {
-        (Language::ZhCn, true) => "Shift+Tab 切换 · Tab 填入 · Enter 直接提问",
-        (Language::ZhCn, false) => "Tab 填入 · Enter 直接提问",
-        (_, true) => "Shift+Tab cycle · Tab insert · Enter ask",
-        (_, false) => "Tab insert · Enter ask",
+    let footer = match (mode, state.language, suggestions.len() > 1) {
+        (StartupSuggestionMode::Interactive, Language::ZhCn, true) => {
+            Some("Shift+Tab 切换 · Tab 填入 · Enter 直接提问")
+        }
+        (StartupSuggestionMode::Interactive, Language::ZhCn, false) => {
+            Some("Tab 填入 · Enter 直接提问")
+        }
+        (StartupSuggestionMode::Interactive, _, true) => {
+            Some("Shift+Tab cycle · Tab insert · Enter ask")
+        }
+        (StartupSuggestionMode::Interactive, _, false) => Some("Tab insert · Enter ask"),
+        _ => None,
     };
     renderer.write_notice_panel(
         output,
@@ -405,7 +455,7 @@ pub(crate) fn write_startup_suggestion_card<W: Write>(
                 "Suggested prompts"
             },
             body,
-            footer: Some(footer),
+            footer,
         },
     )?;
     writeln!(output)
