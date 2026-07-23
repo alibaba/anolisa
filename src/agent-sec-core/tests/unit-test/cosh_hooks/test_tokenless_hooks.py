@@ -125,7 +125,9 @@ class TestLlmContentExtraction:
     def test_falls_back_to_return_display(self):
         """Falls back to returnDisplay when llmContent missing."""
         tool_response = {"returnDisplay": "display only"}
-        llm_content = tool_response.get("llmContent") or tool_response.get("returnDisplay")
+        llm_content = tool_response.get("llmContent") or tool_response.get(
+            "returnDisplay"
+        )
         assert llm_content == "display only"
 
     def test_plain_text_passes_through(self):
