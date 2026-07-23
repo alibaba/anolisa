@@ -9,6 +9,7 @@ use blaze_core::config::{DaemonConfig, PolicyLoadErrorMode};
 use blaze_core::kernel::HookRegistry;
 use blaze_core::policy::PolicyEngine;
 use blaze_core::pool::PoolManager;
+use blaze_core::storage::StorageProvider;
 use blaze_core::template::TemplateRegistry;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -38,6 +39,29 @@ pub async fn run(config_path: &Path) -> Result<()> {
     let hook = HookRegistry::new();
     let (spawner, active_backend) = build_spawner(&config).await;
 
+    // Build storage provider
+    if config.storage.provider != "file" && config.storage.provider != "auto" {
+        tracing::warn!(
+            provider = %config.storage.provider,
+            "unsupported storage provider, falling back to file"
+        );
+    }
+    let storage: Arc<dyn StorageProvider> = {
+        use crate::file_provider::FileStorageProvider;
+        // Ensure base_dir exists (acquire uses create_dir, not create_dir_all)
+        tokio::fs::create_dir_all(&config.storage.images_dir).await?;
+        let fp = FileStorageProvider::new(config.storage.images_dir.clone());
+        match fp.probe().await {
+            Ok(true) => {
+                tracing::info!(dir = %config.storage.images_dir.display(), "storage provider ready");
+            }
+            _ => {
+                tracing::warn!("storage probe returned false, continuing anyway");
+            }
+        }
+        Arc::new(fp)
+    };
+
     let socket_path = config.daemon.socket.clone();
     let http_addr = config.listen.http_addr.clone();
     let state = Arc::new(ServerState::build(
@@ -48,6 +72,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
         hook,
         spawner,
         active_backend,
+        storage,
     ));
 
     if socket_path.exists() {
