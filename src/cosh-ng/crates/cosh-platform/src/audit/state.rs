@@ -192,10 +192,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn state_round_trip_uses_private_file() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::MetadataExt;
 
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = crate::audit::AuditTestDir::create();
         let state = AuditOperationalState::new(AuditSettings::default());
         write_state(directory.path(), &state).unwrap();
         assert_eq!(read_state(directory.path()).unwrap(), Some(state));

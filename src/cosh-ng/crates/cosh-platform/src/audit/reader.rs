@@ -657,8 +657,7 @@ mod tests {
     fn oversized_record_is_diagnosed_without_becoming_an_event() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = crate::audit::AuditTestDir::create();
         let date = root.path().join("v1/segments/2026-07-23");
         super::super::store::ensure_private_dir(&root.path().join("v1")).unwrap();
         super::super::store::ensure_private_dir(&root.path().join("v1/segments")).unwrap();

@@ -32,6 +32,36 @@ use uuid::Uuid;
 
 use self::store::{AuditDurability, AuditSegmentWriter};
 
+#[cfg(test)]
+/// Private temporary directory used by no-follow audit storage tests.
+pub(crate) struct AuditTestDir {
+    _directory: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl AuditTestDir {
+    /// Creates a private test directory and resolves platform-managed path aliases.
+    pub(crate) fn create() -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().canonicalize().unwrap();
+        Self {
+            _directory: directory,
+            path,
+        }
+    }
+
+    /// Returns the real path used by no-follow storage tests.
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 /// Call-site identity captured for a policy audit event.
 #[derive(Debug, Clone)]
 pub struct CallerInfo {
@@ -219,21 +249,16 @@ mod tests {
     }
 
     struct AuditEnvGuard {
-        _directory: tempfile::TempDir,
+        directory: AuditTestDir,
         _lock: MutexGuard<'static, ()>,
     }
 
     fn temp_audit_env() -> AuditEnvGuard {
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
-
         let lock = env_lock();
-        let directory = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = AuditTestDir::create();
         std::env::set_var("COSH_AUDIT_DIR", directory.path());
         AuditEnvGuard {
-            _directory: directory,
+            directory,
             _lock: lock,
         }
     }
@@ -260,7 +285,7 @@ mod tests {
         let loaded = builtin::balanced();
         let decision = check(package_install(), LogSource::Cli, &loaded).unwrap();
         assert_eq!(decision.outcome, Outcome::RequireApproval);
-        let read = reader::read_all(guard._directory.path(), false).unwrap();
+        let read = reader::read_all(guard.directory.path(), false).unwrap();
         assert_eq!(read.events.len(), 1);
         assert_eq!(read.events[0].event.event_type.as_str(), "policy.decision");
     }
@@ -284,7 +309,7 @@ mod tests {
             raw: None,
         };
         check(action, LogSource::Cli, &loaded).unwrap();
-        let files = std::fs::read_dir(guard._directory.path().join("v1/segments"))
+        let files = std::fs::read_dir(guard.directory.path().join("v1/segments"))
             .unwrap()
             .flat_map(|date| std::fs::read_dir(date.unwrap().path()).unwrap())
             .map(|entry| entry.unwrap().path())

@@ -541,11 +541,8 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    fn private_root() -> tempfile::TempDir {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    fn private_root() -> crate::audit::AuditTestDir {
+        let root = crate::audit::AuditTestDir::create();
         ensure_private_dir(&root.path().join("v1")).unwrap();
         ensure_private_dir(&root.path().join("v1/segments")).unwrap();
         root

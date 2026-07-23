@@ -106,25 +106,23 @@ fn pkg_manager_available() -> (&'static str, bool) {
 /// version 1 store, isolate user policy discovery, and clear explicit policy.
 /// Use this for audit tests so they neither read nor write the user's state.
 fn cosh_bin_with_audit_sandbox(audit_log: &Path) -> Command {
+    let sandbox_home = audit_log
+        .parent()
+        .expect("sandbox log has a parent")
+        .canonicalize()
+        .expect("resolve audit sandbox path");
+    let audit_log = sandbox_home.join(audit_log.file_name().expect("sandbox log has a file name"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        std::fs::set_permissions(
-            audit_log.parent().expect("sandbox log has a parent"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .expect("set private audit sandbox mode");
+        std::fs::set_permissions(&sandbox_home, std::fs::Permissions::from_mode(0o700))
+            .expect("set private audit sandbox mode");
     }
     let mut cmd = cosh_bin();
-    cmd.env("COSH_AUDIT_LOG", audit_log);
-    if let Some(sandbox_home) = audit_log.parent() {
-        cmd.env("HOME", sandbox_home);
-    }
-    cmd.env(
-        "COSH_AUDIT_DIR",
-        audit_log.parent().expect("sandbox log has a parent"),
-    );
+    cmd.env("COSH_AUDIT_LOG", &audit_log);
+    cmd.env("HOME", &sandbox_home);
+    cmd.env("COSH_AUDIT_DIR", &sandbox_home);
     cmd.env_remove("COSH_AUDIT_POLICY");
     cmd
 }

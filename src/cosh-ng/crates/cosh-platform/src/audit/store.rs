@@ -462,6 +462,7 @@ fn unsafe_path(reason: &str, path: &Path) -> CoshError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::AuditTestDir;
     use cosh_types::audit::{
         AuditActor, AuditActorKind, AuditComponent, AuditControlData, AuditEventOutcome,
         AuditEventType, AuditIdentity, AuditOutcomeStatus, AuditRedaction, AuditRedactionStatus,
@@ -469,13 +470,6 @@ mod tests {
     };
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-
-    #[cfg(unix)]
-    fn private_tempdir() -> tempfile::TempDir {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        directory
-    }
 
     fn event() -> AuditEventV1 {
         let now = Utc::now();
@@ -517,7 +511,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn writer_uses_distinct_locked_segments_and_closes_them() {
-        let root = private_tempdir();
+        let root = AuditTestDir::create();
         let mut first =
             AuditSegmentWriter::create(root.path(), AuditComponentName::CoshCli).unwrap();
         let mut second =
@@ -551,7 +545,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn private_files_are_create_new_and_mode_0600() {
-        let root = private_tempdir();
+        let root = AuditTestDir::create();
         let path = root.path().join("record");
         let file = create_private_file(&path).unwrap();
         let mode = file.metadata().unwrap().mode() & 0o777;
