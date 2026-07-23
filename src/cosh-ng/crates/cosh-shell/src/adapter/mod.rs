@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::types::{AgentEvent, AgentRequest};
 
+const QUESTION_ANSWER_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
+
 mod claude;
 mod claude_stream;
 mod claude_stream_extract;
@@ -89,6 +91,7 @@ pub struct AgentRunHandle {
     receiver: mpsc::Receiver<Result<AgentEvent, AdapterError>>,
     cancel: Arc<dyn Fn() + Send + Sync>,
     pub(crate) approval_sender: Option<mpsc::Sender<ApprovalResponse>>,
+    question_answer_confirmation: Option<mpsc::Receiver<Result<String, AdapterError>>>,
     pub(crate) auth_sender: Option<std::sync::mpsc::Sender<AuthResponse>>,
     control_capabilities: Arc<Mutex<ControlProtocolCapabilities>>,
     pending_provider_session: Option<Arc<Mutex<Option<String>>>>,
@@ -155,11 +158,22 @@ impl AgentRunHandle {
             receiver,
             cancel: Arc::new(|| {}),
             approval_sender: Some(approval_sender),
+            question_answer_confirmation: None,
             auth_sender: None,
             control_capabilities: Arc::new(Mutex::new(ControlProtocolCapabilities::default())),
             pending_provider_session: None,
             cancellation_artifacts: ProviderCancellationArtifactStore::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_question_answer_confirmation(
+        approval_sender: mpsc::Sender<ApprovalResponse>,
+        confirmation: mpsc::Receiver<Result<String, AdapterError>>,
+    ) -> Self {
+        let mut handle = Self::test_with_approval_sender(approval_sender);
+        handle.question_answer_confirmation = Some(confirmation);
+        handle
     }
 
     pub fn cancel(&self) {
@@ -185,6 +199,32 @@ impl AgentRunHandle {
             .map_err(|_| AdapterError {
                 message: "approval channel closed".to_string(),
             })
+    }
+
+    pub(crate) fn respond_question_answer(
+        &self,
+        response: ApprovalResponse,
+    ) -> Result<(), AdapterError> {
+        let request_id = response.request_id.clone();
+        self.respond_approval(response)?;
+        let Some(confirmation) = self.question_answer_confirmation.as_ref() else {
+            return Ok(());
+        };
+        match confirmation.recv_timeout(QUESTION_ANSWER_CONFIRMATION_TIMEOUT) {
+            Ok(Ok(confirmed_request_id)) if confirmed_request_id == request_id => Ok(()),
+            Ok(Ok(confirmed_request_id)) => Err(AdapterError {
+                message: format!(
+                    "question answer confirmation mismatch: expected {request_id}, got {confirmed_request_id}"
+                ),
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(AdapterError {
+                message: format!("question answer confirmation timed out: {request_id}"),
+            }),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(AdapterError {
+                message: "question answer confirmation channel closed".to_string(),
+            }),
+        }
     }
 
     pub fn respond_auth(&self, response: AuthResponse) -> Result<(), String> {
@@ -415,6 +455,7 @@ fn start_threaded_adapter_run(adapter: AdapterInstance, request: AgentRequest) -
         receiver,
         cancel,
         approval_sender: None,
+        question_answer_confirmation: None,
         auth_sender: None,
         control_capabilities: Arc::new(Mutex::new(ControlProtocolCapabilities::default())),
         pending_provider_session: None,
@@ -435,5 +476,44 @@ impl PreparedInvocation {
         argv.extend(self.args.clone());
         argv.push("<prompt>".to_string());
         argv
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn question_answer_reports_writer_confirmation_failure() {
+        let (approval_sender, approval_receiver) = mpsc::channel();
+        let (confirmation_sender, confirmation_receiver) = mpsc::channel();
+        let handle = AgentRunHandle::test_with_question_answer_confirmation(
+            approval_sender,
+            confirmation_receiver,
+        );
+        thread::spawn(move || {
+            let response = approval_receiver.recv().expect("question answer");
+            confirmation_sender
+                .send(Err(AdapterError {
+                    message: format!("failed to write {}", response.request_id),
+                }))
+                .expect("confirmation");
+        });
+
+        let result = handle.respond_question_answer(ApprovalResponse {
+            request_id: "q-1".to_string(),
+            tool_use_id: None,
+            tool_input: None,
+            decision: ApprovalDecision::Answer {
+                answer: "Green".to_string(),
+            },
+        });
+
+        assert_eq!(
+            result,
+            Err(AdapterError {
+                message: "failed to write q-1".to_string()
+            })
+        );
     }
 }

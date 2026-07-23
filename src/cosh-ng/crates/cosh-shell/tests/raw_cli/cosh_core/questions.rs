@@ -231,7 +231,7 @@ exit 0
 }
 
 #[test]
-fn raw_cli_cosh_core_answer_write_failure_keeps_receipt_and_restores_shell() {
+fn raw_cli_cosh_core_answer_write_failure_retries_through_fallback() {
     let home = temp_shell_home("cosh-core-answer-write-failure");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
@@ -243,6 +243,13 @@ read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}'
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-write-failure","model":"test"}'
 read -r user_message
+case "$user_message" in
+  *"Answer to pending Agent question"*)
+    printf '%s\n' '{"type":"assistant","session_id":"sess-write-failure","message":{"content":[{"type":"text","text":"Answer was retried through a fallback provider turn."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-write-failure","is_error":false,"result":"done"}'
+    exit 0
+    ;;
+esac
 printf '%s\n' '{"type":"control_request","request_id":"ask-write-failure","request":{"subtype":"ask_user","question":"Choose before the connection closes","options":[{"label":"Green"}],"allow_free_text":false,"multi_select":false}}'
 exec 0<&-
 sleep 2
@@ -258,20 +265,21 @@ sleep 2
         &[
             ("cosh-osc$", b"?? answer-write-failure\n"),
             ("Left/Right move | Enter send", b"\n"),
-            ("Agent answer delivery uncertain", b"exit\n"),
+            (
+                "Answer was retried through a fallback provider turn.",
+                b"exit\n",
+            ),
         ],
     );
     let _ = fs::remove_dir_all(&home);
 
     assert!(output.contains("Answer: Green"), "{output}");
     assert!(
-        output.contains("Agent answer delivery uncertain"),
+        output.contains("Answer was retried through a fallback provider turn."),
         "{output}"
     );
     assert!(
-        output.contains(
-            "The Agent connection closed while sending your answer. Delivery could not be confirmed."
-        ),
+        !output.contains("Agent answer delivery uncertain"),
         "{output}"
     );
     assert!(output.contains("cosh-osc$ exit"), "{output}");

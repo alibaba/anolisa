@@ -2,8 +2,8 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::question::runtime::pending_question_capture;
-use crate::question::terminal::redraw_active_question_if_width_changed;
 use crate::runtime::prelude::*;
+use crate::runtime::question_terminal::redraw_active_question_if_width_changed;
 use crate::runtime::state::{ApprovalRequestStatus, CoshApprovalMode, InlineState};
 
 use super::dispatcher::RuntimeDispatcher;

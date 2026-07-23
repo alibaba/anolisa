@@ -1,6 +1,6 @@
 use super::*;
 use crate::question::answer::{resolve_pending_question_answer, QuestionAnswerResolution};
-use crate::question::terminal::redraw_active_question_if_width_changed;
+use crate::runtime::question_terminal::redraw_active_question_if_width_changed;
 
 fn record_test_question(
     state: &mut InlineState,
@@ -101,6 +101,25 @@ fn answer_resolution_distinguishes_selection_and_request_build_failure() {
         QuestionAnswerResolution::RequestBuildFailed
     ));
     assert_eq!(state.questions.pending_id.as_deref(), Some("q-1"));
+}
+
+#[test]
+fn multi_question_accepts_custom_only_answer() {
+    let mut state = InlineState::default();
+    record_test_question(
+        &mut state,
+        vec!["One".to_string()],
+        true,
+        QuestionSelectionMode::Multiple,
+    );
+
+    let QuestionAnswerResolution::Accepted(answer_run) =
+        resolve_pending_question_answer(&card_answer("\neslint only"), 1, &mut state)
+    else {
+        panic!("custom-only answer should be accepted");
+    };
+
+    assert_eq!(answer_run.answer, "eslint only");
 }
 
 #[test]

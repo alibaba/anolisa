@@ -19,6 +19,7 @@ pub(crate) struct QuestionWriter {
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) gate: Arc<Mutex<CoshCoreQuestionGate>>,
     pub(crate) failure_tx: mpsc::Sender<AdapterError>,
+    pub(crate) answer_confirmation_tx: mpsc::Sender<Result<String, AdapterError>>,
 }
 
 impl QuestionWriter {
@@ -47,11 +48,12 @@ impl QuestionWriter {
                 };
             if let Some(request_id) = answered_request_id {
                 if write_answer(&mut writer, &message, &request_id, &self.gate).is_err() {
-                    let _ = self.failure_tx.send(protocol_error(
-                        CoreQuestionProtocolReason::AnswerWriteFailed,
-                    ));
+                    let error = protocol_error(CoreQuestionProtocolReason::AnswerWriteFailed);
+                    let _ = self.answer_confirmation_tx.send(Err(error.clone()));
+                    let _ = self.failure_tx.send(error);
                     break;
                 }
+                let _ = self.answer_confirmation_tx.send(Ok(request_id));
             } else if writeln!(writer, "{message}").is_err() || writer.flush().is_err() {
                 break;
             }

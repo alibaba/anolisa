@@ -638,6 +638,7 @@ fn start_cancellable_cosh_core_process(
         receiver,
         cancel,
         approval_sender: None,
+        question_answer_confirmation: None,
         auth_sender: None,
         control_capabilities: Arc::new(Mutex::new(
             control_protocol::ControlProtocolCapabilities::default(),

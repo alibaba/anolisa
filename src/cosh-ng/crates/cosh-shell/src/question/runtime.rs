@@ -6,8 +6,8 @@ use crate::question::ingress::{
     core_question_store_decision, reject_core_question_store, CoreQuestionStoreDecision,
     IncomingQuestion,
 };
-use crate::question::terminal::clear_active_question_panel;
 use crate::runtime::prelude::*;
+use crate::runtime::question_terminal::clear_active_question_panel;
 use crate::ui::QuestionInputFeedback;
 
 #[derive(Debug, Clone)]
@@ -236,7 +236,7 @@ fn respond_question_answer_to_provider(
     };
     if active_run
         .handle
-        .respond_approval(ApprovalResponse {
+        .respond_question_answer(ApprovalResponse {
             request_id: request_id.clone(),
             tool_use_id: None,
             tool_input: None,

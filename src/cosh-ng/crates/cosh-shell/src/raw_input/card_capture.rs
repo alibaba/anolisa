@@ -14,7 +14,7 @@ pub(super) struct CardInputState {
     free_text: String,
     active_kind: Option<CardInputKind>,
     selected_options: Vec<usize>,
-    pending_escape: Vec<u8>,
+    pending_input: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +128,7 @@ impl CardInputState {
             self.selected = selected;
             self.free_text.clear();
             self.selected_options.clear();
-            self.pending_escape.clear();
+            self.pending_input.clear();
         }
     }
 
@@ -137,7 +137,7 @@ impl CardInputState {
         self.selected = 0;
         self.free_text.clear();
         self.selected_options.clear();
-        self.pending_escape.clear();
+        self.pending_input.clear();
     }
 
     pub(super) fn consume(
@@ -147,10 +147,10 @@ impl CardInputState {
     ) -> Vec<RawInputEvent> {
         let mut events = Vec::new();
         let mut input = Vec::new();
-        if self.pending_escape.is_empty() {
+        if self.pending_input.is_empty() {
             input.extend_from_slice(bytes);
         } else {
-            input.append(&mut self.pending_escape);
+            input.append(&mut self.pending_input);
             input.extend_from_slice(bytes);
         }
         let mut idx = 0;
@@ -218,14 +218,14 @@ impl CardInputState {
                     let Some(next_idx) =
                         self.consume_csi_sequence(capture, &input, idx, &mut events)
                     else {
-                        self.pending_escape.extend_from_slice(&input[idx..]);
+                        self.pending_input.extend_from_slice(&input[idx..]);
                         break;
                     };
                     idx = next_idx;
                 }
                 0x1b if input.get(idx + 1) == Some(&b'O') => {
                     if input.get(idx + 2).is_none() {
-                        self.pending_escape.extend_from_slice(&input[idx..]);
+                        self.pending_input.extend_from_slice(&input[idx..]);
                         break;
                     }
                     if let Some(event) = self.apply_arrow(capture, input[idx + 2]) {
@@ -401,10 +401,32 @@ impl CardInputState {
                             {
                                 idx += 1;
                             }
-                            self.free_text
-                                .push_str(&String::from_utf8_lossy(&input[start..idx]));
-                            if let Some(event) = self.input_event(capture) {
-                                events.push(event);
+                            let bytes = &input[start..idx];
+                            let appended = match std::str::from_utf8(bytes) {
+                                Ok(text) => {
+                                    self.free_text.push_str(text);
+                                    true
+                                }
+                                Err(error) if error.error_len().is_none() => {
+                                    let valid_len = error.valid_up_to();
+                                    if valid_len > 0 {
+                                        self.free_text.push_str(
+                                            std::str::from_utf8(&bytes[..valid_len])
+                                                .expect("validated UTF-8 prefix"),
+                                        );
+                                    }
+                                    self.pending_input.extend_from_slice(&bytes[valid_len..]);
+                                    valid_len > 0
+                                }
+                                Err(_) => {
+                                    self.free_text.push_str(&String::from_utf8_lossy(bytes));
+                                    true
+                                }
+                            };
+                            if appended {
+                                if let Some(event) = self.input_event(capture) {
+                                    events.push(event);
+                                }
                             }
                         }
                     }
@@ -433,7 +455,7 @@ impl CardInputState {
                 if *multiple {
                     if !answer.is_empty() && *allow_free_text {
                         if self.selected_options.is_empty() {
-                            return Some(card_answer_event(answer, *secret));
+                            return Some(card_answer_event(&format!("\n{answer}"), *secret));
                         }
                         return Some(card_answer_event(
                             &format!(

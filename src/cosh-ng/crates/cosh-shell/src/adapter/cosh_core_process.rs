@@ -197,6 +197,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
 ) -> AgentRunHandle {
     let (event_tx, event_rx) = mpsc::channel();
     let (approval_tx, approval_rx) = mpsc::channel::<ApprovalResponse>();
+    let (answer_confirmation_tx, answer_confirmation_rx) = mpsc::channel();
     let (auth_tx, auth_rx) = mpsc::channel::<AuthResponse>();
     let cancelled = Arc::new(AtomicBool::new(false));
     let writer_done = Arc::new(AtomicBool::new(false));
@@ -275,6 +276,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
             cancelled: Arc::clone(&cancelled),
             gate: Arc::clone(&question_gate),
             failure_tx: writer_failure_tx,
+            answer_confirmation_tx,
         }
         .spawn();
 
@@ -575,6 +577,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
+        question_answer_confirmation: Some(answer_confirmation_rx),
         auth_sender: Some(auth_tx),
         control_capabilities,
         pending_provider_session: Some(pending_session),

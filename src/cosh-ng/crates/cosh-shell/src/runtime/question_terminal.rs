@@ -1,5 +1,7 @@
 use std::io::Write;
 
+#[cfg(test)]
+use crate::question::runtime::RuntimeUserQuestion;
 use crate::runtime::state::InlineState;
 use crate::ui::{QuestionInputFeedback, QuestionPanelModel, RatatuiInlineRenderer};
 
@@ -115,7 +117,6 @@ pub(crate) fn redraw_active_question_if_width_changed<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::question::runtime::RuntimeUserQuestion;
     use crate::runtime::prelude::AgentRunOrigin;
     use crate::types::QuestionSelectionMode;
 

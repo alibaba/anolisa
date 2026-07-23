@@ -174,6 +174,38 @@ fn question_capture_strips_split_bracketed_paste_wrappers() {
 }
 
 #[test]
+fn question_capture_buffers_split_utf8_input() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+    let input = "你好🙂";
+    let mut events = Vec::new();
+
+    for byte in input.as_bytes() {
+        events.extend(state.consume(&capture, &[*byte]));
+    }
+    events.extend(state.consume(&capture, b"\n"));
+
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardAnswer(input.to_string()))
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            RawInputEvent::CardInput(_, value) if value.contains('\u{fffd}')
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
 fn question_capture_ignores_tilde_control_sequences() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
@@ -275,6 +307,24 @@ fn question_capture_multiple_toggles_options_and_submits_indices() {
             RawInputEvent::CardToggle("q-1".to_string(), 1),
             RawInputEvent::CardAnswer("1,2".to_string())
         ]
+    );
+}
+
+#[test]
+fn question_capture_multiple_marks_custom_only_answer() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 3,
+        allow_free_text: true,
+        multiple: true,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"1\n").last(),
+        Some(&RawInputEvent::CardAnswer("\n1".to_string()))
     );
 }
 

@@ -199,6 +199,25 @@ fn raw_cli_agent_multiple_empty_submit_stays_on_card() {
 }
 
 #[test]
+fn raw_cli_agent_multiple_accepts_custom_only_answer() {
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? ask multi question\n"),
+            ("Space toggle | Enter send", b"123\n"),
+            ("Got your answer: 123", b"exit\n"),
+        ],
+    );
+
+    assert!(output.contains("Answer: 123"), "{output}");
+    assert!(output.contains("Got your answer: 123"), "{output}");
+    assert!(!output.contains("Choose a valid answer"), "{output}");
+}
+
+#[test]
 fn raw_cli_agent_question_ctrl_c_cancels_card_without_answer_turn() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
