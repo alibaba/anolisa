@@ -6,6 +6,11 @@
  * Otherwise fall back to REACT_APP_API_BASE or localhost:7396 for local dev.
  */
 
+import type {
+  OptimizeSessionResults,
+  OptimizeLlmConfig,
+} from '../types/optimization';
+
 const API_BASE: string = (() => {
   // Explicit override via env var (set at build time for non-embedded deployments)
   if (typeof process !== 'undefined' && (process.env as any).REACT_APP_API_BASE) {
@@ -73,7 +78,7 @@ export interface TraceEventDetail {
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
-class ApiRequestError extends Error {
+export class ApiRequestError extends Error {
   readonly status: number;
   readonly body: Record<string, unknown> | null;
 
@@ -1224,4 +1229,51 @@ export async function login(token: string): Promise<boolean> {
     body: JSON.stringify({ token }),
   });
   return res.ok;
+}
+
+// ─── Optimization analysis API ───────────────────────────────────────────────
+
+export type OptimizeDimension = 'perf' | 'perf-issues' | 'cost' | 'cost-waste' | 'accuracy';
+
+/** Load persisted analysis results for a session (each dimension may be null). */
+export async function fetchOptimizeResults(sessionId: string): Promise<OptimizeSessionResults> {
+  return apiFetch<OptimizeSessionResults>(
+    `${API_BASE}/api/optimize/sessions/${encodeURIComponent(sessionId)}/results`
+  );
+}
+
+/**
+ * Trigger one analysis dimension for a session.
+ * perf/cost return in milliseconds; perf-issues/cost-waste take 10-30s;
+ * accuracy can take 30-60s+ — callers must not set a short timeout.
+ */
+export async function runOptimizeDimension<T>(
+  sessionId: string,
+  dimension: OptimizeDimension
+): Promise<T> {
+  return apiFetch<T>(
+    `${API_BASE}/api/optimize/sessions/${encodeURIComponent(sessionId)}/${dimension}`,
+    { method: 'POST' }
+  );
+}
+
+/** Read the current LLM config (api_key is masked by the backend). */
+export async function fetchOptimizeConfig(): Promise<OptimizeLlmConfig> {
+  return apiFetch<OptimizeLlmConfig>(`${API_BASE}/api/optimize/config`);
+}
+
+/**
+ * Save the LLM config. Omitted/empty fields keep their current value;
+ * an api_key containing masking dots (•) is ignored by the backend.
+ */
+export async function saveOptimizeConfig(body: {
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+}): Promise<OptimizeLlmConfig> {
+  return apiFetch<OptimizeLlmConfig>(`${API_BASE}/api/optimize/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }

@@ -7,6 +7,7 @@ import { AtifViewerPage } from './pages/AtifViewerPage';
 import { TokenSavingsPage } from './pages/TokenSavingsPage';
 import { SkillMetricsPage } from './pages/SkillMetricsPage';
 import { SecurityObservabilityPage } from './pages/SecurityObservabilityPage';
+import { OptimizationPage } from './pages/OptimizationPage';
 import { LoginPage } from './pages/LoginPage';
 import { fetchAuthStatus, fetchAuthVerify, login } from './utils/apiClient';
 
@@ -104,6 +105,8 @@ const App: React.FC = () => {
                   <Routes>
                     <Route path="/" element={<ConversationList />} />
                     <Route path="/savings" element={<TokenSavingsPage />} />
+                    <Route path="/optimization" element={<OptimizationPage />} />
+                    <Route path="/optimization/:sessionId" element={<OptimizationPage />} />
                     <Route path="/skills" element={<SkillMetricsPage />} />
                     <Route path="/security" element={<SecurityObservabilityPage />} />
                     <Route path="/atif" element={<AtifViewerPage />} />
