@@ -57,8 +57,9 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
             #!/usr/bin/env python3
             import json, sys
             if sys.argv[1] == "compress-response":
-                data = sys.stdin.read()
-                print(data + '"extra_padding":"xxxxxxxxxxxxxxxx"')
+                data = json.loads(sys.stdin.read())
+                data["extra_padding"] = "x" * 200
+                print(json.dumps(data))
             elif sys.argv[1] == "compress-toon":
                 sys.exit(1)
         """)
@@ -203,6 +204,13 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertNotIn(sentinel, additional,
                          "additionalContext must not contain compressed content")
 
+        updated = hso.get("updatedToolOutput", "")
+        self.assertTrue(updated,
+                        "updatedToolOutput should be present for Claude Code")
+        updated_str = json.dumps(updated) if isinstance(updated, (dict, list)) else str(updated)
+        self.assertNotIn(sentinel * 30, updated_str,
+                         "updatedToolOutput must not contain the full original sentinel")
+
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestPassthrough(unittest.TestCase):
@@ -256,10 +264,11 @@ class TestSkipTools(unittest.TestCase):
             mock_tokenless_path=self.mock_bin,
         )
 
+        self.assertEqual(result, {},
+                         "Skip-tools (Read) should produce empty result (pass-through)")
         hso = result.get("hookSpecificOutput", {})
-        if hso:
-            self.assertNotIn("updatedToolOutput", hso,
-                             "Skip-tools should not replace tool output")
+        self.assertNotIn("updatedToolOutput", hso,
+                         "Skip-tools should not replace tool output")
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
