@@ -47,6 +47,14 @@ fn contains_legacy_skill_directive(hint: &str) -> bool {
 }
 
 fn attach_failed_command_context(request: &mut AgentRequest) {
+    if request
+        .context_hints
+        .iter()
+        .any(|hint| hint.starts_with("insight_evidence\n"))
+    {
+        return;
+    }
+
     if !request
         .context_hints
         .iter()
@@ -233,6 +241,7 @@ mod tests {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         }
     }
 
@@ -266,6 +275,21 @@ mod tests {
         assert!(!hints.contains("recommended_skill"));
         assert!(!hints.contains("alibabacloud-sysom-diagnosis"));
         assert!(request.recommended_skill.is_none());
+    }
+
+    #[test]
+    fn insight_evidence_replaces_legacy_failed_command_context() {
+        let mut request = request_for_block(block(1, "cargo build", CommandStatus::Failed));
+        request
+            .context_hints
+            .push("insight_evidence\ntarget_facts:\ncommand_id=cmd-1".to_string());
+
+        finalize_agent_request_skill_context(&mut request, None);
+
+        let hints = request.context_hints.join("\n");
+        assert!(hints.contains("insight_evidence"));
+        assert!(!hints.contains("failed_command_context"));
+        assert!(!hints.contains("diagnostic_context"));
     }
 
     #[test]

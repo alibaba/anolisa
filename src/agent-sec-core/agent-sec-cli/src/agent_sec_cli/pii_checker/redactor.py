@@ -2,7 +2,11 @@
 
 import re
 
-from agent_sec_cli.pii_checker.models import PiiFinding
+from agent_sec_cli.pii_checker.models import (
+    PiiCategory,
+    PiiFinding,
+    PiiSeverity,
+)
 
 
 def _mask_middle(value: str, *, prefix: int = 4, suffix: int = 4) -> str:
@@ -12,8 +16,11 @@ def _mask_middle(value: str, *, prefix: int = 4, suffix: int = 4) -> str:
     return f"{value[:prefix]}...[REDACTED]...{value[-suffix:]}"
 
 
-def redact_value(value: str, pii_type: str) -> str:
+def redact_value(value: str, pii_type: str, *, category: str | None = None) -> str:
     """Return a model-safe redaction for a detected value."""
+    if category == PiiCategory.CUSTOM.value:
+        return f"[{pii_type.upper()}_REDACTED]"
+
     if pii_type == "email":
         local, _, domain = value.partition("@")
         if not domain:
@@ -58,16 +65,40 @@ def redact_value(value: str, pii_type: str) -> str:
 
 
 def redact_text(text: str, findings: list[PiiFinding]) -> str:
-    """Replace finding spans with their redacted evidence."""
-    redacted = text
-    replaced_spans: list[tuple[int, int]] = []
-    for finding in sorted(findings, key=lambda item: item.span[0], reverse=True):
+    """Replace overlapping finding spans once without leaving sensitive tails."""
+    ordered_by_span = sorted(
+        findings,
+        key=lambda item: (item.span[0], item.span[1], item.type),
+    )
+    groups: list[list[PiiFinding]] = []
+    group_end = -1
+    for finding in ordered_by_span:
         start, end = finding.span
-        if any(
-            start < prior_end and prior_start < end
-            for prior_start, prior_end in replaced_spans
-        ):
+        if groups and start < group_end:
+            groups[-1].append(finding)
+            group_end = max(group_end, end)
             continue
-        redacted = redacted[:start] + finding.evidence_redacted + redacted[end:]
-        replaced_spans.append((start, end))
+        groups.append([finding])
+        group_end = end
+
+    replacements: list[tuple[int, int, str]] = []
+    for group in groups:
+        selected = min(
+            group,
+            key=lambda item: (
+                item.category != PiiCategory.CUSTOM.value,
+                item.severity != PiiSeverity.DENY.value,
+                item.type,
+            ),
+        )
+        start = min(item.span[0] for item in group)
+        end = max(item.span[1] for item in group)
+        replacement = selected.evidence_redacted
+        if len({item.span for item in group}) > 1:
+            replacement = f"[{selected.type.upper()}_REDACTED]"
+        replacements.append((start, end, replacement))
+
+    redacted = text
+    for start, end, replacement in reversed(replacements):
+        redacted = redacted[:start] + replacement + redacted[end:]
     return redacted

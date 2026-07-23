@@ -34,8 +34,8 @@ default_backend = "raw"
 channel = "stable"
 releasever = "4"
 
-# raw — tar.gz/binary artifacts resolved through the ANOLISA
-# distribution index.
+# raw — tar.gz artifacts resolved through the ANOLISA distribution index.
+# Every archive must embed its authoritative `.anolisa/component.toml`.
 #
 # base_url is the raw v1 distribution root. `index.toml` lives directly
 # under this directory. For every index row that omits `url`, the client

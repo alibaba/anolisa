@@ -1,10 +1,13 @@
 use std::path::Path;
 
-use crate::evidence::model::{EvidenceExcerpt, OutputExcerptDirection};
+use crate::evidence::model::{
+    evidence_capture_status_for_block, EvidenceCaptureStatus, EvidenceExcerpt,
+    OutputExcerptDirection,
+};
 #[cfg(test)]
 use crate::evidence::output_text::PROVIDER_PREVIEW_MAX_CHARS;
 use crate::evidence::output_text::{
-    clean_terminal_control_sequences, provider_output_preview, redact_sensitive_output,
+    clean_terminal_control_sequences, provider_output_preview, redact_sensitive_output_with_policy,
     select_output_lines, truncate_utf8_bytes,
 };
 use crate::evidence::prelude::{
@@ -110,11 +113,126 @@ pub(crate) fn bounded_output_excerpt_for_block(
     max_lines: usize,
     max_bytes: usize,
 ) -> EvidenceExcerpt {
-    bounded_output_excerpt(
+    let mut excerpt = bounded_output_excerpt(
         block.output.terminal_output_ref.as_deref(),
         direction,
         max_lines,
         max_bytes,
+    );
+    let block_status = evidence_capture_status_for_block(block);
+    excerpt.capture_status = match (excerpt.capture_status, block_status) {
+        (EvidenceCaptureStatus::ReadFailed, EvidenceCaptureStatus::Available)
+        | (EvidenceCaptureStatus::ReadFailed, EvidenceCaptureStatus::Truncated) => {
+            EvidenceCaptureStatus::ReadFailed
+        }
+        (_, status) => status,
+    };
+    excerpt
+}
+
+pub(crate) fn bounded_output_head_tail_excerpt_for_block(
+    block: &CommandBlock,
+    max_lines: usize,
+    max_bytes: usize,
+) -> EvidenceExcerpt {
+    let Some(output_ref) = block.output.terminal_output_ref.as_deref() else {
+        return unavailable_excerpt(EvidenceCaptureStatus::Unavailable);
+    };
+    let Ok(text) = std::fs::read_to_string(Path::new(output_ref)) else {
+        let capture_status = match evidence_capture_status_for_block(block) {
+            EvidenceCaptureStatus::Available | EvidenceCaptureStatus::Truncated => {
+                EvidenceCaptureStatus::ReadFailed
+            }
+            status => status,
+        };
+        return unavailable_excerpt(capture_status);
+    };
+
+    let text = clean_terminal_control_sequences(&text);
+    let (redacted, found_sensitive, confirmation_required) =
+        redact_sensitive_output_with_policy(&text);
+    let (line_bounded, line_truncated) = select_output_head_tail_lines(&redacted, max_lines.max(1));
+    let (byte_bounded, byte_truncated) =
+        truncate_utf8_head_tail_bytes(&line_bounded, max_bytes.max(1));
+    let truncated = line_truncated || byte_truncated;
+
+    EvidenceExcerpt {
+        text: Some(byte_bounded),
+        status: if truncated { "truncated" } else { "included" },
+        redaction_status: if found_sensitive {
+            "excerpt_redacted"
+        } else {
+            "excerpt_included"
+        },
+        capture_status: evidence_capture_status_for_block(block),
+        confirmation_required,
+        truncated,
+        truncated_by_lines: line_truncated,
+        truncated_by_bytes: byte_truncated,
+    }
+}
+
+fn select_output_head_tail_lines(text: &str, max_lines: usize) -> (String, bool) {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= max_lines {
+        return (text.to_string(), false);
+    }
+
+    let content_lines = max_lines.saturating_sub(1);
+    let head_lines = content_lines / 2;
+    let tail_lines = content_lines - head_lines;
+    let mut parts = Vec::with_capacity(3);
+    if head_lines > 0 {
+        parts.push(
+            lines
+                .iter()
+                .take(head_lines)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    parts.push("... <truncated>".to_string());
+    if tail_lines > 0 {
+        parts.push(
+            lines
+                .iter()
+                .rev()
+                .take(tail_lines)
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    (parts.join("\n"), true)
+}
+
+fn truncate_utf8_head_tail_bytes(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+
+    const MARKER: &str = "... <truncated>";
+    if max_bytes <= MARKER.len() {
+        return (MARKER[..max_bytes].to_string(), true);
+    }
+    let content_bytes = max_bytes - MARKER.len();
+    let head_bytes = content_bytes / 2;
+    let tail_bytes = content_bytes - head_bytes;
+    let mut head_end = head_bytes.min(value.len());
+    while head_end > 0 && !value.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = value.len().saturating_sub(tail_bytes);
+    while tail_start < value.len() && !value.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    (
+        format!("{}{MARKER}{}", &value[..head_end], &value[tail_start..]),
+        true,
     )
 }
 
@@ -140,16 +258,18 @@ pub(crate) fn bounded_output_excerpt(
     max_bytes: usize,
 ) -> EvidenceExcerpt {
     let Some(output_ref) = output_ref else {
-        return unavailable_excerpt();
+        return unavailable_excerpt(EvidenceCaptureStatus::Unavailable);
     };
     let Ok(text) = std::fs::read_to_string(Path::new(output_ref)) else {
-        return unavailable_excerpt();
+        return unavailable_excerpt(EvidenceCaptureStatus::ReadFailed);
     };
 
     let text = clean_terminal_control_sequences(&text);
-    let (line_bounded, line_truncated) = select_output_lines(&text, direction, max_lines.max(1));
-    let (redacted, found_sensitive) = redact_sensitive_output(&line_bounded);
-    let (byte_bounded, byte_truncated) = truncate_utf8_bytes(&redacted, max_bytes.max(1));
+    let (redacted, found_sensitive, confirmation_required) =
+        redact_sensitive_output_with_policy(&text);
+    let (line_bounded, line_truncated) =
+        select_output_lines(&redacted, direction, max_lines.max(1));
+    let (byte_bounded, byte_truncated) = truncate_utf8_bytes(&line_bounded, max_bytes.max(1));
     let truncated = line_truncated || byte_truncated;
     let redaction_status = if found_sensitive {
         "excerpt_redacted"
@@ -161,6 +281,8 @@ pub(crate) fn bounded_output_excerpt(
         text: Some(byte_bounded),
         status: if truncated { "truncated" } else { "included" },
         redaction_status,
+        capture_status: EvidenceCaptureStatus::Available,
+        confirmation_required,
         truncated,
         truncated_by_lines: line_truncated,
         truncated_by_bytes: byte_truncated,
@@ -168,11 +290,13 @@ pub(crate) fn bounded_output_excerpt(
 }
 
 #[allow(dead_code)]
-fn unavailable_excerpt() -> EvidenceExcerpt {
+fn unavailable_excerpt(capture_status: EvidenceCaptureStatus) -> EvidenceExcerpt {
     EvidenceExcerpt {
         text: None,
         status: "unavailable",
         redaction_status: "excerpt_unavailable",
+        capture_status,
+        confirmation_required: false,
         truncated: false,
         truncated_by_lines: false,
         truncated_by_bytes: false,
@@ -452,7 +576,8 @@ mod tests {
         let output_ref = output.to_str().expect("utf8 output path");
 
         let excerpt = bounded_output_excerpt(Some(output_ref), OutputExcerptDirection::Head, 3, 8);
-        assert_eq!(excerpt.text.as_deref(), Some("alpha\nbr... <truncated>"));
+        assert_eq!(excerpt.text.as_deref(), Some("... <tru"));
+        assert!(excerpt.text.as_deref().unwrap_or_default().len() <= 8);
         assert_eq!(excerpt.status, "truncated");
         assert!(excerpt.truncated);
     }
@@ -469,7 +594,8 @@ mod tests {
         let output_ref = output.to_str().expect("utf8 output path");
 
         let excerpt = bounded_output_excerpt(Some(output_ref), OutputExcerptDirection::Head, 1, 5);
-        assert_eq!(excerpt.text.as_deref(), Some("你... <truncated>"));
+        assert_eq!(excerpt.text.as_deref(), Some("... <"));
+        assert!(excerpt.text.as_deref().unwrap_or_default().len() <= 5);
         assert_eq!(excerpt.status, "truncated");
         assert!(excerpt.truncated);
     }
@@ -501,6 +627,30 @@ mod tests {
     }
 
     #[test]
+    fn bounded_excerpt_redacts_complete_private_key_block() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-evidence-excerpt-private-key-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output = dir.join("output.txt");
+        std::fs::write(
+            &output,
+            "before\n-----BEGIN PRIVATE KEY-----\nc2VjcmV0LWtleS1ib2R5\n-----END PRIVATE KEY-----\nafter\n",
+        )
+        .expect("write output");
+        let output_ref = output.to_str().expect("utf8 output path");
+
+        let excerpt =
+            bounded_output_excerpt(Some(output_ref), OutputExcerptDirection::Head, 10, 1024);
+        let text = excerpt.text.as_deref().unwrap_or_default();
+
+        assert_eq!(excerpt.redaction_status, "excerpt_redacted");
+        assert_eq!(text, "before\n<redacted private key block>\nafter\n");
+        assert!(!text.contains("c2VjcmV0LWtleS1ib2R5"));
+    }
+
+    #[test]
     fn bounded_excerpt_home_path_redaction_does_not_block_delivery() {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/tester".to_string());
         let dir = std::env::temp_dir().join(format!(
@@ -521,9 +671,42 @@ mod tests {
         let excerpt =
             bounded_output_excerpt(Some(output_ref), OutputExcerptDirection::Tail, 10, 1024);
 
-        assert_eq!(excerpt.redaction_status, "excerpt_included");
+        assert_eq!(excerpt.redaction_status, "excerpt_redacted");
         assert!(!excerpt.text.as_deref().unwrap_or_default().contains(&home));
         assert!(excerpt.text.as_deref().unwrap_or_default().contains("~/"));
+    }
+
+    #[test]
+    fn head_tail_redacts_private_key_when_begin_marker_is_outside_selected_lines() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-evidence-head-tail-private-key-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output = dir.join("output.txt");
+        let mut lines = (0..180)
+            .map(|index| format!("ordinary-line-{index}"))
+            .collect::<Vec<_>>();
+        lines[60] = "-----BEGIN PRIVATE KEY-----".to_string();
+        for line in &mut lines[61..150] {
+            *line = "c2VjcmV0LWtleS1ib2R5".to_string();
+        }
+        lines[130] = "PRIVATE-KEY-BODY-MUST-NOT-LEAK".to_string();
+        lines[150] = "-----END PRIVATE KEY-----".to_string();
+        std::fs::write(&output, lines.join("\n")).expect("write output");
+        let block = command_block(
+            "raw-1",
+            "cmd-private-key",
+            Some(output.to_str().expect("utf8 output path")),
+        );
+
+        let excerpt = bounded_output_head_tail_excerpt_for_block(&block, 120, 12 * 1024);
+        let text = excerpt.text.as_deref().unwrap_or_default();
+
+        assert_eq!(excerpt.redaction_status, "excerpt_redacted");
+        assert!(!text.contains("PRIVATE-KEY-BODY-MUST-NOT-LEAK"), "{text}");
+        assert!(!text.contains("c2VjcmV0LWtleS1ib2R5"), "{text}");
+        assert!(text.contains("<redacted private key block>"), "{text}");
     }
 
     #[test]
@@ -541,6 +724,43 @@ mod tests {
             bounded_output_excerpt(Some(output_ref), OutputExcerptDirection::Head, 2, 1024);
 
         assert_eq!(excerpt.text.as_deref(), Some("red\nplain\n"));
+    }
+
+    #[test]
+    fn head_tail_line_budget_includes_marker_for_tiny_limits() {
+        for max_lines in 1..=3 {
+            let (excerpt, truncated) =
+                select_output_head_tail_lines("one\ntwo\nthree\nfour", max_lines);
+
+            assert!(truncated);
+            assert!(excerpt.lines().count() <= max_lines, "{excerpt:?}");
+        }
+    }
+
+    #[test]
+    fn head_tail_byte_truncation_does_not_expand_the_line_budget() {
+        let mut lines = (0..120)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>();
+        lines[59] = "x".repeat(32 * 1024);
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-evidence-head-tail-byte-lines-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output = dir.join("output.txt");
+        std::fs::write(&output, lines.join("\n")).expect("write output");
+        let block = command_block(
+            "raw-1",
+            "cmd-lines",
+            Some(output.to_str().expect("utf8 output path")),
+        );
+
+        let excerpt = bounded_output_head_tail_excerpt_for_block(&block, 120, 12 * 1024);
+
+        assert!(excerpt.truncated_by_bytes);
+        assert!(excerpt.text.as_deref().unwrap_or_default().lines().count() <= 120);
+        assert!(excerpt.text.as_deref().unwrap_or_default().len() <= 12 * 1024);
     }
 
     #[test]
@@ -686,6 +906,7 @@ mod tests {
                 terminal_output_ref: output_ref.map(ToString::to_string),
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         }
     }
 }

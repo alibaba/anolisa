@@ -444,6 +444,18 @@ impl GenAIBuilder {
         text.to_string()
     }
 
+    /// Match a process context against the configured cmdline rules.
+    ///
+    /// Returns the agent name of the first matching allow rule, or `None`.
+    /// Never returns a domain — the result is always a config-defined name.
+    pub(super) fn match_agent_by_ctx(ctx: &ProcessContext) -> Option<String> {
+        default_cmdline_rules()
+            .iter()
+            .filter_map(CmdlineGlobMatcher::from_config)
+            .find(|m| m.matches(ctx))
+            .map(|m| m.info().name.clone())
+    }
+
     /// Resolve agent name from comm string only (no /proc access).
     /// Used for dead-PID drain where the process is already gone.
     pub(super) fn resolve_agent_name_from_comm(
@@ -451,7 +463,8 @@ impl GenAIBuilder {
         pid: u32,
         cache: &impl PidAgentNameCache,
     ) -> Option<String> {
-        // First check the pid→agent_name cache (works even for dead processes)
+        // The cache only ever holds real agent names (config-rule matches); the
+        // connection scanner no longer caches its "domain:<host>" fallback.
         if let Some(name) = cache.get_agent_name(&pid) {
             return Some(name.clone());
         }
@@ -460,11 +473,7 @@ impl GenAIBuilder {
             cmdline_args: vec![],
             exe_path: String::new(),
         };
-        default_cmdline_rules()
-            .iter()
-            .filter_map(CmdlineGlobMatcher::from_config)
-            .find(|m| m.matches(&ctx))
-            .map(|m| m.info().name.clone())
+        Self::match_agent_by_ctx(&ctx)
     }
 
     /// 通过进程名匹配 agent registry，返回已知 agent 名称
@@ -473,7 +482,8 @@ impl GenAIBuilder {
         pid: u32,
         cache: &impl PidAgentNameCache,
     ) -> Option<String> {
-        // First check the pid→agent_name cache (works even for dead processes)
+        // The cache only ever holds real agent names (config-rule matches); the
+        // connection scanner no longer caches its "domain:<host>" fallback.
         if let Some(name) = cache.get_agent_name(&pid) {
             return Some(name.clone());
         }
@@ -498,11 +508,10 @@ impl GenAIBuilder {
             cmdline_args,
             exe_path,
         };
-        default_cmdline_rules()
-            .iter()
-            .filter_map(CmdlineGlobMatcher::from_config)
-            .find(|m| m.matches(&ctx))
-            .map(|m| m.info().name.clone())
+        // Config rule match, else fall back to the *process* comm
+        // (/proc/{pid}/comm) — never the caller's per-event thread comm, which
+        // may be a library thread name such as "HTTP client".
+        Self::match_agent_by_ctx(&ctx).or_else(|| crate::discovery::scanner::read_comm(pid))
     }
 }
 
@@ -787,6 +796,53 @@ mod tests {
         let cache = HashMap::new();
         let result = GenAIBuilder::resolve_agent_name_from_comm("random_process", 99, &cache);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_agent_name_falls_back_to_process_comm() {
+        // Empty cache + a comm that matches no rule must NOT return None (which
+        // would let the caller use the per-event thread comm, e.g. "HTTP
+        // client"). Instead it reads the live process comm from /proc/<pid>/comm.
+        let cache = HashMap::new();
+        let result =
+            GenAIBuilder::resolve_agent_name("random_thread_name", std::process::id(), &cache);
+        assert!(result.is_some());
+        assert!(!result.unwrap().starts_with("domain:"));
+    }
+
+    #[test]
+    fn test_resolve_agent_name_prefers_cached_real_name() {
+        // A cached real agent name (config-rule match) is authoritative and
+        // returned as-is; the cache never holds a "domain:<host>" value.
+        let mut cache = HashMap::new();
+        cache.insert(std::process::id(), "Claude".to_string());
+        let result = GenAIBuilder::resolve_agent_name("x", std::process::id(), &cache);
+        assert_eq!(result, Some("Claude".to_string()));
+    }
+
+    #[test]
+    fn test_match_agent_by_ctx_matches_rule() {
+        // A cmdline whose argv[0] matches the default `claude*` rule resolves to
+        // the configured agent name.
+        let ctx = crate::discovery::matcher::ProcessContext {
+            comm: "claude".to_string(),
+            cmdline_args: vec!["claude".to_string()],
+            exe_path: String::new(),
+        };
+        assert_eq!(
+            GenAIBuilder::match_agent_by_ctx(&ctx),
+            Some("Claude".to_string())
+        );
+    }
+
+    #[test]
+    fn test_match_agent_by_ctx_no_match_returns_none() {
+        let ctx = crate::discovery::matcher::ProcessContext {
+            comm: "x".to_string(),
+            cmdline_args: vec!["some-random-binary".to_string()],
+            exe_path: String::new(),
+        };
+        assert_eq!(GenAIBuilder::match_agent_by_ctx(&ctx), None);
     }
 
     // ─── classify_call_kind_from_raw tests ─────────────────────────────────────

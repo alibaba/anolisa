@@ -821,7 +821,7 @@ fn serialize_user_message_format() {
 
     let s2 = serialize_user_message("hi", None);
     let v2: Value = serde_json::from_str(&s2).unwrap();
-    assert_eq!(v2["session_id"], "default");
+    assert!(v2.get("session_id").is_none());
 }
 
 #[test]

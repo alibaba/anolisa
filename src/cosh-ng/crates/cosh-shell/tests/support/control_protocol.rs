@@ -56,6 +56,7 @@ pub(crate) fn make_request(id: &str) -> AgentRequest {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: vec![],
         context_hints: vec![],
@@ -117,7 +118,6 @@ pub(crate) fn make_cosh_core_adapter(mock_script: &str) -> CoshCoreAdapter {
     CoshCoreAdapter {
         program: mock_cli_path(mock_script),
         allow_model_call: true,
-        session_id: Arc::default(),
-        session_cwd: Arc::default(),
+        session: Arc::default(),
     }
 }

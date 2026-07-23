@@ -12,10 +12,10 @@
 # IMPORTANT: This file is a TEMPLATE. Every value wrapped in
 # `<REPLACE_WITH_...>` (and every `example.invalid` URL) is a placeholder
 # meant to be substituted before the file is published as an actual
-# distribution index. Do NOT copy this file verbatim into
-# `manifests/distribution-index/index.toml` — the host `example.invalid`
-# is reserved by RFC 2606 and will never resolve, so a copy-paste mistake
-# will fail loudly instead of silently fetching the wrong artifact.
+# distribution index on the mirror. Do NOT publish this file verbatim —
+# the host `example.invalid` is reserved by RFC 2606 and will never
+# resolve, so a copy-paste mistake will fail loudly instead of silently
+# fetching the wrong artifact.
 
 schema_version = 1
 channel = "stable"

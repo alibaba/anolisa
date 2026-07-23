@@ -46,6 +46,7 @@ fn make_block(command: &str) -> CommandBlock {
             terminal_output_ref: None,
             terminal_output_bytes: 0,
         },
+        shell_environment_generation: None,
     }
 }
 
@@ -53,7 +54,11 @@ fn make_block(command: &str) -> CommandBlock {
 fn write_executable_hook(dir_name: &str, file_name: &str, body: &str) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = std::env::temp_dir().join(dir_name);
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{dir_name}-{}-{unique}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(file_name);

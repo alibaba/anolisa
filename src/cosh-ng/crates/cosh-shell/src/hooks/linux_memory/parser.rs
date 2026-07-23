@@ -45,7 +45,7 @@ struct PsHeader {
     pid_idx: usize,
     mem_idx: usize,
     rss_idx: Option<usize>,
-    command_idx: Option<usize>,
+    command_idx: usize,
     command_is_tail: bool,
 }
 
@@ -63,13 +63,8 @@ impl PsHeader {
         let pid_idx = schema.index(ColumnSemantic::Pid)?;
         let mem_idx = schema.index(ColumnSemantic::MemPct)?;
         let rss_idx = schema.index(ColumnSemantic::Rss);
-        let command_idx = schema.index(ColumnSemantic::Command);
-        if rss_idx.is_none() && command_idx.is_none() {
-            return None;
-        }
-        let command_is_tail = command_idx
-            .map(|idx| idx + 1 == tokens.len())
-            .unwrap_or(false);
+        let command_idx = schema.index(ColumnSemantic::Command)?;
+        let command_is_tail = command_idx + 1 == tokens.len();
         Some(Self {
             pid_idx,
             mem_idx,
@@ -116,10 +111,7 @@ fn parse_process_row(line: &str, header: &PsHeader) -> Option<ProcessMemoryRow> 
         .rss_idx
         .and_then(|idx| tokens.get(idx))
         .and_then(|value| parse_u64(value));
-    let command = header
-        .command_idx
-        .and_then(|idx| command_from_tokens(&tokens, idx, header.command_is_tail))
-        .unwrap_or_else(|| pid.clone());
+    let command = command_from_tokens(&tokens, header.command_idx, header.command_is_tail)?;
     Some(ProcessMemoryRow {
         pid,
         command,
@@ -137,8 +129,7 @@ fn parse_top_process_row(line: &str, header: &TopHeader) -> Option<ProcessMemory
         .and_then(|idx| tokens.get(idx))
         .and_then(|value| parse_memory_to_mib(value))
         .map(|mib| (mib * 1024.0).round() as u64);
-    let command =
-        command_from_tokens(&tokens, header.command_idx, true).unwrap_or_else(|| pid.clone());
+    let command = command_from_tokens(&tokens, header.command_idx, true)?;
     Some(ProcessMemoryRow {
         pid,
         command,

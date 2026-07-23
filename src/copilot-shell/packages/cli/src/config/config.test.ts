@@ -606,6 +606,10 @@ describe('loadCliConfig', () => {
     // Discriminating: without the env-adopt block, sessionId stays undefined and
     // Config mints a random uuid, so this exact-match assertion fails.
     expect(config.getSessionId()).toBe('sight-corr-abc-123');
+    expect(config.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      'sight-corr-abc-123',
+    );
+    expect(process.env['COSH_SESSION_ID']).toBe('sight-corr-abc-123');
   });
 
   it('ignores an empty COSH_SESSION_ID and mints a fresh id', async () => {
@@ -617,6 +621,30 @@ describe('loadCliConfig', () => {
     // Empty value must be treated as absent (guards the `.length > 0` check).
     expect(config.getSessionId()).not.toBe('');
     expect(config.getSessionId().length).toBeGreaterThan(0);
+    expect(config.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      config.getSessionId(),
+    );
+    expect(process.env['COSH_SESSION_ID']).toBe('');
+  });
+
+  it('keeps ACP chat sessions distinct from launcher correlation', async () => {
+    vi.stubEnv('COSH_SESSION_ID', 'launcher-correlation');
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+
+    const firstConfig = await loadCliConfig({}, argv);
+    const secondConfig = await loadCliConfig({}, argv);
+
+    expect(firstConfig.getSessionId()).not.toBe('launcher-correlation');
+    expect(secondConfig.getSessionId()).not.toBe('launcher-correlation');
+    expect(firstConfig.getSessionId()).not.toBe(secondConfig.getSessionId());
+    expect(firstConfig.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      'launcher-correlation',
+    );
+    expect(secondConfig.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      'launcher-correlation',
+    );
+    expect(process.env['COSH_SESSION_ID']).toBe('launcher-correlation');
   });
 
   describe('Proxy configuration', () => {

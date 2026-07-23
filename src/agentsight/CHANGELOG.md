@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.8.1
+
+### Fixes
+- Replace `lock().unwrap()` with poison-safe `unwrap_or_else` for mutex recovery.
+- Correct SSL library attribution from aws-lc/BoringSSL to OpenSSL 3.x.
+- Add Claude process name to BoringSSL classification.
+- Preserve user config on schema migration instead of overwriting.
+- Don't auto-overwrite invalid JSON configs; record process pid not thread tid in ns pid helper.
+- Downgrade high-frequency event logs from debug to trace to reduce noise.
+
+### Tests
+- Expand unit tests for handlers, interruption store, and token store.
+- Add poison-recovery tests for mutex `unwrap_or_else` changes.
+
+## 0.8.0
+
+### Features
+- Add dashboard token-based authentication with file-only auth config.
+- Add LAN/public IP address display and Chinese output in dashboard CLI.
+- Add ECS security group guide and metadata integration to dashboard.
+- Add conversation grader API and dashboard controls.
+- Add `COSH_SESSION_ID` export for per-run session correlation.
+- Auto-upgrade stale configs via `schema_version`.
+
+### Fixes
+- Fix Codex SSL capture and SSE token extraction.
+- Fix false interruption signals.
+- Persist idle streams and tool results to avoid snapshot loss.
+- Detect SSE stream errors explicitly.
+- Restrict `/health`, `/metrics`, and server auth to localhost/file-only config.
+- Remove `hf-hub` git fork from default build dependency.
+- Fix IMDSv2 token fetching, probe deadlines, and ECS metadata deduplication.
+- Fix RPM build to copy `agentsight.json` into source tarball.
+- Address clippy `single_match`, nested if-let, and architecture boundary issues.
+
+### Tests
+- Add dashboard mock HTTP and unit tests for coverage gate.
+- Add `build_output` and `public_address` tests.
+- Mark probe tests as `#[ignore]` for CI ECS runners.
+
 ## 0.7.1
 
 ### Fixes

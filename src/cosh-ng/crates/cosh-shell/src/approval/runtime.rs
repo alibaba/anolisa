@@ -64,6 +64,7 @@ pub(crate) fn render_approval_actions<W: Write>(
                                 state.agent_run.needs_prompt_after_run = event.cwd.is_none();
                                 start_agent_run(
                                     &request,
+                                    AgentStartIntent::UserInitiated,
                                     adapter,
                                     state,
                                     output,
@@ -124,28 +125,60 @@ pub(crate) fn render_approval_actions<W: Write>(
             continue;
         }
 
+        // Reserve a control-queue slot BEFORE `apply_approval_decision`
+        // consumes durable approval state (status, journal, trust) — but only
+        // when resolving would actually enqueue a fallback Agent
+        // continuation. Direct delivery to the owning provider run, foreground
+        // shell handoffs, and paths that stop the run first consume no queue
+        // slot and must never be blocked: the provider is waiting for exactly
+        // this resolution, and rejecting it would deadlock until it times out.
+        if approval_resolution_needs_queue_slot(state, &state.approvals.requests[request_index])
+            && !control_queue_has_capacity(state)
+        {
+            crate::slash::session::render_control_queue_full_notice(state, output)?;
+            output.flush()?;
+            continue;
+        }
+
         if let Some(decision) = apply_approval_decision(state, request_index, command.kind) {
             if let Some(ref ctrl_request_id) = decision.request.request_id {
                 let outcome = approval_outcome_for_request(state, &decision.request);
                 if outcome == ApprovalOutcome::ProviderNativeShellFallback {
                     let response = provider_approval_response(&decision.request, ctrl_request_id);
-                    if let Some(active_run) = state.agent_run.active.as_mut() {
-                        respond_active_run_approval(active_run, response);
+                    let delivery =
+                        respond_provider_approval_to_owner(state, &decision.request, response);
+                    if delivery == ProviderApprovalDelivery::Responded {
+                        mark_provider_approval_resolved(state);
                     }
-                    mark_provider_approval_resolved(state);
                     clear_active_approval_panel(state, output)?;
                     render_approval_resolution(state, &decision.request, decision.title, output)?;
                     render_current_approval_request(state, output)?;
-                    flush_held_agent_events(state, output)?;
+                    if delivery == ProviderApprovalDelivery::Responded {
+                        flush_held_agent_events(state, output)?;
+                    } else {
+                        recover_undelivered_provider_approval(
+                            delivery,
+                            &decision.request,
+                            event_index,
+                            adapter,
+                            state,
+                            output,
+                        )?;
+                    }
                     continue;
                 }
 
                 if outcome == ApprovalOutcome::ForegroundShellHandoff {
                     render_approval_resolution(state, &decision.request, decision.title, output)?;
-                    if decision.request.status == ApprovalRequestStatus::Approved {
+                    let active_owner = state.agent_run.active.as_ref().is_some_and(|run| {
+                        active_run_owns_provider_approval(run, &decision.request)
+                    });
+                    if decision.request.status == ApprovalRequestStatus::Approved && active_owner {
                         mark_provider_approval_resolved(state);
                     }
-                    if !request_can_receive_host_executed_result(state, &decision.request) {
+                    if active_owner
+                        && !request_can_receive_host_executed_result(state, &decision.request)
+                    {
                         stop_active_agent_run_without_rendering(state, output)?;
                     }
                     queue_approved_shell_handoff(state, &decision.request);
@@ -154,16 +187,28 @@ pub(crate) fn render_approval_actions<W: Write>(
                 }
 
                 let response = provider_approval_response(&decision.request, ctrl_request_id);
-                if let Some(active_run) = state.agent_run.active.as_mut() {
-                    respond_active_run_approval(active_run, response);
-                }
-                if decision.request.status == ApprovalRequestStatus::Approved {
+                let delivery =
+                    respond_provider_approval_to_owner(state, &decision.request, response);
+                if decision.request.status == ApprovalRequestStatus::Approved
+                    && delivery == ProviderApprovalDelivery::Responded
+                {
                     mark_provider_approval_resolved(state);
                 }
                 clear_active_approval_panel(state, output)?;
                 render_approval_resolution(state, &decision.request, decision.title, output)?;
                 render_current_approval_request(state, output)?;
-                flush_held_agent_events(state, output)?;
+                if delivery == ProviderApprovalDelivery::Responded {
+                    flush_held_agent_events(state, output)?;
+                } else {
+                    recover_undelivered_provider_approval(
+                        delivery,
+                        &decision.request,
+                        event_index,
+                        adapter,
+                        state,
+                        output,
+                    )?;
+                }
             } else {
                 render_approval_resolution(state, &decision.request, decision.title, output)?;
                 if decision.run_approved_tool {
@@ -173,7 +218,17 @@ pub(crate) fn render_approval_actions<W: Write>(
                 } else if should_send_approval_resolution_to_agent(state, &decision.request) {
                     stop_active_agent_run_without_rendering(state, output)?;
                     let request = approval_resolution_agent_request(&decision.request);
-                    start_agent_run(&request, adapter, state, output, Some(event_index))?;
+                    // The approval was already resolved (state, journal, and
+                    // possibly trust updated); this continuation must not be
+                    // rejected by a full queue, so it is guaranteed a slot.
+                    start_agent_run_control_response(
+                        &request,
+                        decision.request.origin,
+                        adapter,
+                        state,
+                        output,
+                        Some(event_index),
+                    )?;
                 }
                 render_current_approval_request(state, output)?;
             }
@@ -193,6 +248,104 @@ fn respond_active_run_approval(
         active_run.last_activity_at = std::time::Instant::now();
     }
     responded
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderApprovalDelivery {
+    Responded,
+    OwnerUnavailable,
+    DeliveryFailed,
+}
+
+fn respond_provider_approval_to_owner(
+    state: &mut InlineState,
+    request: &RuntimeApprovalRequest,
+    response: ApprovalResponse,
+) -> ProviderApprovalDelivery {
+    let Some(active_run) = state.agent_run.active.as_mut() else {
+        return ProviderApprovalDelivery::OwnerUnavailable;
+    };
+    if !active_run_owns_provider_approval(active_run, request) {
+        return ProviderApprovalDelivery::OwnerUnavailable;
+    }
+    if respond_active_run_approval(active_run, response) {
+        ProviderApprovalDelivery::Responded
+    } else {
+        ProviderApprovalDelivery::DeliveryFailed
+    }
+}
+
+fn active_run_owns_provider_approval(
+    active_run: &ActiveAgentRun,
+    request: &RuntimeApprovalRequest,
+) -> bool {
+    active_run.governed_events.iter().any(|event| {
+        matches!(
+            &event.event,
+            AgentEvent::ToolPermissionRequest {
+                run_id,
+                request_id,
+                ..
+            } if run_id == &request.run_id
+                && Some(request_id.as_str()) == request.request_id.as_deref()
+        )
+    })
+}
+
+/// Whether resolving this approval would consume a control-queue slot.
+///
+/// Mirrors the delivery plan in [`render_approval_actions`]:
+/// - a pending or running compaction holds every continuation in the queue;
+/// - with no active run the recovery continuation starts immediately;
+/// - a control request owned by the active run is delivered directly (a
+///   runtime delivery failure stops that run first, so its recovery also
+///   starts immediately);
+/// - approvals without a control request id stop the run before any
+///   continuation;
+/// - only a non-owner active run is kept alive by the `OwnerUnavailable`
+///   recovery and forces the continuation into the queue. (This is slightly
+///   conservative for handoff outcomes that never enqueue, which is safe:
+///   the card stays pending and retryable.)
+fn approval_resolution_needs_queue_slot(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> bool {
+    if crate::slash::session::compaction_pending_or_active(state) {
+        return true;
+    }
+    let Some(active_run) = state.agent_run.active.as_ref() else {
+        return false;
+    };
+    if request.request_id.is_none() {
+        return false;
+    }
+    !active_run_owns_provider_approval(active_run, request)
+}
+
+fn recover_undelivered_provider_approval<W: Write>(
+    delivery: ProviderApprovalDelivery,
+    request: &RuntimeApprovalRequest,
+    event_index: usize,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if delivery == ProviderApprovalDelivery::DeliveryFailed {
+        stop_active_agent_run_without_rendering(state, output)?;
+    }
+    let continuation = approval_resolution_agent_request(request);
+    // Recovery of an undelivered approval resolution: the approval is already
+    // resolved, so this control-protocol continuation is guaranteed a queue
+    // slot rather than risking a queue-full rejection it cannot retry.
+    start_agent_run_control_response(
+        &continuation,
+        request.origin,
+        adapter,
+        state,
+        output,
+        Some(event_index),
+    )
+    .map(|_disposition| ())
 }
 
 pub(crate) fn render_approval_resolution<W: Write>(

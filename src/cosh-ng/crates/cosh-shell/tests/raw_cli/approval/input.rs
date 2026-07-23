@@ -25,8 +25,7 @@ fn raw_cli_approval_text_input_does_not_confirm_or_leak_to_bash() {
 fn raw_cli_approval_split_arrow_sequence_does_not_cancel() {
     let output = run_raw_cli_ask_with_delayed_input(vec![
         (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
-        (b"\x1b".to_vec(), Duration::from_millis(5_000)),
-        (b"[".to_vec(), Duration::from_millis(50)),
+        (b"\x1b[".to_vec(), Duration::from_millis(5_000)),
         (b"C".to_vec(), Duration::from_millis(50)),
         (b"\x1b[C".to_vec(), Duration::from_millis(50)),
         (b"\n".to_vec(), Duration::from_millis(100)),

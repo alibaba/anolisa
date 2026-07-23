@@ -76,6 +76,7 @@ export class McpClientManager {
           this.cliConfig.getWorkspaceContext(),
           this.cliConfig.getDebugMode(),
           sdkCallback,
+          this.cliConfig.getChildProcessEnv(config.env),
         );
         this.clients.set(name, client);
 

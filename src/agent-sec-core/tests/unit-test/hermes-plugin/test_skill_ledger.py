@@ -139,11 +139,11 @@ class TestSkillLedgerHooks:
         ],
     )
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_skillfs_inplace_root_fails_open_with_short_notice(
+    def test_skillfs_inplace_sentinel_does_not_bypass_ledger(
         self, mock_cli, tmp_path, sentinel
     ):
         root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
+        skill_dir = _make_skill(root, "devops/risky")
         sentinel_path = root / sentinel
         if sentinel_path.name == "SKILL.md":
             sentinel_path.parent.mkdir(parents=True)
@@ -153,18 +153,22 @@ class TestSkillLedgerHooks:
         else:
             sentinel_path.mkdir(parents=True)
         cap = _make_capability(root, policy="warn")
+        mock_cli.return_value = _cli_status("pass")
 
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
+        result = cap._on_pre_tool_call(
+            "skill_view", {"name": "devops/risky"}, session_id="s1"
+        )
         output = cap._on_transform_llm_output(
             response_text="assistant response", session_id="s1"
         )
 
         assert result is None
-        mock_cli.assert_not_called()
-        assert (
-            output
-            == "暂不支持Hermes场景，请自行关注skill安全性。\n\nassistant response"
+        mock_cli.assert_called_once_with(
+            ["skill-ledger", "show", str(skill_dir.resolve())],
+            timeout=5.0,
+            trace_context={"agent_name": "hermes", "session_id": "s1"},
         )
+        assert output is None
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_skillfs_inplace_root_debug_policy_only_logs(
@@ -174,6 +178,7 @@ class TestSkillLedgerHooks:
         _make_skill(root, "devops/risky")
         (root / ".skillfs-inbox").mkdir()
         cap = _make_capability(root, policy="debug")
+        mock_cli.return_value = _cli_status("warn")
         caplog.set_level(logging.DEBUG, logger="agent-sec-core")
 
         result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
@@ -182,26 +187,53 @@ class TestSkillLedgerHooks:
         )
 
         assert result is None
-        mock_cli.assert_not_called()
+        mock_cli.assert_called_once()
         assert output is None
         assert not cap._warnings_by_context
-        assert any("暂不支持Hermes场景" in record.message for record in caplog.records)
+        assert not any(
+            "暂不支持Hermes场景" in record.message for record in caplog.records
+        )
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_skillfs_inplace_root_block_policy_does_not_block(self, mock_cli, tmp_path):
+    def test_skillfs_inplace_root_block_policy_uses_ledger_result(
+        self, mock_cli, tmp_path
+    ):
         root = tmp_path / "skills"
         _make_skill(root, "devops/risky")
         (root / ".skillfs-inbox").mkdir()
         cap = _make_capability(root, policy="block")
+        mock_cli.return_value = _cli_status("warn")
 
         result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
         output = cap._on_transform_llm_output(
             response_text="assistant response", session_id="s1"
         )
 
-        assert result is None
-        mock_cli.assert_not_called()
+        assert result["action"] == "block"
+        mock_cli.assert_called_once()
         assert output is None
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_hidden_nested_skill_is_forwarded_as_canonical_path(
+        self, mock_cli, tmp_path
+    ):
+        root = tmp_path / "skills"
+        root.mkdir()
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("pass")
+
+        result = cap._on_pre_tool_call(
+            "skill_view",
+            {"name": "apple/apple-notes"},
+            session_id="s1",
+        )
+
+        assert result is None
+        mock_cli.assert_called_once_with(
+            ["skill-ledger", "show", str(root / "apple" / "apple-notes")],
+            timeout=5.0,
+            trace_context={"agent_name": "hermes", "session_id": "s1"},
+        )
 
     @patch("src.capabilities.skill_ledger.Path.rglob")
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
@@ -630,6 +662,21 @@ class TestSkillResolution:
         assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_symlink_skills_root_preserves_canonical_path(self, mock_cli, tmp_path):
+        physical_root = tmp_path / "physical-skills"
+        _make_skill(physical_root, "mlops/axolotl")
+        canonical_root = tmp_path / "skills"
+        canonical_root.symlink_to(physical_root, target_is_directory=True)
+        cap = _make_capability(canonical_root)
+        mock_cli.return_value = _cli_status("pass")
+
+        cap._on_pre_tool_call("skill_view", {"name": "mlops/axolotl"})
+
+        canonical_skill_dir = canonical_root / "mlops" / "axolotl"
+        assert mock_cli.call_args[0][0][-1] == str(canonical_skill_dir)
+        assert canonical_skill_dir != canonical_skill_dir.resolve()
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_frontmatter_name_is_not_used_for_resolution(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(
@@ -683,6 +730,37 @@ class TestSkillResolution:
         cap = _make_capability(root)
 
         result = cap._on_pre_tool_call("skill_view", {"name": "hidden"})
+
+        assert result is None
+        mock_cli.assert_not_called()
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_qualified_internal_dir_is_not_resolved(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        root.mkdir()
+        cap = _make_capability(root)
+
+        result = cap._on_pre_tool_call(
+            "skill_view",
+            {"name": ".archive/hidden"},
+        )
+
+        assert result is None
+        mock_cli.assert_not_called()
+
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_qualified_symlink_escape_is_not_resolved(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        outside = tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+        (root / "linked").symlink_to(outside, target_is_directory=True)
+        cap = _make_capability(root)
+
+        result = cap._on_pre_tool_call(
+            "skill_view",
+            {"name": "linked/hidden"},
+        )
 
         assert result is None
         mock_cli.assert_not_called()

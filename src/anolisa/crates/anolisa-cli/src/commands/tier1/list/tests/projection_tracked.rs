@@ -1,7 +1,8 @@
-use anolisa_core::state::{ObjectStatus, Ownership};
+use anolisa_core::domain::LifecycleStatus;
 
 use super::support::{
-    FakeRpmQuery, pkg_info, projection_for, rpm_component_object, state_with_component_object,
+    FakeRpmQuery, adopted, pkg_info, projection_for, rpm_component_object,
+    state_with_component_object,
 };
 
 #[test]
@@ -16,8 +17,8 @@ fn tracked_rpm_observed_projection_keeps_compatibility_status_available() {
     };
     let state = state_with_component_object(rpm_component_object(
         "agentsight",
-        ObjectStatus::Adopted,
-        Ownership::RpmObserved,
+        LifecycleStatus::Installed,
+        adopted(),
         "agentsight",
         "1.2.3-1.al8",
     ));
@@ -25,7 +26,7 @@ fn tracked_rpm_observed_projection_keeps_compatibility_status_available() {
     let projection = projection_for("agentsight", &state, &query);
 
     assert_eq!(projection.local_state_label(), "tracked");
-    assert_eq!(projection.ownership_label(), "rpm-observed");
+    assert_eq!(projection.ownership_label(), "adopted");
     assert_eq!(projection.action_label(), "status");
     assert_eq!(projection.status, "adopted");
 }
@@ -34,8 +35,8 @@ fn tracked_rpm_observed_projection_keeps_compatibility_status_available() {
 fn tracked_rpm_observed_projection_surfaces_rpm_drift_and_missing() {
     let state = state_with_component_object(rpm_component_object(
         "agentsight",
-        ObjectStatus::Adopted,
-        Ownership::RpmObserved,
+        LifecycleStatus::Installed,
+        adopted(),
         "agentsight",
         "1.2.3-1.al8",
     ));
@@ -64,16 +65,16 @@ fn tracked_rpm_observed_projection_surfaces_rpm_drift_and_missing() {
 fn tracked_rpm_problem_states_do_not_run_drift_probe() {
     let query = FakeRpmQuery::default();
     let cases = [
-        (ObjectStatus::Failed, "failed"),
-        (ObjectStatus::Partial, "degraded"),
-        (ObjectStatus::Disabled, "disabled"),
+        (LifecycleStatus::Failed, "failed"),
+        (LifecycleStatus::Partial, "degraded"),
+        (LifecycleStatus::Disabled, "disabled"),
     ];
 
     for (status, expected_state) in cases {
         let state = state_with_component_object(rpm_component_object(
             "agentsight",
             status,
-            Ownership::RpmObserved,
+            adopted(),
             "agentsight",
             "1.2.3-1.al8",
         ));

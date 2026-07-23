@@ -58,8 +58,9 @@ pub fn handle(mut args: LogsArgs, ctx: &CliContext) -> Result<(), CliError> {
     // Resolve component alias (e.g., "copilot-shell" → "cosh") before
     // filtering — log records store the canonical component name.
     if let Some(component) = args.component.take() {
-        let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-        args.component = Some(common::lookup_component_name(
+        let installed = common::load_state_store(ctx, COMMAND)
+            .unwrap_or_else(|_| anolisa_core::state_store::StateStore::empty());
+        args.component = Some(common::lookup_component_name_in_store(
             &component, &installed, ctx, COMMAND,
         ));
     }

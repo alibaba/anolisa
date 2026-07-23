@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default)]
 pub(crate) struct ProviderToolState {
-    commands: HashMap<String, RuntimeProviderToolCommand>,
+    commands: HashMap<ProviderToolKey, RuntimeProviderToolCommand>,
     pending_shell_commands: Vec<PendingProviderShellCommand>,
-    shell_tool_ids: HashSet<String>,
-    control_permission_shell_tool_ids: HashSet<String>,
-    outputs: HashMap<String, String>,
-    stderr: HashMap<String, String>,
-    rendered_shell_transcript_commands: HashSet<String>,
-    rendered_shell_transcript_outputs: HashSet<String>,
+    shell_tool_ids: HashSet<ProviderToolKey>,
+    control_permission_shell_tool_ids: HashSet<ProviderToolKey>,
+    outputs: HashMap<ProviderToolKey, String>,
+    stderr: HashMap<ProviderToolKey, String>,
+    rendered_shell_transcript_commands: HashSet<ProviderToolKey>,
+    rendered_shell_transcript_outputs: HashSet<ProviderToolKey>,
     delivered_host_executed_shell_results: HashSet<String>,
     foreground_shell_commands: HashSet<String>,
 }
@@ -34,7 +34,8 @@ impl ProviderToolState {
         tool_id: &str,
         input: &str,
     ) -> bool {
-        self.shell_tool_ids.insert(tool_id.to_string());
+        self.shell_tool_ids
+            .insert(ProviderToolKey::new(run_id, tool_id));
         let command = provider_tool_command_from_text(input);
         let Some(command) = command else {
             return false;
@@ -56,9 +57,10 @@ impl ProviderToolState {
     }
 
     fn record_command(&mut self, run_id: &str, tool_id: &str, command: String) {
-        self.shell_tool_ids.insert(tool_id.to_string());
+        let key = ProviderToolKey::new(run_id, tool_id);
+        self.shell_tool_ids.insert(key.clone());
         self.commands.insert(
-            tool_id.to_string(),
+            key,
             RuntimeProviderToolCommand {
                 run_id: run_id.to_string(),
                 tool_id: tool_id.to_string(),
@@ -67,22 +69,28 @@ impl ProviderToolState {
         );
     }
 
-    pub(crate) fn command(&self, tool_id: &str) -> Option<&RuntimeProviderToolCommand> {
-        self.commands.get(tool_id)
+    pub(crate) fn command(
+        &self,
+        run_id: &str,
+        tool_id: &str,
+    ) -> Option<&RuntimeProviderToolCommand> {
+        self.commands.get(&ProviderToolKey::new(run_id, tool_id))
     }
 
-    pub(crate) fn is_shell_tool(&self, tool_id: &str) -> bool {
-        self.shell_tool_ids.contains(tool_id) || self.commands.contains_key(tool_id)
+    pub(crate) fn is_shell_tool(&self, run_id: &str, tool_id: &str) -> bool {
+        let key = ProviderToolKey::new(run_id, tool_id);
+        self.shell_tool_ids.contains(&key) || self.commands.contains_key(&key)
     }
 
-    pub(crate) fn mark_control_permission_shell_tool(&mut self, tool_id: &str) {
-        self.shell_tool_ids.insert(tool_id.to_string());
+    pub(crate) fn mark_control_permission_shell_tool(&mut self, run_id: &str, tool_id: &str) {
+        let key = ProviderToolKey::new(run_id, tool_id);
+        self.shell_tool_ids.insert(key.clone());
+        self.control_permission_shell_tool_ids.insert(key);
+    }
+
+    pub(crate) fn is_control_permission_shell_tool(&self, run_id: &str, tool_id: &str) -> bool {
         self.control_permission_shell_tool_ids
-            .insert(tool_id.to_string());
-    }
-
-    pub(crate) fn is_control_permission_shell_tool(&self, tool_id: &str) -> bool {
-        self.control_permission_shell_tool_ids.contains(tool_id)
+            .contains(&ProviderToolKey::new(run_id, tool_id))
     }
 
     pub(crate) fn record_output_delta(
@@ -93,17 +101,18 @@ impl ProviderToolState {
         text: &str,
     ) {
         self.adopt_pending_shell_command(run_id, tool_id);
-        self.outputs
-            .entry(tool_id.to_string())
-            .or_default()
-            .push_str(text);
+        let key = ProviderToolKey::new(run_id, tool_id);
+        self.outputs.entry(key.clone()).or_default().push_str(text);
         if stream == "stderr" {
-            self.stderr.insert(tool_id.to_string(), text.to_string());
+            self.stderr.insert(key, text.to_string());
         }
     }
 
     fn adopt_pending_shell_command(&mut self, run_id: &str, tool_id: &str) {
-        if self.commands.contains_key(tool_id) {
+        if self
+            .commands
+            .contains_key(&ProviderToolKey::new(run_id, tool_id))
+        {
             return;
         }
         let Some(index) = self
@@ -117,53 +126,59 @@ impl ProviderToolState {
         self.record_command(&pending.run_id, tool_id, pending.command);
     }
 
-    pub(crate) fn stderr(&self, tool_id: &str) -> Option<&str> {
-        self.stderr.get(tool_id).map(String::as_str)
+    pub(crate) fn stderr(&self, run_id: &str, tool_id: &str) -> Option<&str> {
+        self.stderr
+            .get(&ProviderToolKey::new(run_id, tool_id))
+            .map(String::as_str)
     }
 
-    pub(crate) fn output_text(&self, tool_id: &str) -> Option<String> {
-        self.outputs.get(tool_id).cloned()
+    pub(crate) fn output_text(&self, run_id: &str, tool_id: &str) -> Option<String> {
+        self.outputs
+            .get(&ProviderToolKey::new(run_id, tool_id))
+            .cloned()
     }
 
     pub(crate) fn interactive_failure_command(
         &self,
+        run_id: &str,
         tool_id: &str,
         status: &str,
     ) -> Option<&RuntimeProviderToolCommand> {
         if !matches!(status, "error" | "failed" | "interrupted") {
             return None;
         }
-        let stderr = self.stderr(tool_id)?;
+        let stderr = self.stderr(run_id, tool_id)?;
         if !looks_interactive_tool_failure(stderr) {
             return None;
         }
-        self.command(tool_id)
+        self.command(run_id, tool_id)
     }
 
-    pub(crate) fn claim_shell_transcript_command(&mut self, tool_id: &str) -> bool {
+    pub(crate) fn claim_shell_transcript_command(&mut self, run_id: &str, tool_id: &str) -> bool {
         self.rendered_shell_transcript_commands
-            .insert(tool_id.to_string())
+            .insert(ProviderToolKey::new(run_id, tool_id))
     }
 
-    pub(crate) fn mark_shell_transcript_output(&mut self, tool_id: &str) {
+    pub(crate) fn mark_shell_transcript_output(&mut self, run_id: &str, tool_id: &str) {
         self.rendered_shell_transcript_outputs
-            .insert(tool_id.to_string());
+            .insert(ProviderToolKey::new(run_id, tool_id));
     }
 
-    pub(crate) fn mark_shell_transcript_seen(&mut self, tool_id: &str) {
-        self.rendered_shell_transcript_commands
-            .insert(tool_id.to_string());
+    pub(crate) fn mark_shell_transcript_seen(&mut self, run_id: &str, tool_id: &str) {
+        let key = ProviderToolKey::new(run_id, tool_id);
+        self.rendered_shell_transcript_commands.insert(key.clone());
+        self.rendered_shell_transcript_outputs.insert(key);
+    }
+
+    pub(crate) fn shell_transcript_output_seen(&self, run_id: &str, tool_id: &str) -> bool {
         self.rendered_shell_transcript_outputs
-            .insert(tool_id.to_string());
+            .contains(&ProviderToolKey::new(run_id, tool_id))
     }
 
-    pub(crate) fn shell_transcript_output_seen(&self, tool_id: &str) -> bool {
-        self.rendered_shell_transcript_outputs.contains(tool_id)
-    }
-
-    pub(crate) fn shell_transcript_seen(&self, tool_id: &str) -> bool {
-        self.rendered_shell_transcript_commands.contains(tool_id)
-            || self.rendered_shell_transcript_outputs.contains(tool_id)
+    pub(crate) fn shell_transcript_seen(&self, run_id: &str, tool_id: &str) -> bool {
+        let key = ProviderToolKey::new(run_id, tool_id);
+        self.rendered_shell_transcript_commands.contains(&key)
+            || self.rendered_shell_transcript_outputs.contains(&key)
     }
 
     pub(crate) fn mark_foreground_shell_command(&mut self, command: &str) -> bool {
@@ -180,10 +195,11 @@ impl ProviderToolState {
 
     pub(crate) fn claim_host_executed_shell_result(
         &mut self,
+        run_id: &str,
         request_id: &str,
         tool_use_id: Option<&str>,
     ) -> Option<HostExecutedShellResultClaim> {
-        let key = host_executed_shell_result_key(request_id, tool_use_id);
+        let key = host_executed_shell_result_key(run_id, request_id, tool_use_id);
         if self
             .delivered_host_executed_shell_results
             .insert(key.clone())
@@ -196,11 +212,16 @@ impl ProviderToolState {
 
     pub(crate) fn host_executed_shell_result_delivered(
         &self,
+        run_id: &str,
         request_id: &str,
         tool_use_id: Option<&str>,
     ) -> bool {
         self.delivered_host_executed_shell_results
-            .contains(&host_executed_shell_result_key(request_id, tool_use_id))
+            .contains(&host_executed_shell_result_key(
+                run_id,
+                request_id,
+                tool_use_id,
+            ))
     }
 
     pub(crate) fn release_host_executed_shell_result(
@@ -209,6 +230,21 @@ impl ProviderToolState {
     ) {
         self.delivered_host_executed_shell_results
             .remove(&claim.key);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProviderToolKey {
+    run_id: String,
+    tool_id: String,
+}
+
+impl ProviderToolKey {
+    fn new(run_id: &str, tool_id: &str) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            tool_id: tool_id.to_string(),
+        }
     }
 }
 
@@ -273,10 +309,15 @@ fn looks_interactive_tool_failure(stderr: &str) -> bool {
     .any(|needle| stderr.contains(needle))
 }
 
-fn host_executed_shell_result_key(request_id: &str, tool_use_id: Option<&str>) -> String {
+fn host_executed_shell_result_key(
+    run_id: &str,
+    request_id: &str,
+    tool_use_id: Option<&str>,
+) -> String {
+    let run = format!("{}:{run_id}", run_id.len());
     match tool_use_id {
-        Some(tool_use_id) => format!("tool:{tool_use_id}"),
-        None => format!("request:{request_id}"),
+        Some(tool_use_id) => format!("run:{run}:tool:{tool_use_id}"),
+        None => format!("run:{run}:request:{request_id}"),
     }
 }
 
@@ -289,18 +330,21 @@ mod tests {
         let mut state = ProviderToolState::default();
 
         let claim = state
-            .claim_host_executed_shell_result("req-1", Some("call-1"))
+            .claim_host_executed_shell_result("run-1", "req-1", Some("call-1"))
             .expect("claim");
         assert!(state
-            .claim_host_executed_shell_result("req-1", Some("call-1"))
+            .claim_host_executed_shell_result("run-1", "req-1", Some("call-1"))
             .is_none());
-        assert!(state.host_executed_shell_result_delivered("req-1", Some("call-1")));
-        assert!(!state.host_executed_shell_result_delivered("req-1", Some("call-2")));
+        assert!(state.host_executed_shell_result_delivered("run-1", "req-1", Some("call-1")));
+        assert!(!state.host_executed_shell_result_delivered("run-1", "req-1", Some("call-2")));
+        assert!(state
+            .claim_host_executed_shell_result("run-2", "req-1", Some("call-1"))
+            .is_some());
 
         state.release_host_executed_shell_result(claim);
-        assert!(!state.host_executed_shell_result_delivered("req-1", Some("call-1")));
+        assert!(!state.host_executed_shell_result_delivered("run-1", "req-1", Some("call-1")));
         assert!(state
-            .claim_host_executed_shell_result("req-1", Some("call-1"))
+            .claim_host_executed_shell_result("run-1", "req-1", Some("call-1"))
             .is_some());
     }
 
@@ -321,7 +365,7 @@ mod tests {
         );
 
         let command = state
-            .interactive_failure_command("tool-1", "error")
+            .interactive_failure_command("run-1", "tool-1", "error")
             .expect("interactive failure command");
         assert_eq!(command.run_id, "run-1");
         assert_eq!(command.tool_id, "tool-1");
@@ -335,9 +379,35 @@ mod tests {
         assert!(state.record_pending_shell_command("run-1", "df -h"));
         state.record_output_delta("run-1", "toolu-1", "stdout", "Filesystem\n");
 
-        let command = state.command("toolu-1").expect("command");
+        let command = state.command("run-1", "toolu-1").expect("command");
         assert_eq!(command.run_id, "run-1");
         assert_eq!(command.tool_id, "toolu-1");
         assert_eq!(command.command, "df -h");
+    }
+
+    #[test]
+    fn provider_tool_state_does_not_reuse_stderr_across_runs() {
+        let mut state = ProviderToolState::default();
+
+        assert!(state.record_command_from_input(
+            "run-1",
+            "tool-1",
+            &serde_json::json!({ "command": "sudo first" }),
+        ));
+        state.record_output_delta(
+            "run-1",
+            "tool-1",
+            "stderr",
+            "sudo: a terminal is required\n",
+        );
+        assert!(state.record_command_from_input(
+            "run-2",
+            "tool-1",
+            &serde_json::json!({ "command": "printf safe" }),
+        ));
+
+        assert!(state
+            .interactive_failure_command("run-2", "tool-1", "error")
+            .is_none());
     }
 }

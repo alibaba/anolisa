@@ -329,6 +329,7 @@ mod tests {
                 terminal_output_ref: output_ref.map(ToString::to_string),
                 terminal_output_bytes: 42,
             },
+            shell_environment_generation: None,
         }
     }
 
@@ -532,6 +533,8 @@ mod tests {
         let mut block = make_block("x", 0, 1000, None);
         block.command = "curl https://example.test/api?token=query-secret --password cli-secret -H Authorization: Bearer bearer-secret ghp_abcdefghijklmnopqrstuvwxyz123456"
             .to_string();
+        block.cwd = "/tmp/token=cwd-secret".to_string();
+        block.end_cwd = "/tmp/token=end-cwd-secret".to_string();
 
         let line = provider_safe_command_fact_line(&block);
 
@@ -544,6 +547,25 @@ mod tests {
         assert!(!line.contains("bearer-secret"), "{line}");
         assert!(!line.contains("ghp_"), "{line}");
         assert!(!line.contains("abcdefghijklmnopqrstuvwxyz123456"), "{line}");
+        assert!(!line.contains("cwd-secret"), "{line}");
+        assert!(!line.contains("end-cwd-secret"), "{line}");
+    }
+
+    #[test]
+    fn provider_safe_command_facts_redact_home_in_working_directories() {
+        let Some(home) = std::env::var("HOME").ok().filter(|home| !home.is_empty()) else {
+            return;
+        };
+        let mut block = make_block("x", 0, 1000, None);
+        block.cwd = format!("{home}/repo");
+        block.end_cwd = format!("{home}/repo/subdir");
+
+        let facts = provider_safe_command_facts(&block);
+
+        assert_eq!(facts.cwd, "~/repo");
+        assert_eq!(facts.end_cwd, "~/repo/subdir");
+        let line = provider_safe_command_fact_line(&block);
+        assert!(!line.contains(&home), "{line}");
     }
 
     #[test]

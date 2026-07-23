@@ -68,6 +68,19 @@ fn unknown_option_renders_clap_diagnostic_to_stderr() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
 }
 
+#[test]
+fn doctor_fix_help_matches_reserved_behavior() {
+    let help = run(&["doctor", "--help"]);
+    assert_eq!(Some(0), help.status.code());
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("returns `NOT_IMPLEMENTED`"));
+    assert!(!help.contains("executes the fix plan"));
+
+    let fix = run(&["doctor", "--fix"]);
+    assert_eq!(Some(64), fix.status.code());
+    assert!(String::from_utf8_lossy(&fix.stderr).contains("NOT_IMPLEMENTED"));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn help_reports_stdout_failure_when_output_device_is_full() {

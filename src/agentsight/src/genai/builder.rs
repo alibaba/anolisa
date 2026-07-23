@@ -344,12 +344,16 @@ impl GenAIBuilder {
         // Extract provider from request path
         let provider = self.extract_provider_from_path(&request.path);
 
-        // Resolve agent_name: check pid→name cache first, then comm-based matching, then comm as fallback
+        // Resolve agent_name: cache → cmdline rule → *process* comm
+        // (/proc/<pid>/comm). Only if /proc is unreadable do we fall back to the
+        // SSL event's per-event thread comm, which may be a library worker-thread
+        // name such as "HTTP client".
         let agent_name = Self::resolve_agent_name_from_comm(
             &request.source_event.comm,
             conn_id.pid,
             pid_agent_name_cache,
         )
+        .or_else(|| crate::discovery::scanner::read_comm(conn_id.pid))
         .or_else(|| Some(request.source_event.comm_str()));
 
         // 从 request body.metadata 提取 session_id（复用 types.rs 共享函数）
@@ -402,7 +406,9 @@ impl GenAIBuilder {
             session_id,
             start_timestamp_ns: request.source_event.timestamp_ns,
             pid: pid_i32,
-            process_name: request.source_event.comm.clone(),
+            // Process name = the *process* comm, not the per-event thread comm.
+            process_name: crate::discovery::scanner::read_comm(conn_id.pid)
+                .unwrap_or_else(|| request.source_event.comm.clone()),
             agent_name,
             http_method: Some(request.method.clone()),
             http_path: Some(request.path.clone()),

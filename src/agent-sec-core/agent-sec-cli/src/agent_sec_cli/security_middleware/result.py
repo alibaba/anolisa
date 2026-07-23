@@ -13,6 +13,7 @@ class ActionResult:
         stdout:     Text output suitable for CLI passthrough / display.
         exit_code:  Numeric exit code (0 = success, non-zero = failure).
         error:      Human-readable error description (empty on success).
+        error_type: Structured, message-free product error classification.
     """
 
     success: bool
@@ -20,3 +21,4 @@ class ActionResult:
     stdout: str = ""
     exit_code: int = 0
     error: str = ""
+    error_type: str = ""

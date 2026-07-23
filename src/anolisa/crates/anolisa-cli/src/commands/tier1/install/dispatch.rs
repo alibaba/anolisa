@@ -1,51 +1,94 @@
-//! Command dispatch: backend selection (Layer 1/2), raw/RPM routing, and
-//! compatibility checks for the `install` command.
+//! Command dispatch for `install`: provider-family selection, target
+//! resolution, and the observe → plan → execute pipeline for one component.
+//!
+//! The handler resolves the requested component to a [`ProviderTarget`],
+//! assembles host facts, asks the planner for a step sequence (decision
+//! table I1–I11), and hands it to the matching executor: an owned plan runs
+//! through [`RawInstallOps`], a delegated plan re-uses the native-transaction
+//! executor with a [`StoreRecordSink`]. No lifecycle policy lives here.
 
-use anolisa_core::state::{InstalledObject, InstalledState, ObjectKind};
+use std::path::Path;
+
+use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
+use anolisa_core::facts::{
+    FactsError, JournalEvidence, ObserveRequest, assemble_facts, pending_journal_for,
+};
+use anolisa_core::lock::InstallLock;
+use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
+use anolisa_core::planner::{
+    HookKind, InstallRequest, Intent, NativeProbe, Plan, PlanError, ProviderTarget, Step, plan,
+};
+use anolisa_core::providers::{DelegatedProvider, ProviderError};
+use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
+use anolisa_core::state::{ObjectKind, OperationRecord};
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
+use anolisa_platform::pkg_transaction::PackageTransaction;
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
+use chrono::{SecondsFormat, Utc};
+use serde::Serialize;
+
+use anolisa_core::domain::{InstallationScope, NativePm, ProviderBinding};
 
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::recovery::LockedJournalGate;
+use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url,
 };
 use crate::resolution::{
-    BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolutionUse, ResolveOptions,
+    BackendKind, ComponentResolver, ResolutionSet, ResolutionUse, ResolveOptions,
     load_optional_component_index,
 };
-use crate::response::CliError;
+use crate::response::{CliError, render_json};
 
-use super::InstallArgs;
-use super::raw::{build_install_preview, execute_raw, prepare_raw_execution, resolve_raw};
-use super::render::render_plan;
+use super::owned_ops::{
+    RawInstallOps, ValidatedInstall, installed_version_label, validate_owned_install,
+};
+use super::raw::resolve_raw;
 use super::render::repo_config_err;
-use super::rpm::{RpmExec, RpmSituation, probe_rpm_situation, route_rpm_adopt};
-use super::types::*;
+use super::rpm::{RpmTarget, rpm_package_candidates_with_index};
+use super::types::{InstallOutcome, RawResolution, ResolveInputs};
+use super::{ANOLISA_RPM_REPO_ID, COMMAND, InstallArgs};
 
-use super::{ANOLISA_RPM_REPO_ID, COMMAND};
+/// Dispatch `install <component>` against the live host.
 pub(crate) fn handle_one(
     component: String,
     args: InstallArgs,
     ctx: &CliContext,
 ) -> Result<InstallOutcome, CliError> {
+    let (query, txn) = host_backends(&component, &args, ctx)?;
+    install_component_with_deps(&component, &args, ctx, &query, &txn, privilege::is_root())
+}
+
+/// Real host backends for one component invocation.
+///
+/// The backends receive the repo.toml RPM source when the rpm family will
+/// execute, so availability probes and install transactions do not silently
+/// fall back to the host's enabled system repos.
+pub(crate) fn host_backends(
+    component: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+) -> Result<(RpmPackageQuery, RpmTransaction), CliError> {
+    let command = format!("{COMMAND} {component}");
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
-    let rpm_repo = if rpm_repo_required(&component, &args, ctx, &repo_config)? {
+    let (resolved, view, _) = common::resolve_install_target(component, ctx, &command)?;
+    let store = &view.writable.state;
+
+    let rpm_repo = if install_family(args, store, &resolved, &repo_config) == "rpm" {
         configured_rpm_repo_source(&repo_config, &env)?
     } else {
         None
     };
-
-    // Production uses the real rpm/dnf-backed query and transaction; tests
-    // inject fakes via `handle_one_with_exec`. The real backends receive the
-    // repo.toml RPM source so availability probes and install transactions do
-    // not silently fall back to the host's enabled system repos.
     let query = match rpm_repo.clone() {
         Some(repo) => RpmPackageQuery::system_with_repo(repo),
         None => RpmPackageQuery::system(),
@@ -54,135 +97,930 @@ pub(crate) fn handle_one(
         Some(repo) => RpmTransaction::system_with_repo(repo),
         None => RpmTransaction::system(),
     };
-    let exec = RpmExec::new(&query, &txn, privilege::is_root());
-    handle_one_with_config(component, args, ctx, &exec, layout, env, repo_config)
+    Ok((query, txn))
 }
 
-/// Core of [`handle_one`] with the RPM execution dependencies injected, so
-/// tests can drive the adopt and delegated-install paths without a live
-/// rpmdb/dnf or real privileges.
-// pub(crate): driven by the cross-command MVP lifecycle test (#963).
-#[cfg(test)]
-pub(crate) fn handle_one_with_exec(
+/// Provider family for this invocation: explicit `--backend` (canonical
+/// spelling) wins, then the recorded provenance of an existing installation
+/// (owned → raw, delegated → rpm), then repo.toml `default_backend`.
+///
+/// System-RPM presence deliberately plays no part here: it is a host fact
+/// the planner rules on (I3), not a routing input.
+fn install_family(
+    args: &InstallArgs,
+    store: &StateStore,
+    component: &str,
+    repo_config: &RepoConfig,
+) -> String {
+    if let Some(explicit) = args.backend.as_deref() {
+        return RepoConfig::canonical_backend_name(explicit).to_string();
+    }
+    if let Some(installation) = store.find(ObjectKind::Component, component) {
+        return match installation.binding {
+            ProviderBinding::Owned { .. } => "raw".to_string(),
+            ProviderBinding::Delegated { .. } => "rpm".to_string(),
+        };
+    }
+    repo_config.default_backend.clone()
+}
+
+/// What the planning prefix decided for one component, before any side
+/// effect ran: the resolved identity, the provider family, and the planned
+/// route. The single-component path executes it directly; batch
+/// orchestration classifies on the route to group fresh delegated installs
+/// into one merged native transaction.
+pub(crate) struct PlannedComponent {
+    pub(crate) command: String,
+    pub(crate) component: String,
+    /// Lifecycle resolution pinned the literal input, so backend-level
+    /// package aliases must not rewrite it to another component. This holds
+    /// for an exact visible identity and for incomplete cross-scope
+    /// visibility where aliasing would be unsafe.
+    pub(crate) component_identity_pinned: bool,
+    pub(crate) family: String,
+    pub(crate) native_package: Option<String>,
+    pub(crate) scope: InstallationScope,
+    pub(crate) now: String,
+    pub(crate) store: StateStore,
+    pub(crate) route: PlannedRoute,
+}
+
+struct ResolvedInstallIdentity {
     component: String,
-    args: InstallArgs,
+    pinned: bool,
+}
+
+/// Which executor family the plan routed to, or the idempotent NoOp.
+pub(crate) enum PlannedRoute {
+    /// I4/I8: the record already covers the request; nothing to execute.
+    AlreadyInstalled { version: Option<String> },
+    /// Delegated step family (I2 for a fresh install): one native
+    /// transaction, a fresh observation, and a record commit.
+    Delegated { steps: Vec<Step> },
+    /// Owned step family; raw artifact resolution (network) is deferred to
+    /// execution.
+    Owned { steps: Vec<Step> },
+}
+
+impl PlannedRoute {
+    /// The planned steps, empty for the NoOp route.
+    pub(crate) fn steps(&self) -> &[Step] {
+        match self {
+            Self::AlreadyInstalled { .. } => &[],
+            Self::Delegated { steps } | Self::Owned { steps } => steps,
+        }
+    }
+}
+
+/// Core of [`handle_one`] with the package backends injected so tests drive
+/// every branch without a live rpmdb/dnf or real privileges.
+pub(crate) fn install_component_with_deps(
+    input: &str,
+    args: &InstallArgs,
     ctx: &CliContext,
-    exec: &RpmExec,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
 ) -> Result<InstallOutcome, CliError> {
+    let planned = plan_component(input, args, ctx, query, txn)?;
+    execute_planned(planned, args, ctx, query, txn, is_root)
+}
+
+/// Planning prefix of an install: resolve the component and its provider
+/// target, assemble host facts, and ask the planner for the step sequence.
+/// Read-only against the host — every side effect belongs to
+/// [`execute_planned`].
+pub(crate) fn plan_component(
+    input: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+) -> Result<PlannedComponent, CliError> {
+    let command = format!("{COMMAND} {input}");
+    let layout = common::resolve_layout(ctx);
+    let journal_dir = rpm_install::journal_dir(&layout);
+    let uid = privilege::effective_uid();
+    let scope = match ctx.install_mode {
+        InstallMode::System => InstallationScope::System,
+        InstallMode::User => InstallationScope::User { uid },
+    };
+    let now = now_iso8601();
+    let env = anolisa_env::EnvService::detect();
+    let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
+
+    // Resolve identity across all visible roots, but bind install planning to
+    // the writable scope only. A user install may therefore shadow an
+    // existing system installation without mutating or inheriting it.
+    let (mut component, view, component_identity_pinned) =
+        common::resolve_install_target(input, ctx, &command)?;
+    let store = view.writable.state;
+
+    if let Some(explicit) = args.backend.as_deref()
+        && let Some(warning) = RepoConfig::backend_name_deprecation_warning(explicit)
+    {
+        eprintln!("warning: {warning}");
+    }
+
+    let family = install_family(args, &store, &component, &repo_config);
+
+    // Backend gate: only the raw and rpm families have executors. The
+    // selection call validates the name and its configuration first, so an
+    // unconfigured or unknown backend stays INVALID_ARGUMENT. Over an
+    // existing record the provenance conflict outranks the missing executor:
+    // the request would be refused even if the backend could install.
+    if family != "raw" && family != "rpm" {
+        let (backend_name, _) = repo_config
+            .select_backend(Some(family.as_str()))
+            .map_err(|err| repo_config_err(err, true))?;
+        if let Some(installation) = store.find(ObjectKind::Component, &component) {
+            let installed_backend = match installation.binding {
+                ProviderBinding::Owned { .. } => "raw",
+                ProviderBinding::Delegated { .. } => "rpm",
+            };
+            return Err(CliError::InvalidArgument {
+                command,
+                reason: format!(
+                    "component '{component}' is already installed via backend '{installed_backend}'; reinstalling it via backend '{backend_name}' is not allowed — uninstall it first or use backend '{installed_backend}'"
+                ),
+            });
+        }
+        return Err(CliError::not_implemented_with_hint(
+            format!("install --backend {backend_name}"),
+            format!(
+                "the '{backend_name}' backend is configured but its executor is not implemented yet — only 'raw' and 'rpm' can install today",
+            ),
+        ));
+    }
+
+    // I10 short-circuit: a quarantined record decides the outcome before any
+    // network or rpmdb resolution has to run.
+    if quarantined(&store, &component) {
+        return Err(plan_error_to_cli(
+            PlanError::NeedsAttention,
+            &component,
+            &command,
+        ));
+    }
+
+    // Same for a pending operation journal: it blocks any new mutation, and
+    // the refusal must not depend on the rpm candidate chain or the raw repo
+    // resolving.
+    let pending = pending_journal_for(
+        JournalEvidence::new(&journal_dir, &store.operations),
+        &component,
+    )
+    .map_err(|err| CliError::Runtime {
+        command: command.clone(),
+        reason: err.to_string(),
+    })?;
+    if pending.is_some() {
+        return Err(plan_error_to_cli(
+            PlanError::PendingOperation,
+            &component,
+            &command,
+        ));
+    }
+
+    // Resolve the provider target and the native probe package. Nothing here
+    // touches the raw repository: an active record's arms all end in a NoOp
+    // or a refusal (I4–I9, I11), and a fresh owned target's plan does not
+    // depend on the resolved version — only the probe answer (I3) matters,
+    // and that answer must not depend on the repo being reachable.
+    let active_binding = store
+        .find(ObjectKind::Component, &component)
+        .map(|installation| installation.binding.clone());
+    let (target, native_package): (ProviderTarget, Option<String>) = match &active_binding {
+        Some(binding) => target_for_active_record(binding, &family, args, &component),
+        None if family == "raw" => {
+            let native_package = match scope {
+                InstallationScope::System => Some(system_probe_package(
+                    args,
+                    &layout,
+                    &env,
+                    &repo_config,
+                    &component,
+                    query,
+                    &command,
+                )?),
+                InstallationScope::User { .. } => None,
+            };
+            (
+                ProviderTarget::Owned {
+                    version: args.version.clone().unwrap_or_default(),
+                },
+                native_package,
+            )
+        }
+        None => {
+            // Delegated targets need system scope; in user scope the planner
+            // refuses (its first guard), so nothing touches the rpmdb here.
+            if !matches!(scope, InstallationScope::System) {
+                let package = args.package.clone().unwrap_or_else(|| component.clone());
+                (
+                    ProviderTarget::Delegated {
+                        pm: NativePm::Rpm,
+                        package,
+                    },
+                    None,
+                )
+            } else {
+                let (target, package, resolved_component) = resolve_fresh_delegated(
+                    args,
+                    &layout,
+                    &env,
+                    &repo_config,
+                    &component,
+                    query,
+                    &command,
+                )?;
+                component = resolved_component;
+                (target, Some(package))
+            }
+        }
+    };
+
+    let provider = DelegatedProvider::new(query, txn);
+    let observe_request = ObserveRequest {
+        kind: ObjectKind::Component,
+        name: &component,
+        scope,
+        native_package: native_package.as_deref(),
+        observed_at: &now,
+        verify_owned_files: false,
+    };
+    // A missing rpm/dnf binary is a hard error whenever a probe was needed:
+    // without it the host cannot prove the component is not an unobserved
+    // system RPM, and a raw install over one could corrupt it (I3).
+    let facts = assemble_facts(
+        &observe_request,
+        &store,
+        Some(&provider),
+        &layout,
+        &journal_dir,
+    )
+    .map_err(|err| match err {
+        FactsError::Probe(ProviderError::Query(PackageQueryError::CommandMissing {
+            command: bin,
+        })) => rpm_tooling_missing_error(&command, &bin, &component),
+        err => CliError::Runtime {
+            command: command.clone(),
+            reason: err.to_string(),
+        },
+    })?;
+
+    let request = InstallRequest {
+        target,
+        requested_version: args.version.clone(),
+    };
+    let route = match plan(&Intent::Install(request), &facts) {
+        Ok(Plan::Execute { steps, .. }) => {
+            // Route by step family: a delegated plan requests one native
+            // transaction, an owned plan places the resolved artifact through
+            // the raw backend.
+            let is_delegated_plan = steps.iter().all(|step| {
+                matches!(
+                    step,
+                    Step::NativeTransaction { .. }
+                        | Step::Observe { .. }
+                        | Step::WriteRecord(_)
+                        | Step::DropRecord
+                )
+            });
+            if is_delegated_plan {
+                PlannedRoute::Delegated { steps }
+            } else {
+                PlannedRoute::Owned { steps }
+            }
+        }
+        Ok(Plan::NoOp { .. }) => {
+            // I4/I8: install is idempotent over a healthy record.
+            let version = store
+                .find(ObjectKind::Component, &component)
+                .map(installed_version_label);
+            PlannedRoute::AlreadyInstalled { version }
+        }
+        Err(err) => return Err(plan_error_to_cli(err, &component, &command)),
+    };
+
+    Ok(PlannedComponent {
+        command,
+        component,
+        component_identity_pinned,
+        family,
+        native_package,
+        scope,
+        now,
+        store,
+        route,
+    })
+}
+
+/// Execution half of [`install_component_with_deps`]: render the idempotent
+/// NoOp, place a resolved owned artifact, or run the delegated native
+/// transaction. Dry-run renders the plan and stops before any side effect.
+fn execute_planned(
+    planned: PlannedComponent,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+) -> Result<InstallOutcome, CliError> {
+    let PlannedComponent {
+        command,
+        mut component,
+        component_identity_pinned,
+        family,
+        native_package,
+        scope,
+        now,
+        store,
+        route,
+    } = planned;
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
-    handle_one_with_config(component, args, ctx, exec, layout, env, repo_config)
-}
+    let state_path = layout.state_dir.join("installed.toml");
+    let journal_dir = rpm_install::journal_dir(&layout);
 
-fn handle_one_with_config(
-    component: String,
-    args: InstallArgs,
-    ctx: &CliContext,
-    exec: &RpmExec,
-    layout: FsLayout,
-    env: anolisa_env::EnvFacts,
-    repo_config: RepoConfig,
-) -> Result<InstallOutcome, CliError> {
-    let command = format!("install {component}");
-    let installed = common::load_installed_state(ctx, COMMAND)?;
-
-    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before Layer 1
-    // backend selection, so ExistingState detection and compatibility checks
-    // use the canonical component name stored in state.
-    let component = common::lookup_component_name(&component, &installed, ctx, COMMAND);
-
-    let mut rpm_component_index: Option<ComponentIndex> = None;
-
-    // ── Layer 1: pick the backend name + its source (§4). ──
-    //
-    // Priority: explicit --backend > existing state > system RPM presence
-    // (system mode only) > default_backend. The system-RPM probe runs only
-    // when nothing earlier decided AND we are in system mode, so user mode,
-    // an explicit --backend, and existing-state hits never shell out to
-    // rpm/dnf. The default/auto-detect system path DOES probe rpm; when that
-    // probe cannot run because rpm/dnf is absent it fail-fasts with a
-    // `--backend raw` hint (§7.1) rather than silently installing raw over a
-    // possibly-unobserved system RPM.
-    let mut adopt_situation: Option<RpmSituation> = None;
-    let (backend_name, source): (String, BackendSource) =
-        if let Some(explicit) = args.backend.as_deref() {
-            if let Some(warning) = RepoConfig::backend_name_deprecation_warning(explicit) {
-                eprintln!("warning: {warning}");
-            }
-            (
-                RepoConfig::canonical_backend_name(explicit).to_string(),
-                BackendSource::Explicit,
-            )
-        } else if let Some(label) = installed
-            .find_object(ObjectKind::Component, &component)
-            .and_then(installed_backend_label)
-        {
-            // Provenance is sticky: a re-`install` of an adopted rpm-observed
-            // component lands on `rpm` here and is routed to adopt-refresh by
-            // layer 2, rather than being rejected by the raw trunk.
-            (label.to_string(), BackendSource::ExistingState)
-        } else if ctx.install_mode == InstallMode::System {
-            rpm_component_index = load_optional_component_index(&layout, &env, &repo_config);
-            let situation = probe_rpm_situation(
-                &component,
-                args.package.as_deref(),
-                repo_config.backends.get("rpm"),
-                rpm_component_index.as_ref(),
-                ResolutionUse::Install,
-                exec.query,
+    // Only a settled owned plan resolves the raw artifact (network) — every
+    // planning refusal is independent of the raw repo being reachable.
+    let (steps, resolution) = match route {
+        PlannedRoute::AlreadyInstalled { version } => {
+            render_result(
+                ctx,
+                &InstallResultPayload {
+                    component: component.clone(),
+                    package: native_package,
+                    version,
+                    backend: family,
+                    action: "already-installed",
+                    operation_id: None,
+                    dry_run: ctx.dry_run,
+                    plan: Vec::new(),
+                },
+            )?;
+            return Ok(InstallOutcome::AlreadyInstalled);
+        }
+        PlannedRoute::Delegated { steps } => (steps, None),
+        PlannedRoute::Owned { steps } => {
+            let resolution = resolve_owned_artifact(
+                args,
+                ctx,
+                &layout,
+                &env,
+                &repo_config,
+                ResolvedInstallIdentity {
+                    component: component.clone(),
+                    pinned: component_identity_pinned,
+                },
                 &command,
             )?;
-            if matches!(
-                situation,
-                RpmSituation::Absent { .. } | RpmSituation::NotAnolisaComponent
-            ) {
-                // Absent or not an ANOLISA RPM component + no `--backend`: fall
-                // through to the default backend. If that is `rpm`, layer 2
-                // re-probes and either delegates a `dnf install` or rejects the
-                // non-component; if it is `raw`, the raw trunk installs. Either
-                // way the probe's `adopt_situation` is dropped — there is no
-                // installed system RPM to adopt.
-                (repo_config.default_backend.clone(), BackendSource::Default)
-            } else {
-                adopt_situation = Some(situation);
-                ("rpm".to_string(), BackendSource::SystemRpm)
-            }
-        } else {
-            (repo_config.default_backend.clone(), BackendSource::Default)
-        };
-
-    // ── Layer 2: pick the action by (backend, rpmdb, mode) (§7.1). ──
-    if backend_name == "rpm" {
-        if rpm_component_index.is_none() {
-            rpm_component_index = load_optional_component_index(&layout, &env, &repo_config);
+            component = resolution.component.clone();
+            (steps, Some(resolution))
         }
-        return route_rpm_adopt(
-            &component,
-            &args,
+    };
+
+    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+
+    if ctx.dry_run {
+        for warning in resolution.iter().flat_map(|r| r.warnings.iter()) {
+            eprintln!("warning: {warning}");
+        }
+        render_result(
             ctx,
-            &command,
+            &InstallResultPayload {
+                component,
+                package: native_package,
+                version: resolution
+                    .as_ref()
+                    .map(|r| r.entry.version.clone())
+                    .or_else(|| args.version.clone()),
+                backend: family,
+                action: "planned",
+                operation_id: None,
+                dry_run: true,
+                plan: plan_labels,
+            },
+        )?;
+        return Ok(InstallOutcome::Installed);
+    }
+
+    if let Some(resolution) = resolution {
+        // Download, digest check, and contract validation run before the
+        // lock: they are side-effect free outside the download cache, and a
+        // contract refusal (mode mismatch, component conflict, malformed
+        // hooks) is an argument error, not a failed transaction.
+        let validated = validate_owned_install(ctx, &layout, &store, resolution, &command)?;
+        let provider = DelegatedProvider::new(query, txn);
+        return install_owned(
+            &component,
+            ctx,
             &layout,
-            &repo_config,
-            &installed,
-            source,
-            adopt_situation,
-            rpm_component_index.as_ref(),
-            exec,
+            &state_path,
+            &journal_dir,
+            scope,
+            &now,
+            &steps,
+            &plan_labels,
+            validated,
+            native_package.as_deref(),
+            &provider,
+            &command,
         );
     }
 
-    handle_raw_install(
-        component,
-        args,
+    let provider = DelegatedProvider::new(query, txn);
+    let package = native_package.unwrap_or_else(|| component.clone());
+    install_delegated(
+        &component,
+        &package,
         ctx,
-        &command,
         &layout,
-        &env,
+        &state_path,
+        &journal_dir,
+        scope,
+        &now,
+        &steps,
+        &plan_labels,
+        &provider,
         &repo_config,
-        &installed,
-        &backend_name,
+        is_root,
+        &command,
     )
+}
+
+/// Target shape for an existing active record. No remote resolution: the
+/// planner's active-record arms only compare identities and versions.
+fn target_for_active_record(
+    binding: &ProviderBinding,
+    family: &str,
+    args: &InstallArgs,
+    component: &str,
+) -> (ProviderTarget, Option<String>) {
+    match binding {
+        ProviderBinding::Owned { artifact } => {
+            let target = if family == "raw" {
+                ProviderTarget::Owned {
+                    version: artifact.version.clone(),
+                }
+            } else {
+                // Family switch over an owned record: the planner refuses
+                // with ProvenanceConflict (I11) before probing anything.
+                ProviderTarget::Delegated {
+                    pm: NativePm::Rpm,
+                    package: args
+                        .package
+                        .clone()
+                        .unwrap_or_else(|| component.to_string()),
+                }
+            };
+            (target, None)
+        }
+        ProviderBinding::Delegated { package, .. } => {
+            let recorded = package.resolved_name().map(str::to_string);
+            let package = args
+                .package
+                .clone()
+                .or(recorded)
+                .unwrap_or_else(|| component.to_string());
+            let target = if family == "raw" {
+                ProviderTarget::Owned {
+                    version: args.version.clone().unwrap_or_default(),
+                }
+            } else {
+                ProviderTarget::Delegated {
+                    pm: NativePm::Rpm,
+                    package: package.clone(),
+                }
+            };
+            (target, Some(package))
+        }
+    }
+}
+
+/// Owned artifact resolution for a settled I1 plan: repo.toml → base_url →
+/// package → distribution index entry.
+fn resolve_owned_artifact(
+    args: &InstallArgs,
+    ctx: &CliContext,
+    layout: &FsLayout,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+    identity: ResolvedInstallIdentity,
+    command: &str,
+) -> Result<RawResolution, CliError> {
+    let ResolvedInstallIdentity {
+        component,
+        pinned: component_identity_pinned,
+    } = identity;
+    let (backend_name, backend) = repo_config
+        .select_backend(Some("raw"))
+        .map_err(|err| repo_config_err(err, true))?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let base_url = match args.repo.as_deref() {
+        Some(override_url) => {
+            let normalized =
+                normalize_override_url(override_url).map_err(|err| repo_config_err(err, true))?;
+            if normalized.starts_with("http://") {
+                warnings.push(format!(
+                    "--repo uses plaintext http ({normalized}) — artifacts are still sha256-verified on the raw backend, but the index itself is unauthenticated",
+                ));
+            }
+            normalized
+        }
+        None => {
+            let host = HostVars {
+                os: env.os.clone(),
+                arch: env.arch.clone(),
+            };
+            repo_config
+                .resolved_base_url(backend_name, backend, &host)
+                // Variable errors are fixed by editing [vars] in repo.toml.
+                .map_err(|err| repo_config_err(err, true))?
+        }
+    };
+    let (component, package) = resolve_raw_identity(
+        layout,
+        env,
+        repo_config,
+        backend,
+        component,
+        args.package.as_deref(),
+        component_identity_pinned,
+    );
+    resolve_raw(
+        ctx,
+        layout,
+        env,
+        ResolveInputs {
+            component,
+            package,
+            backend: backend_name.to_string(),
+            base_url,
+            version: args.version.as_deref(),
+            warnings,
+        },
+    )
+    .map_err(|err| err.with_command(command))
+}
+
+/// RPM package name a raw install probes for the planner's I3 rule.
+fn system_probe_package(
+    args: &InstallArgs,
+    layout: &FsLayout,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+    component: &str,
+    query: &dyn PackageQuery,
+    command: &str,
+) -> Result<String, CliError> {
+    let component_index = load_optional_component_index(layout, env, repo_config);
+    let candidates = rpm_package_candidates_with_index(
+        args.package.as_deref(),
+        repo_config.backends.get("rpm"),
+        component_index.as_ref(),
+        query,
+        component,
+        ResolutionUse::Install,
+    )
+    .map_err(|err| match err {
+        PackageQueryError::CommandMissing { command: bin } => {
+            rpm_tooling_missing_error(command, &bin, component)
+        }
+        err => pkg_query_err(err, command),
+    })?;
+    Ok(match candidates.as_slice() {
+        [single] => single.package.clone(),
+        _ => component.to_string(),
+    })
+}
+
+/// Fresh delegated resolution: the component must resolve to exactly one
+/// ANOLISA RPM package. Returns the target, its package, and the resolved
+/// component name (aliases may re-map the input).
+fn resolve_fresh_delegated(
+    args: &InstallArgs,
+    layout: &FsLayout,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+    component: &str,
+    query: &dyn PackageQuery,
+    command: &str,
+) -> Result<(ProviderTarget, String, String), CliError> {
+    let component_index = load_optional_component_index(layout, env, repo_config);
+    let candidates = rpm_package_candidates_with_index(
+        args.package.as_deref(),
+        repo_config.backends.get("rpm"),
+        component_index.as_ref(),
+        query,
+        component,
+        ResolutionUse::Install,
+    )
+    .map_err(|err| match err {
+        PackageQueryError::CommandMissing { command: bin } => {
+            rpm_tooling_missing_error(command, &bin, component)
+        }
+        err => pkg_query_err(err, command),
+    })?;
+    match candidates.as_slice() {
+        [] => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is not an ANOLISA RPM component; use the ANOLISA component name and configure the repo-side component index or publish Provides: anolisa-component({component})"
+            ),
+        }),
+        [single] => Ok((
+            ProviderTarget::Delegated {
+                pm: NativePm::Rpm,
+                package: single.package.clone(),
+            },
+            single.package.clone(),
+            single.component.clone(),
+        )),
+        many => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "multiple RPM candidates match '{component}': {}; cannot resolve unambiguously — pin one with `--package <name>` or fix the component index / package metadata",
+                many.iter()
+                    .map(RpmTarget::label)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        }),
+    }
+}
+
+/// Execute an owned install plan (I1) through the raw backend.
+///
+/// The state and relevant system package are re-read under the install lock,
+/// preventing a stale fresh-install plan from claiming either authority.
+#[expect(clippy::too_many_arguments)]
+fn install_owned(
+    target: &str,
+    ctx: &CliContext,
+    layout: &FsLayout,
+    state_path: &Path,
+    journal_dir: &Path,
+    scope: InstallationScope,
+    now: &str,
+    steps: &[Step],
+    plan_labels: &[String],
+    validated: ValidatedInstall,
+    native_package: Option<&str>,
+    provider: &DelegatedProvider,
+    command: &str,
+) -> Result<InstallOutcome, CliError> {
+    // No root pre-check for an owned install: `--prefix` may point at a
+    // user-writable tree, and a genuine permission problem fails the exact
+    // step and unwinds honestly instead of a blanket refusal.
+    let package = validated.package().to_string();
+    let version = validated.version().to_string();
+    let resolve_warnings = validated.warnings().to_vec();
+
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        })?;
+    if store.find(ObjectKind::Component, target).is_some() || quarantined(&store, target) {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "a record for '{target}' appeared while this install was resolving; nothing was changed — re-run `anolisa install {target}`"
+            ),
+        });
+    }
+    revalidate_native_absence(native_package, provider, now, target, command)?;
+
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
+    let operation_id = journal.operation_id.clone();
+
+    let (result, retained_note) = {
+        let mut ops = RawInstallOps::new(
+            ctx,
+            layout,
+            target.to_string(),
+            scope,
+            now.to_string(),
+            operation_id.clone(),
+            validated,
+            &mut store,
+            state_path,
+        );
+        let result = execute_owned_steps(steps, &mut ops, &mut journal);
+        // Auto-provisioned system packages are retained on failure; the note
+        // must be read out before the ops (and their borrow) are dropped.
+        let note = ops.retained_packages_note();
+        (result, note)
+    };
+    let outcome =
+        result.map_err(|err| owned_error_to_cli(err, target, scope, command, &retained_note))?;
+
+    // Operation history is best-effort bookkeeping on top of the committed
+    // record: the install already succeeded, so a history-write failure
+    // degrades to a warning instead of unwinding anything.
+    store.operations.push(OperationRecord {
+        id: operation_id.clone(),
+        command: command.to_string(),
+        status: "ok".to_string(),
+        started_at: now.to_string(),
+        finished_at: Some(now_iso8601()),
+        parent_operation_id: None,
+    });
+    if let Err(err) = store.save(state_path) {
+        eprintln!("warning: failed to record operation history: {err}");
+    }
+
+    for warning in resolve_warnings.iter().chain(outcome.warnings.iter()) {
+        eprintln!("warning: {warning}");
+    }
+
+    render_result(
+        ctx,
+        &InstallResultPayload {
+            component: target.to_string(),
+            package: Some(package),
+            version: Some(version),
+            backend: "raw".to_string(),
+            action: "installed",
+            operation_id: Some(operation_id),
+            dry_run: false,
+            plan: plan_labels.to_vec(),
+        },
+    )?;
+    Ok(InstallOutcome::Installed)
+}
+
+/// Execute a delegated install plan (I2): one native transaction, a fresh
+/// observation, and a managed record.
+#[expect(clippy::too_many_arguments)]
+fn install_delegated(
+    target: &str,
+    package: &str,
+    ctx: &CliContext,
+    layout: &FsLayout,
+    state_path: &Path,
+    journal_dir: &Path,
+    scope: InstallationScope,
+    now: &str,
+    steps: &[Step],
+    plan_labels: &[String],
+    provider: &DelegatedProvider,
+    repo_config: &RepoConfig,
+    is_root: bool,
+    command: &str,
+) -> Result<InstallOutcome, CliError> {
+    // A fresh delegated install pulls from the configured ANOLISA RPM
+    // repository; without one, dnf would resolve against arbitrary host
+    // repos.
+    require_configured_rpm_backend(repo_config, command)?;
+
+    if !is_root {
+        return Err(CliError::PermissionDenied {
+            command: command.to_string(),
+            reason: "installing an RPM-backed component runs dnf and requires root".to_string(),
+            hint: Some(format!("sudo anolisa install {target}")),
+        });
+    }
+
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        })?;
+    if store.find(ObjectKind::Component, target).is_some() || quarantined(&store, target) {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "a record for '{target}' appeared while this install was resolving; nothing was changed — re-run `anolisa install {target}`"
+            ),
+        });
+    }
+    revalidate_native_absence(Some(package), provider, now, target, command)?;
+
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
+    let operation_id = journal.operation_id.clone();
+
+    let context = RecordContext {
+        kind: ObjectKind::Component,
+        name: target.to_string(),
+        scope,
+        now: now.to_string(),
+        operation_id: Some(operation_id.clone()),
+        delegated: Some(DelegatedIdentity {
+            pm: NativePm::Rpm,
+            package: package.to_string(),
+        }),
+        owned_artifact: None,
+    };
+    let outcome = {
+        let mut sink = StoreRecordSink::new(&mut store, state_path, context);
+        execute_delegated_steps(
+            steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(package)),
+            provider,
+            &mut sink,
+            &mut journal,
+            now,
+        )
+    }
+    .map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "install of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
+        ),
+    })?;
+
+    // Operation history is best-effort bookkeeping on top of the committed
+    // record, exactly like the owned path.
+    store.operations.push(OperationRecord {
+        id: operation_id.clone(),
+        command: command.to_string(),
+        status: "ok".to_string(),
+        started_at: now.to_string(),
+        finished_at: Some(now_iso8601()),
+        parent_operation_id: None,
+    });
+    if let Err(err) = store.save(state_path) {
+        eprintln!("warning: failed to record operation history: {err}");
+    }
+
+    // Best-effort: snapshot the datadir component contract so adapter
+    // commands can discover declared adapters. Missing or unwritable
+    // contracts produce warnings, never failures.
+    for warning in super::io_util::snapshot_datadir_contract(
+        layout,
+        target,
+        command,
+        ctx.packaged_data_probe(),
+    ) {
+        eprintln!("warning: {warning}");
+    }
+
+    let version = outcome.observation.as_ref().map(|o| o.version.clone());
+    render_result(
+        ctx,
+        &InstallResultPayload {
+            component: target.to_string(),
+            package: Some(package.to_string()),
+            version,
+            backend: "rpm".to_string(),
+            action: "installed",
+            operation_id: Some(operation_id),
+            dry_run: false,
+            plan: plan_labels.to_vec(),
+        },
+    )?;
+    Ok(InstallOutcome::Installed)
+}
+
+pub(crate) fn revalidate_native_absence(
+    package: Option<&str>,
+    provider: &DelegatedProvider,
+    now: &str,
+    target: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let Some(package) = package else {
+        return Ok(());
+    };
+    match provider.observe(package, now) {
+        Ok(NativeProbe::Absent) => Ok(()),
+        Ok(NativeProbe::Present { .. } | NativeProbe::MultipleVersions { .. }) => {
+            Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "system RPM '{package}' appeared while '{target}' was being resolved; nothing was changed — run `sudo anolisa --install-mode system adopt {target}` or retry after removing the external package"
+                ),
+            })
+        }
+        Ok(NativeProbe::NotProbed) => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("locked system-RPM probe for '{package}' did not run"),
+        }),
+        Err(ProviderError::Query(PackageQueryError::CommandMissing { command: bin })) => {
+            Err(rpm_tooling_missing_error(command, &bin, target))
+        }
+        Err(err) => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("locked rpm query failed for '{package}': {err}"),
+        }),
+    }
 }
 
 pub(crate) fn configured_rpm_repo_source(
@@ -223,123 +1061,13 @@ pub(crate) fn require_configured_rpm_backend(
     }
 }
 
-pub(crate) fn rpm_repo_required(
-    component: &str,
-    args: &InstallArgs,
-    ctx: &CliContext,
-    repo_config: &RepoConfig,
-) -> Result<bool, CliError> {
-    if args
-        .backend
-        .as_deref()
-        .map(RepoConfig::canonical_backend_name)
-        == Some("rpm")
-    {
-        return Ok(true);
-    }
-    if args.backend.is_none() && repo_config.default_backend == "rpm" {
-        return Ok(true);
-    }
-    let installed = common::load_installed_state(ctx, COMMAND)?;
-    Ok(installed
-        .find_object(ObjectKind::Component, component)
-        .and_then(installed_backend_label)
-        == Some("rpm"))
-}
-
-/// Existing raw-backend trunk: repo.toml → base_url → package → resolve →
-/// (dry-run preview | download + execute). Backends other than `raw` that
-/// reach here have no executor yet and return a not-implemented hint.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_raw_install(
-    component: String,
-    args: InstallArgs,
-    ctx: &CliContext,
-    command: &str,
-    layout: &FsLayout,
-    env: &anolisa_env::EnvFacts,
-    repo_config: &RepoConfig,
-    installed: &InstalledState,
-    backend_name: &str,
-) -> Result<InstallOutcome, CliError> {
-    // Re-resolve through `select_backend` so the configured `[backends.<name>]`
-    // table (base_url, package_map, scope) is in hand. This stays on the raw
-    // path only; the rpm/adopt branch above never calls it (no table required).
-    let (backend_name, backend) = repo_config
-        .select_backend(Some(backend_name))
-        .map_err(|err| repo_config_err(err, true))?;
-
-    ensure_component_backend_compatible(installed, &component, backend_name, command)?;
-
-    // Backend gate: only raw can execute today. The selection above already
-    // validated the name/configuration, so this is purely "executor missing".
-    if backend_name != "raw" {
-        return Err(CliError::not_implemented_with_hint(
-            format!("install --backend {backend_name}"),
-            format!(
-                "the '{backend_name}' backend is configured but its executor is not implemented yet — only 'raw' can install today",
-            ),
-        ));
-    }
-
-    let mut warnings: Vec<String> = Vec::new();
-    let base_url = match args.repo.as_deref() {
-        Some(override_url) => {
-            let normalized =
-                normalize_override_url(override_url).map_err(|err| repo_config_err(err, true))?;
-            if normalized.starts_with("http://") {
-                warnings.push(format!(
-                    "--repo uses plaintext http ({normalized}) — artifacts are still sha256-verified on the raw backend, but the index itself is unauthenticated",
-                ));
-            }
-            normalized
-        }
-        None => {
-            let host = HostVars {
-                os: env.os.clone(),
-                arch: env.arch.clone(),
-            };
-            repo_config
-                .resolved_base_url(backend_name, backend, &host)
-                // Variable errors are fixed by editing [vars] in repo.toml.
-                .map_err(|err| repo_config_err(err, true))?
-        }
-    };
-    let (component, package) = resolve_raw_identity(
-        layout,
-        env,
-        repo_config,
-        backend,
-        component,
-        args.package.as_deref(),
-    );
-
-    let resolved = resolve_raw(
-        ctx,
-        layout,
-        env,
-        ResolveInputs {
-            component,
-            package,
-            backend: backend_name.to_string(),
-            base_url,
-            version: args.version.as_deref(),
-            warnings,
-        },
-    )?;
-
-    if ctx.dry_run {
-        let preview = build_install_preview(ctx, layout, installed, resolved)?;
-        render_plan(ctx, &preview)?;
-        return Ok(InstallOutcome::Installed);
-    }
-
-    let prepared = prepare_raw_execution(ctx, layout, resolved)?;
-    execute_raw(ctx, layout, command, prepared)?;
-    Ok(InstallOutcome::Installed)
-}
-
-#[allow(clippy::too_many_arguments)]
+/// Resolve the raw package while preserving a literal lifecycle identity.
+///
+/// `component_identity_pinned` prevents the backend-specific alias pass from
+/// changing the component selected by lifecycle resolution. Pinning applies
+/// both to exact visible identities and to incomplete cross-scope visibility;
+/// explicit package overrides and package maps may still choose the
+/// distribution package.
 pub(crate) fn resolve_raw_identity(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
@@ -347,6 +1075,7 @@ pub(crate) fn resolve_raw_identity(
     backend: &BackendConfig,
     component: String,
     cli_override: Option<&str>,
+    component_identity_pinned: bool,
 ) -> (String, String) {
     if cli_override.is_some() || backend.package_map.contains_key(&component) {
         let package = repo_config.package_name(backend, &component, cli_override);
@@ -361,7 +1090,11 @@ pub(crate) fn resolve_raw_identity(
         ResolutionUse::Install,
         ResolveOptions::default(),
     ) {
-        Ok(ResolutionSet::Unique(target)) => (target.component, target.package),
+        Ok(ResolutionSet::Unique(target))
+            if !component_identity_pinned || target.component == component =>
+        {
+            (target.component, target.package)
+        }
         _ => {
             let package = repo_config.package_name(backend, &component, cli_override);
             (component, package)
@@ -369,50 +1102,219 @@ pub(crate) fn resolve_raw_identity(
     }
 }
 
-pub(crate) fn ensure_component_backend_compatible(
-    state: &InstalledState,
-    component: &str,
-    requested_backend: &str,
+/// True when the store holds a quarantined record for this component.
+pub(crate) fn quarantined(store: &StateStore, component: &str) -> bool {
+    store
+        .quarantined
+        .iter()
+        .any(|q| q.record.kind == ObjectKind::Component && q.record.name == component)
+}
+
+/// Map an owned-executor failure to a CLI error that reports honestly what
+/// happened to the host: cleanly unwound, partially unwound, or untouched.
+fn owned_error_to_cli(
+    err: OwnedExecutionError,
+    target: &str,
+    scope: InstallationScope,
     command: &str,
-) -> Result<(), CliError> {
-    let Some(obj) = state.find_object(ObjectKind::Component, component) else {
-        return Ok(());
+    retained_note: &str,
+) -> CliError {
+    let repair = common::scoped_component_command(scope, "repair", target);
+    let reason = match err {
+        OwnedExecutionError::StepFailed {
+            step,
+            source,
+            rolled_back,
+            rollback_warnings,
+            ..
+        } => {
+            let at = step_label(&step);
+            if !rolled_back {
+                format!(
+                    "install of '{target}' failed at '{at}': {source}; the host was not changed{retained_note}"
+                )
+            } else if rollback_warnings.is_empty() {
+                format!(
+                    "install of '{target}' failed at '{at}': {source}; this run's changes were undone{retained_note}"
+                )
+            } else {
+                format!(
+                    "install of '{target}' failed at '{at}': {source}; undoing this run's changes reported problems ({}) — run `{repair}`{retained_note}",
+                    rollback_warnings.join("; ")
+                )
+            }
+        }
+        OwnedExecutionError::RecoveryUncertain { detail, .. } => {
+            format!("install of '{target}' failed: {detail}; run `{repair}`{retained_note}")
+        }
+        other => format!("install of '{target}' failed: {other}{retained_note}"),
     };
-
-    match installed_backend_label(obj) {
-        Some(installed_backend) if installed_backend == requested_backend => Ok(()),
-        Some(installed_backend) => Err(CliError::InvalidArgument {
-            command: command.to_string(),
-            reason: format!(
-                "component '{component}' is already installed via backend '{installed_backend}'; reinstalling it via backend '{requested_backend}' is not allowed — uninstall it first or use backend '{installed_backend}'",
-            ),
-        }),
-        None => Err(CliError::InvalidArgument {
-            command: command.to_string(),
-            reason: format!(
-                "component '{component}' is already installed but its install backend is unknown; uninstall it before installing via backend '{requested_backend}'",
-            ),
-        }),
+    CliError::Runtime {
+        command: command.to_string(),
+        reason,
     }
 }
 
-pub(crate) fn installed_backend_label(obj: &InstalledObject) -> Option<&str> {
-    obj.install_backend
-        .as_deref()
-        .map(RepoConfig::canonical_backend_name)
-        .or_else(|| infer_backend_from_distribution_source(obj.distribution_source.as_deref()))
+/// Actionable "rpm/dnf tooling missing" error. The system-RPM presence check
+/// needs the native tooling; installing without it could place raw files
+/// over an unobserved system RPM.
+fn rpm_tooling_missing_error(command: &str, bin: &str, target: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "cannot install '{target}': {bin} not found on PATH — the system-RPM presence check needs rpm/dnf; install rpm/dnf and retry"
+        ),
+    }
 }
 
-pub(crate) fn infer_backend_from_distribution_source(source: Option<&str>) -> Option<&'static str> {
-    let source = source?;
-    if source.starts_with("http://")
-        || source.starts_with("https://")
-        || source.starts_with("file://")
-    {
-        Some("raw")
-    } else {
-        None
+fn pkg_query_err(err: PackageQueryError, command: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("rpm query failed: {err}"),
     }
+}
+
+/// Map a planning refusal to an actionable CLI error. The planner names the
+/// way out; this mapping only renders it.
+fn plan_error_to_cli(err: PlanError, target: &str, command: &str) -> CliError {
+    let command = command.to_string();
+    match err {
+        PlanError::AlreadyPresentOnSystem => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "'{target}' is already installed as a system RPM that ANOLISA does not manage; run `anolisa adopt {target}` to start tracking it"
+            ),
+        },
+        PlanError::UseUpdate => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "component '{target}' is already installed at a different version; run `anolisa update {target} --version <version>` to change versions"
+            ),
+        },
+        PlanError::AlreadyManaged => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "component '{target}' is already managed through the native package manager; run `anolisa update {target}` to move versions"
+            ),
+        },
+        PlanError::ExternallyRemoved => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "the package backing '{target}' was removed outside ANOLISA; run `anolisa repair {target}` to reconcile or `anolisa forget {target}` to drop the record"
+            ),
+        },
+        PlanError::TrackedButAbsent => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "'{target}' is tracked but its package is no longer installed; run `anolisa forget {target}` to drop the record, then install again"
+            ),
+        },
+        PlanError::NeedsAttention => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "the record for '{target}' was quarantined by the state migration; run `anolisa repair {target}` to resolve it"
+            ),
+        },
+        PlanError::ProvenanceConflict => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "the requested backend/package conflicts with the recorded provenance of '{target}'; uninstall it first or re-run without the conflicting override"
+            ),
+        },
+        PlanError::DelegatedRequiresSystemScope => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "installing '{target}' through the RPM backend requires system mode; re-run with sudo or use `--backend raw`"
+            ),
+        },
+        PlanError::PendingOperation => CliError::Runtime {
+            command,
+            reason: format!(
+                "a previous operation on '{target}' is pending recovery; run `anolisa repair {target}` before retrying"
+            ),
+        },
+        other => CliError::InvalidArgument {
+            command,
+            reason: format!("cannot install '{target}': {other:?}"),
+        },
+    }
+}
+
+/// Human-facing label for a plan step (preview rendering).
+pub(crate) fn step_label(step: &Step) -> String {
+    match step {
+        Step::NativeTransaction {
+            action, packages, ..
+        } => format!("dnf {} {}", action.verb(), packages.join(" ")),
+        Step::Observe { packages } => format!("observe {}", packages.join(" ")),
+        Step::WriteRecord(write) => format!("record: {}", write.label()),
+        Step::DropRecord => "record: drop".to_string(),
+        Step::DownloadVerify => "download and verify artifact".to_string(),
+        Step::ProvisionRuntimeDeps => "provision runtime dependencies".to_string(),
+        Step::RunHook(kind) => format!(
+            "run {} hooks",
+            match kind {
+                HookKind::PreInstall => "pre-install",
+                HookKind::PostInstall => "post-install",
+                HookKind::PreUninstall => "pre-uninstall",
+                HookKind::PostUninstall => "post-uninstall",
+            }
+        ),
+        Step::BackupFiles => "back up current files".to_string(),
+        Step::PlaceFiles => "place files".to_string(),
+        Step::SetCapabilities => "apply file capabilities".to_string(),
+        Step::EnableServices => "enable services".to_string(),
+        Step::RestartServices => "restart services".to_string(),
+        Step::StopServices => "stop services".to_string(),
+        Step::RemoveOwnedFiles => "remove owned files".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// JSON payload for a completed (or previewed, or idempotent) install.
+#[derive(Debug, Serialize)]
+struct InstallResultPayload {
+    component: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    backend: String,
+    /// `installed` | `planned` (dry-run) | `already-installed`.
+    action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    dry_run: bool,
+    plan: Vec<String>,
+}
+
+fn render_result(ctx: &CliContext, payload: &InstallResultPayload) -> Result<(), CliError> {
+    if ctx.json {
+        return render_json(COMMAND, payload);
+    }
+    if ctx.quiet {
+        return Ok(());
+    }
+    if payload.dry_run {
+        println!("install {} (dry-run):", payload.component);
+        for label in &payload.plan {
+            println!("  - {label}");
+        }
+        return Ok(());
+    }
+    match (payload.action, &payload.version) {
+        ("already-installed", Some(version)) => {
+            println!("{} {version} is already installed", payload.component);
+        }
+        ("already-installed", None) => println!("{} is already installed", payload.component),
+        (_, Some(version)) => println!("installed {} {version}", payload.component),
+        (_, None) => println!("installed {}", payload.component),
+    }
+    Ok(())
+}
+
+fn now_iso8601() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
@@ -423,6 +1325,85 @@ mod tests {
     use crate::repo_config::RepoConfig;
     use anolisa_platform::fs_layout::FsLayout;
     use tempfile::tempdir;
+
+    #[test]
+    fn raw_resolution_does_not_rewrite_exact_state_identity() {
+        let tmp = tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        let repo_v1 = repo_root.join("v1");
+        std::fs::create_dir_all(&repo_v1).expect("repo dir");
+        std::fs::write(
+            repo_v1.join("components.toml"),
+            r#"
+schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "raw"
+package = "cosh"
+
+[[components.aliases]]
+kind = "raw-package"
+name = "legacy-name"
+
+[[components]]
+name = "sec-core"
+
+[[components.backends]]
+kind = "raw"
+package = "agent-sec-core"
+"#,
+        )
+        .expect("component index");
+        let repo_config = RepoConfig::from_toml_str(&format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n[backends.raw]\nbase_url = \"file://{}\"\n",
+            repo_root.display()
+        ))
+        .expect("repo config");
+        let backend = repo_config.backends.get("raw").expect("raw backend");
+        let layout = FsLayout::system(Some(tmp.path().join("root")));
+        let env = anolisa_env::EnvService::detect();
+
+        let exact = resolve_raw_identity(
+            &layout,
+            &env,
+            &repo_config,
+            backend,
+            "legacy-name".to_string(),
+            None,
+            true,
+        );
+        let alias = resolve_raw_identity(
+            &layout,
+            &env,
+            &repo_config,
+            backend,
+            "legacy-name".to_string(),
+            None,
+            false,
+        );
+        let exact_with_mapped_package = resolve_raw_identity(
+            &layout,
+            &env,
+            &repo_config,
+            backend,
+            "sec-core".to_string(),
+            None,
+            true,
+        );
+
+        assert_eq!(
+            exact,
+            ("legacy-name".to_string(), "legacy-name".to_string())
+        );
+        assert_eq!(alias, ("cosh".to_string(), "cosh".to_string()));
+        assert_eq!(
+            exact_with_mapped_package,
+            ("sec-core".to_string(), "agent-sec-core".to_string())
+        );
+    }
 
     #[test]
     fn install_unknown_component_is_invalid_argument() {
@@ -576,22 +1557,57 @@ gpgcheck = false
     }
 
     #[test]
-    fn raw_default_does_not_require_rpm_repo_resolution() {
-        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+    fn install_family_follows_flag_then_record_then_default() {
+        use anolisa_core::domain::{
+            Installation, LifecycleStatus, ManagementRelation, PackageIdentity,
+        };
+
         let repo = RepoConfig::from_toml_str(
             r#"schema_version = 1
 default_backend = "raw"
 [backends.raw]
 base_url = "https://example.com/anolisa"
 [backends.rpm]
-base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
+base_url = "https://repo.example/anolisa"
 "#,
         )
-        .expect("parse repo without resolving rpm variables");
-        let a = args("copilot-shell");
-        assert!(
-            !rpm_repo_required("copilot-shell", &a, &ctx, &repo).expect("check requirement"),
-            "raw default with no rpm state must not resolve the rpm backend"
-        );
+        .expect("parse repo");
+
+        // Explicit --backend wins, canonicalized.
+        let mut a = args("cosh");
+        a.backend = Some("rpm".to_string());
+        let store = StateStore::empty();
+        assert_eq!(install_family(&a, &store, "cosh", &repo), "rpm");
+
+        // Recorded provenance is sticky: a delegated record routes to rpm
+        // even though the default backend is raw.
+        let a = args("cosh");
+        let mut store = StateStore::empty();
+        store.upsert(Installation {
+            kind: ObjectKind::Component,
+            name: "cosh".to_string(),
+            scope: InstallationScope::System,
+            binding: ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Resolved {
+                    name: "copilot-shell".to_string(),
+                },
+                relation: ManagementRelation::Managed {
+                    since: "2026-07-01T00:00:00Z".to_string(),
+                },
+                last_observed: None,
+            },
+            status: LifecycleStatus::Installed,
+            installed_at: "2026-07-01T00:00:00Z".to_string(),
+            last_operation_id: None,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+        });
+        assert_eq!(install_family(&a, &store, "cosh", &repo), "rpm");
+
+        // No flag, no record: the default backend decides.
+        let store = StateStore::empty();
+        assert_eq!(install_family(&a, &store, "cosh", &repo), "raw");
     }
 }

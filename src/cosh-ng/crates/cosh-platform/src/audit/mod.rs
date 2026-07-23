@@ -24,7 +24,7 @@ pub mod log;
 pub mod policy;
 pub mod redact;
 
-pub use action::{parse_action_string, ParseError};
+pub use action::{parse_action_string, split_compound_command, ParseError};
 pub use builtin::BuiltinPreset;
 pub use evaluate::evaluate;
 pub use policy::{LoadedPolicy, PolicySource};

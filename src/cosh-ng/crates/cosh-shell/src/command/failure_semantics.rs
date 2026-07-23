@@ -2,10 +2,16 @@ use crate::types::{CommandBlock, CommandOrigin, ShellEvent, ShellEventKind};
 
 use super::{classify_exit, first_program_token, ExitCodeCategory};
 
+const CLASSIFIER_MAX_LINES: usize = 120;
+const CLASSIFIER_MAX_BYTES: usize = 8 * 1024;
+const CLASSIFIER_SIDE_LINES: usize = CLASSIFIER_MAX_LINES / 2;
+const CLASSIFIER_SIDE_BYTES: usize = CLASSIFIER_MAX_BYTES / 2;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailureSemantics {
     pub(crate) class: FailureClass,
     pub(crate) confidence: FailureConfidence,
+    pub(crate) auto_eligibility: FailureAutoEligibility,
     pub(crate) reasons: Vec<FailureReason>,
 }
 
@@ -21,6 +27,7 @@ pub(crate) enum FailureClass {
     PermissionDenied,
     AbnormalSignal,
     BuildOrTestFailure,
+    RuntimeException,
     GenericRuntimeFailure,
     ProviderOrInternalArtifact,
     UnknownFailure,
@@ -31,6 +38,12 @@ pub(crate) enum FailureConfidence {
     High,
     Medium,
     Low,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureAutoEligibility {
+    LegacyAllowlisted,
+    SuggestOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +63,46 @@ pub(crate) enum FailureReason {
     InteractiveCancelOutput,
     UserInterruptEvent,
     OutputUnavailable,
+    CommandFamily(BuildOrTestFamily),
+    TerminalSignature(FailureTerminalSignature),
+    ExcerptDirection(FailureExcerptDirection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildOrTestFamily {
+    Cargo,
+    Make,
+    Ninja,
+    Maven,
+    Gradle,
+    Npm,
+    Pytest,
+    GoTest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureTerminalSignature {
+    CargoTest,
+    CargoTestRerun,
+    CargoBuild,
+    Make,
+    Ninja,
+    Maven,
+    Gradle,
+    Npm,
+    Pytest,
+    GoTest,
+    PythonTraceback,
+    RustPanic,
+    PermissionDenied,
+    SegmentationFault,
+    CoreDumped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureExcerptDirection {
+    Head,
+    Tail,
 }
 
 pub(crate) fn classify_failure(
@@ -86,6 +139,21 @@ pub(crate) fn classify_failure(
         );
     }
 
+    if block.exit_code > 128
+        && !matches!(
+            block.exit_code,
+            130 | 132 | 134 | 135 | 136 | 137 | 139 | 141
+        )
+    {
+        reasons.push(FailureReason::SignalLikeExit);
+        return semantics(
+            FailureClass::UnknownFailure,
+            FailureConfidence::Low,
+            reasons,
+        );
+    }
+
+    let bounded_output = output_excerpt.map(BoundedOutput::new);
     let category = classify_exit(block.exit_code, &block.command);
     match category {
         ExitCodeCategory::Success => {
@@ -124,6 +192,9 @@ pub(crate) fn classify_failure(
         }
         ExitCodeCategory::PermissionDenied => {
             reasons.push(FailureReason::PermissionDenied);
+            if let Some(output) = &bounded_output {
+                push_terminal_signature_reason(&mut reasons, output_permission_signature(output));
+            }
             return semantics(
                 FailureClass::PermissionDenied,
                 FailureConfidence::High,
@@ -132,6 +203,12 @@ pub(crate) fn classify_failure(
         }
         ExitCodeCategory::AbnormalSignal => {
             reasons.push(FailureReason::SignalLikeExit);
+            if let Some(output) = &bounded_output {
+                push_terminal_signature_reason(
+                    &mut reasons,
+                    fatal_signal_signature(block.exit_code, output),
+                );
+            }
             return semantics(
                 FailureClass::AbnormalSignal,
                 FailureConfidence::High,
@@ -141,7 +218,7 @@ pub(crate) fn classify_failure(
         ExitCodeCategory::GenericError => {}
     }
 
-    let Some(output) = output_excerpt else {
+    let Some(output) = bounded_output else {
         reasons.push(FailureReason::OutputUnavailable);
         return semantics(
             FailureClass::UnknownFailure,
@@ -149,7 +226,7 @@ pub(crate) fn classify_failure(
             reasons,
         );
     };
-    let normalized = normalize_output(output);
+    let normalized = output.text();
     if interactive_cancel_output(&normalized) {
         reasons.push(FailureReason::InteractiveCancelOutput);
         return semantics(
@@ -159,15 +236,26 @@ pub(crate) fn classify_failure(
         );
     }
 
-    let real_failure = real_failure_signals(&normalized);
     let usage = usage_help_signals(&normalized, block.exit_code);
-    if real_failure.high_confidence && !usage.explicit_option_parse_error() {
-        reasons.extend(real_failure.reasons);
-        return semantics(
-            FailureClass::BuildOrTestFailure,
-            FailureConfidence::High,
-            reasons,
-        );
+    let family = build_or_test_family(&block.command);
+    let build_or_test = family.and_then(|family| {
+        terminal_summary_for_family(&output, family).map(|signature| (family, signature))
+    });
+    if let Some(family) = family {
+        reasons.push(FailureReason::CommandFamily(family));
+    }
+    if !usage.explicit_option_parse_error() {
+        if let Some((_, signature)) = build_or_test {
+            reasons.push(FailureReason::TerminalSignature(signature));
+            reasons.push(FailureReason::ExcerptDirection(
+                FailureExcerptDirection::Tail,
+            ));
+            return semantics(
+                FailureClass::BuildOrTestFailure,
+                FailureConfidence::High,
+                reasons,
+            );
+        }
     }
 
     if usage.high_confidence() {
@@ -183,13 +271,26 @@ pub(crate) fn classify_failure(
         );
     }
 
-    if real_failure.high_confidence {
-        reasons.extend(real_failure.reasons);
+    if let Some(signature) = output_permission_signature(&output) {
+        reasons.push(FailureReason::PermissionDenied);
+        push_terminal_signature_reason(&mut reasons, Some(signature));
         return semantics(
-            FailureClass::BuildOrTestFailure,
+            FailureClass::PermissionDenied,
             FailureConfidence::High,
             reasons,
         );
+    }
+
+    if family.is_none() {
+        if let Some((signature, direction)) = runtime_exception_signature(&output) {
+            reasons.push(FailureReason::TerminalSignature(signature));
+            reasons.push(FailureReason::ExcerptDirection(direction));
+            return semantics(
+                FailureClass::RuntimeException,
+                FailureConfidence::High,
+                reasons,
+            );
+        }
     }
 
     semantics(
@@ -204,11 +305,62 @@ fn semantics(
     confidence: FailureConfidence,
     reasons: Vec<FailureReason>,
 ) -> FailureSemantics {
+    let auto_eligibility = failure_auto_eligibility(class, &reasons);
     FailureSemantics {
         class,
         confidence,
+        auto_eligibility,
         reasons,
     }
+}
+
+fn failure_auto_eligibility(
+    class: FailureClass,
+    reasons: &[FailureReason],
+) -> FailureAutoEligibility {
+    let exit_code = reasons.iter().find_map(|reason| match reason {
+        FailureReason::ExitCode(exit_code) => Some(*exit_code),
+        _ => None,
+    });
+    match class {
+        FailureClass::PermissionDenied if exit_code == Some(126) => {
+            FailureAutoEligibility::LegacyAllowlisted
+        }
+        FailureClass::AbnormalSignal if matches!(exit_code, Some(134 | 136 | 137 | 139)) => {
+            FailureAutoEligibility::LegacyAllowlisted
+        }
+        FailureClass::BuildOrTestFailure if legacy_build_or_test_signature(reasons) => {
+            FailureAutoEligibility::LegacyAllowlisted
+        }
+        _ => FailureAutoEligibility::SuggestOnly,
+    }
+}
+
+fn legacy_build_or_test_signature(reasons: &[FailureReason]) -> bool {
+    let family = reasons.iter().find_map(|reason| match reason {
+        FailureReason::CommandFamily(family) => Some(*family),
+        _ => None,
+    });
+    let signature = reasons.iter().find_map(|reason| match reason {
+        FailureReason::TerminalSignature(signature) => Some(*signature),
+        _ => None,
+    });
+    matches!(
+        (family, signature),
+        (
+            Some(BuildOrTestFamily::Cargo),
+            Some(FailureTerminalSignature::CargoTest | FailureTerminalSignature::CargoBuild)
+        ) | (
+            Some(BuildOrTestFamily::Make),
+            Some(FailureTerminalSignature::Make)
+        ) | (
+            Some(BuildOrTestFamily::Npm),
+            Some(FailureTerminalSignature::Npm)
+        ) | (
+            Some(BuildOrTestFamily::Pytest),
+            Some(FailureTerminalSignature::Pytest)
+        )
+    )
 }
 
 fn command_has_user_interrupt_event(events: &[ShellEvent], block: &CommandBlock) -> bool {
@@ -344,38 +496,14 @@ fn is_option_list_line(line: &str) -> bool {
             .is_some_and(|ch| ch.is_ascii_alphanumeric())
 }
 
-#[derive(Default)]
-struct RealFailureSignals {
-    high_confidence: bool,
-    reasons: Vec<FailureReason>,
-}
+#[path = "failure_signatures.rs"]
+mod failure_signatures;
 
-fn real_failure_signals(output: &str) -> RealFailureSignals {
-    let mut signals = RealFailureSignals::default();
-    for line in output.lines() {
-        if line.contains("test result: failed")
-            || line.trim() == "failures:"
-            || line.contains("failed tests")
-            || line.contains("pytest") && line.contains("failed")
-        {
-            signals.high_confidence = true;
-            push_reason_once(&mut signals.reasons, FailureReason::TestFailureOutput);
-        }
-        if line.contains("compilation failed")
-            || line.contains("error[e")
-            || line.contains("npm err!")
-            || line.contains("make: ***")
-            || line.contains("traceback")
-            || line.contains("panic")
-            || line.contains("segmentation fault")
-            || line.contains("core dumped")
-        {
-            signals.high_confidence = true;
-            push_reason_once(&mut signals.reasons, FailureReason::BuildFailureOutput);
-        }
-    }
-    signals
-}
+use failure_signatures::{
+    build_or_test_family, fatal_signal_signature, output_permission_signature,
+    push_terminal_signature_reason, runtime_exception_signature, terminal_summary_for_family,
+    BoundedOutput,
+};
 
 fn interactive_cancel_output(output: &str) -> bool {
     [
@@ -401,97 +529,5 @@ fn push_reason_once(reasons: &mut Vec<FailureReason>, reason: FailureReason) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{CommandStatus, OutputRefs};
-
-    fn block(exit_code: i32, command: &str) -> CommandBlock {
-        CommandBlock {
-            id: "cmd-1".to_string(),
-            session_id: "session".to_string(),
-            command: command.to_string(),
-            origin: CommandOrigin::UserInteractive,
-            cwd: "/tmp".to_string(),
-            end_cwd: "/tmp".to_string(),
-            started_at_ms: 100,
-            ended_at_ms: 200,
-            duration_ms: 100,
-            exit_code,
-            status: if exit_code == 0 {
-                CommandStatus::Completed
-            } else {
-                CommandStatus::Failed
-            },
-            output: OutputRefs {
-                terminal_output_ref: None,
-                terminal_output_bytes: 0,
-            },
-        }
-    }
-
-    fn class(exit_code: i32, command: &str, output: Option<&str>) -> FailureClass {
-        classify_failure(&block(exit_code, command), &[], output).class
-    }
-
-    #[test]
-    fn usage_help_exit_two_is_not_generic_failure() {
-        assert_eq!(
-            class(
-                2,
-                "demo --bad",
-                Some("error: unexpected argument '--bad'\nUsage: demo [OPTIONS]\n")
-            ),
-            FailureClass::UsageOrHelp
-        );
-    }
-
-    #[test]
-    fn exit_two_without_output_is_unknown() {
-        assert_eq!(class(2, "demo --bad", None), FailureClass::UnknownFailure);
-    }
-
-    #[test]
-    fn real_test_failure_with_usage_footer_stays_test_failure() {
-        assert_eq!(
-            class(
-                2,
-                "fake-test",
-                Some("test result: FAILED. 1 failed\nUsage: fake-test [OPTIONS]\n")
-            ),
-            FailureClass::BuildOrTestFailure
-        );
-    }
-
-    #[test]
-    fn explicit_parse_error_wins_over_generic_failure_words() {
-        assert_eq!(
-            class(
-                2,
-                "cargo test --bad-flag",
-                Some("error: unexpected argument '--bad-flag'\nUsage: cargo test [OPTIONS]\n")
-            ),
-            FailureClass::UsageOrHelp
-        );
-    }
-
-    #[test]
-    fn expected_nonzero_commands_are_classified_as_no_result() {
-        assert_eq!(
-            class(1, "grep missing file.txt", Some("")),
-            FailureClass::ExpectedNoResult
-        );
-        assert_eq!(
-            class(1, "diff a b", Some("1c1\n< a\n---\n> b\n")),
-            FailureClass::ExpectedNoResult
-        );
-    }
-
-    #[test]
-    fn reserved_shell_failures_remain_actionable() {
-        assert_eq!(class(127, "nope", Some("")), FailureClass::CommandNotFound);
-        assert_eq!(
-            class(126, "./script", Some("")),
-            FailureClass::PermissionDenied
-        );
-    }
-}
+#[path = "failure_semantics_tests.rs"]
+mod tests;

@@ -41,11 +41,11 @@ anolisa bug
 # 查看特定组件日志
 anolisa logs <component>
 
-# 实时跟踪日志
-anolisa logs <component> --follow
+# 查看 warning 和 error 记录
+anolisa logs <component> --severity warn
 
 # 显示最后 N 行
-anolisa logs <component> --tail 50
+anolisa logs <component> --limit 50
 ```
 
 ---
@@ -93,11 +93,11 @@ ls -la /dev/fuse
 **解决**：
 
 ```bash
-# 检查网络连接
-anolisa doctor --check network
+# 查看检测到的运行环境
+anolisa env
 
 # 使用 verbose 模式重试
-anolisa install tokenless --verbose
+anolisa --verbose install tokenless
 
 # 替代方式：使用 YUM
 sudo yum install tokenless
@@ -116,8 +116,8 @@ rustup show
 # 更新到最新 stable
 rustup update stable
 
-# 检查缺失的系统依赖
-anolisa doctor --check build-deps
+# 查看检测到的构建环境
+anolisa env
 ```
 
 ---
@@ -218,8 +218,9 @@ ls /dev/fuse
 # 检查内核版本（建议 >= 5.4）
 uname -r
 
-# 验证 eBPF 支持
-anolisa doctor --check ebpf
+# 查看内核能力，再诊断已安装的组件
+anolisa env
+sudo anolisa --install-mode system doctor agentsight
 
 # AgentSight 需要 system mode
 sudo anolisa install agentsight

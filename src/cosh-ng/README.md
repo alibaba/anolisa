@@ -66,7 +66,20 @@ cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 # Security audit
 cosh-cli audit check --action "rm -rf /var/log"
 # → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
+
+# Resume an Agent conversation in the current workspace
+cosh-shell --resume              # Open the interactive session picker
+cosh-shell --resume <session-id> # Select a known provider session
 ```
+
+Inside cosh-shell, use `/session` to browse sessions, `/session status` to
+inspect the selected and active identities, and `/session clear ...` to remove
+old entries after confirmation. Session recovery restores model-visible
+conversation context; historical terminal evidence is intentionally not
+restored. Records default to `~/.copilot-shell/cosh-core/sessions/`; change the
+root with `session.persist_dir`. Project session settings and relative store
+paths are resolved from the workspace cosh-shell sends to Core. See the
+[session recovery guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-recovery.md).
 
 ## Command reference
 
@@ -113,6 +126,16 @@ Key fields for Agents: `ok` (success?), `error.recoverable` (retry-worthy?), `er
 3. **Reversible** — checkpoint → execute → rollback on failure
 4. **Classified errors** — `recoverable` tells Agent whether to retry
 5. **Dry-run** — `--dry-run` on all write operations, preview before execute
+
+## MCP tools
+
+`cosh-core --headless` can connect to trusted MCP servers over stdio or
+Streamable HTTP, discover their tools at startup, and expose them to the Agent as
+`mcp__<server>__<tool>`. MCP servers are configured in user or system config;
+their tools require approval unless the session uses `trust` mode. Use
+`cosh-core mcp list`, `inspect`, `refresh`, `connect`, and `disconnect` to
+manage configured servers; status output never includes credentials. See the
+[MCP configuration reference](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#mcp-servers).
 
 ## Logging
 

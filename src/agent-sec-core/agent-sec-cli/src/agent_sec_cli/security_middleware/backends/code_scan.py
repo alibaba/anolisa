@@ -28,6 +28,7 @@ class CodeScanBackend(BaseBackend):
                 success=False,
                 error=f"scan error: {err.message}",
                 exit_code=1,
+                error_type=type(err).__name__,
             )
         result = scan(code, language, mode=mode)
         return ActionResult(
@@ -35,4 +36,5 @@ class CodeScanBackend(BaseBackend):
             data=result.model_dump(),
             stdout=result.model_dump_json(indent=2),
             exit_code=0 if result.verdict != Verdict.ERROR else 1,
+            error_type="CodeScanError" if result.verdict == Verdict.ERROR else "",
         )

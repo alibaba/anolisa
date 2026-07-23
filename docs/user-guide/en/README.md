@@ -37,7 +37,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | Document | Component | Description |
 |----------|-----------|-------------|
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | Unified CLI for component management |
-| [Copilot Shell](user-entrypoint/copilot-shell.md) | cosh | AI terminal assistant and command gateway |
+| [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI terminal assistant and command gateway |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
 
 ### Agent Observability (`agent-observability/`)
@@ -50,14 +50,19 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 
 | Document | Component | Description |
 |----------|-----------|-------------|
-| [AgentSecCore](agent-security/agent-sec-core.md) | agent-sec-core | Hardening, code scanning, prompt scanning, skill ledger |
+| [AgentSecCore](agent-security/agent-sec-core/QUICKSTART.md) | agent-sec-core | Hardening, code scanning, prompt scanning, skill ledger |
+| [PII Checker](agent-security/agent-sec-core/pii-checker.md) | agent-sec-core | Personal data / credential detection and redaction |
+| [Skill Ledger User Guide](agent-security/agent-sec-core/skill-ledger.md) | agent-sec-core | Skill integrity chain and signing workflow |
+| [OpenClaw Deployment & Upgrade](agent-security/agent-sec-core/openclaw-deploy.md) | agent-sec-core | OpenClaw plugin deployment and upgrade guide |
 
 ### Token Saving (`token-saving/`)
 
 | Document | Component | Description |
 |----------|-----------|-------------|
-| [Tokenless](token-saving/tokenless.md) | tokenless | Schema/response compression, command rewriting |
-| [Agent Memory](token-saving/agent-memory.md) | agent-memory | MCP-based persistent file memory |
+| [Tokenless](token-saving/tokenless/QUICKSTART.md) | tokenless | Schema/response compression, command rewriting |
+| [Tokenless User Manual](token-saving/tokenless/user-manual.md) | tokenless | Per-strategy triggers, thresholds, stats and A/B testing |
+| [Agent Memory](token-saving/agent-memory/QUICKSTART.md) | agent-memory | MCP-based persistent file memory |
+| [Agent Memory User Manual](token-saving/agent-memory/user-manual.md) | agent-memory | Full MCP tool reference, search, sovereignty controls |
 
 ### Runtime (`runtime/`)
 

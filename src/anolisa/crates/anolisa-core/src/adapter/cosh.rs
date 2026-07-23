@@ -28,7 +28,7 @@ use super::claim::{
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
-    FrameworkDriver, HostEnv, find_binary_in_path,
+    FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
 use super::util::{bool_status, digest_tree, now_iso8601};
 
@@ -160,32 +160,41 @@ impl FrameworkDriver for CoshDriver {
         &self,
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
-    ) -> Result<AdapterClaim, AdapterError> {
+    ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let dst = extension_dir(bundle, ctx)?;
         let resources = vec![ClaimResource {
             id: RES_EXTENSION_DIR.to_string(),
             purpose: "cosh_extension_dir".to_string(),
             kind: ClaimResourceKind::ExternalPath { path: dst },
         }];
-        Ok(AdapterClaim {
-            claim_schema: CLAIM_SCHEMA_VERSION,
-            component: ctx.component.clone(),
-            framework: self.name().to_string(),
-            plugin_id: bundle.plugin_id.clone(),
-            adapter_type: ctx.adapter_type.clone(),
-            enabled_at: now_iso8601(),
-            resource_root: bundle.resource_root.clone(),
-            bundle_digest: bundle.digest.clone(),
-            driver_schema: DRIVER_SCHEMA_VERSION,
-            status: ClaimStatus::Enabled,
-            resources,
-            driver_payload: DriverPayload::Cosh(CoshClaim {
-                extension_dir_resource: RES_EXTENSION_DIR.to_string(),
-            }),
-        })
+        Ok((
+            AdapterClaim {
+                claim_schema: CLAIM_SCHEMA_VERSION,
+                component: ctx.component.clone(),
+                framework: self.name().to_string(),
+                plugin_id: bundle.plugin_id.clone(),
+                adapter_type: ctx.adapter_type.clone(),
+                enabled_at: now_iso8601(),
+                resource_root: bundle.resource_root.clone(),
+                bundle_digest: bundle.digest.clone(),
+                driver_schema: DRIVER_SCHEMA_VERSION,
+                status: ClaimStatus::Enabled,
+                resources,
+                driver_payload: DriverPayload::Cosh(CoshClaim {
+                    extension_dir_resource: RES_EXTENSION_DIR.to_string(),
+                }),
+            },
+            PreparedEnable::None,
+        ))
     }
 
-    fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
+    fn apply_enable(
+        &self,
+        claim: &mut AdapterClaim,
+        _prepared: &PreparedEnable,
+        ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::EnableProgress,
+    ) -> Result<(), AdapterError> {
         let dst = claim_extension_dir(claim).ok_or_else(|| AdapterError::BundleInvalid {
             root: claim.resource_root.clone(),
             reason: "cosh receipt has no extension directory resource".to_string(),
@@ -600,6 +609,8 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: false,
             ops,
         }
@@ -627,8 +638,10 @@ mod tests {
         let bundle = driver.read_bundle(&ctx).expect("read bundle");
         assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
 
-        let claim = driver.prepare_enable(&bundle, &ctx).expect("claim");
-        driver.apply_enable(&claim, &ctx).expect("apply");
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        driver
+            .apply_enable(&mut claim, &prepared, &ctx, &mut ())
+            .expect("apply");
 
         let ext_dir = cosh.join("extensions").join("tokenless");
         assert!(ext_dir.join(COSH_MANIFEST).is_file(), "manifest copied");
@@ -673,9 +686,9 @@ mod tests {
         let driver = CoshDriver::new();
 
         let bundle = driver.read_bundle(&ctx).expect("read bundle");
-        let claim = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
         let err = driver
-            .apply_enable(&claim, &ctx)
+            .apply_enable(&mut claim, &prepared, &ctx, &mut ())
             .expect_err("must refuse to clobber non-ANOLISA extension");
         assert!(
             matches!(err, AdapterError::InvalidAdapterInput { .. }),

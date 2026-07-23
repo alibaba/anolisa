@@ -19,7 +19,7 @@ _PROMPT_PRELOAD_CHILD_MODULE = "agent_sec_cli.daemon.jobs.prompt_preload"
 
 
 class PromptModelPreloadJob(OneShotBackgroundJob):
-    """One-shot startup job that downloads, loads, and probes the prompt model."""
+    """One-shot startup job that loads and probes the prompt model."""
 
     name = PROMPT_PRELOAD_JOB_NAME
 
@@ -35,10 +35,10 @@ class PromptModelPreloadJob(OneShotBackgroundJob):
         self._probe_text = probe_text
 
     def on_run_started(self, started_at: str) -> None:
-        """Mark prompt model preload as downloading."""
+        """Mark prompt model preload as loading from the local cache."""
         _update_prompt_state(
             self._prompt_state,
-            status="downloading",
+            status="loading",
             loaded=False,
             last_error=None,
             last_started_at=started_at,
@@ -46,9 +46,18 @@ class PromptModelPreloadJob(OneShotBackgroundJob):
         )
 
     async def run_once(self) -> None:
-        """Download, load, and probe the prompt model."""
-        await _run_preload_child_process(self._mode)
-        _update_prompt_state(self._prompt_state, status="loading")
+        """Load and probe locally, downloading once only when loading fails."""
+        try:
+            await self._load_and_probe()
+        except Exception:
+            # Preserve the previous recovery contract with one bounded download/repair attempt.
+            _update_prompt_state(self._prompt_state, status="downloading")
+            await _run_preload_child_process(self._mode)
+            _update_prompt_state(self._prompt_state, status="loading")
+            await self._load_and_probe()
+
+    async def _load_and_probe(self) -> None:
+        """Load and probe the prompt model without blocking the event loop."""
         await asyncio.to_thread(
             _preload_prompt_model_sync,
             self._prompt_state,
@@ -183,7 +192,8 @@ def _preload_prompt_model_sync(
 ) -> None:
     """Load and probe the prompt model in a worker thread.
 
-    Downloads are handled by the child process before this function runs.
+    The first call uses only the local cache.  The job may run a download-only
+    child and call this function once more if local model loading fails.
     Avoid redirecting sys.stdout/sys.stderr here: those are process-global
     objects, so changing them in this worker thread could hide unrelated
     daemon output from other threads.
@@ -201,8 +211,10 @@ def _preload_prompt_model_sync(
     _update_prompt_state(prompt_state, model=config.model_name)
 
     scanner = PromptScanner(mode=scan_mode)
-    _update_prompt_state(prompt_state, status="loading")
-    scanner.scan(probe_text, source="daemon-startup")
+    result = scanner.scan(probe_text, source="daemon-startup")
+
+    if not any(layer.layer_name == "ml_classifier" for layer in result.layer_results):
+        raise RuntimeError("prompt model probe did not execute the ML classifier")
 
 
 def _warmup_silently(scanner: Any) -> None:

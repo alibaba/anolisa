@@ -7,7 +7,7 @@ from agent_sec_cli.daemon.jobs.prompt_preload import (
     PromptModelPreloadJob,
     prompt_preload_enabled,
 )
-from agent_sec_cli.daemon.skill_ledger_activation import (
+from agent_sec_cli.daemon.jobs.skill_ledger import (
     SkillLedgerActivationJob,
 )
 

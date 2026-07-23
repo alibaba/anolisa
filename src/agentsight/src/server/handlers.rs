@@ -1302,6 +1302,7 @@ mod tests {
             1234,
             "claude".to_string(),
         );
+        call.agent_name = Some("claude".to_string());
         call.set_response(
             LLMResponse {
                 messages: vec![OutputMessage {
@@ -1329,6 +1330,10 @@ mod tests {
         call.metadata.insert(
             "response_id".to_string(),
             format!("trace-{conversation_id}"),
+        );
+        call.metadata.insert(
+            "session_id".to_string(),
+            format!("session-{conversation_id}"),
         );
         call.metadata
             .insert("user_query".to_string(), "hello".to_string());
@@ -1614,6 +1619,694 @@ mod tests {
             serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
                 .unwrap();
         assert_eq!(body["authenticated"], true);
+    }
+
+    fn test_app_state_with_storage(storage_path: PathBuf) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: storage_path.clone(),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+        })
+    }
+
+    fn test_app_state_with_interruption_store(
+        store: Arc<crate::storage::sqlite::InterruptionStore>,
+    ) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: Some(store),
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+        })
+    }
+
+    fn unique_handler_db(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentsight_handler_{label}_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn make_interruption_event(
+        id: &str,
+        session_id: &str,
+        conversation_id: &str,
+        itype: crate::interruption::InterruptionType,
+    ) -> crate::interruption::InterruptionEvent {
+        crate::interruption::InterruptionEvent {
+            interruption_id: id.to_string(),
+            session_id: Some(session_id.to_string()),
+            trace_id: Some(format!("trace-{conversation_id}")),
+            conversation_id: Some(conversation_id.to_string()),
+            call_id: Some(format!("call-{id}")),
+            pid: Some(1234),
+            agent_name: Some("Agent-A".to_string()),
+            interruption_type: itype,
+            severity: crate::interruption::types::Severity::High,
+            occurred_at_ns: 1_700_000_000_000_000_000,
+            detail: Some(r#"{"error":"rate limit"}"#.to_string()),
+            resolved: false,
+        }
+    }
+
+    #[actix_web::test]
+    async fn health_reports_status_version_and_uptime() {
+        let app =
+            awtest::init_service(App::new().app_data(test_app_state(0)).service(health)).await;
+        let response =
+            awtest::call_service(&app, awtest::TestRequest::get().uri("/health").to_request())
+                .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = service_response_json(response).await;
+        assert_eq!(body["status"], "ok");
+        assert!(body["version"].as_str().is_some());
+        assert!(body["uptime_seconds"].as_u64().is_some());
+    }
+
+    #[actix_web::test]
+    async fn genai_query_handlers_return_persisted_data() {
+        let db_path = unique_handler_db("genai_queries");
+        write_completed_conversation_event(&db_path, "conv-handler");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(list_sessions)
+                .service(list_traces_by_session)
+                .service(get_trace_detail)
+                .service(get_conversation_events)
+                .service(list_agent_names)
+                .service(get_timeseries),
+        )
+        .await;
+
+        let sessions = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/sessions?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(sessions.status(), StatusCode::OK);
+        let sessions_body = service_response_json(sessions).await;
+        assert_eq!(sessions_body.as_array().unwrap().len(), 1);
+        let session_id = sessions_body[0]["session_id"].as_str().unwrap();
+
+        let traces = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!(
+                    "/sessions/{session_id}/traces?start_ns=0&end_ns=9223372036854775807"
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(traces.status(), StatusCode::OK);
+        let traces_body = service_response_json(traces).await;
+        assert_eq!(traces_body.as_array().unwrap().len(), 1);
+
+        let detail = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/traces/trace-conv-handler")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(detail.status(), StatusCode::OK);
+        assert_eq!(
+            service_response_json(detail)
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let conversation = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/conversations/conv-handler")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(conversation.status(), StatusCode::OK);
+        assert_eq!(
+            service_response_json(conversation)
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let agent_names = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/agent-names?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(agent_names.status(), StatusCode::OK);
+        assert_eq!(service_response_json(agent_names).await[0], "claude");
+
+        let timeseries = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/timeseries?start_ns=0&end_ns=9223372036854775807&buckets=2")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(timeseries.status(), StatusCode::OK);
+        let timeseries_body = service_response_json(timeseries).await;
+        assert!(timeseries_body["token_series"].as_array().is_some());
+        assert!(timeseries_body["model_series"].as_array().is_some());
+
+        cleanup_db(&db_path);
+    }
+
+    #[actix_web::test]
+    async fn metrics_returns_prometheus_text_for_agent_tokens_and_interruptions() {
+        let db_path = unique_handler_db("metrics");
+        write_completed_conversation_event(&db_path, "conv-metrics");
+        let interruption_path = unique_handler_db("metrics_interruptions");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        istore
+            .insert(&make_interruption_event(
+                "int-metrics",
+                "sess-metrics",
+                "conv-metrics",
+                crate::interruption::InterruptionType::RateLimit,
+            ))
+            .unwrap();
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState {
+                    storage_path: db_path.clone(),
+                    start_time: Instant::now(),
+                    health_store: Arc::new(RwLock::new(HealthStore::new())),
+                    interruption_store: Some(Arc::clone(&istore)),
+                    evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
+                    security_observability: super::super::SecurityObservabilityConfig {
+                        timeout_ms: 0,
+                    },
+                    auth,
+                }))
+                .service(metrics),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/metrics").to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("agentsight_token_input_total"));
+        assert!(text.contains("agent=\"claude\""));
+        assert!(text.contains("agentsight_interruptions_total"));
+        assert!(text.contains("type=\"rate_limit\""));
+
+        cleanup_db(&db_path);
+        cleanup_db(&interruption_path);
+    }
+
+    #[actix_web::test]
+    async fn agent_health_filters_clients_and_allows_deletion() {
+        let state = test_app_state(0);
+        {
+            let mut store = state.health_store.write().unwrap();
+            store.update(
+                1001,
+                crate::health::AgentHealthStatus {
+                    pid: 1001,
+                    agent_name: "Gateway".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: "/bin/gateway".to_string(),
+                    ports: vec![8080],
+                    status: crate::health::store::AgentHealthState::Healthy,
+                    last_check_time: 1,
+                    latency_ms: Some(10),
+                    error_message: None,
+                    restart_cmd: None,
+                    offline_since: None,
+                    role: crate::health::store::AgentRole::Gateway,
+                    parent_pid: None,
+                    has_crash: false,
+                },
+            );
+            store.update(
+                1002,
+                crate::health::AgentHealthStatus {
+                    pid: 1002,
+                    agent_name: "Client".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: "/bin/client".to_string(),
+                    ports: Vec::new(),
+                    status: crate::health::store::AgentHealthState::Healthy,
+                    last_check_time: 1,
+                    latency_ms: None,
+                    error_message: None,
+                    restart_cmd: None,
+                    offline_since: None,
+                    role: crate::health::store::AgentRole::Client,
+                    parent_pid: None,
+                    has_crash: false,
+                },
+            );
+            store.update(
+                1003,
+                crate::health::AgentHealthStatus {
+                    pid: 1003,
+                    agent_name: "Cosh".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: "/bin/cosh".to_string(),
+                    ports: Vec::new(),
+                    status: crate::health::store::AgentHealthState::Offline,
+                    last_check_time: 1,
+                    latency_ms: None,
+                    error_message: Some("offline".to_string()),
+                    restart_cmd: None,
+                    offline_since: Some(1),
+                    role: crate::health::store::AgentRole::Client,
+                    parent_pid: None,
+                    has_crash: true,
+                },
+            );
+        }
+        let app = awtest::init_service(
+            App::new()
+                .app_data(state)
+                .service(get_agent_health)
+                .route("/agent-health/{pid}", web::delete().to(delete_agent_health)),
+        )
+        .await;
+
+        let filtered = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/agent-health").to_request(),
+        )
+        .await;
+        let filtered_body = service_response_json(filtered).await;
+        let filtered_agents = filtered_body["agents"].as_array().unwrap();
+        assert_eq!(filtered_agents.len(), 1);
+        assert_eq!(filtered_agents[0]["pid"], 1001);
+
+        let include_clients = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/agent-health?include_clients=true")
+                .to_request(),
+        )
+        .await;
+        let include_body = service_response_json(include_clients).await;
+        let agents = include_body["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 2, "Cosh should still be excluded");
+
+        let deleted = awtest::call_service(
+            &app,
+            awtest::TestRequest::delete()
+                .uri("/agent-health/1001")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        assert_eq!(service_response_json(deleted).await["ok"], true);
+
+        let missing = awtest::call_service(
+            &app,
+            awtest::TestRequest::delete()
+                .uri("/agent-health/9999")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn interruption_handlers_cover_list_stats_counts_detail_and_resolve() {
+        let interruption_path = unique_handler_db("interruptions");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        istore
+            .insert(&make_interruption_event(
+                "int-handler-1",
+                "sess-handler",
+                "conv-handler-i",
+                crate::interruption::InterruptionType::RateLimit,
+            ))
+            .unwrap();
+        istore
+            .insert(&make_interruption_event(
+                "int-handler-2",
+                "sess-handler",
+                "conv-handler-i",
+                crate::interruption::InterruptionType::AuthError,
+            ))
+            .unwrap();
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(list_interruptions)
+                .service(interruption_count)
+                .service(interruption_stats)
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts)
+                .service(list_session_interruptions)
+                .service(list_conversation_interruptions)
+                .service(get_interruption)
+                .route(
+                    "/interruptions/{interruption_id}/resolve",
+                    web::post().to(resolve_interruption),
+                ),
+        )
+        .await;
+
+        let list = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        assert_eq!(
+            service_response_json(list).await.as_array().unwrap().len(),
+            2
+        );
+
+        let count = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        let count_body = service_response_json(count).await;
+        assert_eq!(count_body["total"], 2);
+        assert_eq!(count_body["by_severity"]["high"], 2);
+
+        let stats = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/stats?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            service_response_json(stats).await.as_array().unwrap().len(),
+            2
+        );
+
+        let session_counts = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/session-counts?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(service_response_json(session_counts).await[0]["total"], 2);
+
+        let conversation_counts = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/conversation-counts?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            service_response_json(conversation_counts).await[0]["total"],
+            2
+        );
+
+        let by_session = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/sessions/sess-handler/interruptions")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            service_response_json(by_session)
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let by_conversation = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/conversations/conv-handler-i/interruptions")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            service_response_json(by_conversation)
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let detail = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/int-handler-1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            service_response_json(detail).await["interruption_id"],
+            "int-handler-1"
+        );
+
+        let resolved = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/interruptions/int-handler-1/resolve")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resolved.status(), StatusCode::OK);
+        assert_eq!(service_response_json(resolved).await["status"], "resolved");
+
+        let missing = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/missing-id")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        cleanup_db(&interruption_path);
+    }
+
+    #[actix_web::test]
+    async fn interruption_handlers_return_unavailable_without_store() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .service(list_interruptions)
+                .service(interruption_count)
+                .service(interruption_stats),
+        )
+        .await;
+
+        for uri in [
+            "/interruptions",
+            "/interruptions/count",
+            "/interruptions/stats",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
+    #[actix_web::test]
+    async fn atif_export_handlers_return_documents_and_not_found() {
+        let db_path = unique_handler_db("atif_exports");
+        write_completed_conversation_event(&db_path, "conv-atif");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(export_atif_trace)
+                .service(export_atif_session)
+                .service(export_atif_conversation),
+        )
+        .await;
+
+        for uri in [
+            "/export/atif/trace/trace-conv-atif",
+            "/export/atif/session/session-conv-atif",
+            "/export/atif/conversation/conv-atif",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{uri} should export ATIF"
+            );
+            let body = service_response_json(response).await;
+            assert!(body.is_object(), "{uri} should return a JSON document");
+        }
+
+        for (uri, message) in [
+            ("/export/atif/trace/missing-trace", "trace not found"),
+            ("/export/atif/session/missing-session", "session not found"),
+            (
+                "/export/atif/conversation/missing-conversation",
+                "conversation not found",
+            ),
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(service_response_json(response).await["error"], message);
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[actix_web::test]
+    async fn skill_metrics_handlers_return_reports_for_all_metric_variants() {
+        let db_path = unique_handler_db("skill_metrics");
+        write_completed_conversation_event(&db_path, "conv-skill-metrics");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(skill_metrics_all)
+                .service(skill_metrics_downloads)
+                .service(skill_metrics_loads)
+                .service(skill_metrics_usage_ratio)
+                .service(skill_metrics_distribution)
+                .service(skill_metrics_hotness),
+        )
+        .await;
+
+        for uri in [
+            "/skill-metrics?start_ns=0&end_ns=9223372036854775807&granularity=day",
+            "/skill-metrics/downloads?start_ns=0&end_ns=9223372036854775807",
+            "/skill-metrics/loads?start_ns=0&end_ns=9223372036854775807",
+            "/skill-metrics/usage-ratio?start_ns=0&end_ns=9223372036854775807",
+            "/skill-metrics/distribution?start_ns=0&end_ns=9223372036854775807",
+            "/skill-metrics/hotness?start_ns=0&end_ns=9223372036854775807&granularity=day",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{uri} should return report"
+            );
+            let body = service_response_json(response).await;
+            assert!(body.is_object(), "{uri} should return JSON object");
+        }
+
+        cleanup_db(&db_path);
+    }
+
+    #[actix_web::test]
+    async fn storage_backed_handlers_report_database_open_errors() {
+        let root = temp_root("handler_open_errors");
+        std::fs::write(&root, b"not a directory").unwrap();
+        let blocked_db = root.join("events.db");
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState {
+                    storage_path: blocked_db.clone(),
+                    start_time: Instant::now(),
+                    health_store: Arc::new(RwLock::new(HealthStore::new())),
+                    interruption_store: None,
+                    evaluation_store: Arc::new(
+                        EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+                    ),
+                    security_observability: super::super::SecurityObservabilityConfig {
+                        timeout_ms: 0,
+                    },
+                    auth,
+                }))
+                .service(list_sessions)
+                .service(list_agent_names)
+                .service(get_timeseries)
+                .service(metrics)
+                .service(export_atif_trace)
+                .service(skill_metrics_all),
+        )
+        .await;
+
+        for (uri, status) in [
+            ("/sessions", StatusCode::INTERNAL_SERVER_ERROR),
+            ("/agent-names", StatusCode::INTERNAL_SERVER_ERROR),
+            ("/timeseries", StatusCode::INTERNAL_SERVER_ERROR),
+            (
+                "/export/atif/trace/trace-1",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            ("/skill-metrics", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), status, "{uri} should fail opening DB");
+        }
+
+        let metrics_response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/metrics").to_request(),
+        )
+        .await;
+        assert_eq!(metrics_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = actix_web::body::to_bytes(metrics_response.into_body())
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("# ERROR opening database"));
+
+        let _ = std::fs::remove_file(&root);
     }
 }
 

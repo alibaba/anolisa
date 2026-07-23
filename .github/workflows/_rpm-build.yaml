@@ -200,7 +200,7 @@ jobs:
             cp -p "$SOURCE_ROOT/scripts/agentsight.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/component.toml" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/README.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/README_CN.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/README_zh.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/LICENSE" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" "${COMPONENT}-${VERSION}"
           fi

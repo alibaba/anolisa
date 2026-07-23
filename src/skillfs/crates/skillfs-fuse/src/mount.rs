@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use skillfs_core::SharedSkillStore;
+use skillfs_core::os_adapter::OsAdapterStage;
+use skillfs_core::transform::TransformPipeline;
 use tracing::{error, info, warn};
 
 use crate::path::SkillLayout;
@@ -39,6 +41,13 @@ pub struct MountConfig {
     /// opens and security/policy decisions emit `runtime_metric` JSONL records.
     pub runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
     pub skill_layout: Option<SkillLayout>,
+    /// Opt-in OS adapter stage, pre-compiled and validated at mount startup.
+    /// When `Some`, it is appended after the directive stage in the read-time
+    /// transform pipeline. `None` keeps the default directive-only pipeline.
+    pub os_adapter: Option<OsAdapterStage>,
+    /// Directive/compiler stage toggle. `None` keeps the default (enabled);
+    /// `Some(false)` disables directive compilation for `SKILL.md` reads.
+    pub directive_enabled: Option<bool>,
 }
 
 /// Mount the SkillFS FUSE filesystem (blocking) with a unified
@@ -70,6 +79,8 @@ pub fn mount_configured(
         config.post_publish_controller,
         config.runtime_metrics,
         config.skill_layout,
+        config.os_adapter,
+        config.directive_enabled,
     )
 }
 
@@ -108,6 +119,8 @@ pub fn mount_background_configured(
             config.post_publish_controller,
             config.runtime_metrics,
             config.skill_layout,
+            config.os_adapter,
+            config.directive_enabled,
         ) {
             error!(error = %e, "background mount failed");
         }
@@ -145,6 +158,8 @@ fn mount_inner(
     post_publish_controller: Option<Arc<PostPublishGraceController>>,
     runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
     skill_layout: Option<SkillLayout>,
+    os_adapter: Option<OsAdapterStage>,
+    directive_enabled: Option<bool>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
 
@@ -184,11 +199,15 @@ fn mount_inner(
         fuse_opts.push(fuser::MountOption::AllowOther);
     }
 
-    let mut fs = SkillFs::new(
+    // Start from an empty pipeline and enable stages from configuration below.
+    // This keeps `EnvironmentProfile::detect()` gated on the directive stage
+    // actually being enabled, unlike the public `SkillFs::new` default.
+    let mut fs = SkillFs::new_with_pipeline(
         mountpoint.to_path_buf(),
         source.to_path_buf(),
         store,
         in_place,
+        TransformPipeline::empty(),
     );
     if let Some(sink) = event_sink {
         fs = fs.with_event_sink(sink);
@@ -247,6 +266,23 @@ fn mount_inner(
     if let Some(layout) = skill_layout {
         fs = fs.with_skill_layout(layout);
     }
+    // Directive/compiler stage defaults to enabled; `None` means "no config
+    // opinion". Enabling detects the environment, so a config that disables the
+    // directive stage skips that probe entirely.
+    fs = fs.with_directive_enabled(directive_enabled.unwrap_or(true));
+    if let Some(stage) = os_adapter {
+        // Content-free initialization diagnostics: pipeline stage order,
+        // resolved target OS, rule digest, and rule counts. No Skill content.
+        info!(
+            target_os = stage.target().as_str(),
+            rule_digest = stage.rule_digest(),
+            total_rules = stage.total_rules(),
+            active_rules = stage.active_rules(),
+            "os_adapter transform stage enabled"
+        );
+        fs = fs.with_os_adapter_stage(stage);
+    }
+    info!(stages = ?fs.transform_stage_names(), "read-time transform pipeline ready");
     info!("starting FUSE filesystem");
 
     // Neutralize the daemon process's file-creation mask. The FUSE protocol
@@ -289,7 +325,7 @@ pub fn mount(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, None, None, None, None, None, None, None,
-        None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None,
     )
 }
 
@@ -319,7 +355,7 @@ pub fn mount_with_security(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, event_sink, policy, None, None, None, None,
-        None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, None,
     )
 }
 
@@ -354,6 +390,8 @@ pub fn mount_with_security_and_active_resolver(
         event_sink,
         policy,
         active_resolver,
+        None,
+        None,
         None,
         None,
         None,
@@ -408,6 +446,8 @@ pub fn mount_with_security_active_resolver_and_demo_refresh(
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -450,6 +490,8 @@ pub fn mount_with_security_active_resolver_demo_refresh_and_trusted_writer(
         refresh_controller,
         None,
         trusted_writer,
+        None,
+        None,
         None,
         None,
         None,
@@ -616,6 +658,8 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
             refresh_controller,
             None,
             trusted_writer,
+            None,
+            None,
             None,
             None,
             None,

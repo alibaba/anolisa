@@ -13,21 +13,27 @@ pub mod component;
 pub mod daemon_server;
 pub mod dependency;
 pub mod distribution;
+pub mod domain;
 pub mod download;
+pub mod executor;
+pub mod facts;
 pub mod feature_flags;
 pub mod health;
 pub mod hooks;
 pub mod install_runner;
-pub mod instance;
+
 pub mod integrity;
 pub mod lifecycle;
 pub mod lock;
 pub mod manifest;
-pub mod metadata;
 pub mod osbase_install;
+pub mod owned_executor;
 pub mod path_safety;
+pub mod planner;
 pub mod process;
+pub mod providers;
 pub mod provisioner;
+pub mod record_sink;
 pub mod register;
 pub mod registry;
 pub mod resolver;
@@ -35,6 +41,8 @@ pub mod sandbox_manifest;
 pub mod self_update;
 pub mod service;
 pub mod state;
+pub mod state_migration;
+pub mod state_store;
 pub mod system_helper;
 pub mod telemetry;
 pub mod transaction;
@@ -63,7 +71,9 @@ pub use distribution::{
 };
 pub use download::{DownloadCache, DownloadError, DownloadedArtifact};
 pub use feature_flags::FeatureStore;
-pub use health::{CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, run_check};
+pub use health::{
+    CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, ServiceProbes, run_check,
+};
 pub use hooks::{
     HookOutcome, HookPhase, HookRunResult, HookSkipReason, HookSpec, resolve_manifest_hooks,
     run_hook, run_hooks,
@@ -71,27 +81,24 @@ pub use hooks::{
 pub use install_runner::{
     InstallError, InstallOutcome, InstallRunner, InstalledFile, ResolvedInstallFile,
 };
-pub use instance::{InstanceInfo, InstanceProber, InstanceSnapshot};
 pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{
     ComponentLifecyclePlan, FileAction, FileActionKind, FileOwner as LifecycleFileOwner,
-    HookAction, LifecycleError, LifecycleMode, LifecycleOperation, LifecycleOutcome,
-    LifecyclePhase, LifecyclePlan, LifecycleTargetKind, ResolvedLifecycleHooks, RiskLevel,
-    ServiceAction, ServiceActionKind, execute_plan,
+    HookAction, LifecycleError, LifecycleMode, LifecycleOperation, LifecyclePhase, LifecyclePlan,
+    LifecycleTargetKind, ResolvedLifecycleHooks, RiskLevel, ServiceAction, ServiceActionKind,
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{
-    AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind, HealthSpec,
-    PackageNames, RuntimeDependency, ServiceScope,
+    AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind, PackageNames,
+    RuntimeDependency, ServiceScope, declared_unit_scope,
 };
-pub use metadata::MetadataClient;
 pub use provisioner::{
     ManualDependency, ProvisionOutcome, ProvisionPlan, ProvisionStrategy, ProvisionablePackage,
     UnresolvableDependency,
 };
 pub use register::{
-    ConsentState, HistoryAction, HistoryEntry, ProductType, RegisterRecord, RegisterSource,
-    RegisterState, RegistrationManager, SubscriptionError, current_operator, require_root,
+    ConsentState, HistoryAction, HistoryEntry, RegisterRecord, RegisterSource, RegisterState,
+    RegistrationManager, SubscriptionError, current_operator, generate_link_id, require_root,
 };
 pub use registry::{
     FetchFailure, FetchedMeta, HttpFetch, IndexFreshness, Registry, RegistryClient, RegistryConfig,
@@ -116,8 +123,14 @@ pub use state::{
     InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, OwnedFileKind, Ownership,
     RpmMetadata, STATE_SCHEMA_VERSION, ServiceRef, StateError, SubscriptionScope,
 };
-pub use telemetry::{TelemetryConfig, TelemetryError, TelemetryStarter, validate_sls_account_id};
+pub use telemetry::instance::{InstanceInfo, InstanceProber, InstanceSnapshot};
+pub use telemetry::metadata::MetadataClient;
+pub use telemetry::{
+    DISABLE_MARKER_PATH, Endpoint, FileOffset, LegacyAccountsConfig, LegacyIlogtail, ProductType,
+    TelemetryChannel, TelemetryConfig, TelemetryError, Uploader, UploaderConfig, UploaderError,
+};
 pub use transaction::{
-    JOURNAL_SCHEMA_VERSION, RollbackAction, RollbackActionKind, Transaction, TransactionError,
-    TransactionOutcome, TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
+    DelegatedRecordAction, DelegatedRecoveryContext, JOURNAL_SCHEMA_VERSION, RollbackAction,
+    RollbackActionKind, Transaction, TransactionError, TransactionOutcome,
+    TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
 };

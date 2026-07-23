@@ -37,7 +37,8 @@ fn activity_tool_output_summary_uses_state_language() {
         .iter()
         .find(|row| row.id == "out-1")
         .expect("activity row");
-    assert_eq!(row.summary, "stdout 已捕获；[Details] out-1");
+    assert_eq!(row.summary, "stdout 已捕获");
+    assert!(!row.summary.contains("out-1"));
     assert!(row.detail.contains("stream: stdout"));
 
     let mut output = Vec::new();
@@ -1893,7 +1894,7 @@ fn control_protocol_policy_suppresses_known_foreground_shell_echo() {
     };
     state
         .control
-        .mark_provider_shell_transcript_seen("toolu-shell");
+        .mark_provider_shell_transcript_seen("run-1", "toolu-shell");
     let ids = record_activity_rows_with_policy(
         &mut state,
         &[
@@ -2146,6 +2147,7 @@ fn shell_handoff_activity_marks_user_interrupt_status() {
             terminal_output_ref: Some("/tmp/internal-output-ref.txt".to_string()),
             terminal_output_bytes: 0,
         },
+        shell_environment_generation: None,
     };
 
     let ids = record_approved_shell_handoff_blocks(&mut state, &[block]);
@@ -2206,6 +2208,7 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
             terminal_output_ref: Some("/tmp/stale-output-ref.txt".to_string()),
             terminal_output_bytes: 0,
         },
+        shell_environment_generation: None,
     };
 
     let ids = record_approved_shell_handoff_blocks(&mut state, &[stale_block]);
@@ -2221,7 +2224,7 @@ fn activity_interactive_handoff_summary_uses_state_language() {
         language: Language::ZhCn,
         ..InlineState::default()
     };
-    record_activity_rows(
+    record_activity_rows_with_policy(
         &mut state,
         &[
             governed(AgentEvent::ToolCall {
@@ -2242,7 +2245,17 @@ fn activity_interactive_handoff_summary_uses_state_language() {
                 status: "error".to_string(),
             }),
         ],
+        ActivityRecordPolicy {
+            origin: AgentRunOrigin::InsightPrompt,
+            ..ActivityRecordPolicy::default()
+        },
     );
+
+    let handoff = state
+        .control
+        .find_interactive_shell_handoff("handoff-1")
+        .expect("interactive handoff");
+    assert_eq!(handoff.origin, AgentRunOrigin::InsightPrompt);
 
     let row = state
         .activity
@@ -2252,8 +2265,9 @@ fn activity_interactive_handoff_summary_uses_state_language() {
         .expect("activity row");
     assert_eq!(
         row.summary,
-        "sudo: a terminal is required; 可能需要前台 shell；[Send to shell] handoff-1；[Details] tool-2"
+        "sudo: a terminal is required; 可能需要前台 shell；[Send to shell] handoff-1"
     );
+    assert!(!row.summary.contains("tool-2"));
     assert!(row
         .detail
         .contains("interactive_hint: may_require_foreground_shell"));
@@ -2581,6 +2595,7 @@ fn activity_records_terminal_output_read_misroute_for_control_tool_mode() {
         ActivityRecordPolicy {
             suppress_provider_native_shell: false,
             shell_evidence_tool_available: true,
+            ..ActivityRecordPolicy::default()
         },
     );
 
@@ -2636,6 +2651,7 @@ fn activity_records_terminal_output_read_misroute_for_fenced_fallback() {
         ActivityRecordPolicy {
             suppress_provider_native_shell: false,
             shell_evidence_tool_available: false,
+            ..ActivityRecordPolicy::default()
         },
     );
 

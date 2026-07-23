@@ -1,11 +1,70 @@
+use super::marker::{bash_marker_script, zsh_marker_script};
+use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use super::osc::*;
 use crate::types::{
     CommandOrigin, ShellEventKind, ShellHandoffRequest, COMMAND_OUTPUT_REF_MAX_BYTES,
     SESSION_OUTPUT_REF_MAX_BYTES,
 };
 use std::os::unix::fs::PermissionsExt;
+use std::sync::{Arc, Mutex};
 
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
+
+#[test]
+fn trusted_history_file_marker_is_private_and_observed() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let mut parser = parser_for_test("history-file").with_history_file_observer(
+        ShellHistoryFileObserver::new(move |path| {
+            sink.lock().expect("history observer lock").push(path);
+        }),
+    );
+    let marker = b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"session_id\":\"history-file\",\"history_file\":\"/home/test/.bash_history\"}\x07";
+
+    parser.feed(marker).expect("feed history marker");
+
+    assert_eq!(
+        *observed.lock().expect("history observer lock"),
+        vec![std::path::PathBuf::from("/home/test/.bash_history")]
+    );
+    assert!(parser.events.is_empty());
+    assert!(parser.clean.is_empty());
+    assert!(parser.display.is_empty());
+}
+
+#[test]
+fn history_file_marker_rejects_untrusted_or_relative_paths() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let mut parser = parser_for_test("history-file-reject").with_history_file_observer(
+        ShellHistoryFileObserver::new(move |path| {
+            sink.lock().expect("history observer lock").push(path);
+        }),
+    );
+
+    for marker in [
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"wrong\",\"session_id\":\"history-file-reject\",\"history_file\":\"/tmp/history\"}\x07".as_slice(),
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"history_file\":\"/tmp/history\"}\x07".as_slice(),
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"session_id\":\"history-file-reject\",\"history_file\":\"relative/history\"}\x07".as_slice(),
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"session_id\":\"history-file-reject\",\"history_file\":\"/tmp/line\\nhistory\"}\x07".as_slice(),
+    ] {
+        parser.feed(marker).expect("feed rejected history marker");
+    }
+
+    assert!(observed.lock().expect("history observer lock").is_empty());
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn bash_history_file_marker_is_native_only() {
+    let script = bash_marker_script();
+
+    assert!(script.contains("_cosh_emit_native_history_file_marker"));
+    assert!(script.contains("[[ -n \"${COSH_SHELL_ISOLATED:-}\" ]]"));
+    assert!(script.contains("\"event\":\"history_file\""));
+    assert!(script.contains("[[:cntrl:]]"));
+    assert!(!zsh_marker_script().contains("\"event\":\"history_file\""));
+}
 
 #[test]
 fn parser_clean_strips_zsh_bracketed_paste_and_applies_backspace() {
@@ -148,6 +207,295 @@ fn pending_handoff_origin_mismatch_becomes_unknown() {
 }
 
 #[test]
+fn trusted_preexec_path_reuses_and_advances_normalized_generation() {
+    let mut parser = parser_for_test("path-generation");
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/first:/first:relative:/second/",
+        false,
+        Some("path-generation"),
+    );
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .generation,
+        1
+    );
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        1
+    );
+    assert_eq!(
+        parser.shell_environment_snapshot.as_ref().unwrap().path,
+        "/first:/second"
+    );
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo one"),
+        "/first:/second",
+        true,
+        Some("path-generation"),
+    );
+    let first = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("first command start");
+    assert_eq!(first.shell_environment_generation, Some(1));
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        2
+    );
+    feed_precmd(&mut parser, 0);
+    let completed = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandCompleted)
+        .expect("first command completion");
+    assert_eq!(completed.shell_environment_generation, Some(1));
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo two"),
+        "/third:/second",
+        true,
+        Some("path-generation"),
+    );
+    let second = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == ShellEventKind::CommandStarted)
+        .nth(1)
+        .expect("second command start");
+    assert_eq!(second.shell_environment_generation, Some(2));
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        3
+    );
+}
+
+#[test]
+fn untrusted_or_invalid_environment_marker_never_binds_generation() {
+    let mut parser = parser_for_test("path-untrusted");
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/provisional",
+        false,
+        Some("path-untrusted"),
+    );
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo untrusted"),
+        "/provisional",
+        false,
+        Some("path-untrusted"),
+    );
+    let untrusted = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("untrusted command start");
+    assert_eq!(untrusted.shell_environment_generation, None);
+    feed_precmd(&mut parser, 0);
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo wrong-session"),
+        "/wrong",
+        true,
+        Some("different-session"),
+    );
+    assert_eq!(
+        parser
+            .events
+            .iter()
+            .filter(|event| event.kind == ShellEventKind::CommandStarted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        2
+    );
+
+    let oversized = format!("/{}", "x".repeat(8192));
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo oversized"),
+        &oversized,
+        true,
+        Some("path-untrusted"),
+    );
+    let oversized_start = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == ShellEventKind::CommandStarted)
+        .nth(1)
+        .expect("oversized command start");
+    assert_eq!(oversized_start.shell_environment_generation, None);
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        2
+    );
+}
+
+#[test]
+fn path_snapshot_accepts_exact_eight_kibibyte_boundary() {
+    let mut parser = parser_for_test("path-eight-kib");
+    let path = format!("/{}", "x".repeat(8191));
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo boundary"),
+        &path,
+        true,
+        Some("path-eight-kib"),
+    );
+
+    let start = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("boundary command start");
+    assert_eq!(start.shell_environment_generation, Some(1));
+    assert_eq!(
+        parser.shell_environment_snapshot.as_ref().unwrap().path,
+        path
+    );
+}
+
+#[test]
+fn environment_marker_with_wrong_token_does_not_update_state() {
+    let mut parser = parser_for_test("path-wrong-token");
+    let marker = serde_json::json!({
+        "event": "preexec",
+        "token": "wrong-token",
+        "session_id": "path-wrong-token",
+        "command": "echo forged",
+        "cwd": "/tmp",
+        "path": "/forged",
+        "path_trusted": true,
+        "status": 0,
+    });
+    let bytes = format!("\x1b]1337;COSH;{marker}\x07");
+
+    parser.feed(bytes.as_bytes()).expect("feed forged marker");
+
+    assert!(parser.shell_environment_snapshot.is_none());
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn completion_keeps_generation_captured_at_command_start() {
+    let mut parser = parser_for_test("path-completion-stable");
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo stable"),
+        "/at-start",
+        true,
+        Some("path-completion-stable"),
+    );
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/after-command",
+        false,
+        Some("path-completion-stable"),
+    );
+
+    let completed = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandCompleted)
+        .expect("completed command");
+    assert_eq!(completed.shell_environment_generation, Some(1));
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .generation,
+        2
+    );
+}
+
+#[test]
+fn accepted_environment_snapshots_are_forwarded_without_events_or_journal_fields() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("path-observer").with_environment_observer(
+        ShellEnvironmentObserver::new(move |snapshot| {
+            sender.send(snapshot).expect("forward snapshot");
+        }),
+    );
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/provisional",
+        false,
+        Some("path-observer"),
+    );
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo observed"),
+        "/authoritative",
+        true,
+        Some("path-observer"),
+    );
+
+    let provisional = receiver.recv().expect("provisional snapshot");
+    let authoritative = receiver.recv().expect("authoritative snapshot");
+    assert_eq!(provisional.path, "/provisional");
+    assert_eq!(authoritative.path, "/authoritative");
+    assert!(parser.events.iter().all(|event| {
+        serde_json::to_value(event)
+            .expect("serialize event")
+            .get("path")
+            .is_none()
+    }));
+}
+
+#[test]
 fn parser_preserves_pending_handoff_command_echo_for_crlf() {
     let mut parser = parser_for_test("handoff-echo-crlf");
     let request = ShellHandoffRequest::new(
@@ -227,6 +575,28 @@ fn output_ref_file_uses_private_permissions() {
             & 0o777,
         0o600
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn output_ref_file_redacts_secrets_before_persistence() {
+    let dir = std::env::temp_dir().join(format!(
+        "cosh-shell-osc-secret-output-ref-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let secret = "output-secret-value";
+
+    let path = write_output_ref(
+        &dir,
+        "cmd-1",
+        format!("result api_key={secret}\n").as_bytes(),
+    )
+    .expect("write output ref");
+    let output = std::fs::read_to_string(&path).expect("read output ref");
+
+    assert!(!output.contains(secret), "{output}");
+    assert!(output.contains("api_key=<redacted>"), "{output}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -358,4 +728,28 @@ fn feed_precmd(parser: &mut OscParser, status: i32) {
         "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":{status},\"cwd\":\"/tmp\"}}\x07"
     );
     parser.feed(marker.as_bytes()).expect("feed precmd");
+}
+
+fn feed_environment_marker(
+    parser: &mut OscParser,
+    event: &str,
+    command: Option<&str>,
+    path: &str,
+    path_trusted: bool,
+    session_id: Option<&str>,
+) {
+    let marker = serde_json::json!({
+        "event": event,
+        "token": TEST_MARKER_TOKEN,
+        "session_id": session_id,
+        "command": command,
+        "cwd": "/tmp",
+        "path": path,
+        "path_trusted": path_trusted,
+        "status": 0,
+    });
+    let bytes = format!("\x1b]1337;COSH;{marker}\x07");
+    parser
+        .feed(bytes.as_bytes())
+        .expect("feed environment marker");
 }

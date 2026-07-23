@@ -9,7 +9,7 @@ ANOLISA 是面向 AI Agent 工作负载的服务端操作系统层。通过统�
 ## 安装 CLI
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://agentic-os.sh/install.sh | bash
 ```
 
 > Alinux 4 用户也可通过 `sudo yum install anolisa` 安装。
@@ -32,26 +32,27 @@ anolisa env
 anolisa list
 ```
 
-按需安装组件。大部分组件使用 user mode；`agentsight` 和 `agent-sec-core` 需要 system mode（sudo）。
+按需安装组件。当前 `agentsight`、`agent-sec-core`、`ws-ckpt` 和 `skillfs`
+制品要求 system mode；下列其他示例支持 user mode。
 
 ```bash
 # Token 优化
 anolisa install tokenless
 
 # 工作区快照（基于 btrfs COW）
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 
 # 可观测性（需要 sudo — eBPF 依赖 root）
-sudo anolisa install agentsight
+sudo anolisa --install-mode system install agentsight
 
 # 安全内核（需要 sudo）
-sudo anolisa install agent-sec-core
+sudo anolisa --install-mode system install agent-sec-core
 
 # 持久记忆（MCP 文件形态）
 anolisa install agent-memory
 
 # 技能文件系统（FUSE 虚拟视图）
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # OS 技能库
 anolisa install os-skills
@@ -119,17 +120,17 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ### 用户入口点
 
 - [anolisa CLI 命令参考](user-guide/zh/user-entrypoint/anolisa-cli.md)
-- [Copilot Shell](user-guide/zh/user-entrypoint/copilot-shell.md)
+- [Copilot Shell](user-guide/zh/user-entrypoint/copilot-shell/QUICKSTART.md)
 - [OS 技能库](user-guide/zh/user-entrypoint/os-skills.md)
 
 ### 运行时与 Token 节省
 
 - [工作区快照](user-guide/zh/runtime/ws-ckpt.md)
 - [技能文件系统](user-guide/zh/runtime/skillfs.md)
-- [Token 优化](user-guide/zh/token-saving/tokenless.md)
-- [Agent 记忆](user-guide/zh/token-saving/agent-memory.md)
+- [Token 优化](user-guide/zh/token-saving/tokenless/QUICKSTART.md)
+- [Agent 记忆](user-guide/zh/token-saving/agent-memory/QUICKSTART.md)
 
 ### 可观测性与安全
 
 - [AgentSight](user-guide/zh/agent-observability/agentsight.md)
-- [AgentSecCore](user-guide/zh/agent-security/agent-sec-core.md)
+- [AgentSecCore](user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md)

@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('../utils/apiClient', () => ({
   SecurityApiClientError: class SecurityApiClientError extends Error {
@@ -216,6 +216,61 @@ describe('SecurityObservabilityPage', () => {
     expect(screen.queryByText('正常')).not.toBeInTheDocument();
     expect(screen.queryByText('近期事件')).not.toBeInTheDocument();
     expect(screen.queryByText('latest events')).not.toBeInTheDocument();
+  });
+
+  it('uses summary verdicts when the detailed event sample is unavailable', async () => {
+    const summaryEvent = {
+      event_id: 'skill-ledger-show',
+      event_type: 'skill_ledger_show',
+      category: 'skill_ledger',
+      result: 'succeeded',
+      verdict: 'tampered',
+      command: 'show',
+      skill_name: 'demo-skill',
+      timestamp: '2026-06-09T00:00:00+00:00',
+    };
+    mockFetchSecuritySummary.mockResolvedValueOnce({
+      state: 'ok',
+      data: {
+        total: 3,
+        by_category: { skill_ledger: 3 },
+        by_event_type: { skill_ledger_show: 3 },
+        by_result: { succeeded: 3 },
+        affected_sessions: 0,
+        affected_runs: 0,
+        latest_events: [summaryEvent],
+      },
+    });
+    mockFetchSecurityCountBy.mockImplementation((groupBy: string) => Promise.resolve({
+      state: 'ok',
+      data: {
+        group_by: groupBy,
+        items: groupBy === 'verdict'
+          ? [
+            { value: 'tampered', count: 1 },
+            { value: 'drifted', count: 1 },
+            { value: 'unmanaged', count: 1 },
+          ]
+          : defaultSecurityCountItems(groupBy),
+      },
+    }));
+    mockFetchSecurityEvents.mockRejectedValueOnce(new Error('recent events unavailable'));
+
+    render(<SecurityObservabilityPage />);
+
+    const recentEventsHeading = await screen.findByText('近期安全事件');
+    const recentEventsCard = recentEventsHeading.closest<HTMLElement>('.rounded-lg');
+    expect(recentEventsCard).not.toBeNull();
+    await waitFor(() => {
+      expect(within(recentEventsCard!).getByText('tampered')).toHaveClass('bg-red-100');
+    });
+    expect(await screen.findByText('存在 1 个风险 verdict')).toBeInTheDocument();
+    expect(screen.getByText('风险 1 / Warning 2')).toBeInTheDocument();
+    for (const verdict of ['drifted', 'unmanaged']) {
+      const warningBadge = screen.getAllByText(verdict)
+        .find((element) => element.classList.contains('bg-amber-100'));
+      expect(warningBadge).toBeDefined();
+    }
   });
 
   it('uses exact verdict counts instead of the overview event sample', async () => {

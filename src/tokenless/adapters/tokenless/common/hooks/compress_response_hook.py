@@ -18,6 +18,17 @@ Pipeline: Env Attribution → Layered分流 → Compression → TOON Encoding
 
 Hook point: **PostToolUse**
 
+Output contract per agent:
+  - claude-code (>= 2.1.121): the compressed payload *replaces* the
+    model-visible tool result via ``hookSpecificOutput.updatedToolOutput``.
+    ``additionalContext`` is additive in Claude Code (appended alongside
+    the original tool result), so it only carries genuinely additive
+    diagnostics (environment attribution). Older Claude Code versions fail
+    open: compression is disabled instead of injecting a duplicate payload
+    (issue #1645).
+  - other agents: the compressed payload is injected via
+    ``additionalContext`` per each runtime's hook contract.
+
 The agent ID is read from the TOKENLESS_AGENT_ID environment variable
 (set by the install action script).  Fallback paths follow the ANOLISA
 FHS spec: /usr/bin/tokenless.
@@ -38,8 +49,10 @@ from hook_utils import (
     classify_env_error,
     get_thresholds,
     is_skill_file,
+    parse_version,
     resolve_binary,
     resolve_tool_call_id,
+    secure_write_text,
     skip,
     try_parse_json,
     unwrap_string_json,
@@ -50,6 +63,19 @@ from hook_utils import (
 
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 _MIN_RESPONSE_CHARS = 200
+
+# Claude Code added hookSpecificOutput.updatedToolOutput (normal-path tool
+# output replacement for all tools) in v2.1.121. Older versions only support
+# the additive additionalContext, which would duplicate the payload.
+_CLAUDE_AGENT_ID = "claude-code"
+_CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
+
+# Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
+# invalidate it. Hooks run as a fresh process per tool call and spawning the
+# node CLI every time would add noticeable latency.
+_CLAUDE_VERSION_CACHE = os.path.join(
+    os.path.expanduser("~"), ".tokenless", ".claude-version"
+)
 
 
 # -- helpers -------------------------------------------------------------------
@@ -64,6 +90,99 @@ def _build_additional_context(
         parts.append(env_attribution)
     parts.append(content)
     return "\n".join(parts)
+
+
+def _emit(output: dict) -> None:
+    print(json.dumps(output, ensure_ascii=False))
+
+
+def _emit_attribution_or_skip(env_attribution: str) -> None:
+    """Pass the original result through, keeping only additive diagnostics.
+
+    Emits an attribution-only additionalContext when present (it is genuinely
+    additive and safe on every agent), otherwise a plain skip. Never returns.
+    """
+    if env_attribution:
+        _emit({
+            "suppressOutput": True,
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": env_attribution,
+            },
+        })
+        sys.exit(0)
+    skip()
+
+
+def _cached_claude_version(claude_bin: str) -> tuple | None:
+    """Return the Claude Code version tuple, caching `claude --version`."""
+    try:
+        st = os.stat(claude_bin)
+        cache_key = f"{claude_bin}:{int(st.st_mtime)}:{st.st_size}"
+    except OSError:
+        cache_key = claude_bin
+
+    try:
+        with open(_CLAUDE_VERSION_CACHE) as f:
+            key, _, ver_str = f.read().strip().partition("\n")
+        if key == cache_key:
+            return parse_version(ver_str)
+    except OSError:
+        pass
+
+    try:
+        proc = subprocess.run(
+            [claude_bin, "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception as e:
+        warn(f"claude --version failed: {e}")
+        return None
+    if proc.returncode != 0:
+        return None
+    ver = parse_version(proc.stdout)
+    if ver:
+        try:
+            # Same hardened write as other ~/.tokenless state files (0o600,
+            # symlink-safe) so the cache stays private on shared HOMEs.
+            secure_write_text(
+                _CLAUDE_VERSION_CACHE, f"{cache_key}\n{proc.stdout.strip()}"
+            )
+        except OSError:
+            pass
+    return ver
+
+
+def _claude_supports_replacement() -> bool:
+    """Whether the running Claude Code supports updatedToolOutput (>= 2.1.121).
+
+    Returns False when the version cannot be determined; the caller then
+    fails open by disabling compression, so unknown versions never receive a
+    duplicate compressed payload through additionalContext.
+    """
+    claude_bin = resolve_binary("claude")
+    if not claude_bin:
+        return False
+    ver = _cached_claude_version(claude_bin)
+    return ver is not None and ver >= _CLAUDE_MIN_REPLACE_VERSION
+
+
+def _restore_dropped_schema_fields(original: dict, compressed: dict) -> dict:
+    """Restore top-level keys dropped by compression when originally empty.
+
+    compress-response drops nulls, empty values ("" / {} / []) and configured
+    debug fields. Built-in Claude Code tools expect a stable output schema
+    (e.g. Bash: stdout/stderr/interrupted/isImage), so cheap empty fields are
+    restored for updatedToolOutput; intentionally dropped non-empty debug
+    payloads stay dropped.
+    """
+    restored = dict(compressed)
+    for key, value in original.items():
+        if key in restored:
+            continue
+        if value is None or value == "" or value == {} or value == []:
+            restored[key] = value
+    return restored
 
 
 # -- main --------------------------------------------------------------------
@@ -138,33 +257,13 @@ def main() -> None:
 
     # 10. Content retrieval — skip entirely (preserve integrity)
     if tool_name in SKIP_TOOLS:
-        if env_attribution:
-            output = {
-                "suppressOutput": True,
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": env_attribution,
-                },
-            }
-            print(json.dumps(output, ensure_ascii=False))
-            return
-        skip()
+        _emit_attribution_or_skip(env_attribution)
 
     # 11. All other tools — skip small responses, but still inject
     # env attribution for error cases (small size doesn't mean the
     # error classification is unimportant to the agent).
     if len(tool_response) < _MIN_RESPONSE_CHARS:
-        if env_attribution:
-            output = {
-                "suppressOutput": True,
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": env_attribution,
-                },
-            }
-            print(json.dumps(output, ensure_ascii=False))
-            return
-        skip()
+        _emit_attribution_or_skip(env_attribution)
 
     # 12. Step 1: Response compression with 3-layer thresholds
     #   Layer 1 (content retrieval): already skipped above
@@ -232,20 +331,77 @@ def main() -> None:
     # Determine final output
     final_output = toon_output if toon_output else compressed
 
-    # 14. Build response
+    # Nothing shrank — pass the original through untouched instead of
+    # emitting a same-size duplicate of the response (applies to all agents).
+    if not used_resp_compression and not toon_output:
+        _emit_attribution_or_skip(env_attribution)
+
+    # 14. Build response.
+    #
+    # Claude Code: additionalContext is *additive* — the model would see both
+    # the original tool result and the compressed copy, inflating the context
+    # instead of shrinking it (issue #1645). Replace the tool result via
+    # updatedToolOutput (>= 2.1.121) and keep additionalContext for additive
+    # diagnostics only. Unsupported versions fail open via pass-through.
+    if _AGENT_ID == _CLAUDE_AGENT_ID:
+        if not _claude_supports_replacement():
+            warn(
+                "Claude Code < 2.1.121 (or version unknown): "
+                "updatedToolOutput unsupported, response compression disabled."
+            )
+            _emit_attribution_or_skip(env_attribution)
+
+        if isinstance(tool_response_raw, (dict, list)):
+            # Structured original: the replacement must preserve the built-in
+            # tool output schema, so TOON (a text encoding) is not applicable
+            # and only a genuine compress-response win qualifies.
+            if not used_resp_compression:
+                _emit_attribution_or_skip(env_attribution)
+            compressed_parsed = try_parse_json(compressed)
+            if isinstance(tool_response_raw, dict) and isinstance(
+                compressed_parsed, dict
+            ):
+                updated_output = _restore_dropped_schema_fields(
+                    tool_response_raw, compressed_parsed
+                )
+            elif compressed_parsed is not None:
+                updated_output = compressed_parsed
+            else:
+                _emit_attribution_or_skip(env_attribution)
+            # Restoring empty schema fields can cancel out a marginal win;
+            # only replace when the result is strictly smaller than the
+            # original serialized response.
+            if len(json.dumps(updated_output, separators=(",", ":"))) >= len(
+                tool_response
+            ):
+                _emit_attribution_or_skip(env_attribution)
+        else:
+            # String original (JSON-in-string): replace with the smallest
+            # text form (TOON when it won, compressed JSON otherwise).
+            updated_output = final_output
+
+        hook_output = {
+            "hookEventName": "PostToolUse",
+            "updatedToolOutput": updated_output,
+        }
+        if env_attribution:
+            hook_output["additionalContext"] = env_attribution
+        _emit({"suppressOutput": True, "hookSpecificOutput": hook_output})
+        return
+
+    # Other agents: inject via additionalContext per their hook contracts.
     context = _build_additional_context(
         final_output,
         env_attribution=env_attribution,
     )
 
-    output = {
+    _emit({
         "suppressOutput": True,
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
             "additionalContext": context,
         },
-    }
-    print(json.dumps(output, ensure_ascii=False))
+    })
 
 
 if __name__ == "__main__":

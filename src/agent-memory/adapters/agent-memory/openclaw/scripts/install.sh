@@ -54,5 +54,16 @@ env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" pl
     exit 1
 }
 
+# OpenClaw 2026.6.11 requires non-bundled plugins to explicitly opt-in
+# to conversation hooks (agent_end, before_prompt_build, etc.). Without
+# this setting the hooks are silently blocked and auto-capture /
+# auto-recall never fire (#1460).
+env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" config set \
+    "plugins.entries.memory-anolisa.hooks.allowConversationAccess" true || {
+    echo "[${COMPONENT}] WARNING: failed to set allowConversationAccess — auto-capture/auto-recall hooks may be blocked." >&2
+}
+
 echo "[${COMPONENT}] ${AGENT} plugin installed via openclaw CLI."
 echo "[${COMPONENT}] Run '${OPENCLAW_BIN} gateway restart' to activate."
+echo "[${COMPONENT}] NOTE: allowConversationAccess and plugin hooks only take effect after gateway restart."
+echo "[${COMPONENT}]       Without restart, auto-capture and auto-recall hooks remain silently blocked."

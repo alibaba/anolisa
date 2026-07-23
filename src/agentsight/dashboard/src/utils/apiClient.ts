@@ -792,6 +792,9 @@ export interface SecurityEventRecord {
   event_type?: string | null;
   category?: string | null;
   result?: string | null;
+  verdict?: string | null;
+  command?: string | null;
+  skill_name?: string | null;
   timestamp?: string | null;
   timestamp_ns?: number | null;
   timestamp_epoch?: number | null;

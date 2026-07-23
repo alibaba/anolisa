@@ -78,9 +78,6 @@ pub struct ComponentManifest {
     /// synthesized `binary_version` over the first executable layout file —
     /// see [`ComponentManifest::health_spec`].
     pub health_check: Option<CheckSpec>,
-    /// Legacy `[[health_checks]]` entries in source order, retained for the
-    /// existing `status` probe path during the additive-compat window.
-    pub health_checks: Vec<HealthSpec>,
 }
 
 /// Structured distribution selector, surfaced for downstream consumers
@@ -370,6 +367,33 @@ impl ServiceSpec {
             instance: None,
         }
     }
+
+    /// Whether this declaration covers `unit`: an exact name match, or a
+    /// template declaration (`foo@.service`) covering its instantiated
+    /// units (`foo@alice.service`).
+    pub fn covers_unit(&self, unit: &str) -> bool {
+        if self.unit == unit {
+            return true;
+        }
+        if let Some(prefix) = self.unit.strip_suffix("@.service") {
+            return unit
+                .strip_prefix(&format!("{prefix}@"))
+                .map(|rest| rest.ends_with(".service") && rest.len() > ".service".len())
+                .unwrap_or(false);
+        }
+        false
+    }
+}
+
+/// Scope declared for `unit` by the `[[component.services]]` declarations;
+/// a unit with no covering declaration probes as system scope, matching the
+/// serde default on [`ServiceSpec::scope`].
+pub fn declared_unit_scope(services: &[ServiceSpec], unit: &str) -> ServiceScope {
+    services
+        .iter()
+        .find(|decl| decl.covers_unit(unit))
+        .map(|decl| decl.scope)
+        .unwrap_or_default()
 }
 
 /// Serde default for boolean fields whose absent value is `true`.
@@ -686,6 +710,15 @@ pub struct AdapterConfigSetSpec {
     pub key: String,
     /// Value to set.
     pub value: toml::Value,
+    /// Optional semver-style constraint on the target framework version,
+    /// e.g. `">=2026.4.24"`. When present, the driver applies this config
+    /// entry only if the detected framework version satisfies the
+    /// constraint; otherwise the entry is skipped and left out of the
+    /// receipt. Absent means "always apply", preserving backward
+    /// compatibility with older manifests. Skipped on serialize when absent
+    /// so those manifests round-trip byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_version: Option<String>,
 }
 
 /// One skill entry in an `[[adapters]]` or framework-specific section.
@@ -800,31 +833,6 @@ impl HermesAdapterSpec {
     }
 }
 
-/// One `[[health_checks]]` entry. Multiple checks per component are
-/// expected (binary probe + systemd unit + http endpoint, etc.) so we
-/// keep the entire list rather than only the first.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct HealthSpec {
-    /// Optional stable health-check name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Health-check kind (`file`, `command`, `systemd`, ...).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub kind: String,
-    /// Command line for command-style checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// Probe path for binary/file checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe: Option<String>,
-    /// Service unit for service-manager checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-    /// Optional checks degrade instead of failing when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub optional: Option<bool>,
-}
-
 #[derive(Deserialize)]
 struct ComponentManifestRaw {
     #[serde(default = "current_schema_version", alias = "manifest_version")]
@@ -851,8 +859,6 @@ struct ComponentManifestRaw {
     features: Vec<FeatureRaw>,
     #[serde(default)]
     adapters: Vec<AdapterRaw>,
-    #[serde(default, alias = "health")]
-    health_checks: Vec<HealthCheckRaw>,
 }
 
 #[derive(Deserialize)]
@@ -1128,22 +1134,6 @@ struct AdapterCompatRaw {
     framework_version: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
-struct HealthCheckRaw {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    probe: Option<String>,
-    #[serde(default)]
-    unit: Option<String>,
-    #[serde(default)]
-    optional: Option<bool>,
-}
-
 impl From<ComponentManifestRaw> for ComponentManifest {
     fn from(raw: ComponentManifestRaw) -> Self {
         // Destructure the `[component]` table once so the nested minimal-schema
@@ -1343,19 +1333,6 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             })
             .collect();
 
-        let health_checks: Vec<HealthSpec> = raw
-            .health_checks
-            .into_iter()
-            .map(|h| HealthSpec {
-                name: h.name,
-                kind: h.kind.unwrap_or_default(),
-                command: h.command,
-                probe: h.probe,
-                unit: h.unit,
-                optional: h.optional,
-            })
-            .collect();
-
         // Prefer the minimal-schema `[component.platform]`; fall back to the
         // legacy `[environment]` / `requires_env`.
         let env_requirements = platform_raw
@@ -1378,7 +1355,6 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             features,
             adapters,
             health_check,
-            health_checks,
         }
     }
 }
@@ -2056,6 +2032,48 @@ mod tests {
     }
 
     #[test]
+    fn service_declarations_cover_exact_and_template_units() {
+        let plain = ServiceSpec::from_legacy_unit("agentsight.service".to_string());
+        assert!(plain.covers_unit("agentsight.service"));
+        assert!(!plain.covers_unit("agentsight-user.service"));
+
+        let template = ServiceSpec {
+            unit: "anolisa-memory@.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+            instance: Some("%u".to_string()),
+        };
+        assert!(template.covers_unit("anolisa-memory@alice.service"));
+        // Exact match on the template's own literal name still counts.
+        assert!(template.covers_unit("anolisa-memory@.service"));
+        assert!(!template.covers_unit("anolisa-memory@.service.d"));
+    }
+
+    #[test]
+    fn declared_unit_scope_defaults_to_system_without_a_covering_decl() {
+        let declared = vec![ServiceSpec {
+            unit: "anolisa-memory@.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+            instance: Some("%u".to_string()),
+        }];
+        assert_eq!(
+            declared_unit_scope(&declared, "anolisa-memory@alice.service"),
+            ServiceScope::User
+        );
+        assert_eq!(
+            declared_unit_scope(&declared, "agentsight.service"),
+            ServiceScope::System
+        );
+        assert_eq!(
+            declared_unit_scope(&[], "anything.service"),
+            ServiceScope::System
+        );
+    }
+
+    #[test]
     fn legacy_install_services_map_to_specs_with_defaults() {
         // Legacy `[install] services = [...]` is a bare unit-name list; each
         // name becomes a system-scoped ServiceSpec with enable/start true.
@@ -2453,8 +2471,12 @@ mod tests {
         assert!(m.health_spec().is_none());
     }
 
+    /// The retired `[[health_checks]]` vocabulary must not break parsing:
+    /// manifests written against the legacy schema still load, the legacy
+    /// entries are simply ignored (structured health comes only from
+    /// `[component.health_check]`).
     #[test]
-    fn multiple_health_checks_are_preserved_in_order() {
+    fn legacy_health_checks_sections_are_ignored() {
         let toml_text = r#"
             [component]
             name = "agentsight"
@@ -2471,21 +2493,12 @@ mod tests {
             unit = "agentsight.service"
             optional = true
         "#;
-        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
-        assert_eq!(m.health_checks.len(), 2);
-        assert_eq!(m.health_checks[0].name.as_deref(), Some("binary"));
-        assert_eq!(m.health_checks[0].kind, "command");
-        assert_eq!(
-            m.health_checks[0].command.as_deref(),
-            Some("{bindir}/agentsight --help")
+        let m = ComponentManifest::from_toml_str(toml_text).expect("legacy manifest still parses");
+        assert_eq!(m.component.name, "agentsight");
+        assert!(
+            m.health_spec().is_none(),
+            "legacy checks must not synthesize a structured spec"
         );
-        assert_eq!(m.health_checks[1].name.as_deref(), Some("service"));
-        assert_eq!(m.health_checks[1].kind, "systemd");
-        assert_eq!(
-            m.health_checks[1].unit.as_deref(),
-            Some("agentsight.service")
-        );
-        assert_eq!(m.health_checks[1].optional, Some(true));
     }
 
     #[test]
@@ -2796,6 +2809,72 @@ mod tests {
         assert_eq!(
             m.adapters[0].framework_version_req,
             m2.adapters[0].framework_version_req
+        );
+    }
+
+    #[test]
+    fn adapter_config_framework_version_parses_and_round_trips() {
+        // The issue's suggested component shape: a per-config framework
+        // version condition alongside the adapter-level compat requirement.
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            plugin_id = "agent-sec"
+
+            [adapters.compat]
+            framework_version = ">=2026.4.14"
+
+            [[adapters.openclaw.config]]
+            key = "plugins.entries.agent-sec.hooks.allowConversationAccess"
+            value = true
+            framework_version = ">=2026.4.24"
+
+            [[adapters.openclaw.config]]
+            key = "plugins.entries.agent-sec.enabled"
+            value = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert_eq!(a.compat.framework_version.as_deref(), Some(">=2026.4.14"));
+        let oc = a.openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.config.len(), 2);
+        assert_eq!(
+            oc.config[0].framework_version.as_deref(),
+            Some(">=2026.4.24")
+        );
+        // A config entry with no condition means "always apply".
+        assert!(oc.config[1].framework_version.is_none());
+
+        // The condition must survive a serialize→parse round-trip, and an
+        // absent condition must not be emitted (old manifests stay stable).
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(m.adapters, m2.adapters);
+    }
+
+    #[test]
+    fn adapter_config_without_framework_version_skips_serializing_field() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.config]]
+            key = "some.key"
+            value = "hello"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("framework_version"),
+            "absent per-config framework_version must be skipped: {serialized}"
         );
     }
 

@@ -27,6 +27,7 @@ fn internal_origins_are_silent_even_for_critical_findings() {
             &block_with_command("free -m"),
             aggregate,
             origin,
+            InterventionGates::eligible(),
             &mut state,
         );
 
@@ -51,6 +52,7 @@ fn unknown_origin_warning_is_silent() {
         &block_with_command("free -m"),
         aggregate,
         CommandOrigin::Unknown,
+        InterventionGates::eligible(),
         &mut state,
     );
 
@@ -71,6 +73,7 @@ fn unknown_origin_critical_is_hint_not_consultation() {
         &block_with_command("free -m"),
         aggregate,
         CommandOrigin::Unknown,
+        InterventionGates::eligible(),
         &mut state,
     );
 

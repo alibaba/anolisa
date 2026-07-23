@@ -153,12 +153,18 @@ sleep 60
         .expect("spawn cosh-shell raw");
     let raw_pid = child.id();
     let mut stdin = child.stdin.take().expect("child stdin");
+    let writer_pid_file = pid_file.clone();
     let writer = thread::spawn(move || {
         stdin
             .write_all(b"?? cosh-core-process-cleanup\n")
             .expect("write prompt");
         stdin.flush().expect("flush prompt");
-        thread::sleep(Duration::from_millis(1_200));
+        for _ in 0..100 {
+            if writer_pid_file.is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
         stdin.write_all(b"/cancel\n").expect("write cancel");
         stdin.flush().expect("flush cancel");
         thread::sleep(Duration::from_millis(1_000));

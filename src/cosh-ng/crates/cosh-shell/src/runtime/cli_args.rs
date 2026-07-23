@@ -8,12 +8,30 @@ pub(crate) enum RawShellKind {
     Unsupported(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumeLaunch {
+    Picker,
+    Session(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LaunchOptions {
+    pub(crate) resume: Option<ResumeLaunch>,
+}
+
 pub(crate) fn adapter_name_from_args(args: &[String]) -> Option<&str> {
     let mut idx = 0;
     while idx < args.len() {
         match args[idx].as_str() {
             "--shell" => idx += 2,
+            "--resume" => {
+                idx += 1;
+                if args.get(idx).is_some_and(|value| !value.starts_with('-')) {
+                    idx += 1;
+                }
+            }
             arg if arg.starts_with("--shell=") => idx += 1,
+            arg if arg.starts_with("--resume=") => idx += 1,
             arg if arg.starts_with("--") => idx += 1,
             arg => return Some(arg),
         }
@@ -68,8 +86,14 @@ pub(crate) fn should_start_default_raw(args: &[String]) -> bool {
                 }
                 idx += 2;
             }
+            "--resume" => {
+                idx += 1;
+                if args.get(idx).is_some_and(|value| !value.starts_with('-')) {
+                    idx += 1;
+                }
+            }
             "--isolated" | "--login" | "-l" => idx += 1,
-            arg if arg.starts_with("--shell=") => idx += 1,
+            arg if arg.starts_with("--shell=") || arg.starts_with("--resume=") => idx += 1,
             _ => return false,
         }
     }
@@ -108,13 +132,47 @@ pub(crate) fn shell_from_default_or_auto(value: &str) -> RawShellKind {
     RawShellKind::Bash
 }
 
-pub(crate) fn configured_raw_invocation(args: &[String]) -> (String, RawShellKind) {
+pub(crate) fn launch_options_from_args(args: &[String]) -> LaunchOptions {
+    let mut options = LaunchOptions::default();
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--shell" => idx += 2,
+            "--resume" => {
+                options.resume = match args.get(idx + 1) {
+                    Some(value) if !value.starts_with('-') => {
+                        idx += 2;
+                        Some(ResumeLaunch::Session(value.clone()))
+                    }
+                    _ => {
+                        idx += 1;
+                        Some(ResumeLaunch::Picker)
+                    }
+                };
+            }
+            arg if arg.starts_with("--resume=") => {
+                let value = arg.trim_start_matches("--resume=");
+                options.resume = Some(if value.is_empty() {
+                    ResumeLaunch::Picker
+                } else {
+                    ResumeLaunch::Session(value.to_string())
+                });
+                idx += 1;
+            }
+            _ => idx += 1,
+        }
+    }
+    options
+}
+
+pub(crate) fn configured_raw_invocation(args: &[String]) -> (String, RawShellKind, LaunchOptions) {
     let config = load_config();
     let adapter_name = adapter_name_from_args(args)
         .unwrap_or(&config.adapter_default)
         .to_string();
     let shell_kind = raw_shell_from_args_or_default(args, &config.shell_default);
-    (adapter_name, shell_kind)
+    let launch_options = launch_options_from_args(args);
+    (adapter_name, shell_kind, launch_options)
 }
 
 fn cosh_shell_default_state_previous_shell() -> Option<String> {
@@ -136,8 +194,9 @@ fn cosh_shell_default_state_path_for_home(home: &std::path::Path) -> std::path::
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_name_from_args, cosh_shell_default_state_path_for_home, parse_raw_shell,
-        raw_shell_from_args, shell_from_default_or_auto, should_start_default_raw, RawShellKind,
+        adapter_name_from_args, cosh_shell_default_state_path_for_home, launch_options_from_args,
+        parse_raw_shell, raw_shell_from_args, shell_from_default_or_auto, should_start_default_raw,
+        RawShellKind, ResumeLaunch,
     };
 
     #[test]
@@ -192,6 +251,24 @@ mod tests {
             adapter_name_from_args(&["--shell".to_string(), "zsh".to_string(), "co".to_string()]),
             Some("co")
         );
+        assert_eq!(
+            adapter_name_from_args(&[
+                "cosh-core".to_string(),
+                "--resume".to_string(),
+                "00000000-0000-4000-8000-000000000000".to_string(),
+                "--shell".to_string(),
+                "zsh".to_string(),
+            ]),
+            Some("cosh-core")
+        );
+        assert_eq!(
+            adapter_name_from_args(&[
+                "--resume".to_string(),
+                "00000000-0000-4000-8000-000000000000".to_string(),
+                "--shell=zsh".to_string(),
+            ]),
+            None
+        );
     }
 
     #[test]
@@ -223,6 +300,12 @@ mod tests {
             "--isolated".to_string()
         ]));
         assert!(should_start_default_raw(&["--shell=bash".to_string()]));
+        assert!(should_start_default_raw(&["--resume".to_string()]));
+        assert!(should_start_default_raw(&[
+            "--resume".to_string(),
+            "00000000-0000-4000-8000-000000000000".to_string(),
+            "--shell=zsh".to_string(),
+        ]));
 
         assert!(!should_start_default_raw(&["fake".to_string()]));
         assert!(!should_start_default_raw(&["--shell".to_string()]));
@@ -231,5 +314,30 @@ mod tests {
             "--isolated".to_string()
         ]));
         assert!(!should_start_default_raw(&["--unknown".to_string()]));
+    }
+
+    #[test]
+    fn resume_launch_parsing_never_treats_option_values_as_adapters() {
+        assert_eq!(
+            launch_options_from_args(&["--resume".to_string()]).resume,
+            Some(ResumeLaunch::Picker)
+        );
+        assert_eq!(
+            launch_options_from_args(&[
+                "cosh-core".to_string(),
+                "--shell".to_string(),
+                "zsh".to_string(),
+                "--resume".to_string(),
+                "00000000-0000-4000-8000-000000000000".to_string(),
+            ])
+            .resume,
+            Some(ResumeLaunch::Session(
+                "00000000-0000-4000-8000-000000000000".to_string()
+            ))
+        );
+        assert_eq!(
+            launch_options_from_args(&["--resume=".to_string()]).resume,
+            Some(ResumeLaunch::Picker)
+        );
     }
 }

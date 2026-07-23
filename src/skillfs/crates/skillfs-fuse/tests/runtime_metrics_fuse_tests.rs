@@ -24,7 +24,7 @@ use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_conf
 #[path = "common/mod.rs"]
 mod common;
 
-use crate::common::{create_skill_dir, fuse_available};
+use crate::common::{create_skill_dir, fuse_available, telemetry_enabled};
 
 /// Normal-mode mount that injects a `RuntimeMetricsSink` (and optionally an
 /// `ActiveSkillResolver`) and points the metrics writer at `metrics_path`.
@@ -188,6 +188,10 @@ fn skill_open_emits_skill_hit_without_resolver_but_no_policy() {
         eprintln!("SKIP: FUSE not available");
         return;
     }
+    if !telemetry_enabled() {
+        eprintln!("SKIP: telemetry disabled on host (/etc/anolisa/.telemetry_disabled present)");
+        return;
+    }
 
     let (_dir, metrics) = make_metrics_file();
     let mount = MetricsMount::new(
@@ -218,6 +222,10 @@ fn skill_open_emits_skill_hit_without_resolver_but_no_policy() {
 fn current_skill_open_emits_policy_allow() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    if !telemetry_enabled() {
+        eprintln!("SKIP: telemetry disabled on host (/etc/anolisa/.telemetry_disabled present)");
         return;
     }
 
@@ -254,6 +262,10 @@ fn current_skill_open_emits_policy_allow() {
 fn snapshot_skill_open_emits_policy_fallback() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    if !telemetry_enabled() {
+        eprintln!("SKIP: telemetry disabled on host (/etc/anolisa/.telemetry_disabled present)");
         return;
     }
 
@@ -295,6 +307,10 @@ fn snapshot_skill_open_emits_policy_fallback() {
 fn hidden_skill_open_emits_policy_denied() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    if !telemetry_enabled() {
+        eprintln!("SKIP: telemetry disabled on host (/etc/anolisa/.telemetry_disabled present)");
         return;
     }
 

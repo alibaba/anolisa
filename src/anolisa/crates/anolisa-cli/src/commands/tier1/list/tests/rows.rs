@@ -1,17 +1,17 @@
-use anolisa_core::state::{InstalledState, ObjectStatus, Ownership};
+use anolisa_core::domain::LifecycleStatus;
 
 use crate::commands::tier1::list::{ListArgs, build_rows};
 
 use super::support::{
-    FakeRpmQuery, component_object, pkg_info, rpm_component_object, sample_index,
-    state_with_component_object,
+    FakeRpmQuery, adopted, delegated_component, empty_state, managed, owned_component, pkg_info,
+    rpm_component_object, sample_index, state_with_component_object,
 };
 
 #[test]
 fn rows_use_local_projection_for_untracked_observed_rpm() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = InstalledState::default();
+    let state = empty_state();
     let query = FakeRpmQuery {
         installed: vec![(
             "agentsight".to_string(),
@@ -33,7 +33,7 @@ fn rows_use_local_projection_for_untracked_observed_rpm() {
 #[test]
 fn rows_without_rpm_query_do_not_surface_observed_system_rpms() {
     let index = sample_index();
-    let state = InstalledState::default();
+    let state = empty_state();
 
     let all_rows = build_rows(&index, &ListArgs { installed: false }, &state, None);
     let sight = all_rows.iter().find(|r| r.name == "agentsight").unwrap();
@@ -49,7 +49,7 @@ fn rows_without_rpm_query_do_not_surface_observed_system_rpms() {
 fn rows_ignore_rpm_query_failures() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = InstalledState::default();
+    let state = empty_state();
     let query = FakeRpmQuery {
         installed: Vec::new(),
         command_missing: true,
@@ -68,8 +68,8 @@ fn rows_use_status_action_for_tracked_rpm_observed_state() {
     let args = ListArgs { installed: false };
     let state = state_with_component_object(rpm_component_object(
         "agentsight",
-        ObjectStatus::Adopted,
-        Ownership::RpmObserved,
+        LifecycleStatus::Installed,
+        adopted(),
         "agentsight",
         "1.2.3-1.al8",
     ));
@@ -87,7 +87,7 @@ fn rows_use_status_action_for_tracked_rpm_observed_state() {
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.status, "adopted");
     assert_eq!(sight.local_state, "tracked");
-    assert_eq!(sight.ownership, "rpm-observed");
+    assert_eq!(sight.ownership, "adopted");
     assert_eq!(sight.action, "status");
 }
 
@@ -104,27 +104,24 @@ fn rows_project_raw_and_rpm_managed_state_as_installed() {
         what_provides: Vec::new(),
     };
 
-    let raw_state = state_with_component_object(component_object(
-        "tokenless",
-        ObjectStatus::Installed,
-        Ownership::RawManaged,
-    ));
+    let raw_state =
+        state_with_component_object(owned_component("tokenless", LifecycleStatus::Installed));
     let raw_rows = build_rows(&index, &args, &raw_state, Some(&query));
     let token = raw_rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.local_state, "installed");
-    assert_eq!(token.ownership, "raw-managed");
+    assert_eq!(token.ownership, "owned");
 
     let rpm_state = state_with_component_object(rpm_component_object(
         "agentsight",
-        ObjectStatus::Installed,
-        Ownership::RpmManaged,
+        LifecycleStatus::Installed,
+        managed(),
         "agentsight",
         "1.2.3-1.al8",
     ));
     let rpm_rows = build_rows(&index, &args, &rpm_state, Some(&query));
     let sight = rpm_rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.local_state, "installed");
-    assert_eq!(sight.ownership, "rpm-managed");
+    assert_eq!(sight.ownership, "managed");
 }
 
 #[test]
@@ -133,8 +130,8 @@ fn rows_surface_rpm_drift_and_missing() {
     let args = ListArgs { installed: false };
     let state = state_with_component_object(rpm_component_object(
         "agentsight",
-        ObjectStatus::Installed,
-        Ownership::RpmManaged,
+        LifecycleStatus::Installed,
+        managed(),
         "agentsight",
         "1.2.3-1.al8",
     ));
@@ -174,7 +171,7 @@ fn installed_filter_keeps_only_currently_installed_local_states() {
     let observed_rows = build_rows(
         &index,
         &args,
-        &InstalledState::default(),
+        &empty_state(),
         Some(&FakeRpmQuery {
             installed: vec![(
                 "agentsight".to_string(),
@@ -193,31 +190,28 @@ fn installed_filter_keeps_only_currently_installed_local_states() {
     );
 
     let included_cases = [
-        (ObjectStatus::Installed, Ownership::RawManaged, "installed"),
-        (ObjectStatus::Adopted, Ownership::RpmObserved, "tracked"),
-        (ObjectStatus::Partial, Ownership::RawManaged, "degraded"),
+        owned_component("tokenless", LifecycleStatus::Installed),
+        delegated_component("tokenless", LifecycleStatus::Installed, adopted()),
+        owned_component("tokenless", LifecycleStatus::Partial),
     ];
-    for (status, ownership, expected_state) in included_cases {
-        let state = state_with_component_object(component_object("tokenless", status, ownership));
+    let expected_states = ["installed", "tracked", "degraded"];
+    for (object, expected_state) in included_cases.into_iter().zip(expected_states) {
+        let state = state_with_component_object(object);
         let rows = build_rows(&index, &args, &state, Some(&FakeRpmQuery::default()));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].local_state, expected_state);
     }
 
-    for status in [ObjectStatus::Failed, ObjectStatus::Disabled] {
-        let state = state_with_component_object(component_object(
-            "tokenless",
-            status,
-            Ownership::RawManaged,
-        ));
+    for status in [LifecycleStatus::Failed, LifecycleStatus::Disabled] {
+        let state = state_with_component_object(owned_component("tokenless", status));
         let rows = build_rows(&index, &args, &state, Some(&FakeRpmQuery::default()));
         assert!(rows.is_empty());
     }
 
     let rpm_state = state_with_component_object(rpm_component_object(
         "agentsight",
-        ObjectStatus::Installed,
-        Ownership::RpmManaged,
+        LifecycleStatus::Installed,
+        managed(),
         "agentsight",
         "1.2.3-1.al8",
     ));
@@ -242,7 +236,7 @@ fn installed_filter_keeps_only_currently_installed_local_states() {
     let empty_rows = build_rows(
         &index,
         &args,
-        &InstalledState::default(),
+        &empty_state(),
         Some(&FakeRpmQuery::default()),
     );
     assert!(empty_rows.is_empty());

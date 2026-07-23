@@ -61,7 +61,7 @@ impl GenAISqliteStore {
         end_ns: i64,
         include_auxiliary: bool,
     ) -> Result<Vec<SessionSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let call_kind_filter = if include_auxiliary {
             ""
         } else {
@@ -113,7 +113,7 @@ impl GenAISqliteStore {
         end_ns: i64,
         agent_name: Option<&str>,
     ) -> Result<Vec<SavingsSessionSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql = if agent_name.is_some() {
             "SELECT session_id,
@@ -175,7 +175,7 @@ impl GenAISqliteStore {
         &self,
         session_id: &str,
     ) -> Result<Option<SavingsSessionSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql = "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
@@ -213,7 +213,7 @@ impl GenAISqliteStore {
         &self,
         session_ids: &[&str],
     ) -> Result<std::collections::HashMap<String, usize>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = std::collections::HashMap::new();
 
         for sid in session_ids {
@@ -247,7 +247,7 @@ impl GenAISqliteStore {
         session_ids: &[&str],
     ) -> Result<std::collections::HashMap<String, ToolCallTurnInfo>, Box<dyn std::error::Error>>
     {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = std::collections::HashMap::new();
 
         for sid in session_ids {
@@ -307,7 +307,7 @@ impl GenAISqliteStore {
         end_ns: Option<i64>,
         include_auxiliary: bool,
     ) -> Result<Vec<TraceSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let call_kind_filter = if include_auxiliary {
             ""
@@ -431,7 +431,7 @@ impl GenAISqliteStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT DISTINCT agent_name
              FROM genai_events
@@ -456,7 +456,7 @@ impl GenAISqliteStore {
         &self,
         pid: i32,
     ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result = conn.query_row(
             "SELECT session_id FROM genai_events
              WHERE pid = ?1 AND status = 'complete' AND session_id IS NOT NULL
@@ -477,7 +477,7 @@ impl GenAISqliteStore {
         call_id: &str,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE genai_events SET session_id = ?2 WHERE call_id = ?1",
             params![call_id, session_id],

@@ -3,14 +3,14 @@ use std::fs::File;
 use std::io::Read;
 
 use super::elf_buildid;
-use super::sslsniff::BoringSslOffsets;
+use super::sslsniff::StaticSslOffsets;
 
 const HEAD_SIZE: usize = 65536;
 
 #[derive(Debug)]
 struct OffsetEntry {
     fingerprint: Fingerprint,
-    offsets: Option<BoringSslOffsets>,
+    offsets: Option<StaticSslOffsets>,
 }
 
 #[derive(Debug)]
@@ -55,7 +55,7 @@ impl OffsetTable {
                         .get("read_is_ex")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    Some(BoringSslOffsets {
+                    Some(StaticSslOffsets {
                         ssl_write: w,
                         ssl_read: r,
                         ssl_do_handshake: h,
@@ -75,7 +75,7 @@ impl OffsetTable {
         Some(Self { entries })
     }
 
-    pub fn lookup(&self, path: &str) -> Option<BoringSslOffsets> {
+    pub fn lookup(&self, path: &str) -> Option<StaticSslOffsets> {
         let metadata = std::fs::metadata(path).ok()?;
         let file_size = metadata.len();
 

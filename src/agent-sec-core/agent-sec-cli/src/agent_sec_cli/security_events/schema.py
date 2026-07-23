@@ -37,7 +37,7 @@ class SecurityEvent(BaseModel):
 
     Required fields (caller must supply):
         event_type  — e.g. sandbox_prehook, hardening_scan, hardening_fix, …
-        category    — sandbox | hardening | asset_verify | intent_security
+        category    — action category used for grouping
         details     — backend-specific structured data
 
     Auto-filled fields:

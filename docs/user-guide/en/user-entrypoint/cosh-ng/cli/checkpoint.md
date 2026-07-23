@@ -89,7 +89,7 @@ cosh-cli checkpoint status
 
 ## IPC Protocol
 
-Checkpoint commands communicate with the ws-ckpt daemon via Unix socket, using bincode serialization + 4-byte little-endian length prefix frame format. See developer documentation [IPC Protocol](../../developers/ipc-protocol.md).
+Checkpoint commands communicate with the ws-ckpt daemon via Unix socket, using bincode serialization + 4-byte little-endian length prefix frame format. See developer documentation [IPC Protocol](../../../../../developer-guide/en/cosh-ng/ipc-protocol.md).
 
 ## Typical Agent Workflow
 

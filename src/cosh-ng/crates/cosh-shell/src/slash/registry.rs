@@ -49,6 +49,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/health",
+            usage: "/health",
+            summary_id: MessageId::HelpSummaryHealth,
+            group: Some("Health"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/auth",
             usage: "/auth",
             summary_id: MessageId::HelpSummaryAuth,
@@ -60,6 +68,30 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             name: "/config",
             usage: "/config language [auto|en-US|zh-CN]",
             summary_id: MessageId::HelpSummaryConfig,
+            group: Some("Config"),
+            scope: "config",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/session",
+            usage: "/session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
+            summary_id: MessageId::HelpSummarySession,
+            group: Some("Sessions"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/resume",
+            usage: "/resume [id]",
+            summary_id: MessageId::HelpSummarySession,
+            group: None,
+            scope: "session",
+            state: SlashCommandState::Hidden,
+        },
+        SlashCommandSpec {
+            name: "/recommendations",
+            usage: "/recommendations [on|off|status|privacy|clear]",
+            summary_id: MessageId::HelpSummaryRecommendations,
             group: Some("Config"),
             scope: "config",
             state: SlashCommandState::Public,
@@ -307,9 +339,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(visible.contains(&"/config language [auto|en-US|zh-CN]"));
+        assert!(visible
+            .iter()
+            .any(|usage| usage.starts_with("/session [status|list|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));
+        assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
         assert!(!visible.iter().any(|usage| usage.starts_with("/agent")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/explain")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/cancel")));
@@ -318,6 +354,19 @@ mod tests {
         assert!(!visible.iter().any(|usage| usage.starts_with("/select")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/copy")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/debug")));
+    }
+
+    #[test]
+    fn recommendations_is_public_local_config_control() {
+        let spec = slash_command_registry()
+            .iter()
+            .find(|spec| spec.name == "/recommendations")
+            .expect("recommendations spec");
+
+        assert_eq!(spec.group, Some("Config"));
+        assert_eq!(spec.scope, "config");
+        assert_eq!(spec.state, SlashCommandState::Public);
+        assert!(exact_slash_control_commands().any(|name| name == "/recommendations"));
     }
 
     #[test]
@@ -342,6 +391,7 @@ mod tests {
             "/copy",
             "/send-to-shell",
             "/debug",
+            "/resume",
             "/skill",
             "/approval-mode",
             "/allow",

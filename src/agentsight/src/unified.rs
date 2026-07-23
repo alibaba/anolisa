@@ -284,13 +284,23 @@ impl AgentSight {
             pid_agent_name_cache.put(agent.pid, agent.agent_info.name.clone());
         }
         for result in &conn_results {
-            // Prefer cmdline agent name over domain fallback if the process matches a rule.
-            let agent_name = scanner
-                .try_match_process(result.pid)
-                .map(|a| a.agent_info.name)
-                .unwrap_or_else(|| format!("domain:{}", result.domain));
-            Self::attach_process_internal(&mut probes, result.pid, &agent_name);
-            pid_agent_name_cache.put(result.pid, agent_name);
+            // Agent name comes from a config rule, else the process comm — never
+            // the endpoint domain, never a per-event thread name.
+            let agent_name = Self::conn_scan_agent_name(&scanner, result.pid);
+            if let Some(ref name) = agent_name {
+                pid_agent_name_cache.put(result.pid, name.clone());
+            }
+            log::debug!(
+                "Connection scan: pid={} connected to {}, agent_name={:?}",
+                result.pid,
+                result.domain,
+                agent_name
+            );
+            Self::attach_process_internal(
+                &mut probes,
+                result.pid,
+                agent_name.as_deref().unwrap_or("unknown"),
+            );
         }
         if !conn_results.is_empty() {
             log::info!(
@@ -582,6 +592,19 @@ impl AgentSight {
         Self::attach_process_internal(&mut self.probes, pid, agent_name);
     }
 
+    /// Resolve the agent name to cache for a connection-scan hit.
+    ///
+    /// Prefers a cmdline config-rule match; otherwise falls back to the process
+    /// comm (`/proc/<pid>/comm`). Returns `None` only when neither is available
+    /// (comm unreadable) — such a pid is left uncached for runtime resolution.
+    /// Never returns the endpoint domain.
+    fn conn_scan_agent_name(scanner: &AgentScanner, pid: u32) -> Option<String> {
+        scanner
+            .try_match_process(pid)
+            .map(|a| a.agent_info.name)
+            .or_else(|| crate::discovery::scanner::read_comm(pid))
+    }
+
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
         if let Err(e) = probes.add_traced_pid(pid) {
@@ -719,7 +742,9 @@ impl AgentSight {
                 &self.pid_agent_name_cache,
             );
 
-            // Backfill TokenRecord.agent from pid_agent_name_cache, falling back to comm
+            // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
+            // to the *process* comm (/proc/<pid>/comm) and only then the event's
+            // per-event thread comm (which may be e.g. "HTTP client").
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {
@@ -727,12 +752,22 @@ impl AgentSight {
                             .pid_agent_name_cache
                             .get(&t.pid)
                             .cloned()
+                            .or_else(|| crate::discovery::scanner::read_comm(t.pid))
                             .or_else(|| Some(t.comm.clone()));
                     }
                 }
             }
 
-            if !output.events.is_empty() {
+            // FFI fallback: when every built LLM event is semantically empty
+            // (the underlying body format could not be parsed into
+            // `AgentsightLLMData`), skip the useless LLM event and fall through
+            // to raw-HTTP (`AgentsightHttpsData`) reporting instead. Only in FFI
+            // mode; requires *all* events to be empty LLM calls so we never drop
+            // a meaningful event.
+            let ffi_https_fallback =
+                self.ffi_sender.is_some() && events_are_empty_llm(&output.events);
+
+            if !output.events.is_empty() && !ffi_https_fallback {
                 if output.pending_response_id.is_some() {
                     // Session_id not yet resolved — queue for deferred resolution.
                     // Write a pending row NOW so crash detection can see this call
@@ -807,10 +842,12 @@ impl AgentSight {
                     self.detect_and_store_interruptions(&output.events);
                 }
             } else if let Some(ref sender) = self.ffi_sender {
-                // No LLM event produced — send plain HTTP data via FFI channel
+                // Either no LLM event was produced, or all LLM events were
+                // semantically empty (fallback). The FFI sender suppresses
+                // raw HTTPS before cloning or enqueueing when it is disabled.
                 for ar in &analysis_results {
                     if let crate::analyzer::AnalysisResult::Http(record) = ar {
-                        sender.send(FfiEvent::Https(record.clone()));
+                        sender.send_https(record);
                     }
                 }
             }
@@ -1899,6 +1936,20 @@ impl Drop for AgentSight {
 ///
 /// Extracted as a free function so the persistence policy is unit-testable
 /// without constructing a full `AgentSight` instance.
+/// Whether FFI reporting should fall back from LLM to raw-HTTP.
+///
+/// True when there is at least one event and *every* event is a semantically
+/// empty `LLMCall` (no parsed request/response messages). Any non-`LLMCall`
+/// event or any non-empty call disables the fallback so a meaningful event is
+/// never dropped.
+fn events_are_empty_llm(events: &[GenAISemanticEvent]) -> bool {
+    !events.is_empty()
+        && events.iter().all(|e| match e {
+            GenAISemanticEvent::LLMCall(call) => call.is_semantically_empty(),
+            _ => false,
+        })
+}
+
 fn complete_deferred_genai(
     events: &[GenAISemanticEvent],
     sqlite_store: Option<&Arc<GenAISqliteStore>>,
@@ -1959,6 +2010,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    // ── Tests for conn_scan_agent_name (agent identity, never a domain) ──
+
+    #[test]
+    fn test_conn_scan_agent_name_uses_matched_rule() {
+        // When a cmdline rule matches, the configured agent name is returned.
+        let rules = vec![crate::config::CmdlineRule {
+            patterns: vec!["*".to_string()],
+            agent_name: Some("MatchedAgent".to_string()),
+            allow: true,
+        }];
+        let scanner = AgentScanner::from_rules(&rules, &[]);
+        let name = AgentSight::conn_scan_agent_name(&scanner, std::process::id());
+        assert_eq!(name, Some("MatchedAgent".to_string()));
+    }
+
+    #[test]
+    fn test_conn_scan_agent_name_falls_back_to_process_comm() {
+        // No matching rule → the process comm, never a "domain:<host>" string.
+        let scanner = AgentScanner::from_rules(&[], &[]);
+        let name = AgentSight::conn_scan_agent_name(&scanner, std::process::id());
+        assert!(name.is_some());
+        assert!(!name.unwrap().starts_with("domain:"));
+    }
+
+    #[test]
+    fn test_conn_scan_agent_name_none_for_dead_pid() {
+        // Unmatched and unreadable comm → None (left uncached).
+        let scanner = AgentScanner::from_rules(&[], &[]);
+        assert!(AgentSight::conn_scan_agent_name(&scanner, u32::MAX).is_none());
     }
 
     // ── Tests for complete_deferred_genai + complete_pending guard ──
@@ -2208,5 +2290,45 @@ mod tests {
         let bytes = pending.estimated_bytes();
         // 1 event × 512 bytes estimate
         assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
+    }
+
+    // ── Tests for the AgentsightHttpsData fallback path ──
+
+    #[test]
+    fn test_events_are_empty_llm() {
+        use crate::genai::semantic::{InputMessage, MessagePart};
+
+        // No events → no fallback.
+        assert!(!events_are_empty_llm(&[]));
+
+        // A single semantically empty LLM call → fallback.
+        let empty = GenAISemanticEvent::LLMCall(make_test_llm_call("c1"));
+        assert!(events_are_empty_llm(std::slice::from_ref(&empty)));
+
+        // A call with parsed request messages → no fallback.
+        let mut call = make_test_llm_call("c2");
+        call.request.messages.push(InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "hi".to_string(),
+            }],
+            name: None,
+        });
+        assert!(!events_are_empty_llm(&[GenAISemanticEvent::LLMCall(call)]));
+
+        // A non-LLM event alongside an empty call disables the fallback.
+        let tool = GenAISemanticEvent::ToolUse(crate::genai::semantic::ToolUse {
+            tool_use_id: "t1".to_string(),
+            timestamp_ns: 0,
+            tool_name: "grep".to_string(),
+            arguments: serde_json::Value::Null,
+            result: None,
+            duration_ns: None,
+            success: true,
+            error: None,
+            parent_llm_call_id: None,
+            pid: 1,
+        });
+        assert!(!events_are_empty_llm(&[empty, tool]));
     }
 }

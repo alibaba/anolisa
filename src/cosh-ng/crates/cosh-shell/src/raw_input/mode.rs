@@ -12,7 +12,37 @@ pub enum RawObserverAction {
     EmitToPty(ShellHandoffRequest),
     EmitToPtyWithPromptRestore(ShellHandoffRequest),
     InterruptForeground,
-    RestorePrompt { ghost_text: Option<String> },
+    RestorePrompt {
+        ghost_text: Option<String>,
+        ghost_route: PromptGhostRoute,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptGhostRoute {
+    NativeShell,
+    AgentIntercept {
+        suggestion_id: Option<String>,
+    },
+    AgentSelection {
+        candidates: Vec<PromptGhostCandidate>,
+        active: usize,
+        pending_escape: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptGhostCandidate {
+    pub text: String,
+    pub suggestion_id: String,
+}
+
+impl Default for PromptGhostRoute {
+    fn default() -> Self {
+        Self::AgentIntercept {
+            suggestion_id: None,
+        }
+    }
 }
 
 impl RawObserverAction {
@@ -30,7 +60,10 @@ pub(crate) enum RawInputMode {
     RawPassthrough,
     Hold,
     Delay,
-    PromptGhost(String),
+    PromptGhost {
+        text: String,
+        route: PromptGhostRoute,
+    },
     Capture(RawInputCapture),
 }
 
@@ -41,6 +74,7 @@ pub enum RawInputCapture {
         option_count: usize,
         allow_free_text: bool,
         multiple: bool,
+        secret: bool,
     },
     Approval {
         id: String,
@@ -61,6 +95,12 @@ pub enum RawInputCapture {
         option_count: usize,
         selected: usize,
     },
+    Session {
+        id: String,
+        option_count: usize,
+        selected: usize,
+        confirming_clear: bool,
+    },
     Consultation {
         id: String,
     },
@@ -76,7 +116,7 @@ pub(crate) fn update_input_mode(input_mode: &Arc<Mutex<RawInputMode>>, action: &
     if matches!(
         action,
         RawObserverAction::Continue | RawObserverAction::RawPassthrough
-    ) && matches!(&*mode, RawInputMode::PromptGhost(_))
+    ) && matches!(&*mode, RawInputMode::PromptGhost { .. })
     {
         return;
     }
@@ -87,12 +127,18 @@ pub(crate) fn update_input_mode(input_mode: &Arc<Mutex<RawInputMode>>, action: &
         RawObserverAction::RawPassthrough => RawInputMode::RawPassthrough,
         RawObserverAction::RestorePrompt {
             ghost_text: Some(text),
-        } => RawInputMode::PromptGhost(text.clone()),
+            ghost_route,
+        } => RawInputMode::PromptGhost {
+            text: text.clone(),
+            route: ghost_route.clone(),
+        },
         RawObserverAction::Continue
         | RawObserverAction::EmitToPty(_)
         | RawObserverAction::EmitToPtyWithPromptRestore(_)
         | RawObserverAction::InterruptForeground
-        | RawObserverAction::RestorePrompt { ghost_text: None } => RawInputMode::Passthrough,
+        | RawObserverAction::RestorePrompt {
+            ghost_text: None, ..
+        } => RawInputMode::Passthrough,
     };
 }
 

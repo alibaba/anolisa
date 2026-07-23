@@ -18,12 +18,20 @@ mod animation;
 mod approval;
 #[path = "raw_cli/cancellation.rs"]
 mod cancellation;
+#[path = "raw_cli/compaction.rs"]
+mod compaction;
 #[path = "raw_cli/config.rs"]
 mod config;
 #[path = "raw_cli/cosh_core/mod.rs"]
 mod cosh_core;
+#[path = "raw_cli/diagnostics.rs"]
+mod diagnostics;
+#[path = "raw_cli/doctor.rs"]
+mod doctor;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
+#[path = "raw_cli/external_hook.rs"]
+mod external_hook;
 #[path = "raw_cli/failed_command.rs"]
 mod failed_command;
 #[path = "raw_cli/heavy.rs"]
@@ -52,6 +60,8 @@ mod recommendation;
 mod registry;
 #[path = "raw_cli/renderer.rs"]
 mod renderer;
+#[path = "raw_cli/session.rs"]
+mod session;
 #[path = "raw_cli/slash.rs"]
 mod slash;
 #[path = "raw_cli/startup.rs"]

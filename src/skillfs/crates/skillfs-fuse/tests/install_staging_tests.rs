@@ -294,7 +294,7 @@ fn staging_writes_never_trigger_notify_even_after_long_wait() {
     let events = fixture.notify_client.events();
     let staging_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .collect();
     assert!(
         staging_events.is_empty(),
@@ -409,7 +409,7 @@ fn fuse_e2e_staging_mkdir_write_rename_flow() {
     let events_before_rename = fixture.notify_client.events();
     let staging_events: Vec<_> = events_before_rename
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .collect();
     assert!(
         staging_events.is_empty(),
@@ -429,7 +429,7 @@ fn fuse_e2e_staging_mkdir_write_rename_flow() {
     let all_events = fixture.notify_client.events();
     let rename_events: Vec<_> = all_events
         .iter()
-        .filter(|e| e.skill_name == "newskill" && e.event_kind == "rename")
+        .filter(|e| e.skill_id == "newskill" && e.event_kind == "rename")
         .collect();
     assert_eq!(
         rename_events.len(),
@@ -437,9 +437,12 @@ fn fuse_e2e_staging_mkdir_write_rename_flow() {
         "expected exactly one rename notify for newskill, got all events: {:?}",
         all_events
     );
+    assert_eq!(rename_events[0].schema_version, 2);
+    assert_eq!(rename_events[0].skill_id, "newskill");
+    assert!(rename_events[0].canonical_skill_dir.ends_with("/newskill"));
     let staging_name_events: Vec<_> = all_events
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .collect();
     assert!(
         staging_name_events.is_empty(),
@@ -569,7 +572,7 @@ impl QuietTimeoutMountFixture {
                 .events()
                 .iter()
                 .filter(|e| {
-                    e.skill_name == skill_name
+                    e.skill_id == skill_name
                         && e.event_kind != "install-complete"
                         && e.paths.is_empty()
                 })
@@ -626,7 +629,7 @@ fn quiet_timeout_staging_writes_never_trigger_notify() {
     let events = fixture.notify_client.events();
     let staging_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .collect();
     assert!(
         staging_events.is_empty(),
@@ -652,7 +655,7 @@ fn quiet_timeout_direct_final_skill_triggers_mutation_notify() {
     let mutation_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            e.skill_name == "direct-install"
+            e.skill_id == "direct-install"
                 && e.event_kind != "install-complete"
                 && e.paths.is_empty()
         })
@@ -662,6 +665,12 @@ fn quiet_timeout_direct_final_skill_triggers_mutation_notify() {
         1,
         "expected one quiet-timeout mutation notify for final skill, got: {:?}",
         events
+    );
+    assert_eq!(mutation_events[0].schema_version, 2);
+    assert!(
+        mutation_events[0]
+            .canonical_skill_dir
+            .ends_with("/direct-install")
     );
     assert!(
         events.iter().all(|e| e.event_kind != "install-complete"),
@@ -689,9 +698,7 @@ fn quiet_timeout_direct_writes_collapse_to_one() {
     let quiet_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            e.skill_name == "multi-write"
-                && e.event_kind != "install-complete"
-                && e.paths.is_empty()
+            e.skill_id == "multi-write" && e.event_kind != "install-complete" && e.paths.is_empty()
         })
         .collect();
     assert_eq!(
@@ -724,7 +731,7 @@ fn no_quiet_timeout_direct_writes_do_not_fire_quiet_mutation() {
     // (with non-empty paths). No empty-paths quiet-timeout event should appear.
     let quiet_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "alpha" && e.paths.is_empty())
+        .filter(|e| e.skill_id == "alpha" && e.paths.is_empty())
         .collect();
     assert!(
         quiet_events.is_empty(),
@@ -753,7 +760,7 @@ fn quiet_timeout_rename_still_immediate_no_staging_events() {
             .notify_client
             .events()
             .iter()
-            .filter(|e| e.skill_name == "renamed-skill" && e.event_kind == "rename")
+            .filter(|e| e.skill_id == "renamed-skill" && e.event_kind == "rename")
             .count();
         if count >= 1 {
             break;
@@ -770,7 +777,7 @@ fn quiet_timeout_rename_still_immediate_no_staging_events() {
     let events = fixture.notify_client.events();
     let staging_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .collect();
     assert!(
         staging_events.is_empty(),
@@ -806,7 +813,7 @@ fn quiet_timeout_skill_meta_writes_do_not_trigger() {
     let quiet_events: Vec<_> = events
         .iter()
         .filter(|e| {
-            e.skill_name == "meta-test" && e.event_kind != "install-complete" && e.paths.is_empty()
+            e.skill_id == "meta-test" && e.event_kind != "install-complete" && e.paths.is_empty()
         })
         .collect();
     assert_eq!(quiet_events.len(), 1);
@@ -1160,7 +1167,7 @@ fn resolver_staging_intermediate_writes_do_not_notify() {
         .notify_client
         .events()
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .cloned()
         .collect();
     assert!(
@@ -1196,7 +1203,7 @@ fn resolver_staging_rename_triggers_rename_mutation() {
             .notify_client
             .events()
             .iter()
-            .filter(|e| e.skill_name == "eta" && e.event_kind == "rename")
+            .filter(|e| e.skill_id == "eta" && e.event_kind == "rename")
             .count();
         if count >= 1 {
             break;
@@ -1213,7 +1220,7 @@ fn resolver_staging_rename_triggers_rename_mutation() {
     let all_events = fixture.notify_client.events();
     let staging_events: Vec<_> = all_events
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .collect();
     assert!(
         staging_events.is_empty(),
@@ -1371,7 +1378,7 @@ fn pending_mkdir_does_not_notify() {
     let events = fixture.notify_client.events();
     let new_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "new-skill")
+        .filter(|e| e.skill_id == "new-skill")
         .collect();
     assert!(
         new_events.is_empty(),
@@ -1465,7 +1472,7 @@ fn pending_skill_md_missing_no_notify() {
     let events = fixture.notify_client.events();
     let incomplete_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "incomplete")
+        .filter(|e| e.skill_id == "incomplete")
         .collect();
     assert!(
         incomplete_events.is_empty(),
@@ -1494,7 +1501,7 @@ fn pending_skill_md_unparseable_no_notify() {
     let events = fixture.notify_client.events();
     let bad_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "bad-parse")
+        .filter(|e| e.skill_id == "bad-parse")
         .collect();
     assert!(
         bad_events.is_empty(),
@@ -1527,13 +1534,19 @@ fn pending_complete_skill_notifies_after_timeout() {
     let events = fixture.notify_client.events();
     let complete_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "complete-skill")
+        .filter(|e| e.skill_id == "complete-skill")
         .collect();
     assert_eq!(
         complete_events.len(),
         1,
         "complete skill must trigger exactly one notify: {:?}",
         events
+    );
+    assert_eq!(complete_events[0].schema_version, 2);
+    assert!(
+        complete_events[0]
+            .canonical_skill_dir
+            .ends_with("/complete-skill")
     );
     assert!(
         events.iter().all(|e| e.event_kind != "install-complete"),
@@ -1568,7 +1581,7 @@ fn pending_multiple_writes_collapse() {
     let events = fixture.notify_client.events();
     let mw_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "multi-write-pending")
+        .filter(|e| e.skill_id == "multi-write-pending")
         .collect();
     assert_eq!(
         mw_events.len(),
@@ -1603,7 +1616,7 @@ fn pending_activation_clears_pending_and_shows_skill() {
     // Verify notify happened
     let events = fixture.notify_client.events();
     assert!(
-        events.iter().any(|e| e.skill_name == "activated-new"),
+        events.iter().any(|e| e.skill_id == "activated-new"),
         "pending complete must have fired notify"
     );
 
@@ -1702,7 +1715,7 @@ fn pending_activated_skill_uses_normal_notify() {
             .notify_client
             .events()
             .iter()
-            .filter(|e| e.skill_name == "existing")
+            .filter(|e| e.skill_id == "existing")
             .count();
         if count >= 1 {
             break;
@@ -1719,10 +1732,7 @@ fn pending_activated_skill_uses_normal_notify() {
     // The notify for "existing" should come from normal notify path
     // (with paths populated), not from pending install
     let events = fixture.notify_client.events();
-    let existing_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.skill_name == "existing")
-        .collect();
+    let existing_events: Vec<_> = events.iter().filter(|e| e.skill_id == "existing").collect();
     assert!(
         !existing_events.is_empty(),
         "activated skill must use normal notify"
@@ -1809,7 +1819,7 @@ fn pending_staging_inbox_not_affected() {
     let staging_events: Vec<_> = notify_client
         .events()
         .iter()
-        .filter(|e| e.skill_name.starts_with(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.starts_with(".openclaw-install-stage-"))
         .cloned()
         .collect();
     assert!(
@@ -2446,7 +2456,7 @@ fn post_publish_grace_direct_pending_complete_triggers_session() {
     // Verify notify fired
     let events = notify_client.events();
     assert!(
-        events.iter().any(|e| e.skill_name == "direct-grace"),
+        events.iter().any(|e| e.skill_id == "direct-grace"),
         "pending complete must have fired notify: {:?}",
         events
     );
@@ -2911,7 +2921,7 @@ fn hermes_staging_writes_no_notify() {
         .notify_client
         .events()
         .iter()
-        .filter(|e| e.skill_name.contains(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
         .cloned()
         .collect();
     assert!(
@@ -2945,7 +2955,7 @@ fn hermes_staging_rename_triggers_notify() {
     let events = fix.notify_client.events();
     let rename_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "apple/beta" && e.event_kind == "rename")
+        .filter(|e| e.skill_id == "apple/beta" && e.event_kind == "rename")
         .collect();
     assert_eq!(
         rename_events.len(),
@@ -2954,14 +2964,16 @@ fn hermes_staging_rename_triggers_notify() {
         events
     );
     assert!(
-        rename_events[0].skill_dir.ends_with("/apple/beta"),
+        rename_events[0]
+            .canonical_skill_dir
+            .ends_with("/apple/beta"),
         "skillDir must end with /apple/beta, got: {}",
-        rename_events[0].skill_dir
+        rename_events[0].canonical_skill_dir
     );
 
     let staging_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name.contains(".openclaw-install-stage-"))
+        .filter(|e| e.skill_id.contains(".openclaw-install-stage-"))
         .collect();
     assert!(
         staging_events.is_empty(),
@@ -3140,7 +3152,7 @@ fn hermes_pending_complete_notifies() {
     let events = fix.notify_client.events();
     let new_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "apple/new-skill")
+        .filter(|e| e.skill_id == "apple/new-skill")
         .collect();
     assert_eq!(
         new_events.len(),
@@ -3169,7 +3181,7 @@ fn hermes_pending_incomplete_no_notify() {
     let events = fix.notify_client.events();
     let inc_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "apple/incomplete")
+        .filter(|e| e.skill_id == "apple/incomplete")
         .collect();
     assert!(
         inc_events.is_empty(),

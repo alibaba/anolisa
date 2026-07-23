@@ -161,8 +161,18 @@ impl Episode {
         )
     }
 
+    /// Sanitize a value for safe frontmatter inclusion.
+    /// Replaces newlines and ASCII control chars with spaces.
+    /// Does NOT apply YAML double-quoting or backslash escaping:
+    /// the hand-rolled frontmatter readers do not interpret those.
     fn sanitize(&self, s: &str) -> String {
-        s.replace('\n', " ").replace('"', "'")
+        s.chars()
+            .map(|c| match c {
+                '\n' | '\r' => ' ',
+                c if c.is_ascii_control() => ' ',
+                other => other,
+            })
+            .collect()
     }
 }
 

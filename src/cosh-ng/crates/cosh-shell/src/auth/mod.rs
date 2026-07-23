@@ -1,3 +1,4 @@
+mod completion;
 pub(crate) mod provider_display;
 pub(crate) mod runtime;
 

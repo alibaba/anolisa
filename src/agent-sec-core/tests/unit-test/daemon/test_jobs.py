@@ -6,6 +6,7 @@ import logging
 import sys
 import threading
 import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +31,7 @@ from agent_sec_cli.daemon.jobs.prompt_preload import (
 )
 from agent_sec_cli.daemon.jobs.registry import register_default_jobs
 from agent_sec_cli.daemon.runtime import PromptScanRuntimeState
+from agent_sec_cli.prompt_scanner.exceptions import ModelLoadError
 
 
 class RecordingPeriodicJob(PeriodicBackgroundJob):
@@ -320,20 +322,19 @@ def test_register_default_jobs_respects_prompt_preload_env(monkeypatch):
     ]
 
 
-def test_prompt_model_preload_job_updates_runtime_state(monkeypatch):
+def test_prompt_model_preload_job_cache_hit_skips_download(monkeypatch):
     prompt_state = PromptScanRuntimeState()
     child_calls: list[str] = []
     calls: list[tuple[str, str]] = []
 
     async def fake_child_preload(mode: str) -> None:
         child_calls.append(mode)
-        assert prompt_state.status == "downloading"
+        raise AssertionError("cache hit should not start the download child")
 
     def fake_preload(state, mode: str, probe_text: str) -> None:
         calls.append((mode, probe_text))
         assert state.status == "loading"
         state.model = "fake-model"
-        state.status = "loading"
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
@@ -353,7 +354,7 @@ def test_prompt_model_preload_job_updates_runtime_state(monkeypatch):
 
     status = asyncio.run(scenario())
 
-    assert child_calls == ["strict"]
+    assert child_calls == []
     assert calls == [("strict", "probe")]
     assert status["state"] == "completed"
     assert status["last_error"] is None
@@ -370,13 +371,19 @@ def test_prompt_model_preload_job_propagates_trace_context_to_preload_thread(
 ) -> None:
     prompt_state = PromptScanRuntimeState()
     trace_contexts: list[tuple[str, TraceContext | None]] = []
+    preload_calls = 0
 
     async def fake_child_preload(_mode: str) -> None:
+        assert prompt_state.status == "downloading"
         trace_contexts.append(("child", get_current_trace_context()))
 
     def fake_preload(state, _mode: str, _probe_text: str) -> None:
+        nonlocal preload_calls
+        preload_calls += 1
         trace_contexts.append(("preload", get_current_trace_context()))
         state.model = "fake-model"
+        if preload_calls == 1:
+            raise RuntimeError("cache unavailable")
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
@@ -405,7 +412,7 @@ def test_prompt_model_preload_job_propagates_trace_context_to_preload_thread(
     trace_ids = {ctx.trace_id for ctx in contexts if ctx is not None}
 
     assert status["state"] == "completed"
-    assert labels == ["child", "preload"]
+    assert labels == ["preload", "child", "preload"]
     assert all(ctx is not None for ctx in contexts)
     assert len(trace_ids) == 1
     trace_id = trace_ids.pop()
@@ -417,13 +424,20 @@ def test_prompt_model_preload_job_propagates_trace_context_to_preload_thread(
     assert after_context is None
 
 
-def test_prompt_model_preload_job_marks_prompt_degraded_on_failure(monkeypatch):
+def test_prompt_model_preload_job_retries_unexpected_failure_once_then_degrades(
+    monkeypatch,
+):
     prompt_state = PromptScanRuntimeState()
+    child_calls = 0
+    preload_calls = 0
 
     async def fake_child_preload(_mode: str) -> None:
-        pass
+        nonlocal child_calls
+        child_calls += 1
 
     def fake_preload(_state, _mode: str, _probe_text: str) -> None:
+        nonlocal preload_calls
+        preload_calls += 1
         raise RuntimeError("forced preload failure")
 
     monkeypatch.setattr(
@@ -450,16 +464,23 @@ def test_prompt_model_preload_job_marks_prompt_degraded_on_failure(monkeypatch):
     assert prompt_state.loaded is False
     assert prompt_state.last_error == "forced preload failure"
     assert prompt_state.last_finished_at is not None
+    assert preload_calls == 2
+    assert child_calls == 1
 
 
 def test_prompt_model_preload_job_marks_prompt_degraded_on_child_failure(monkeypatch):
     prompt_state = PromptScanRuntimeState()
+    preload_calls = 0
 
     async def fake_child_preload(_mode: str) -> None:
+        assert prompt_state.status == "downloading"
         raise RuntimeError("forced child failure")
 
-    def fake_preload(_state, _mode: str, _probe_text: str) -> None:
-        raise AssertionError("main preload should not run after child failure")
+    def fake_preload(state, _mode: str, _probe_text: str) -> None:
+        nonlocal preload_calls
+        preload_calls += 1
+        state.model = "fake-model"
+        raise RuntimeError("cache unavailable")
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
@@ -485,12 +506,56 @@ def test_prompt_model_preload_job_marks_prompt_degraded_on_child_failure(monkeyp
     assert prompt_state.loaded is False
     assert prompt_state.last_error == "forced child failure"
     assert prompt_state.last_finished_at is not None
+    assert preload_calls == 1
+
+
+def test_prompt_model_preload_job_retries_only_once(monkeypatch):
+    prompt_state = PromptScanRuntimeState()
+    preload_calls = 0
+    child_calls = 0
+
+    async def fake_child_preload(_mode: str) -> None:
+        nonlocal child_calls
+        child_calls += 1
+
+    def fake_preload(state, _mode: str, _probe_text: str) -> None:
+        nonlocal preload_calls
+        preload_calls += 1
+        state.model = "fake-model"
+        raise ModelLoadError(f"load failure {preload_calls}")
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
+        fake_child_preload,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._preload_prompt_model_sync",
+        fake_preload,
+    )
+
+    async def scenario():
+        job = PromptModelPreloadJob(prompt_state)
+        await job.start()
+        status = await _wait_for_job_state(job, {"completed", "error"})
+        await job.stop()
+        return status
+
+    status = asyncio.run(scenario())
+
+    assert preload_calls == 2
+    assert child_calls == 1
+    assert status["state"] == "error"
+    assert status["last_error"] == "load failure 2"
+    assert prompt_state.status == "degraded"
+    assert prompt_state.loaded is False
+    assert prompt_state.last_error == "load failure 2"
 
 
 def test_prompt_model_preload_job_cancel_during_child_preload(monkeypatch):
     prompt_state = PromptScanRuntimeState()
     child_started = asyncio.Event()
     child_cancelled = False
+    preload_calls = 0
 
     async def fake_child_preload(_mode: str) -> None:
         nonlocal child_cancelled
@@ -501,8 +566,11 @@ def test_prompt_model_preload_job_cancel_during_child_preload(monkeypatch):
             child_cancelled = True
             raise
 
-    def fake_preload(_state, _mode: str, _probe_text: str) -> None:
-        raise AssertionError("main preload should not run after cancellation")
+    def fake_preload(state, _mode: str, _probe_text: str) -> None:
+        nonlocal preload_calls
+        preload_calls += 1
+        state.model = "fake-model"
+        raise RuntimeError("cache unavailable")
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
@@ -528,6 +596,7 @@ def test_prompt_model_preload_job_cancel_during_child_preload(monkeypatch):
     assert prompt_state.loaded is False
     assert prompt_state.last_error is None
     assert prompt_state.last_finished_at is not None
+    assert preload_calls == 1
 
 
 def test_prompt_model_preload_job_cancel_during_main_preload(monkeypatch):
@@ -537,10 +606,9 @@ def test_prompt_model_preload_job_cancel_during_main_preload(monkeypatch):
     release_preload = threading.Event()
 
     async def fake_child_preload(_mode: str) -> None:
-        pass
+        raise AssertionError("cache hit should not start the download child")
 
-    def fake_preload(state, _mode: str, _probe_text: str) -> None:
-        state.status = "loading"
+    def fake_preload(_state, _mode: str, _probe_text: str) -> None:
         preload_started.set()
         try:
             release_preload.wait(timeout=1.0)
@@ -566,14 +634,13 @@ def test_prompt_model_preload_job_cancel_during_main_preload(monkeypatch):
         assert preload_started.is_set()
 
         await job.stop()
-        prompt_snapshot = prompt_state.to_dict()
         release_preload.set()
         for _attempt in range(50):
             if preload_finished.is_set():
                 break
             await asyncio.sleep(0.01)
         assert preload_finished.is_set()
-        return job.status().to_dict(), prompt_snapshot
+        return job.status().to_dict(), prompt_state.to_dict()
 
     status, prompt_snapshot = asyncio.run(scenario())
 
@@ -742,6 +809,9 @@ def test_prompt_model_preload_sync_does_not_redirect_daemon_stdio(monkeypatch, c
             print("daemon stdout remains visible")
             print("daemon stderr remains visible", file=sys.stderr)
             calls.append(("scan", text, source))
+            return SimpleNamespace(
+                layer_results=[SimpleNamespace(layer_name="ml_classifier")]
+            )
 
     monkeypatch.setattr(
         "agent_sec_cli.prompt_scanner.scanner.PromptScanner",
@@ -758,7 +828,52 @@ def test_prompt_model_preload_sync_does_not_redirect_daemon_stdio(monkeypatch, c
     assert captured.out == "daemon stdout remains visible\n"
     assert captured.err == "daemon stderr remains visible\n"
     assert prompt_state.model == "LLM-Research/Llama-Prompt-Guard-2-86M"
-    assert prompt_state.status == "loading"
+    assert prompt_state.status == "pending"
+
+
+def test_prompt_model_preload_sync_requires_ml_probe_result(monkeypatch):
+    prompt_state = PromptScanRuntimeState()
+
+    class FakePromptScanner:
+        def __init__(self, mode):
+            assert mode.value == "strict"
+
+        def scan(self, _text, source=None):
+            assert source == "daemon-startup"
+            return SimpleNamespace(
+                layer_results=[SimpleNamespace(layer_name="rule_engine")]
+            )
+
+    monkeypatch.setattr(
+        "agent_sec_cli.prompt_scanner.scanner.PromptScanner",
+        FakePromptScanner,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="prompt model probe did not execute the ML classifier",
+    ):
+        _preload_prompt_model_sync(prompt_state, "strict", "probe")
+
+
+def test_prompt_model_preload_sync_propagates_model_load_error(monkeypatch):
+    prompt_state = PromptScanRuntimeState()
+
+    class FakePromptScanner:
+        def __init__(self, mode):
+            assert mode.value == "strict"
+
+        def scan(self, _text, source=None):
+            assert source == "daemon-startup"
+            raise ModelLoadError("cache unavailable")
+
+    monkeypatch.setattr(
+        "agent_sec_cli.prompt_scanner.scanner.PromptScanner",
+        FakePromptScanner,
+    )
+
+    with pytest.raises(ModelLoadError, match="cache unavailable"):
+        _preload_prompt_model_sync(prompt_state, "strict", "probe")
 
 
 async def _wait_for_job_state(

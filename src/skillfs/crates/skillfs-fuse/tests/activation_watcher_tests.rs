@@ -290,6 +290,7 @@ fn startup_reconcile_then_daemon_writes_refreshes() {
     let notify_ctrl = NotifyController::new_with_reload(
         notify_client.clone(),
         dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
         Duration::from_millis(50),
         5000,
         writer.clone(),
@@ -526,6 +527,7 @@ fn new_skill_notify_poll_timeout_then_late_activation_converges() {
     let notify_ctrl = NotifyController::new_with_reload(
         notify_client,
         dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
         Duration::from_millis(50),
         5000,
         writer.clone(),
@@ -601,6 +603,7 @@ fn notify_send_failure_auto_registers_for_convergence() {
     let failing_client = Arc::new(FailingNotifyClient);
     let notify_ctrl = NotifyController::new_with_protocol_writer(
         failing_client,
+        dir.path().to_path_buf(),
         dir.path().to_path_buf(),
         Duration::from_millis(50),
         5000,

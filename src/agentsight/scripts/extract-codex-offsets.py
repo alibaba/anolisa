@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Extract aws-lc/BoringSSL function offsets from a codex binary.
+"""Extract OpenSSL 3.x function offsets from a codex binary.
 
-Codex CLI links aws-lc statically (BoringSSL-compatible C ABI). When the
-release binary keeps its symbol table, the offsets of `SSL_write_ex`,
+Codex CLI links OpenSSL 3.x statically (via reqwest → native-tls → openssl-sys).
+When the release binary keeps its symbol table, the offsets of `SSL_write_ex`,
 `SSL_read_ex`, and `SSL_do_handshake` can be read directly with `nm`.
 Falls back to `SSL_write` / `SSL_read` when the `_ex` variants are absent.
 
@@ -31,7 +31,7 @@ from typing import Dict, Optional
 
 HEAD_SIZE = 65536
 
-# Preferred symbols (aws-lc _ex variants). `SSL_write_ex` and `SSL_read_ex`
+# Preferred symbols (OpenSSL 3.x _ex variants). `SSL_write_ex` and `SSL_read_ex`
 # return 0/1 with the actual byte count in `*written` / `*readbytes`; the
 # Rust user-space gate routes BPF probes accordingly when `write_is_ex` /
 # `read_is_ex` is true.

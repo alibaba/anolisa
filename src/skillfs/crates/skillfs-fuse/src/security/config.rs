@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::Path;
 
 use serde::Deserialize;
+use skillfs_core::os_adapter::{OsAdapterError, OsAdapterStage, TargetSelector};
 
 use super::activation::ActivationMode;
 use super::activation_reload::ReloadMode;
@@ -30,6 +31,49 @@ pub struct SecurityConfig {
     pub install: Option<InstallSection>,
     pub control_socket: Option<ControlSocketSection>,
     pub skills: Option<SkillsSection>,
+    pub transforms: Option<TransformsSection>,
+}
+
+/// `[transforms]` — read-time `SKILL.md` transform configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformsSection {
+    pub directive: Option<DirectiveSection>,
+    pub os_adapter: Option<OsAdapterSection>,
+}
+
+/// `[transforms.directive]` — the conditional-compiler stage.
+///
+/// Enabled by default; the section only needs to appear to disable it. When the
+/// section is absent, directive compilation stays enabled so existing mounts
+/// keep byte-for-byte compatible output.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectiveSection {
+    /// Enable the directive/compiler stage. Absent field defaults to `true`.
+    pub enabled: Option<bool>,
+}
+
+/// `[transforms.os_adapter]` — opt-in OS adapter stage.
+///
+/// The stage rewrites distribution-specific literals in `SKILL.md`. Disabled by
+/// default. When `enabled = true` and `rules_path` is absent, SkillFS uses its
+/// built-in Ubuntu/Alinux catalog embedded in the binary. A non-empty
+/// `rules_path` overrides the built-in with an external artifact. Either way the
+/// artifact is loaded and validated once at mount startup. A present but blank
+/// `rules_path` is rejected as an invalid override rather than treated as the
+/// built-in default.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsAdapterSection {
+    /// Enable the OS adapter stage. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Target OS selector: `"auto"` (default), `"ubuntu"`, or `"alinux"`.
+    pub target_os: Option<String>,
+    /// Optional path to an external read-only rule artifact. Absent selects the
+    /// built-in catalog; blank/whitespace is rejected.
+    pub rules_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,9 +157,9 @@ pub struct ActivationEventsSection {
 #[serde(deny_unknown_fields)]
 pub struct LedgerSection {
     /// Private source-side work path for external daemons.
-    /// When set, all daemon-facing operations (notify skillDir,
-    /// activation bootstrap, activation reload, startup reconcile,
-    /// activation watcher) use this path instead of the source.
+    /// When set, activation bootstrap, reload, watching, and N3 protocol
+    /// event `skillDir` use this path instead of the source. Socket notify v2
+    /// retains the canonical source root for `canonicalSkillDir`.
     pub backing_root: Option<String>,
 }
 
@@ -144,6 +188,7 @@ pub struct ControlSocketSection {
 pub enum ConfigError {
     Io(std::io::Error),
     Parse(toml::de::Error),
+    OsAdapter(OsAdapterError),
     InvalidValue {
         field: &'static str,
         value: String,
@@ -156,6 +201,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::Io(e) => write!(f, "config I/O error: {e}"),
             ConfigError::Parse(e) => write!(f, "config parse error: {e}"),
+            ConfigError::OsAdapter(e) => fmt::Display::fmt(e, f),
             ConfigError::InvalidValue {
                 field,
                 value,
@@ -168,7 +214,23 @@ impl fmt::Display for ConfigError {
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConfigError::Io(e) => Some(e),
+            ConfigError::Parse(e) => Some(e),
+            ConfigError::OsAdapter(e) => Some(e),
+            ConfigError::InvalidValue { .. } => None,
+        }
+    }
+}
+
+/// Pure, validated adapter settings. Parsing this type performs no file I/O or
+/// host OS detection; those operations remain gated on stage construction.
+struct ParsedOsAdapterConfig<'a> {
+    selector: TargetSelector,
+    rules_path: Option<&'a str>,
+}
 
 impl SecurityConfig {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -370,32 +432,15 @@ impl SecurityConfig {
                 }
             }
         }
-        if let Some(ref cs) = self.control_socket {
-            let has_path = cs
-                .path
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            let has_exe = cs
-                .trusted_peer_exe
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            if has_path && !has_exe {
-                return Err(ConfigError::InvalidValue {
-                    field: "control_socket.trusted_peer_exe",
-                    value: String::new(),
-                    allowed: "non-empty path when control_socket.path is set",
-                });
-            }
-            if !has_path && has_exe {
-                return Err(ConfigError::InvalidValue {
-                    field: "control_socket.path",
-                    value: String::new(),
-                    allowed: "non-empty path when control_socket.trusted_peer_exe is set",
-                });
-            }
-        }
+        self.parse_os_adapter_config()
+            .map_err(ConfigError::OsAdapter)?;
+        // Cross-field control-socket integrity ("a socket path requires a
+        // trusted peer") is intentionally NOT validated here. Config values
+        // are merged with the CLI later (CLI overrides config, and either
+        // field may come from either source), so validating a single field
+        // in isolation at load time would reject valid combinations such as
+        // a config-file socket path completed by a CLI `--trusted-peer-exe`.
+        // The mutual-requirement gate runs once, after the merge, in the CLI.
         Ok(())
     }
 
@@ -588,6 +633,93 @@ impl SecurityConfig {
             .as_ref()
             .and_then(|s| s.layout.as_deref())
             .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Whether the directive/compiler transform stage is enabled.
+    ///
+    /// Defaults to `true` when `[transforms.directive]` (or its `enabled` field)
+    /// is absent, so existing configurations preserve current behavior. Set
+    /// `enabled = false` to disable only the directive stage; the OS adapter
+    /// remains independently opt-in.
+    pub fn directive_enabled(&self) -> bool {
+        self.transforms
+            .as_ref()
+            .and_then(|t| t.directive.as_ref())
+            .and_then(|d| d.enabled)
+            .unwrap_or(true)
+    }
+
+    /// Parse and validate the enabled OS adapter without loading rules or
+    /// detecting the host OS.
+    fn parse_os_adapter_config(&self) -> Result<Option<ParsedOsAdapterConfig<'_>>, OsAdapterError> {
+        let Some(adapter) = self
+            .transforms
+            .as_ref()
+            .and_then(|t| t.os_adapter.as_ref())
+            .filter(|adapter| adapter.enabled)
+        else {
+            return Ok(None);
+        };
+
+        let selector = match adapter.target_os.as_deref() {
+            None => TargetSelector::Auto,
+            Some(raw) => {
+                TargetSelector::parse(raw).ok_or_else(|| OsAdapterError::InvalidTargetSelector {
+                    value: raw.to_string(),
+                })?
+            }
+        };
+        let rules_path = match adapter.rules_path.as_deref() {
+            None => None,
+            Some(raw) => {
+                let path = raw.trim();
+                if path.is_empty() {
+                    return Err(OsAdapterError::BlankRulesPath);
+                }
+                Some(path)
+            }
+        };
+        Ok(Some(ParsedOsAdapterConfig {
+            selector,
+            rules_path,
+        }))
+    }
+
+    /// Build the opt-in OS adapter stage from `[transforms.os_adapter]`.
+    ///
+    /// Returns `Ok(None)` when the section is absent or `enabled = false`, so
+    /// the default read pipeline (directive stage only) is preserved and no
+    /// catalog is loaded or validated.
+    ///
+    /// When enabled, an artifact is parsed, validated, and specialized for the
+    /// resolved target OS here — once, before the mount begins. An absent
+    /// `rules_path` uses the built-in catalog embedded in the binary; a
+    /// non-empty `rules_path` overrides it with that external artifact.
+    /// `target_os = "auto"` reads `/etc/os-release`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OsAdapterError`] when `target_os` is an unsupported value, the
+    /// external rule artifact is missing/unreadable, a configured `rules_path`
+    /// is blank/whitespace, the YAML is malformed, a rule is invalid, the
+    /// resolved target has duplicate/ambiguous patterns, or `target_os = auto`
+    /// cannot map the host distribution. Callers must surface this before
+    /// mounting.
+    ///
+    /// This builder is **fail-closed** — on both a blank `rules_path` and an
+    /// invalid `target_os` — independently of [`Self::load`]'s validation, so an
+    /// embedder that constructs a config by other means (e.g. direct
+    /// deserialization) cannot silently fall back to the built-in catalog or to
+    /// `auto` detection when it meant something specific.
+    pub fn build_os_adapter_stage(&self) -> Result<Option<OsAdapterStage>, OsAdapterError> {
+        let Some(adapter) = self.parse_os_adapter_config()? else {
+            return Ok(None);
+        };
+        let stage = match adapter.rules_path {
+            None => OsAdapterStage::load_default(adapter.selector)?,
+            Some(path) => OsAdapterStage::load(Path::new(path), adapter.selector)?,
+        };
+        Ok(Some(stage))
     }
 
     /// Validate that the backing root is configured and accessible when
@@ -1413,9 +1545,14 @@ path = "  "
     }
 
     #[test]
-    fn control_socket_path_without_exe_rejected() {
+    fn control_socket_path_without_exe_accepted_at_load() {
+        // Config load must NOT reject a socket path that lacks a trusted
+        // peer: the peer can still arrive from the CLI (`--trusted-peer-exe`)
+        // during the later merge. The "socket requires a peer" rule is
+        // enforced once, after merge, in the CLI — validating a single field
+        // in isolation here would break `config socket + CLI peer`.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
+        let path = dir.path().join("path-only.toml");
         std::fs::write(
             &path,
             r#"
@@ -1424,23 +1561,17 @@ path = "/run/skillfs/skillfs.sock"
 "#,
         )
         .unwrap();
-        let result = SecurityConfig::load(&path);
-        assert!(
-            matches!(
-                result,
-                Err(ConfigError::InvalidValue {
-                    field: "control_socket.trusted_peer_exe",
-                    ..
-                })
-            ),
-            "path without trusted_peer_exe must fail: {result:?}"
-        );
+        let cfg = SecurityConfig::load(&path).expect("path-only control_socket must load");
+        assert_eq!(cfg.control_socket_path(), Some("/run/skillfs/skillfs.sock"));
+        assert!(cfg.control_socket_trusted_peer_exe().is_none());
     }
 
     #[test]
-    fn control_socket_exe_without_path_rejected() {
+    fn control_socket_exe_without_path_uses_default_endpoint() {
+        // A trusted peer with no explicit path is valid: SkillFS binds the
+        // default per-user endpoint. Config loading must accept it.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
+        let path = dir.path().join("ok.toml");
         std::fs::write(
             &path,
             r#"
@@ -1449,16 +1580,11 @@ trusted_peer_exe = "/usr/local/bin/agent-sec-cli"
 "#,
         )
         .unwrap();
-        let result = SecurityConfig::load(&path);
-        assert!(
-            matches!(
-                result,
-                Err(ConfigError::InvalidValue {
-                    field: "control_socket.path",
-                    ..
-                })
-            ),
-            "trusted_peer_exe without path must fail: {result:?}"
+        let cfg = SecurityConfig::load(&path).expect("trusted_peer_exe without path is valid");
+        assert!(cfg.control_socket_path().is_none());
+        assert_eq!(
+            cfg.control_socket_trusted_peer_exe(),
+            Some("/usr/local/bin/agent-sec-cli")
         );
     }
 
@@ -1692,6 +1818,206 @@ post_publish_write_patterns = [".openclaw/**"]
         std::fs::write(&path, "[skills]\nlayout = \"categorized\"\n").unwrap();
         let result = SecurityConfig::load(&path);
         assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    // -----------------------------------------------------------------------
+    // transforms.os_adapter config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn directive_enabled_defaults_true_when_absent() {
+        let cfg: SecurityConfig = toml::from_str("").unwrap();
+        assert!(cfg.directive_enabled());
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.os_adapter]\nenabled = false\n").unwrap();
+        assert!(cfg.directive_enabled());
+    }
+
+    #[test]
+    fn directive_can_be_disabled() {
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.directive]\nenabled = false\n").unwrap();
+        assert!(!cfg.directive_enabled());
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.directive]\nenabled = true\n").unwrap();
+        assert!(cfg.directive_enabled());
+    }
+
+    #[test]
+    fn directive_section_without_enabled_defaults_true() {
+        let cfg: SecurityConfig = toml::from_str("[transforms.directive]\n").unwrap();
+        assert!(cfg.directive_enabled());
+    }
+
+    #[test]
+    fn os_adapter_absent_returns_none() {
+        let cfg: SecurityConfig = toml::from_str("").unwrap();
+        assert!(cfg.build_os_adapter_stage().unwrap().is_none());
+    }
+
+    #[test]
+    fn os_adapter_disabled_returns_none() {
+        let toml = r#"
+[transforms.os_adapter]
+enabled = false
+rules_path = "/nonexistent/rules.yaml"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        // Disabled: never touches the (missing) rules file.
+        assert!(cfg.build_os_adapter_stage().unwrap().is_none());
+    }
+
+    #[test]
+    fn os_adapter_disabled_ignores_invalid_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disabled.toml");
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = false\ntarget_os = \"fedora\"\nrules_path = \"   \"\n",
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).expect("disabled adapter must not be validated");
+        assert!(cfg.build_os_adapter_stage().unwrap().is_none());
+    }
+
+    #[test]
+    fn os_adapter_enabled_without_rules_path_builds_builtin() {
+        // Absent rules_path is valid: it selects the built-in catalog. Use an
+        // explicit target so the test does not depend on the host's os-release.
+        let toml = r#"
+[transforms.os_adapter]
+enabled = true
+target_os = "alinux"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        cfg.validate().expect("absent rules_path must validate");
+        let stage = cfg
+            .build_os_adapter_stage()
+            .unwrap()
+            .expect("built-in stage");
+        assert_eq!(stage.target().as_str(), "alinux");
+        // The bundled catalog has 311 rules.
+        assert_eq!(stage.total_rules(), 311);
+    }
+
+    #[test]
+    fn os_adapter_blank_rules_path_has_shared_root_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = true\nrules_path = \"   \"\n",
+        )
+        .unwrap();
+        let load_err = SecurityConfig::load(&path).unwrap_err();
+        let cfg: SecurityConfig = toml::from_str(
+            "[transforms.os_adapter]\nenabled = true\ntarget_os = \"alinux\"\nrules_path = \"   \"\n",
+        )
+        .unwrap();
+        let build_err = cfg.build_os_adapter_stage().unwrap_err();
+        assert!(
+            matches!(
+                &load_err,
+                ConfigError::OsAdapter(OsAdapterError::BlankRulesPath)
+            ),
+            "load must preserve the shared adapter root error: {load_err}"
+        );
+        assert!(matches!(&build_err, OsAdapterError::BlankRulesPath));
+        assert_eq!(load_err.to_string(), build_err.to_string());
+    }
+
+    #[test]
+    fn os_adapter_invalid_target_os_has_shared_root_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = true\ntarget_os = \"fedora\"\n",
+        )
+        .unwrap();
+        let load_err = SecurityConfig::load(&path).unwrap_err();
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.os_adapter]\nenabled = true\ntarget_os = \"fedora\"\n")
+                .unwrap();
+        let build_err = cfg.build_os_adapter_stage().unwrap_err();
+        assert!(
+            matches!(
+                &load_err,
+                ConfigError::OsAdapter(OsAdapterError::InvalidTargetSelector { value })
+                    if value == "fedora"
+            ),
+            "load must preserve the shared adapter root error: {load_err}"
+        );
+        assert!(matches!(
+            &build_err,
+            OsAdapterError::InvalidTargetSelector { value } if value == "fedora"
+        ));
+        assert_eq!(load_err.to_string(), build_err.to_string());
+    }
+
+    #[test]
+    fn os_adapter_load_validation_does_not_read_rules_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("valid.toml");
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = true\nrules_path = \"/definitely/missing/os-rules.yaml\"\ntarget_os = \"alinux\"\n",
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).expect("validation must not load rule files");
+        let err = cfg.build_os_adapter_stage().unwrap_err();
+        assert!(matches!(err, OsAdapterError::ReadRules { .. }));
+    }
+
+    #[test]
+    fn os_adapter_enabled_missing_rules_file_errors_at_build() {
+        let toml = r#"
+[transforms.os_adapter]
+enabled = true
+target_os = "alinux"
+rules_path = "/definitely/missing/os-rules.yaml"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        let err = cfg.build_os_adapter_stage().unwrap_err();
+        // Actionable read error before any mount happens.
+        assert!(format!("{err}").contains("cannot read rules file"));
+    }
+
+    #[test]
+    fn os_adapter_valid_config_builds_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.yaml");
+        std::fs::write(
+            &rules,
+            "- ubuntu: \"apt-get install -y \"\n  alinux: \"dnf install -y \"\n  direction: bidirectional\n  auto_apply: always\n",
+        )
+        .unwrap();
+        let toml = format!(
+            "[transforms.os_adapter]\nenabled = true\ntarget_os = \"alinux\"\nrules_path = \"{}\"\n",
+            rules.display()
+        );
+        let cfg: SecurityConfig = toml::from_str(&toml).unwrap();
+        let stage = cfg.build_os_adapter_stage().unwrap().expect("stage built");
+        assert_eq!(stage.target().as_str(), "alinux");
+        // A non-empty rules_path overrides the built-in catalog: this artifact
+        // has exactly one rule, not the 311 bundled rules.
+        assert_eq!(
+            stage.total_rules(),
+            1,
+            "external artifact overrides built-in"
+        );
+    }
+
+    #[test]
+    fn transforms_unknown_field_rejected() {
+        let toml = r#"
+[transforms.os_adapter]
+enabled = true
+rules_path = "/r.yaml"
+bogus = 1
+"#;
+        let result: Result<SecurityConfig, _> = toml::from_str(toml);
+        assert!(result.is_err());
     }
 
     #[test]

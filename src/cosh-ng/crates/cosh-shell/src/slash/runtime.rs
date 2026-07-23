@@ -4,6 +4,7 @@ use crate::slash::commands::render_slash_command;
 use crate::slash::config::render_config_card_actions;
 use crate::slash::parser::{slash_input, SlashCommand};
 use crate::slash::prompt::{clear_shell_prompt_line, write_shell_prompt};
+use crate::slash::session::{render_session_card_actions, render_session_launch};
 
 pub(crate) fn render_slash_actions<W: Write>(
     events: &[ShellEvent],
@@ -13,6 +14,8 @@ pub(crate) fn render_slash_actions<W: Write>(
     output: &mut W,
     event_index_base: usize,
 ) -> std::io::Result<()> {
+    render_session_launch(events, blocks, adapter, state, output)?;
+    render_session_card_actions(events, adapter, state, output, event_index_base)?;
     render_mode_card_actions(events, state, output, event_index_base)?;
     render_config_card_actions(events, state, output, event_index_base)?;
 
@@ -31,7 +34,15 @@ pub(crate) fn render_slash_actions<W: Write>(
         }
 
         clear_shell_prompt_line(output)?;
-        let restore_prompt = render_slash_command(command, blocks, adapter, state, output)?;
+        let restore_prompt = render_slash_command(
+            command,
+            event,
+            blocks,
+            adapter,
+            state,
+            event.cwd.as_deref(),
+            output,
+        )?;
         if restore_prompt {
             write_shell_prompt(state, output)?;
         }
@@ -168,6 +179,7 @@ mod tests {
         let mut state = InlineState::default();
         let evidence = RuntimeShellCommandCompleted {
             approval_id: Some("req-1".to_string()),
+            origin: AgentRunOrigin::Standard,
             provider_request_id: Some("ctrl-1".to_string()),
             tool_use_id: Some("toolu-1".to_string()),
             shell_session_id: "raw-test".to_string(),

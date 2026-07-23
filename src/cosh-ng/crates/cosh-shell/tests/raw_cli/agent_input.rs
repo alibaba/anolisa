@@ -163,7 +163,11 @@ fn raw_cli_zh_natural_language_intercept_skips_redundant_notice() {
     );
     assert!(output.contains("正在思考..."), "{output}");
     assert!(
-        output.contains("Received shell prompt request: 帮我看看当前目录"),
+        output.contains("已收到 Shell 提示请求：帮我看看当前目录"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("Received shell prompt request"),
         "{output}"
     );
     assert!(!output.contains("bash: 帮我看看当前目录"), "{output}");

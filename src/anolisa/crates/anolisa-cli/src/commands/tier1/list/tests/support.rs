@@ -1,6 +1,9 @@
-use anolisa_core::state::{
-    InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership, RpmMetadata,
+use anolisa_core::domain::{
+    Installation, InstallationScope, LifecycleStatus, ManagementRelation, NativePm, Observation,
+    OwnedArtifact, PackageIdentity, ProviderBinding,
 };
+use anolisa_core::state::ObjectKind;
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError, PackageVersion};
 
 use crate::commands::tier1::list::state_view::{self, LocalProjection};
@@ -50,96 +53,150 @@ pub(super) fn sample_index() -> ComponentIndex {
     }
 }
 
-pub(super) fn empty_state() -> InstalledState {
-    InstalledState::default()
+const FIXTURE_TIME: &str = "2026-06-12T00:00:00Z";
+
+pub(super) fn empty_state() -> StateStore {
+    StateStore::empty()
 }
 
-pub(super) fn state_with_object(
+pub(super) fn managed() -> ManagementRelation {
+    ManagementRelation::Managed {
+        since: FIXTURE_TIME.to_string(),
+    }
+}
+
+pub(super) fn adopted() -> ManagementRelation {
+    ManagementRelation::Adopted {
+        since: FIXTURE_TIME.to_string(),
+    }
+}
+
+fn installation(
     kind: ObjectKind,
     name: &str,
-    status: ObjectStatus,
-) -> InstalledState {
-    let mut state = InstalledState::default();
-    state.objects.push(InstalledObject {
+    status: LifecycleStatus,
+    binding: ProviderBinding,
+) -> Installation {
+    Installation {
         kind,
         name: name.to_string(),
-        version: "0.1.0".to_string(),
+        scope: InstallationScope::System,
+        binding,
         status,
-        manifest_digest: None,
-        distribution_source: None,
-        raw_package: None,
-        install_backend: None,
-        ownership: None,
-        rpm_metadata: None,
-        installed_at: "2026-06-12T00:00:00Z".to_string(),
+        installed_at: FIXTURE_TIME.to_string(),
         last_operation_id: None,
-        managed: true,
-        adopted: false,
         subscription_scope: Default::default(),
         enabled_features: Vec::new(),
-        component_refs: Vec::new(),
-        files: Vec::new(),
-        external_modified_files: Vec::new(),
-        services: Vec::new(),
         health: Vec::new(),
-        provisioned_packages: Vec::new(),
-    });
-    state
-}
-
-pub(super) fn state_with_component_object(mut object: InstalledObject) -> InstalledState {
-    let mut state = InstalledState::default();
-    object.kind = ObjectKind::Component;
-    state.objects.push(object);
-    state
-}
-
-pub(super) fn component_object(
-    name: &str,
-    status: ObjectStatus,
-    ownership: Ownership,
-) -> InstalledObject {
-    InstalledObject {
-        kind: ObjectKind::Component,
-        name: name.to_string(),
-        version: "0.1.0".to_string(),
-        status,
-        manifest_digest: None,
-        distribution_source: None,
-        raw_package: None,
-        install_backend: Some(if ownership.is_rpm() { "rpm" } else { "raw" }.to_string()),
-        ownership: Some(ownership),
-        rpm_metadata: None,
-        installed_at: "2026-06-12T00:00:00Z".to_string(),
-        last_operation_id: None,
-        managed: ownership.owns_removal(),
-        adopted: ownership == Ownership::RpmObserved,
-        subscription_scope: Default::default(),
-        enabled_features: Vec::new(),
-        component_refs: Vec::new(),
-        files: Vec::new(),
-        external_modified_files: Vec::new(),
-        services: Vec::new(),
-        health: Vec::new(),
-        provisioned_packages: Vec::new(),
     }
+}
+
+fn owned_binding() -> ProviderBinding {
+    ProviderBinding::Owned {
+        artifact: OwnedArtifact {
+            version: "0.1.0".to_string(),
+            distribution_source: None,
+            raw_package: None,
+            manifest_digest: None,
+            files: Vec::new(),
+            services: Vec::new(),
+            external_modified_files: Vec::new(),
+            provisioned_packages: Vec::new(),
+        },
+    }
+}
+
+pub(super) fn state_with_owned_object(
+    kind: ObjectKind,
+    name: &str,
+    status: LifecycleStatus,
+) -> StateStore {
+    let mut store = StateStore::empty();
+    store
+        .installations
+        .push(installation(kind, name, status, owned_binding()));
+    store
+}
+
+/// An adopted delegated record with no package resolution — the minimal
+/// rpm-backed shape whose projected status is `adopted`.
+pub(super) fn state_with_adopted_object(kind: ObjectKind, name: &str) -> StateStore {
+    let mut store = StateStore::empty();
+    store.installations.push(installation(
+        kind,
+        name,
+        LifecycleStatus::Installed,
+        ProviderBinding::Delegated {
+            pm: NativePm::Rpm,
+            package: PackageIdentity::Unresolved {
+                component_hint: name.to_string(),
+            },
+            relation: adopted(),
+            last_observed: None,
+        },
+    ));
+    store
+}
+
+pub(super) fn state_with_component_object(mut installation: Installation) -> StateStore {
+    installation.kind = ObjectKind::Component;
+    let mut store = StateStore::empty();
+    store.installations.push(installation);
+    store
+}
+
+pub(super) fn owned_component(name: &str, status: LifecycleStatus) -> Installation {
+    installation(ObjectKind::Component, name, status, owned_binding())
+}
+
+/// Delegated component without package resolution (no rpm metadata in the
+/// legacy vocabulary) — drift probes have nothing to query.
+pub(super) fn delegated_component(
+    name: &str,
+    status: LifecycleStatus,
+    relation: ManagementRelation,
+) -> Installation {
+    installation(
+        ObjectKind::Component,
+        name,
+        status,
+        ProviderBinding::Delegated {
+            pm: NativePm::Rpm,
+            package: PackageIdentity::Unresolved {
+                component_hint: name.to_string(),
+            },
+            relation,
+            last_observed: None,
+        },
+    )
 }
 
 pub(super) fn rpm_component_object(
     name: &str,
-    status: ObjectStatus,
-    ownership: Ownership,
+    status: LifecycleStatus,
+    relation: ManagementRelation,
     package: &str,
     evr: &str,
-) -> InstalledObject {
-    let mut object = component_object(name, status, ownership);
-    object.rpm_metadata = Some(RpmMetadata {
-        package_name: package.to_string(),
-        evr: Some(evr.to_string()),
-        arch: Some("x86_64".to_string()),
-        source_repo: Some("@System".to_string()),
-    });
-    object
+) -> Installation {
+    installation(
+        ObjectKind::Component,
+        name,
+        status,
+        ProviderBinding::Delegated {
+            pm: NativePm::Rpm,
+            package: PackageIdentity::Resolved {
+                name: package.to_string(),
+            },
+            relation,
+            last_observed: Some(Observation {
+                version: evr.to_string(),
+                evr: Some(evr.to_string()),
+                arch: Some("x86_64".to_string()),
+                source_repo: Some("@System".to_string()),
+                observed_at: FIXTURE_TIME.to_string(),
+            }),
+        },
+    )
 }
 
 #[derive(Default)]
@@ -202,7 +259,7 @@ pub(super) fn pkg_info(
 
 pub(super) fn projection_for(
     component: &str,
-    state: &InstalledState,
+    state: &StateStore,
     query: &dyn PackageQuery,
 ) -> LocalProjection {
     let index = sample_index();
@@ -212,7 +269,7 @@ pub(super) fn projection_for(
 pub(super) fn projection_for_index(
     index: &ComponentIndex,
     component: &str,
-    state: &InstalledState,
+    state: &StateStore,
     query: &dyn PackageQuery,
 ) -> LocalProjection {
     let entry = index

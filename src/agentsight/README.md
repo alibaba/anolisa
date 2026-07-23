@@ -1,6 +1,6 @@
 # AgentSight
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 eBPF-based observability tool for AI Agents on Linux, providing zero-intrusion monitoring of LLM API calls, token consumption, process behavior, and SSL/TLS traffic. AgentSight is an observability component of [ANOLISA](../../README.md).
 
@@ -213,6 +213,36 @@ When finished, run `make build-frontend && cargo build --release` to embed the u
 
 ### Prerequisites
 
+#### System Packages
+
+Before building, install the required system packages:
+
+**Anolis OS / CentOS / RHEL:**
+```bash
+sudo yum install -y openssl-devel elfutils-libelf-devel perl-IPC-Cmd libbpf-devel clang llvm bpftool
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt install -y pkg-config libssl-dev libelf-dev libbpf-dev clang llvm linux-tools-common
+```
+
+| Package | Required for |
+|---------|-------------|
+| `openssl-devel` | OpenSSL vendored build (used via `openssl = { features = ["vendored"] }`) |
+| `elfutils-libelf-devel` | libbpf-sys crate (provides `gelf.h`, `libelf.h`) |
+| `perl-IPC-Cmd` | OpenSSL source build (Perl IPC::Cmd module) |
+| `libbpf-devel` | eBPF program compilation and loading |
+| `clang` / `llvm` | eBPF C program compilation to BPF bytecode |
+| `bpftool` | eBPF skeleton generation |
+
+You can verify all dependencies with the included check script:
+```bash
+./scripts/check-deps.sh
+```
+
+#### Version Requirements
+
 | Component | Version |
 |-----------|---------|
 | Linux kernel | >= 5.8 (BTF support) |
@@ -224,6 +254,11 @@ When finished, run `make build-frontend && cargo build --release` to embed the u
 
 ```bash
 cd src/agentsight
+
+# Verify dependencies (optional but recommended)
+./scripts/check-deps.sh
+
+# Build
 cargo build --release
 ```
 

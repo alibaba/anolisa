@@ -15,9 +15,25 @@ pub struct CoshConfig {
     pub log_level: String,
     pub ai_enabled: bool,
     pub health: HealthConfig,
+    pub recommendations: RecommendationsConfig,
     pub trusted_commands: Vec<String>,
     pub trusted_project_roots: Vec<PathBuf>,
     pub(super) readonly: RuntimeReadonlyConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecommendationsConfig {
+    pub enabled: bool,
+    pub bash_history: bool,
+}
+
+impl Default for RecommendationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bash_history: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +95,7 @@ impl Default for CoshConfig {
             log_level: "warn".into(),
             ai_enabled: true,
             health: HealthConfig::default(),
+            recommendations: RecommendationsConfig::default(),
             trusted_commands: Vec::new(),
             trusted_project_roots: Vec::new(),
             readonly: RuntimeReadonlyConfig::default(),

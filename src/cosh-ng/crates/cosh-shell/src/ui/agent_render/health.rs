@@ -12,9 +12,10 @@ use ratatui::{
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
 
+use super::health_labels::collector_label;
 use crate::diagnostics::health::{
-    HealthCollector, HealthFact, HealthFactValue, HealthFinding, HealthMessageId, HealthScanReport,
-    HealthSeverity, HealthTryItem, HealthUnavailableReason,
+    sorted_findings, sorted_try_items, HealthFact, HealthFactValue, HealthFinding, HealthMessageId,
+    HealthScanReport, HealthSeverity, HealthUnavailableReason,
 };
 
 use super::{
@@ -30,6 +31,12 @@ const HEALTH_MAX_VISIBLE_PROMPTS: usize = 3;
 #[derive(Debug, Clone, Copy)]
 pub struct HealthBannerModel<'a> {
     pub report: &'a HealthScanReport,
+}
+
+impl<'a> HealthBannerModel<'a> {
+    pub fn new(report: &'a HealthScanReport) -> Self {
+        Self { report }
+    }
 }
 
 impl RatatuiInlineRenderer {
@@ -720,35 +727,6 @@ fn top_finding(report: &HealthScanReport) -> Option<&HealthFinding> {
     sorted_findings(report).into_iter().next()
 }
 
-fn sorted_findings(report: &HealthScanReport) -> Vec<&HealthFinding> {
-    let mut findings = report.findings.iter().collect::<Vec<_>>();
-    findings.sort_by(|left, right| {
-        right
-            .severity
-            .precedence()
-            .cmp(&left.severity.precedence())
-            .then_with(|| finding_display_rank(left).cmp(&finding_display_rank(right)))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    findings
-}
-
-fn finding_display_rank(finding: &HealthFinding) -> u8 {
-    match finding.title_id {
-        HealthMessageId::HealthFindingRecentOom => 0,
-        HealthMessageId::HealthFindingCpuLoadHigh => 1,
-        HealthMessageId::HealthFindingMemoryAvailableLow => 2,
-        HealthMessageId::HealthFindingSwapPressure => 3,
-        HealthMessageId::HealthFindingDiskHigh => 4,
-        HealthMessageId::HealthFindingServiceFailed
-        | HealthMessageId::HealthFindingServiceInactive => 5,
-        HealthMessageId::HealthFindingCoreCollectorUnavailable
-        | HealthMessageId::HealthFindingPlatformUnsupported => 6,
-        HealthMessageId::HealthFindingKernelPanic => 7,
-        _ => 8,
-    }
-}
-
 fn insight_id_for_finding(finding: &HealthFinding) -> HealthMessageId {
     match finding.title_id {
         HealthMessageId::HealthFindingMemoryAvailableLow => {
@@ -1182,31 +1160,6 @@ fn try_lines(
     lines
 }
 
-fn sorted_try_items(report: &HealthScanReport) -> Vec<&HealthTryItem> {
-    let visible_finding_rank = sorted_findings(report)
-        .into_iter()
-        .take(HEALTH_MAX_VISIBLE_FINDINGS)
-        .enumerate()
-        .map(|(rank, finding)| (finding.id.as_str(), rank))
-        .collect::<BTreeMap<_, _>>();
-    let mut items = report
-        .try_items
-        .iter()
-        .filter(|item| {
-            report.findings.is_empty()
-                || visible_finding_rank.contains_key(item.finding_id.as_str())
-        })
-        .collect::<Vec<_>>();
-    items.sort_by_key(|item| {
-        let finding_rank = visible_finding_rank
-            .get(item.finding_id.as_str())
-            .copied()
-            .unwrap_or(usize::MAX);
-        (finding_rank, std::cmp::Reverse(item.score), item.id.clone())
-    });
-    items
-}
-
 fn max_visible_prompt_count(content_width: usize) -> usize {
     if content_width < 60 {
         1
@@ -1527,17 +1480,6 @@ fn severity_color(severity: HealthSeverity) -> Color {
 
 fn is_zh(i18n: crate::I18n) -> bool {
     i18n.language() == crate::Language::ZhCn
-}
-
-fn collector_label(collector: HealthCollector, i18n: crate::I18n) -> &'static str {
-    match collector {
-        HealthCollector::Host => i18n.t(crate::MessageId::HealthMetricHost),
-        HealthCollector::Cpu => i18n.t(crate::MessageId::HealthMetricCpu),
-        HealthCollector::Memory => i18n.t(crate::MessageId::HealthMetricMemory),
-        HealthCollector::Disk => i18n.t(crate::MessageId::HealthMetricDisk),
-        HealthCollector::KernelSignal => i18n.t(crate::MessageId::HealthMetricSignal),
-        HealthCollector::ConfiguredService => i18n.t(crate::MessageId::HealthMetricService),
-    }
 }
 
 fn unavailable_reason_label(reason: HealthUnavailableReason, i18n: crate::I18n) -> &'static str {

@@ -1,6 +1,6 @@
 //! SkillFS CLI — AI agent skill management via virtual filesystem.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 fn cleanup_pid_file(pid_file: &Option<PathBuf>) {
@@ -23,20 +23,125 @@ use skillfs_fuse::security::{
     ControlSocketServer, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS,
     DEFAULT_RELOAD_INTERVAL_MS, DEFAULT_RELOAD_TIMEOUT_MS, DecisionCommand,
     InstallerStagingController, JsonlProtocolEventWriter, JsonlSecurityEventWriter, LedgerAdapter,
-    LedgerBackingRoot, NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyController,
-    ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome, RuntimeMetricsSink,
-    RuntimeMetricsWriter, SecurityConfig, SecurityEventWriter, SecurityModeConfig,
-    SessionStatsWriter, SkillfsSessionStats, SourceDriftObserver, StagingMatcher,
-    TrustedPeerConfig, TrustedWriterConfig, UnixSocketNotifyClient, bootstrap_activation,
-    resolve_events_path, resolve_protocol_events_path, spawn_drift_watcher,
+    LedgerBackingRoot, NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyClient,
+    NotifyController, ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome,
+    RuntimeMetricsSink, RuntimeMetricsWriter, SecurityConfig, SecurityEventWriter,
+    SecurityModeConfig, SessionStatsWriter, SkillfsSessionStats, SourceDriftObserver,
+    StagingMatcher, SummaryWriteOutcome, TrustedPeerConfig, TrustedWriterConfig,
+    UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
+    resolve_protocol_events_path, spawn_drift_watcher,
 };
 use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod help_text;
 mod managed;
 mod sls_ops;
+
+#[derive(Clone, Debug)]
+struct SourceRoots {
+    canonical_identity_root: PathBuf,
+    physical_source_root: PathBuf,
+}
+
+impl SourceRoots {
+    fn resolve(source: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            canonical_identity_root: lexical_absolute(source)?,
+            physical_source_root: source.canonicalize()?,
+        })
+    }
+
+    fn canonical_identity_root(&self) -> &Path {
+        &self.canonical_identity_root
+    }
+
+    fn physical_source_root(&self) -> &Path {
+        &self.physical_source_root
+    }
+}
+
+fn lexical_absolute(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+    Ok(normalized)
+}
+
+#[derive(Clone, Debug)]
+struct MountRuntimeRoots {
+    notify_canonical_root: PathBuf,
+    physical_source_root: PathBuf,
+    daemon_root: PathBuf,
+}
+
+impl MountRuntimeRoots {
+    fn from_source(source: &SourceRoots, ledger_backing_root: Option<&Path>) -> Self {
+        Self {
+            notify_canonical_root: source.canonical_identity_root().to_path_buf(),
+            physical_source_root: source.physical_source_root().to_path_buf(),
+            daemon_root: ledger_backing_root
+                .unwrap_or(source.physical_source_root())
+                .to_path_buf(),
+        }
+    }
+
+    fn notify_canonical_root(&self) -> &Path {
+        &self.notify_canonical_root
+    }
+
+    fn physical_source_root(&self) -> &Path {
+        &self.physical_source_root
+    }
+
+    fn daemon_root(&self) -> &Path {
+        &self.daemon_root
+    }
+}
+
+fn build_notify_controller(
+    client: Arc<dyn NotifyClient>,
+    roots: &MountRuntimeRoots,
+    notify_timeout_ms: u64,
+    protocol_event_writer: Arc<dyn ProtocolEventWriter>,
+    reload_controller: Option<Arc<ActivationReloadController>>,
+) -> Arc<NotifyController> {
+    if let Some(reload) = reload_controller {
+        NotifyController::new_with_reload(
+            client,
+            roots.notify_canonical_root().to_path_buf(),
+            roots.daemon_root().to_path_buf(),
+            std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+            notify_timeout_ms,
+            protocol_event_writer,
+            reload,
+        )
+    } else {
+        NotifyController::new_with_protocol_writer(
+            client,
+            roots.notify_canonical_root().to_path_buf(),
+            roots.daemon_root().to_path_buf(),
+            std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+            notify_timeout_ms,
+            protocol_event_writer,
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CLI Arguments
@@ -226,18 +331,20 @@ enum Commands {
         ledger_backing_root: Option<PathBuf>,
 
         /// Unix domain socket path for the trusted peer control
-        /// channel. When set, SkillFS creates a control socket at this
-        /// path and accepts connections from trusted peers. Peer
-        /// identity is verified via `SO_PEERCRED` + executable identity.
-        /// Requires `--trusted-peer-exe`. Linux only.
+        /// channel. Overrides the default per-user endpoint
+        /// `/run/user/<uid>/skillfs/control.sock`. SkillFS creates a
+        /// control socket at this path and accepts connections from
+        /// trusted peers; peer identity is verified via `SO_PEERCRED` +
+        /// executable identity. Requires `--trusted-peer-exe`. Linux only.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         control_socket: Option<PathBuf>,
 
         /// Trusted peer executable path for control socket
         /// authentication. The peer's `/proc/<pid>/exe` must match this
         /// canonical path and its on-disk `(dev, ino)` file identity.
-        /// Requires `--control-socket`. The path must exist and be a
-        /// regular file.
+        /// The path must exist and be a regular file. Enables the control
+        /// plane; with no `--control-socket` it binds the default per-user
+        /// endpoint `/run/user/<uid>/skillfs/control.sock`.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_exe: Option<PathBuf>,
 
@@ -264,8 +371,9 @@ enum Commands {
         /// top-level skill/SKILL.md).
         ///
         /// Hermes mode supports --security --activation-mode file
-        /// for nested skill activation and notify. Incompatible with
-        /// --decision-command and --control-socket.
+        /// for nested skill activation and notify, and the read-only
+        /// `skill.resolveLiveSource` control socket query. Incompatible
+        /// with --decision-command.
         #[arg(long, value_name = "MODE", help_heading = help_text::HEADING_MOUNT)]
         skill_layout: Option<String>,
     },
@@ -344,6 +452,18 @@ async fn main() {
     let cli = Cli::parse();
 
     let pid = std::process::id();
+
+    // Arm the SLS ops guard before any logging output so a broken stdout /
+    // stderr pipe that closes before the first write still yields exactly one
+    // ops record via Drop. Stop / Supervise are internal and left unlogged.
+    let sls_guard = match &cli.command {
+        Commands::Mount { .. } => Some(SlsOpsGuard::new("mount")),
+        Commands::Classify { .. } => Some(SlsOpsGuard::new("classify")),
+        Commands::Validate { .. } => Some(SlsOpsGuard::new("validate")),
+        Commands::List { .. } => Some(SlsOpsGuard::new("list")),
+        Commands::Stop { .. } | Commands::Supervise { .. } => None,
+    };
+
     let max_level = if cli.verbose {
         tracing::Level::DEBUG
     } else {
@@ -400,13 +520,17 @@ async fn main() {
 
     info!(pid, "starting skillfs CLI");
 
-    if let Err(e) = run(cli, raw_args).await {
+    if let Err(e) = run(cli, raw_args, sls_guard).await {
         error!(error = %e, "command failed");
         std::process::exit(1);
     }
 }
 
-async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(
+    cli: Cli,
+    raw_args: Vec<String>,
+    guard: Option<SlsOpsGuard>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Mount {
             source,
@@ -441,15 +565,13 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 // as a foreground worker using the preserved raw arguments.
                 // Log this public mount invocation too — the detached worker's
                 // own mount record is separate.
-                let start = std::time::Instant::now();
                 let result = managed::run_client(&raw_args, &source, &mountpoint);
-                sls_ops::log_command("mount", start, err_reason(&result));
+                finish_sls(guard, err_reason(&result));
                 return result;
             }
             // Log the mount startup attempt as a best-effort ops record. The
             // mount may be long-running, so this captures startup success or
             // failure; the mount-session summary writer remains untouched.
-            let start = std::time::Instant::now();
             let result = cmd_mount(
                 source,
                 mountpoint,
@@ -477,7 +599,7 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 skill_layout,
             )
             .await;
-            sls_ops::log_command("mount", start, err_reason(&result));
+            finish_sls(guard, err_reason(&result));
             result
         }
         Commands::Classify {
@@ -485,13 +607,11 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             primary_count,
             dry_run,
         } => {
-            let start = std::time::Instant::now();
             let result = cmd_classify(source, primary_count, dry_run).await;
-            sls_ops::log_command("classify", start, err_reason(&result));
+            finish_sls(guard, err_reason(&result));
             result
         }
         Commands::Validate { source, format } => {
-            let start = std::time::Instant::now();
             let (result, validation_failed) = cmd_validate(source, format).await;
             // A validation failure exits non-zero but is not a command error;
             // record it with a concise err_reason before exiting.
@@ -500,7 +620,9 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 None if validation_failed => Some("validation failed".to_string()),
                 None => None,
             };
-            sls_ops::log_command("validate", start, reason);
+            // Write now, not on drop: process::exit below skips destructors, so
+            // the validation-failure record must land before the exit.
+            finish_sls(guard, reason);
             if result.is_ok() && validation_failed {
                 std::process::exit(1);
             }
@@ -510,9 +632,8 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             source,
             enabled_only,
         } => {
-            let start = std::time::Instant::now();
             let result = cmd_list(source, enabled_only).await;
-            sls_ops::log_command("list", start, err_reason(&result));
+            finish_sls(guard, err_reason(&result));
             result
         }
         Commands::Stop { mountpoint } => managed::run_stop(&mountpoint),
@@ -523,6 +644,58 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
 /// Extract a concise error string from a command result for the SLS ops log.
 fn err_reason<T>(result: &Result<T, Box<dyn std::error::Error>>) -> Option<String> {
     result.as_ref().err().map(|e| e.to_string())
+}
+
+/// Guarantees each CLI command emits exactly one SLS ops record on every exit
+/// path. It is armed in `main` before logging is initialized, so the `Drop`
+/// fallback is live if tracing's internal error report panics after an early
+/// EPIPE. The same fallback handles later `println!`/`eprintln!` broken-pipe
+/// panics. `finish` writes the record immediately and disarms the guard; if the
+/// command unwinds first, `Drop` writes a single `err_reason="panic"` record
+/// instead.
+///
+/// `finish` writes eagerly rather than deferring to `Drop` because
+/// `process::exit` (used by `validate` on validation failure) skips
+/// destructors — the record must already be on disk before any explicit exit.
+/// Covers panic unwinding only, not `abort`/SIGKILL, which never run drops.
+struct SlsOpsGuard {
+    ops_name: &'static str,
+    start: std::time::Instant,
+    // `true` until `finish` runs; gates the panic fallback in `Drop`.
+    armed: bool,
+}
+
+impl SlsOpsGuard {
+    fn new(ops_name: &'static str) -> Self {
+        Self {
+            ops_name,
+            start: std::time::Instant::now(),
+            armed: true,
+        }
+    }
+
+    /// Write the ops record now and disarm the panic fallback.
+    fn finish(mut self, reason: Option<String>) {
+        self.armed = false;
+        sls_ops::log_command(self.ops_name, self.start, reason);
+    }
+}
+
+impl Drop for SlsOpsGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Reached only when the command unwound before `finish`.
+            sls_ops::log_command(self.ops_name, self.start, Some("panic".to_string()));
+        }
+    }
+}
+
+/// Finish the command's SLS guard, if any, writing exactly one ops record. A
+/// no-op for the internal Stop/Supervise commands, which carry no guard.
+fn finish_sls(guard: Option<SlsOpsGuard>, reason: Option<String>) {
+    if let Some(guard) = guard {
+        guard.finish(reason);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -537,25 +710,54 @@ fn err_reason<T>(result: &Result<T, Box<dyn std::error::Error>>) -> Option<Strin
 /// out-of-band change happened.
 const DRIFT_DEBOUNCE_MS: u64 = 200;
 
-/// Compute the expected canonical path a daemon-facing directory will
-/// resolve to, without requiring the leaf to exist.
+/// Resolve the canonical path a daemon-facing path will occupy, resolving
+/// symlinks in **every** existing ancestor even when one or more trailing
+/// components do not exist yet.
 ///
-/// Mirrors the parent-canonicalize + leaf-join shape used by
-/// `LedgerBackingRoot::setup`: the parent must resolve, but the final
-/// component may be created later. Falls back to the input path when the
-/// parent cannot be canonicalized so the caller still gets a best-effort
-/// answer instead of silently skipping the check.
-fn expected_daemon_facing_path(p: &Path) -> PathBuf {
-    let parent = p
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    match parent.canonicalize() {
-        Ok(parent_canon) => match p.file_name() {
-            Some(leaf) => parent_canon.join(leaf),
-            None => parent_canon,
-        },
-        Err(_) => p.to_path_buf(),
+/// A plain parent-only canonicalize (used previously) resolves only the
+/// direct parent, and falls back to the raw input when that parent does not
+/// exist. That misses `link-to-tmp/missing/leaf`, where `link-to-tmp` is a
+/// symlink into `/tmp` but `missing` does not exist yet: the raw lexical
+/// path shows no `/tmp` prefix, yet the object is created under `/tmp`. This
+/// walk climbs to the deepest existing ancestor, canonicalizes it (resolving
+/// the whole symlink chain), and re-appends the remaining components.
+///
+/// Returns `None` when the path cannot be reliably resolved (no existing
+/// ancestor, or an ancestor cannot be canonicalized) so the caller can fail
+/// closed instead of trusting an unverified lexical prefix.
+fn resolve_daemon_facing_path(p: &Path) -> Option<PathBuf> {
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = p;
+    loop {
+        // `exists()` follows symlinks, which is exactly what we want for
+        // ancestors: a symlinked ancestor pointing at an existing directory
+        // is the deepest resolvable point, and `canonicalize` resolves it.
+        if cursor.exists() {
+            let base = cursor.canonicalize().ok()?;
+            let mut result = base;
+            for name in trailing.iter().rev() {
+                result.push(name);
+            }
+            return Some(result);
+        }
+        // No filename (e.g. a trailing `..`) means we cannot reason about
+        // the path safely — fail closed.
+        let name = cursor.file_name()?;
+        trailing.push(name.to_os_string());
+        match cursor.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
+            _ => {
+                // Reached the top with no existing ancestor. For an absolute
+                // path this only happens if `/` is missing; for a relative
+                // path, anchor at the current directory.
+                let base = Path::new(".").canonicalize().ok()?;
+                let mut result = base;
+                for name in trailing.iter().rev() {
+                    result.push(name);
+                }
+                return Some(result);
+            }
+        }
     }
 }
 
@@ -586,18 +788,15 @@ fn daemon_facing_path_under_private_tmp(candidate: &Path) -> bool {
 /// Return `true` when an operator-supplied daemon-facing argument resolves
 /// under a private-tmp root.
 ///
-/// Checks both the parent-canonicalize + leaf shape (so a not-yet-created
-/// leaf is still evaluated) and, when the path already exists, its fully
-/// canonicalized form. The latter closes a symlink bypass such as
-/// `/run/.../x -> /tmp/real`, which passes the shape check but is resolved
-/// to a PrivateTmp-invisible path once the daemon follows it.
+/// Resolution climbs to the deepest existing ancestor and canonicalizes it,
+/// so an ancestor symlink into `/tmp` is caught even when trailing
+/// components (e.g. a not-yet-created parent directory) do not exist. A path
+/// that cannot be reliably resolved is treated as unsafe (fail closed).
 fn daemon_facing_arg_under_private_tmp(path: &Path) -> bool {
-    daemon_facing_path_under_private_tmp(&expected_daemon_facing_path(path))
-        || path
-            .canonicalize()
-            .ok()
-            .as_deref()
-            .is_some_and(daemon_facing_path_under_private_tmp)
+    match resolve_daemon_facing_path(path) {
+        Some(resolved) => daemon_facing_path_under_private_tmp(&resolved),
+        None => true,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -639,6 +838,22 @@ async fn cmd_mount(
         }
         None => None,
     };
+
+    // Build the opt-in OS adapter transform stage from
+    // `[transforms.os_adapter]`. Loading, YAML/schema validation, and (for
+    // `target_os = "auto"`) `/etc/os-release` detection all happen here, before
+    // the mount begins, so a missing/invalid rule artifact or an unrecognized
+    // auto target OS produces an actionable startup error instead of a silently
+    // disabled adapter. `None` config keeps the default directive-only pipeline.
+    let os_adapter_stage = match file_config.as_ref() {
+        Some(cfg) => cfg.build_os_adapter_stage().map_err(|e| format!("{e}"))?,
+        None => None,
+    };
+
+    // Directive/compiler stage toggle. `None` (no config) keeps the default
+    // (enabled); a config file supplies the resolved value, which defaults to
+    // enabled unless `[transforms.directive] enabled = false` is set.
+    let directive_enabled: Option<bool> = file_config.as_ref().map(|cfg| cfg.directive_enabled());
 
     // Parse activation mode: CLI flag (if present) overrides config file.
     let activation_mode = match activation_mode_raw.as_deref() {
@@ -760,40 +975,68 @@ async fn cmd_mount(
         );
     }
 
+    // ── Trusted peer control socket: merge CLI over config ──────────
+    //
+    // Merge CLI flags with the config file (CLI overrides config) here,
+    // BEFORE any control-plane validation, so the mutual-requirement,
+    // semantic, endpoint-classification, and backing-root checks all see a
+    // single merged view. This is the only place `control_socket` /
+    // `trusted_peer_exe` are resolved; there is no second merge later.
+    let control_socket = control_socket.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_path().map(PathBuf::from))
+    });
+    let trusted_peer_exe = trusted_peer_exe.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_exe().map(PathBuf::from))
+    });
+    let trusted_peer_uid = trusted_peer_uid.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_uid())
+    });
+    let trusted_peer_gid = trusted_peer_gid.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_gid())
+    });
+
     // Control socket gates — mutual requirement first, then semantic
     // gates. Must fire before the generic security source check so the
-    // error message names the actual problem.
-    match (&control_socket, &trusted_peer_exe) {
-        (Some(p), None) => {
-            return Err(format!(
-                "--control-socket {} requires --trusted-peer-exe",
-                p.display()
-            )
-            .into());
-        }
-        (None, Some(p)) => {
-            return Err(format!(
-                "--trusted-peer-exe {} requires --control-socket",
-                p.display()
-            )
-            .into());
-        }
-        _ => {}
+    // error message names the actual problem. All operate on the merged
+    // values above.
+    //
+    // A trusted peer without an explicit socket path is valid: the
+    // control plane binds the default per-user endpoint (resolved below).
+    // Only an explicit socket path without a trusted peer is an error —
+    // the control plane is always authenticated.
+    if let (Some(p), None) = (&control_socket, &trusted_peer_exe) {
+        return Err(format!(
+            "--control-socket {} requires a trusted peer (--trusted-peer-exe \
+             or [control_socket].trusted_peer_exe)",
+            p.display()
+        )
+        .into());
     }
-    if control_socket.is_some() {
+    // The control plane is enabled by either an explicit socket path or a
+    // trusted peer (which selects the default endpoint).
+    let control_plane_enabled = control_socket.is_some() || trusted_peer_exe.is_some();
+    if control_plane_enabled {
         if !security {
-            return Err("--control-socket requires --security (the control socket \
+            return Err("control socket requires --security (the control socket \
                  writes activation state through the active resolver)"
                 .into());
         }
         if activation_mode != ActivationMode::File {
-            return Err("--control-socket requires --activation-mode file (the \
+            return Err("control socket requires --activation-mode file (the \
                  control socket writes activation files consumed by the \
                  file-based activation path)"
                 .into());
         }
         if parsed_decision_command.is_some() {
-            return Err("--control-socket and --decision-command are mutually \
+            return Err("control socket and --decision-command are mutually \
                  exclusive (control socket is the daemon-driven activation \
                  path; --decision-command is the CLI-driven refresh path)"
                 .into());
@@ -1031,14 +1274,33 @@ async fn cmd_mount(
         .validate(&source, &mountpoint)
         .map_err(|e| format!("{}", e))?;
 
-    // Resolve the source canonical path once, up front. Several startup
-    // gates need it: the W1 audit-path-vs-source check below, the
-    // in-place detection further down, and the W1 drift watcher
-    // (which must observe canonical source events). Falls back to the
-    // user-supplied path on canonicalize failure so the existing CLI UX
-    // is preserved for callers who hand us a relative path that already
-    // resolves to a real directory.
-    let source_canon = source.canonicalize().unwrap_or_else(|_| source.clone());
+    // Keep external identity separate from physical I/O. The canonical
+    // identity is absolute and lexically normalized without following a
+    // source symlink; the physical root resolves that symlink for mount,
+    // backing-root, safety, and live-source operations.
+    let source_roots = SourceRoots::resolve(&source)
+        .map_err(|e| format!("failed to resolve source root '{}': {e}", source.display()))?;
+
+    // Compute mount identity before side-effecting setup. Notify v2 carries
+    // canonical identity only, so the daemon needs the authenticated resolver
+    // whenever the live root differs by contract: an in-place mount hides the
+    // physical source, while an explicit backing root replaces the canonical
+    // host path as the daemon-facing source.
+    let mount_canon = mountpoint
+        .canonicalize()
+        .unwrap_or_else(|_| mountpoint.clone());
+    let in_place = source_roots.physical_source_root() == mount_canon;
+    let notify_requires_resolver =
+        notify_socket.is_some() && (in_place || ledger_backing_root.is_some());
+    if notify_requires_resolver && !control_plane_enabled {
+        return Err(
+            "--notify-socket with an in-place mount or --ledger-backing-root requires the \
+             authenticated live-source resolver; \
+             configure --trusted-peer-exe (and optionally --control-socket) so the daemon \
+             can resolve canonicalSkillDir before accessing the source"
+                .into(),
+        );
+    }
 
     // Build the runtime audit configuration. When `--audit-log` is omitted
     // the default `NoopEventSink` is preserved (Ok(None) below). When it is
@@ -1058,36 +1320,48 @@ async fn cmd_mount(
     // creates the audit log file on disk. Disabled audit configs always
     // pass.
     audit_runtime
-        .validate_audit_path_outside_source(&source_canon)
+        .validate_audit_path_outside_source(source_roots.physical_source_root())
         .map_err(|e| format!("{}", e))?;
     // N3 source-tree guard: reject --activation-events-log inside source,
     // same rationale as audit. Ordered before the file is opened so a
     // rejected path never creates the log file on disk.
     if let Some(ref p) = activation_events_log {
-        skillfs_fuse::security::validate_protocol_events_path_outside_source(p, &source_canon)
-            .map_err(|e| format!("{}", e))?;
+        skillfs_fuse::security::validate_protocol_events_path_outside_source(
+            p,
+            source_roots.physical_source_root(),
+        )
+        .map_err(|e| format!("{}", e))?;
     }
 
-    // #1262 PrivateTmp gate. When daemon-driven activation is enabled,
+    // #1262 PrivateTmp gate. When a daemon-facing operation is enabled,
     // agent-sec-core.service runs with PrivateTmp=true and therefore
     // cannot see the host /tmp or /var/tmp. Any daemon-facing path under
     // those roots makes the daemon reject notify, fail to tail the events
-    // log, or time out the activation reload, which hides the affected
-    // skills. Fail fast here — before the audit sink is opened, the
-    // mountpoint is auto-created, or any backing root bind mount runs — so
-    // a rejected config leaves no side effects behind. The pure
-    // inside-source guards above keep their own error ordering; this only
-    // adds a check, never a side effect.
+    // log, time out the activation reload, or be unable to reach the
+    // control socket / open the live source the resolver reports — all of
+    // which hide the affected skills. Fail fast here — before the audit
+    // sink is opened, the mountpoint is auto-created, or any backing root
+    // bind mount runs — so a rejected config leaves no side effects behind.
+    // The pure inside-source guards above keep their own error ordering;
+    // this only adds a check, never a side effect.
+    //
+    // This gate protects both the daemon-driven activation transport
+    // (notify / events log) and the resolver control plane (the control
+    // socket transport and the live source it resolves).
     //
     // Guarded paths (all daemon-facing):
-    //   * backing root, or the source fallback (the daemon's scan target);
+    //   * backing root, or the source fallback (the daemon's scan target
+    //     and the resolver's live root);
     //   * --activation-events-log (the daemon tails this JSONL file);
-    //   * --notify-socket (the daemon owns this Unix socket).
+    //   * --notify-socket (the daemon owns this Unix socket);
+    //   * --control-socket (the daemon connects to this Unix socket; the
+    //     default /run/user/<uid>/... endpoint is always daemon-visible and
+    //     is therefore not checked here).
     // A plain agent-visible mountpoint under /tmp is NOT guarded.
-    let daemon_driven_activation = security
+    let daemon_facing_ops = security
         && activation_mode == ActivationMode::File
-        && (notify_socket.is_some() || activation_events_log.is_some());
-    if daemon_driven_activation {
+        && (notify_socket.is_some() || activation_events_log.is_some() || control_plane_enabled);
+    if daemon_facing_ops {
         // Daemon-facing root: the backing root when set, otherwise the
         // source is what the daemon scans directly.
         if let Some(ref br_path) = ledger_backing_root {
@@ -1102,14 +1376,14 @@ async fn cmd_mount(
                 )
                 .into());
             }
-        } else if daemon_facing_path_under_private_tmp(&source_canon) {
+        } else if daemon_facing_path_under_private_tmp(source_roots.physical_source_root()) {
             return Err(format!(
                 "the daemon-facing source root {} resolves under /tmp or /var/tmp, which the \
                  agent-sec-core.service daemon cannot see because it runs with PrivateTmp=true. \
                  Daemon-driven activation would be rejected and the affected skills hidden. \
                  Set --ledger-backing-root to a daemon-visible path such as \
                  /run/user/$UID/skillfs-ledger/... or /run/skillfs-ledger/... instead.",
-                source_canon.display()
+                source_roots.physical_source_root().display()
             )
             .into());
         }
@@ -1140,6 +1414,25 @@ async fn cmd_mount(
                      activation would break and the affected skills be hidden. Use a \
                      daemon-visible path such as /run/user/$UID/skillfs-ledger/... or \
                      /run/skillfs-ledger/... instead.",
+                    p.display()
+                )
+                .into());
+            }
+        }
+        // Explicit control socket. The daemon connects to this socket to
+        // issue resolver queries, so a path under /tmp or /var/tmp is
+        // invisible to it. Only an explicit path is checked: when the
+        // control plane uses the default endpoint (`control_socket` is
+        // None) the path is always under /run/user/<uid> and daemon-visible.
+        if let Some(ref p) = control_socket {
+            if daemon_facing_arg_under_private_tmp(p) {
+                return Err(format!(
+                    "--control-socket {} resolves under /tmp or /var/tmp, which the \
+                     agent-sec-core.service daemon cannot see because it runs with \
+                     PrivateTmp=true. The daemon connects to this socket, so the resolver \
+                     control plane would be unreachable. Use the default \
+                     /run/user/$UID/skillfs/control.sock endpoint (omit --control-socket) \
+                     or another daemon-visible /run/... path instead.",
                     p.display()
                 )
                 .into());
@@ -1178,26 +1471,25 @@ async fn cmd_mount(
         return Err(format!("Mount point is not a directory: {}", mountpoint.display()).into());
     }
 
-    // Compute mount_canon and in_place early so the A6/B1 backing root
-    // setup can validate path shape before the FUSE over-mount.
-    let mount_canon = mountpoint
-        .canonicalize()
-        .unwrap_or_else(|_| mountpoint.clone());
-    let in_place = source_canon == mount_canon;
-
     // A6/B1: Ledger backing root setup.
     //
     // When the operator provides --ledger-backing-root, SkillFS creates a
     // private source alias (bind mount) before the FUSE over-mount becomes
-    // active. All daemon-facing operations then use the backing root path.
+    // active. Daemon live-source operations and N3 protocol events then use
+    // the backing root path; socket notify v2 keeps canonical source identity.
     // Fail-closed: unsafe backing root rejects startup.
     let backing_root: Option<LedgerBackingRoot> = if let Some(ref br_path) = ledger_backing_root {
-        let br = LedgerBackingRoot::setup(&source_canon, br_path, &mount_canon, in_place)
-            .map_err(|e| format!("--ledger-backing-root setup failed: {e}"))?;
+        let br = LedgerBackingRoot::setup(
+            source_roots.physical_source_root(),
+            br_path,
+            &mount_canon,
+            in_place,
+        )
+        .map_err(|e| format!("--ledger-backing-root setup failed: {e}"))?;
         info!(
             backing_root = %br.path().display(),
             in_place,
-            "ledger backing root enabled — daemon-facing operations will use this path"
+            "ledger backing root enabled for live-source operations"
         );
         Some(br)
     } else {
@@ -1207,9 +1499,15 @@ async fn cmd_mount(
     // In-place mount with daemon-facing operations requires a backing root.
     // Without it, daemon_root would fall back to source which becomes the
     // FUSE over-mount path — the daemon cannot scan through FUSE.
+    //
+    // The control plane (control socket / resolver) is a daemon-facing
+    // operation too: `skill.resolveLiveSource` must open the physical live
+    // source, not the FUSE current/fallback/hidden view. `control_plane_enabled`
+    // was computed above from the merged CLI+config values.
     let has_daemon_ops = notify_socket.is_some()
         || activation_events_log.is_some()
-        || reload_mode == ReloadMode::Poll;
+        || reload_mode == ReloadMode::Poll
+        || control_plane_enabled;
     if in_place
         && security
         && activation_mode == ActivationMode::File
@@ -1217,24 +1515,27 @@ async fn cmd_mount(
         && backing_root.is_none()
     {
         return Err(
-            "in-place mount with activation/notify requires --ledger-backing-root \
-             (the FUSE over-mount makes the source path inaccessible to the daemon)"
+            "in-place mount with activation/notify/control-socket requires \
+             --ledger-backing-root (the FUSE over-mount makes the source path \
+             inaccessible to the daemon and the resolver)"
                 .into(),
         );
     }
 
-    // daemon_root: the path used for all daemon-facing operations.
-    // When a backing root is set, use it; otherwise fall back to the source.
-    let daemon_root: PathBuf = backing_root
-        .as_ref()
-        .map(|br| br.path().to_path_buf())
-        .unwrap_or_else(|| source.clone());
+    // Select the path contracts once for all later production wiring. Socket
+    // notify v2 keeps canonical source identity, while daemon live-source
+    // operations and N3 protocol events use the backing root when configured.
+    let runtime_roots = MountRuntimeRoots::from_source(
+        &source_roots,
+        backing_root.as_ref().map(LedgerBackingRoot::path),
+    );
+    let daemon_root = runtime_roots.daemon_root().to_path_buf();
 
     // Load skills into store
     info!("loading skills from source directory");
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let errors = store.load_from_directory(&source, &config);
+    let errors = store.load_from_directory(runtime_roots.physical_source_root(), &config);
 
     if !errors.is_empty() {
         warn!(count = errors.len(), "some skills failed to load");
@@ -1246,7 +1547,7 @@ async fn cmd_mount(
     info!(count = store.len(), "skills loaded");
 
     // Auto-assign any skills that are not yet in any view to the default view.
-    if let Some(mut views) = ViewsConfig::load(&source) {
+    if let Some(mut views) = ViewsConfig::load(runtime_roots.physical_source_root()) {
         let assigned = views.all_assigned_skills();
         let new_skills: Vec<String> = store
             .list()
@@ -1259,7 +1560,9 @@ async fn cmd_mount(
                 count = new_skills.len(),
                 "auto-assigning new skills to default view"
             );
-            if let Err(e) = views.assign_to_default(&source, &new_skills) {
+            if let Err(e) =
+                views.assign_to_default(runtime_roots.physical_source_root(), &new_skills)
+            {
                 warn!(error = %e, "failed to save updated views config");
             }
         }
@@ -1297,7 +1600,7 @@ async fn cmd_mount(
         // `<skill_dir>/.skill-meta/activation.json` for every loaded
         // skill at startup and populates the resolver. Invalid or
         // missing activation files map to hidden (fail-safe).
-        let resolver = ActiveSkillResolver::new(source.clone());
+        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root().to_path_buf());
         let skill_names: Vec<String> = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
             skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root)
         } else {
@@ -1342,7 +1645,7 @@ async fn cmd_mount(
             .expect("decision_command presence checked above")
             .clone();
         let adapter: Arc<dyn LedgerAdapter> = Arc::new(CliLedgerAdapter::new(cmd.clone()));
-        let resolver = ActiveSkillResolver::new(source.clone());
+        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root().to_path_buf());
         let skill_names: Vec<String> = shared_store
             .read()
             .list()
@@ -1356,7 +1659,7 @@ async fn cmd_mount(
             "security: resolving active skill mapping via scan -> resolve"
         );
         for name in &skill_names {
-            let skill_dir = source.join(name);
+            let skill_dir = runtime_roots.physical_source_root().join(name);
             if let Err(e) = adapter.scan(&skill_dir) {
                 warn!(
                     skill = %name,
@@ -1506,25 +1809,13 @@ async fn cmd_mount(
                 socket_path.clone(),
                 std::time::Duration::from_millis(notify_timeout_ms),
             ));
-            let source_for_notify = daemon_root.clone();
-            let ctrl = if let Some(ref reload) = reload_controller {
-                NotifyController::new_with_reload(
-                    client,
-                    source_for_notify,
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    notify_timeout_ms,
-                    protocol_event_writer.clone(),
-                    reload.clone(),
-                )
-            } else {
-                NotifyController::new_with_protocol_writer(
-                    client,
-                    source_for_notify,
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    notify_timeout_ms,
-                    protocol_event_writer.clone(),
-                )
-            };
+            let ctrl = build_notify_controller(
+                client,
+                &runtime_roots,
+                notify_timeout_ms,
+                protocol_event_writer.clone(),
+                reload_controller.clone(),
+            );
             info!(
                 socket = %socket_path.display(),
                 timeout_ms = notify_timeout_ms,
@@ -1534,24 +1825,13 @@ async fn cmd_mount(
             Some(ctrl)
         } else if activation_events_log.is_some() {
             let client = Arc::new(skillfs_fuse::security::NoopNotifyClient);
-            let ctrl = if let Some(ref reload) = reload_controller {
-                NotifyController::new_with_reload(
-                    client,
-                    daemon_root.clone(),
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    DEFAULT_NOTIFY_TIMEOUT_MS,
-                    protocol_event_writer.clone(),
-                    reload.clone(),
-                )
-            } else {
-                NotifyController::new_with_protocol_writer(
-                    client,
-                    daemon_root.clone(),
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    DEFAULT_NOTIFY_TIMEOUT_MS,
-                    protocol_event_writer.clone(),
-                )
-            };
+            let ctrl = build_notify_controller(
+                client,
+                &runtime_roots,
+                DEFAULT_NOTIFY_TIMEOUT_MS,
+                protocol_event_writer.clone(),
+                reload_controller.clone(),
+            );
             info!("notify: protocol event log only (no socket)");
             Some(ctrl)
         } else {
@@ -1638,69 +1918,53 @@ async fn cmd_mount(
             _ => None,
         };
 
-    // ── Trusted peer control socket ────────────────────────────────
+    // ── Trusted peer control socket: resolve the effective endpoint ──
     //
-    // Merge CLI flags with config file. CLI overrides config.
-    let control_socket = control_socket.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_path().map(PathBuf::from))
-    });
-    let trusted_peer_exe = trusted_peer_exe.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_trusted_peer_exe().map(PathBuf::from))
-    });
-    let trusted_peer_uid = trusted_peer_uid.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_trusted_peer_uid())
-    });
-    let trusted_peer_gid = trusted_peer_gid.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_trusted_peer_gid())
-    });
-
-    // Re-check mutual requirement after config merge (the early gate
-    // only covers CLI args; config-file values are merged above).
-    match (&control_socket, &trusted_peer_exe) {
-        (Some(p), None) => {
-            return Err(format!(
-                "--control-socket {} requires --trusted-peer-exe",
-                p.display()
-            )
-            .into());
+    // CLI/config values were merged and validated earlier (mutual
+    // requirement, semantic gates, backing-root gate). Here we only
+    // classify the endpoint by priority:
+    //   1. --control-socket / [control_socket].path (merged earlier)
+    //   2. the default per-user endpoint, when a trusted peer is set but
+    //      no explicit path is given.
+    let effective_socket_path: Option<PathBuf> = {
+        use skillfs_fuse::security::control_socket::{
+            EndpointResolution, classify_control_socket_endpoint,
+            resolve_default_control_socket_endpoint,
+        };
+        match classify_control_socket_endpoint(
+            control_socket.as_deref(),
+            trusted_peer_exe.is_some(),
+        ) {
+            EndpointResolution::Explicit(path) => Some(path),
+            EndpointResolution::UseDefault => {
+                // Trusted peer, no explicit path: bind the default per-user
+                // endpoint. Never falls back to /tmp or /var/tmp.
+                Some(resolve_default_control_socket_endpoint().map_err(|e| e.to_string())?)
+            }
+            // The mutual-requirement gate above already rejected an explicit
+            // path without a trusted peer.
+            EndpointResolution::MissingTrustedPeer(p) => {
+                return Err(format!(
+                    "--control-socket {} requires --trusted-peer-exe",
+                    p.display()
+                )
+                .into());
+            }
+            EndpointResolution::Disabled => None,
         }
-        (None, Some(p)) => {
-            return Err(format!(
-                "--trusted-peer-exe {} requires --control-socket",
-                p.display()
-            )
-            .into());
-        }
-        _ => {}
-    }
+    };
 
-    // Hermes + control-socket gate (post config merge).
+    // Build ControlSocketConfig when the control plane is enabled.
     //
-    // Control socket skill-name validation does not accept nested ids.
-    // This gate runs after both CLI and config-file values are merged.
-    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) && control_socket.is_some() {
-        return Err("--skill-layout hermes is incompatible with \
-                 --control-socket (control socket skill-name validation \
-                 does not accept nested ids)"
-            .into());
-    }
-
-    // Build ControlSocketConfig when both are set.
+    // Hermes layout is compatible: the read-only resolver derives full
+    // nested skill ids from the canonical path. Nested activation *writes*
+    // still return an invalid-skill-name error inside the write methods —
+    // enabling the resolver does not widen the write protocol.
     let control_socket_config: Option<ControlSocketConfig> =
-        match (&control_socket, &trusted_peer_exe) {
+        match (&effective_socket_path, &trusted_peer_exe) {
             (Some(socket_path), Some(exe_path)) => {
                 #[cfg(not(target_os = "linux"))]
-                return Err(
-                    "--control-socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into(),
-                );
+                return Err("control socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into());
 
                 #[cfg(target_os = "linux")]
                 {
@@ -1854,11 +2118,12 @@ async fn cmd_mount(
     // operator already asked for. We log a warning and continue with the
     // sink-only audit pipeline that S2.1 delivered.
     let drift_handle = if let Some(ref sink) = audit_sink {
-        let observer = Arc::new(SourceDriftObserver::new(source_canon.clone(), sink.clone()));
-        match spawn_drift_watcher(source_canon.clone(), observer, DRIFT_DEBOUNCE_MS).await {
+        let drift_source = runtime_roots.daemon_root().to_path_buf();
+        let observer = Arc::new(SourceDriftObserver::new(drift_source.clone(), sink.clone()));
+        match spawn_drift_watcher(drift_source.clone(), observer, DRIFT_DEBOUNCE_MS).await {
             Ok(handle) => {
                 info!(
-                    source = %source_canon.display(),
+                    source = %drift_source.display(),
                     debounce_ms = DRIFT_DEBOUNCE_MS,
                     "source drift observation enabled"
                 );
@@ -2021,7 +2286,13 @@ async fn cmd_mount(
     // Start control socket server before the FUSE mount.
     let control_socket_handle = if let Some(cs_config) = control_socket_config {
         let ctx = ControlSocketContext {
+            // Canonical root: the user-visible Skill root the ledger
+            // addresses. Live root (source_root): the physical backing
+            // tree that stays accessible under the FUSE over-mount.
+            canonical_root: runtime_roots.notify_canonical_root().to_path_buf(),
             source_root: daemon_root.clone(),
+            // Layout drives the resolver's Flat / Hermes Skill boundary.
+            layout: skill_layout.unwrap_or_default(),
             resolver: active_resolver.clone(),
             protocol_event_writer: Some(protocol_event_writer.clone()),
         };
@@ -2056,7 +2327,7 @@ async fn cmd_mount(
         // Load ViewsConfig once; derive all metrics from a single canonical set.
         let store_guard = shared_store.read();
         let total_skills = store_guard.len() as u64;
-        let views_config = ViewsConfig::load(&source);
+        let views_config = ViewsConfig::load(runtime_roots.physical_source_root());
 
         // Build the canonical "real existing default-view skills" set.
         // Deduplicates and filters out stale/typo names not in the store.
@@ -2172,7 +2443,7 @@ async fn cmd_mount(
     let mount_task = tokio::task::spawn_blocking(move || {
         mount_configured(
             &mountpoint,
-            &source,
+            runtime_roots.physical_source_root(),
             shared_store,
             options,
             in_place,
@@ -2190,6 +2461,8 @@ async fn cmd_mount(
                 post_publish_controller,
                 runtime_metrics: Some(mount_runtime_metrics),
                 skill_layout,
+                os_adapter: os_adapter_stage,
+                directive_enabled,
             },
         )
     });
@@ -2239,20 +2512,32 @@ async fn cmd_mount(
             return;
         };
         let writer = SessionStatsWriter::default_path();
-        if let Err(e) = writer.write_summary(&summary) {
-            warn!(
-                error = %e,
-                path = %writer.path().display(),
-                "session stats: failed to flush summary (non-fatal)"
-            );
-        } else {
-            info!(
-                path = %writer.path().display(),
-                session_id = %session_id,
-                mount_duration_ms = summary.mount_duration_ms,
-                skill_hit_times = summary.skill_hit_times,
-                "session stats: summary flushed to session metrics log"
-            );
+        match writer.write_summary_with_outcome(&summary) {
+            Ok(SummaryWriteOutcome::Written) => {
+                info!(
+                    path = %writer.path().display(),
+                    session_id = %session_id,
+                    mount_duration_ms = summary.mount_duration_ms,
+                    skill_hit_times = summary.skill_hit_times,
+                    "session stats: summary flushed to session metrics log"
+                );
+            }
+            Ok(SummaryWriteOutcome::SkippedDisabled) => {
+                // Telemetry disabled by sentinel: nothing was written, so do
+                // not claim a flush. Normal state, not an error.
+                debug!(
+                    path = %writer.path().display(),
+                    session_id = %session_id,
+                    "session stats: telemetry disabled, summary not written"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = %writer.path().display(),
+                    "session stats: failed to flush summary (non-fatal)"
+                );
+            }
         }
     }
 
@@ -2718,4 +3003,244 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use parking_lot::Mutex;
+    use skillfs_fuse::security::{
+        ActiveSkillResolver, InMemoryProtocolEventWriter, MutationKind, NOTIFY_METHOD,
+        NotifyChangeEvent, NotifyClient, NotifyError,
+    };
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct CapturedNotify {
+        schema_version: u64,
+        method: &'static str,
+        canonical_skill_dir: String,
+        skill_id: String,
+        event_kind: String,
+        paths: Vec<String>,
+    }
+
+    struct ActivationWritingNotifyClient {
+        activation_path: PathBuf,
+        events: Mutex<Vec<CapturedNotify>>,
+    }
+
+    impl ActivationWritingNotifyClient {
+        fn new(activation_path: PathBuf) -> Self {
+            Self {
+                activation_path,
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<CapturedNotify> {
+            self.events.lock().clone()
+        }
+    }
+
+    impl NotifyClient for ActivationWritingNotifyClient {
+        fn send(&self, event: &NotifyChangeEvent) -> Result<(), NotifyError> {
+            self.events.lock().push(CapturedNotify {
+                schema_version: event.params.schema_version,
+                method: event.method,
+                canonical_skill_dir: event.params.canonical_skill_dir.clone(),
+                skill_id: event.params.skill_id.clone(),
+                event_kind: event.params.event_kind.clone(),
+                paths: event.params.paths.clone(),
+            });
+            let before = std::fs::metadata(&self.activation_path)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
+            for _ in 0..100 {
+                std::thread::sleep(Duration::from_millis(15));
+                std::fs::write(
+                    &self.activation_path,
+                    r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+                )
+                .expect("write activation during notify");
+                let after = std::fs::metadata(&self.activation_path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok());
+                if before.map_or(after.is_some(), |before| {
+                    after.is_some_and(|after| after > before)
+                }) {
+                    return Ok(());
+                }
+            }
+            panic!("activation mtime did not advance");
+        }
+    }
+
+    fn seed_skill(root: &Path, skill_id: &str) -> PathBuf {
+        let skill_dir = root.join(skill_id);
+        let snapshot = skill_dir.join(".skill-meta/versions/v000001.snapshot");
+        std::fs::create_dir_all(&snapshot).expect("create snapshot");
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            format!("---\nname: {skill_id}\ndescription: fixture\n---\n"),
+        )
+        .expect("write snapshot skill");
+        skill_dir.join(".skill-meta/activation.json")
+    }
+
+    #[test]
+    fn mount_runtime_roots_preserve_notify_identity_and_select_live_root() {
+        let source_roots = SourceRoots {
+            canonical_identity_root: PathBuf::from("/srv/skills"),
+            physical_source_root: PathBuf::from("/srv/skills"),
+        };
+        let backing_root = Path::new("/run/skillfs-ledger/skills");
+
+        let direct = MountRuntimeRoots::from_source(&source_roots, None);
+        assert_eq!(
+            direct.notify_canonical_root(),
+            source_roots.canonical_identity_root()
+        );
+        assert_eq!(direct.daemon_root(), source_roots.physical_source_root());
+
+        let backed = MountRuntimeRoots::from_source(&source_roots, Some(backing_root));
+        assert_eq!(
+            backed.notify_canonical_root(),
+            source_roots.canonical_identity_root()
+        );
+        assert_eq!(backed.daemon_root(), backing_root);
+        assert_ne!(backed.notify_canonical_root(), backed.daemon_root());
+    }
+
+    #[test]
+    fn source_roots_preserve_symlink_identity_and_resolve_physical_source() {
+        let physical_root = tempfile::tempdir().unwrap();
+        let identity_parent = tempfile::tempdir().unwrap();
+        let identity_root = identity_parent.path().join("skills-link");
+        std::os::unix::fs::symlink(physical_root.path(), &identity_root).unwrap();
+
+        let source_roots = SourceRoots::resolve(&identity_root).unwrap();
+        assert_eq!(source_roots.canonical_identity_root(), identity_root);
+        assert_eq!(
+            source_roots.physical_source_root(),
+            physical_root.path().canonicalize().unwrap()
+        );
+
+        let runtime_roots = MountRuntimeRoots::from_source(&source_roots, None);
+        assert_eq!(runtime_roots.notify_canonical_root(), identity_root);
+        assert_eq!(
+            runtime_roots.daemon_root(),
+            physical_root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn notify_controller_wiring_splits_canonical_and_event_roots() {
+        let physical_source_root = tempfile::tempdir().unwrap();
+        let identity_parent = tempfile::tempdir().unwrap();
+        let canonical_identity_root = identity_parent.path().join("skills-link");
+        std::os::unix::fs::symlink(physical_source_root.path(), &canonical_identity_root).unwrap();
+        let daemon_root = tempfile::tempdir().unwrap();
+        let skill_id = "category/alpha";
+        let activation_path = seed_skill(daemon_root.path(), skill_id);
+        seed_skill(physical_source_root.path(), skill_id);
+
+        let client = Arc::new(ActivationWritingNotifyClient::new(activation_path));
+        let writer = Arc::new(InMemoryProtocolEventWriter::new());
+        let resolver = Arc::new(ActiveSkillResolver::new(
+            physical_source_root.path().to_path_buf(),
+        ));
+        let reload_controller = Arc::new(ActivationReloadController::new(
+            daemon_root.path().to_path_buf(),
+            resolver,
+            Duration::from_millis(1),
+            Duration::from_millis(250),
+        ));
+        let source_roots = SourceRoots::resolve(&canonical_identity_root).unwrap();
+        let runtime_roots = MountRuntimeRoots::from_source(&source_roots, Some(daemon_root.path()));
+
+        assert_eq!(
+            runtime_roots.notify_canonical_root(),
+            canonical_identity_root
+        );
+        assert_eq!(
+            runtime_roots.physical_source_root(),
+            physical_source_root.path().canonicalize().unwrap()
+        );
+        assert_eq!(runtime_roots.daemon_root(), daemon_root.path());
+
+        let ctrl = build_notify_controller(
+            client.clone(),
+            &runtime_roots,
+            DEFAULT_NOTIFY_TIMEOUT_MS,
+            writer.clone(),
+            Some(reload_controller),
+        );
+
+        let count = ctrl.emit_startup_reconcile(&[skill_id.to_string()]);
+        assert_eq!(count, 1);
+
+        ctrl.observe(skill_id, Some(Path::new("SKILL.md")), MutationKind::Write);
+        ctrl.flush_for_testing();
+
+        let notify_events = client.events();
+        assert_eq!(notify_events.len(), 2);
+        for event in &notify_events {
+            assert_eq!(event.method, NOTIFY_METHOD);
+            assert_eq!(event.schema_version, 2);
+            assert_eq!(event.skill_id, skill_id);
+            assert!(
+                event
+                    .canonical_skill_dir
+                    .starts_with(canonical_identity_root.to_string_lossy().as_ref())
+            );
+            assert!(
+                !event
+                    .canonical_skill_dir
+                    .starts_with(physical_source_root.path().to_string_lossy().as_ref()),
+                "notify canonicalSkillDir must preserve symlink identity"
+            );
+            assert!(
+                !event
+                    .canonical_skill_dir
+                    .starts_with(daemon_root.path().to_string_lossy().as_ref()),
+                "notify canonicalSkillDir must not expose daemon root"
+            );
+        }
+        assert_eq!(notify_events[0].event_kind, "reconcile");
+        assert!(notify_events[0].paths.is_empty());
+        assert_eq!(notify_events[1].event_kind, "write");
+        assert_eq!(notify_events[1].paths, vec!["SKILL.md"]);
+
+        let protocol_events = writer.events();
+        assert_eq!(protocol_events.len(), 3);
+        assert_eq!(protocol_events[0].schema_version, 1);
+        assert_eq!(protocol_events[0].event_kind, "reconcile");
+        assert_eq!(protocol_events[1].event_kind, "write");
+        assert_eq!(
+            protocol_events[2].reload_outcome.as_deref(),
+            Some("activation_updated")
+        );
+        for event in &protocol_events {
+            assert_eq!(event.skill_name, skill_id);
+            assert!(
+                event
+                    .skill_dir
+                    .starts_with(daemon_root.path().to_string_lossy().as_ref()),
+                "protocol event skillDir must use daemon root"
+            );
+            assert!(
+                !event
+                    .skill_dir
+                    .starts_with(canonical_identity_root.to_string_lossy().as_ref()),
+                "protocol event skillDir must not use canonical root"
+            );
+        }
+
+        ctrl.shutdown();
+    }
 }

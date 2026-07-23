@@ -159,6 +159,6 @@ Hook 脚本通过 stdin 接收 JSON 输入，通过 stdout 返回 JSON 输出。
 
 ## 相关文档
 
-- [Hook 开发指南](../developers/hooks/index.md)
-- [Hook API 参考](../developers/hooks/reference.md)
-- [编写自定义 Hook](../developers/hooks/writing-hooks.md)
+- [Hook 开发指南](../../../../developer-guide/zh/copilot-shell/hooks/index.md)
+- [Hook API 参考](../../../../developer-guide/zh/copilot-shell/hooks/reference.md)
+- [编写自定义 Hook](../../../../developer-guide/zh/copilot-shell/hooks/writing-hooks.md)

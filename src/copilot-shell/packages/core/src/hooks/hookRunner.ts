@@ -29,6 +29,18 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 const DEFAULT_HOOK_TIMEOUT = 60000;
 
 /**
+ * Grace period after SIGTERM before escalating to SIGKILL
+ */
+const SIGTERM_GRACE_PERIOD_MS = 5000;
+
+/**
+ * Bounded settlement window after SIGKILL. Descendants that inherit the
+ * hook's stdio can keep the pipes open and suppress the 'close' event
+ * forever, so the promise must resolve without it after this window.
+ */
+const FORCE_SETTLE_GRACE_PERIOD_MS = 1000;
+
+/**
  * Maximum length for stdout/stderr output (1MB)
  * Prevents memory issues from unbounded output
  */
@@ -46,11 +58,15 @@ const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 export class HookRunner {
   /**
    * Execute a single hook
+   *
+   * An aborted `signal` terminates the hook's entire process tree and
+   * settles the result within a bounded grace period.
    */
   async executeHook(
     hookConfig: HookConfig,
     eventName: HookEventName,
     input: HookInput,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
 
@@ -60,6 +76,7 @@ export class HookRunner {
         eventName,
         input,
         startTime,
+        signal,
       );
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -86,10 +103,11 @@ export class HookRunner {
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult[]> {
     const promises = hookConfigs.map(async (config, index) => {
       onHookStart?.(config, index);
-      const result = await this.executeHook(config, eventName, input);
+      const result = await this.executeHook(config, eventName, input, signal);
       onHookEnd?.(config, result);
       return result;
     });
@@ -106,6 +124,7 @@ export class HookRunner {
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult[]> {
     const results: HookExecutionResult[] = [];
     let currentInput = input;
@@ -113,7 +132,12 @@ export class HookRunner {
     for (let i = 0; i < hookConfigs.length; i++) {
       const config = hookConfigs[i];
       onHookStart?.(config, i);
-      const result = await this.executeHook(config, eventName, currentInput);
+      const result = await this.executeHook(
+        config,
+        eventName,
+        currentInput,
+        signal,
+      );
       onHookEnd?.(config, result);
       results.push(result);
 
@@ -190,8 +214,10 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     startTime: number,
+    signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const timeout = hookConfig.timeout ?? DEFAULT_HOOK_TIMEOUT;
+    const hookId = hookConfig.name || hookConfig.command || 'unknown';
 
     return new Promise((resolve) => {
       if (!hookConfig.command) {
@@ -212,6 +238,8 @@ export class HookRunner {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let cancelled = false;
+      let settled = false;
 
       const shellConfig = getShellConfiguration();
       const command = this.expandCommand(
@@ -229,6 +257,24 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
+      // If the caller already cancelled, do not spawn at all
+      if (signal?.aborted) {
+        resolve({
+          hookConfig,
+          eventName,
+          success: false,
+          error: new Error('Hook cancelled before start'),
+          duration: Date.now() - startTime,
+        });
+        return;
+      }
+
+      // POSIX: run the hook in its own process group so that timeout and
+      // cancellation can terminate the entire process tree. Otherwise
+      // descendants survive, get reparented to PID 1, and keep the
+      // inherited stdio pipes open (see issue #1582).
+      const useProcessGroup = process.platform !== 'win32';
+
       const child = spawn(
         shellConfig.executable,
         [...shellConfig.argsPrefix, command],
@@ -237,21 +283,124 @@ export class HookRunner {
           cwd: input.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
           shell: false,
+          detached: useProcessGroup,
         },
       );
+
+      // child.killed only records that a signal was sent; exitCode and
+      // signalCode reflect whether the process actually terminated.
+      const hasExited = (): boolean =>
+        child.exitCode !== null || child.signalCode !== null;
+
+      // Signal the whole process group when available, falling back to the
+      // direct child if the group is already gone.
+      const killProcessTree = (killSignal: NodeJS.Signals): void => {
+        if (child.pid === undefined) {
+          return;
+        }
+        if (useProcessGroup) {
+          try {
+            process.kill(-child.pid, killSignal);
+            return;
+          } catch {
+            // Group no longer exists; fall through to the direct child.
+          }
+        }
+        try {
+          child.kill(killSignal);
+        } catch {
+          // Process already exited.
+        }
+      };
+
+      let sigkillHandle: NodeJS.Timeout | undefined;
+      let settleHandle: NodeJS.Timeout | undefined;
+
+      const onAbort = (): void => {
+        cancelled = true;
+        debugLogger.warn(
+          `Hook '${hookId}' cancelled; terminating process group (pid=${child.pid})`,
+        );
+        terminate();
+      };
+
+      const settle = (result: HookExecutionResult): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        if (sigkillHandle) {
+          clearTimeout(sigkillHandle);
+        }
+        if (settleHandle) {
+          clearTimeout(settleHandle);
+        }
+        signal?.removeEventListener('abort', onAbort);
+        resolve(result);
+      };
+
+      const terminationError = (): Error => {
+        // Include the child's actual exit state so logs can distinguish a
+        // hook that honored SIGTERM from one that had to be SIGKILLed or
+        // never exited at all.
+        const exitState = `exitCode=${child.exitCode}, signalCode=${child.signalCode}`;
+        return cancelled
+          ? new Error(`Hook cancelled (${exitState})`)
+          : new Error(`Hook timed out after ${timeout}ms (${exitState})`);
+      };
+
+      // Escalation path shared by timeout and cancellation: SIGTERM the
+      // tree, SIGKILL survivors after a grace period, then force-settle so
+      // descendants holding the inherited stdio cannot block the promise.
+      const terminate = (): void => {
+        if (settled || sigkillHandle) {
+          return;
+        }
+        killProcessTree('SIGTERM');
+
+        sigkillHandle = setTimeout(() => {
+          if (!hasExited()) {
+            debugLogger.warn(
+              `Hook '${hookId}' did not exit after SIGTERM; sending SIGKILL to process group (pid=${child.pid})`,
+            );
+          }
+          // Always re-signal the group: even if the direct child exited,
+          // descendants may still be running in the same group.
+          killProcessTree('SIGKILL');
+
+          settleHandle = setTimeout(() => {
+            debugLogger.warn(
+              `Hook '${hookId}' stdio still open after SIGKILL (pid=${child.pid}); force-settling without close event`,
+            );
+            // Release our ends of the pipes so no descendant can keep the
+            // event loop or this promise alive.
+            child.stdin?.destroy();
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+            settle({
+              hookConfig,
+              eventName,
+              success: false,
+              error: terminationError(),
+              stdout,
+              stderr,
+              duration: Date.now() - startTime,
+            });
+          }, FORCE_SETTLE_GRACE_PERIOD_MS);
+        }, SIGTERM_GRACE_PERIOD_MS);
+      };
 
       // Set up timeout
       const timeoutHandle = setTimeout(() => {
         timedOut = true;
-        child.kill('SIGTERM');
-
-        // Force kill after 5 seconds
-        setTimeout(() => {
-          if (!child.killed) {
-            child.kill('SIGKILL');
-          }
-        }, 5000);
+        debugLogger.warn(
+          `Hook '${hookId}' timed out after ${timeout}ms; terminating process group (pid=${child.pid})`,
+        );
+        terminate();
       }, timeout);
+
+      signal?.addEventListener('abort', onAbort, { once: true });
 
       // Send input to stdin
       if (child.stdin) {
@@ -303,23 +452,21 @@ export class HookRunner {
 
       // Handle process exit
       child.on('close', (exitCode) => {
-        clearTimeout(timeoutHandle);
         const duration = Date.now() - startTime;
 
         // Forward hook stderr to terminal for visibility
         if (stderr.trim()) {
-          const hookId = hookConfig.name || hookConfig.command || 'unknown';
           debugLogger.info(
             `[Hook Debug] hookRunner: hook '${hookId}' stderr:\n${stderr.trim()}`,
           );
         }
 
-        if (timedOut) {
-          resolve({
+        if (timedOut || cancelled) {
+          settle({
             hookConfig,
             eventName,
             success: false,
-            error: new Error(`Hook timed out after ${timeout}ms`),
+            error: terminationError(),
             stdout,
             stderr,
             duration,
@@ -361,7 +508,7 @@ export class HookRunner {
           }
         }
 
-        resolve({
+        settle({
           hookConfig,
           eventName,
           success: exitCode === EXIT_CODE_SUCCESS,
@@ -375,10 +522,9 @@ export class HookRunner {
 
       // Handle process errors
       child.on('error', (error) => {
-        clearTimeout(timeoutHandle);
         const duration = Date.now() - startTime;
 
-        resolve({
+        settle({
           hookConfig,
           eventName,
           success: false,

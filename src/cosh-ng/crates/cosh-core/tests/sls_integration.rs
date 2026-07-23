@@ -38,12 +38,18 @@ fn user_message_produces_sls_record() {
     {
         let stdin = child.stdin.as_mut().unwrap();
         writeln!(stdin, r#"{{"type":"control_request","request_id":"init-1","request":{{"subtype":"initialize"}}}}"#).unwrap();
-        writeln!(stdin, r#"{{"type":"user","message":{{"role":"user","content":"say hello"}},"session_id":"sls-test-session","parent_tool_use_id":null}}"#).unwrap();
+        writeln!(stdin, r#"{{"type":"user","message":{{"role":"user","content":"say hello"}},"parent_tool_use_id":null}}"#).unwrap();
         writeln!(stdin, r#"{{"type":"control_request","request_id":"shut-1","request":{{"subtype":"shutdown"}}}}"#).unwrap();
         stdin.flush().unwrap();
     }
 
-    let _output = child.wait_with_output().unwrap();
+    let output = child.wait_with_output().unwrap();
+    let initialized_session = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|message| message["type"] == "system" && message["subtype"] == "init")
+        .and_then(|message| message["session_id"].as_str().map(str::to_string))
+        .expect("initialized session id");
 
     let mut content = String::new();
     std::fs::File::open(&sls_file)
@@ -62,7 +68,7 @@ fn user_message_produces_sls_record() {
     // Verify key fields
     assert_eq!(record["component.name"], "cosh");
     assert_eq!(record["component.agent_name"], "cosh-ng");
-    assert_eq!(record["session.id"], "sls-test-session");
+    assert_eq!(record["session.id"], initialized_session);
     assert!(record["component.version"].is_string());
 
     // Verify all numeric fields exist
@@ -97,7 +103,7 @@ fn sls_not_created_when_missing() {
     {
         let stdin = child.stdin.as_mut().unwrap();
         writeln!(stdin, r#"{{"type":"control_request","request_id":"init-1","request":{{"subtype":"initialize"}}}}"#).unwrap();
-        writeln!(stdin, r#"{{"type":"user","message":{{"role":"user","content":"hi"}},"session_id":"s2","parent_tool_use_id":null}}"#).unwrap();
+        writeln!(stdin, r#"{{"type":"user","message":{{"role":"user","content":"hi"}},"parent_tool_use_id":null}}"#).unwrap();
         writeln!(stdin, r#"{{"type":"control_request","request_id":"shut-1","request":{{"subtype":"shutdown"}}}}"#).unwrap();
         stdin.flush().unwrap();
     }

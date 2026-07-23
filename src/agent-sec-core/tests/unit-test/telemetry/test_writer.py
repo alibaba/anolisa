@@ -1,5 +1,7 @@
 """Unit tests for telemetry writer."""
 
+# ruff: noqa: I001
+
 import json
 import logging
 import subprocess
@@ -11,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import agent_sec_cli.telemetry as telemetry
+import pytest
 from agent_sec_cli.security_events.schema import SecurityEvent
 from agent_sec_cli.telemetry import writer as telemetry_writer
 from agent_sec_cli.telemetry.writer import (
@@ -23,6 +26,11 @@ from agent_sec_cli.telemetry.writer import (
 @dataclass
 class _TelemetryCtx:
     agent_name: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def _allow_l1_telemetry(monkeypatch) -> None:
+    monkeypatch.setattr(telemetry_writer, "is_l1_telemetry_allowed", lambda: True)
 
 
 def _event() -> SecurityEvent:
@@ -176,7 +184,6 @@ def test_writer_skips_and_logs_when_target_flock_is_busy(
     assert record.data == {
         "reason": "target_flock_busy",
         "path": str(path),
-        "event_id": "event-1",
         "event_type": "code_scan",
         "category": "code_scan",
         "agent_name": "cosh",
@@ -247,9 +254,11 @@ def test_record_security_event_telemetry_uses_mapping_and_writer(
 
     record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
     assert record["component.name"] == "agent-sec-core"
-    assert record["seccore.event_id"] == "event-1"
+    assert "seccore.event_id" not in record
     assert record["seccore.verdict"] == "deny"
     assert record["component.agent_name"] == ""
+    assert "seccore.request" not in record
+    assert "seccore.summary" not in record
 
 
 def test_record_security_event_telemetry_writes_ctx_agent_name(
@@ -293,6 +302,58 @@ def test_record_security_event_telemetry_skips_mapping_when_target_missing(
 
     mapper.assert_not_called()
     assert not path.exists()
+
+
+def test_record_security_event_telemetry_checks_disabled_before_writer_or_mapping(
+    monkeypatch,
+) -> None:
+    get_writer_mock = MagicMock()
+    mapper = MagicMock(return_value={"component.name": "agent-sec-core"})
+    monkeypatch.setattr(telemetry_writer, "is_l1_telemetry_allowed", lambda: False)
+    monkeypatch.setattr(telemetry_writer, "get_writer", get_writer_mock)
+    monkeypatch.setattr(telemetry_writer, "build_telemetry_security_event", mapper)
+
+    record_security_event_telemetry(_event(), _TelemetryCtx())
+
+    get_writer_mock.assert_not_called()
+    mapper.assert_not_called()
+
+
+def test_record_security_event_telemetry_rechecks_gate_for_every_event(
+    monkeypatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
+    monkeypatch.setattr(telemetry_writer, "_writer", None)
+    gate = MagicMock(side_effect=[False, True])
+    monkeypatch.setattr(telemetry_writer, "is_l1_telemetry_allowed", gate)
+
+    record_security_event_telemetry(_event(), _TelemetryCtx())
+    record_security_event_telemetry(_event(), _TelemetryCtx())
+
+    assert gate.call_count == 2
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_record_security_event_telemetry_writes_common_fields_for_new_action(
+    monkeypatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
+    monkeypatch.setattr(telemetry_writer, "_writer", None)
+    event = _event().model_copy(
+        update={"event_type": "future_action", "category": "future_category"}
+    )
+
+    record_security_event_telemetry(event, _TelemetryCtx())
+
+    record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert record["seccore.event_type"] == "future_action"
+    assert record["seccore.category"] == "future_category"
+    assert "seccore.verdict" not in record
+    assert "seccore.elapsed_ms" not in record
 
 
 def test_record_security_event_telemetry_swallows_mapping_errors(

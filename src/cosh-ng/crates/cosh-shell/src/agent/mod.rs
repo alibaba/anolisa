@@ -9,6 +9,7 @@ pub(crate) mod heartbeat;
 pub(crate) mod intercept;
 mod pending_tools;
 pub(crate) mod poll;
+pub(crate) mod queue;
 pub(super) mod run;
 pub(crate) mod skill_context;
 

@@ -19,6 +19,7 @@ mod approval_receipt;
 mod card;
 mod consultation;
 mod health;
+mod health_labels;
 mod markdown;
 mod notice;
 mod question;

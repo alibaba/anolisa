@@ -44,7 +44,7 @@ install -p -m 0644 agentsight.service %{buildroot}%{_unitdir}/
 install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/agentsight/component.toml
 install -p -m 0644 agentsight.json %{buildroot}%{_sysconfdir}/agentsight/config.json
 install -p -m 0644 README.md %{buildroot}%{_docdir}/agentsight/
-install -p -m 0644 README_CN.md %{buildroot}%{_docdir}/agentsight/
+install -p -m 0644 README_zh.md %{buildroot}%{_docdir}/agentsight/
 install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 
 %post
@@ -64,7 +64,7 @@ install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 %{_unitdir}/agentsight.service
 %{_datadir}/anolisa/components/agentsight/component.toml
 %doc %{_docdir}/agentsight/README.md
-%doc %{_docdir}/agentsight/README_CN.md
+%doc %{_docdir}/agentsight/README_zh.md
 %license %{_docdir}/agentsight/LICENSE
 
 %changelog

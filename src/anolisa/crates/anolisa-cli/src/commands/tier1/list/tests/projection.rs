@@ -1,14 +1,15 @@
-use anolisa_core::state::{InstalledState, ObjectStatus, Ownership};
+use anolisa_core::domain::LifecycleStatus;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 
 use super::support::{
-    FakeRpmQuery, component_object, pkg_info, projection_for, projection_for_index,
-    rpm_component_object, sample_index_with_aliases, state_with_component_object,
+    FakeRpmQuery, adopted, empty_state, managed, owned_component, pkg_info, projection_for,
+    projection_for_index, rpm_component_object, sample_index_with_aliases,
+    state_with_component_object,
 };
 
 #[test]
 fn local_projection_labels_cover_list_states() {
-    let empty = InstalledState::default();
+    let empty = empty_state();
     let absent_query = FakeRpmQuery::default();
     let observed_query = FakeRpmQuery {
         installed: vec![(
@@ -26,8 +27,8 @@ fn local_projection_labels_cover_list_states() {
         "agentsight",
         &state_with_component_object(rpm_component_object(
             "agentsight",
-            ObjectStatus::Adopted,
-            Ownership::RpmObserved,
+            LifecycleStatus::Installed,
+            adopted(),
             "agentsight",
             "1.2.3-1.al8",
         )),
@@ -37,11 +38,7 @@ fn local_projection_labels_cover_list_states() {
 
     let installed = projection_for(
         "tokenless",
-        &state_with_component_object(component_object(
-            "tokenless",
-            ObjectStatus::Installed,
-            Ownership::RawManaged,
-        )),
+        &state_with_component_object(owned_component("tokenless", LifecycleStatus::Installed)),
         &absent_query,
     );
     assert_eq!(installed.local_state_label(), "installed");
@@ -50,8 +47,8 @@ fn local_projection_labels_cover_list_states() {
         "agentsight",
         &state_with_component_object(rpm_component_object(
             "agentsight",
-            ObjectStatus::Installed,
-            Ownership::RpmManaged,
+            LifecycleStatus::Installed,
+            managed(),
             "agentsight",
             "1.2.3-1.al8",
         )),
@@ -70,8 +67,8 @@ fn local_projection_labels_cover_list_states() {
         "agentsight",
         &state_with_component_object(rpm_component_object(
             "agentsight",
-            ObjectStatus::Installed,
-            Ownership::RpmManaged,
+            LifecycleStatus::Installed,
+            managed(),
             "agentsight",
             "1.2.3-1.al8",
         )),
@@ -81,33 +78,21 @@ fn local_projection_labels_cover_list_states() {
 
     let failed = projection_for(
         "tokenless",
-        &state_with_component_object(component_object(
-            "tokenless",
-            ObjectStatus::Failed,
-            Ownership::RawManaged,
-        )),
+        &state_with_component_object(owned_component("tokenless", LifecycleStatus::Failed)),
         &absent_query,
     );
     assert_eq!(failed.local_state_label(), "failed");
 
     let degraded = projection_for(
         "tokenless",
-        &state_with_component_object(component_object(
-            "tokenless",
-            ObjectStatus::Partial,
-            Ownership::RawManaged,
-        )),
+        &state_with_component_object(owned_component("tokenless", LifecycleStatus::Partial)),
         &absent_query,
     );
     assert_eq!(degraded.local_state_label(), "degraded");
 
     let disabled = projection_for(
         "tokenless",
-        &state_with_component_object(component_object(
-            "tokenless",
-            ObjectStatus::Disabled,
-            Ownership::RawManaged,
-        )),
+        &state_with_component_object(owned_component("tokenless", LifecycleStatus::Disabled)),
         &absent_query,
     );
     assert_eq!(disabled.local_state_label(), "disabled");
@@ -127,7 +112,7 @@ fn untracked_observed_rpm_projection_uses_rpm_backend_rpm_ownership_and_install_
         what_provides: Vec::new(),
     };
 
-    let projection = projection_for("agentsight", &InstalledState::default(), &query);
+    let projection = projection_for("agentsight", &empty_state(), &query);
 
     assert_eq!(projection.local_state_label(), "observed");
     assert_eq!(projection.backend.as_deref(), Some("rpm"));
@@ -159,7 +144,7 @@ fn untracked_observed_rpm_projection_fetches_source_repo_when_installed_info_has
         }
     }
 
-    let projection = projection_for("agentsight", &InstalledState::default(), &OriginQuery);
+    let projection = projection_for("agentsight", &empty_state(), &OriginQuery);
 
     assert_eq!(projection.local_state_label(), "observed");
     assert_eq!(projection.rpm_source_repo.as_deref(), Some("alinux3-plus"));
@@ -173,7 +158,7 @@ fn rpm_query_command_missing_keeps_state_index_projection() {
         what_provides: Vec::new(),
     };
 
-    let projection = projection_for("agentsight", &InstalledState::default(), &query);
+    let projection = projection_for("agentsight", &empty_state(), &query);
 
     assert_eq!(projection.local_state_label(), "not_installed");
     assert_eq!(projection.backend, None);
@@ -195,7 +180,7 @@ fn observed_rpm_found_via_alias_when_backend_package_not_installed() {
         what_provides: Vec::new(),
     };
 
-    let projection = projection_for_index(&index, "cosh", &InstalledState::default(), &query);
+    let projection = projection_for_index(&index, "cosh", &empty_state(), &query);
 
     assert_eq!(projection.local_state_label(), "observed");
     assert_eq!(projection.ownership_label(), "rpm");
@@ -220,7 +205,7 @@ fn observed_rpm_found_via_provides_when_no_direct_match() {
         )],
     };
 
-    let projection = projection_for_index(&index, "cosh", &InstalledState::default(), &query);
+    let projection = projection_for_index(&index, "cosh", &empty_state(), &query);
 
     assert_eq!(projection.local_state_label(), "observed");
     assert_eq!(projection.ownership_label(), "rpm");
@@ -250,7 +235,7 @@ fn observed_rpm_provides_with_ambiguous_providers_is_not_observed() {
         )],
     };
 
-    let projection = projection_for_index(&index, "cosh", &InstalledState::default(), &query);
+    let projection = projection_for_index(&index, "cosh", &empty_state(), &query);
 
     assert_eq!(projection.local_state_label(), "not_installed");
     assert_eq!(projection.ownership_label(), "none");

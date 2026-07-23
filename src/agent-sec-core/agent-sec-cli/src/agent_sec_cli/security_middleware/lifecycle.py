@@ -70,6 +70,9 @@ def post_action(
     """
     try:
         details = backend.build_event_details(result, kwargs)
+        if not result.success and result.error_type:
+            details["error_type"] = result.error_type
+            details["exit_code"] = result.exit_code
         event = SecurityEvent(
             event_type=ctx.action,
             category=_category_for(ctx.action),

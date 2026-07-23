@@ -46,6 +46,7 @@ class TestAssetVerifyBackend(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.data["failed"], 1)
         self.assertIn("[ERROR]", result.stdout)
+        self.assertEqual(result.error_type, "")
 
     @patch(_PATCH_TARGET)
     def test_full_scan(self, mock_run):
@@ -67,6 +68,7 @@ class TestAssetVerifyBackend(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertIn("Verification error", result.error)
+        self.assertEqual(result.error_type, "RuntimeError")
 
 
 if __name__ == "__main__":

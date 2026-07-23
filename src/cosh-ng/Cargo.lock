@@ -352,7 +352,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cosh-cli"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "clap",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -383,11 +383,13 @@ dependencies = [
  "notify",
  "regex",
  "reqwest",
+ "rustix 0.38.44",
  "scrypt",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
+ "signal-hook",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -401,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-platform"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bincode",
  "chrono",
@@ -412,15 +414,17 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+ "tracing",
 ]
 
 [[package]]
 name = "cosh-shell"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "nix",
  "qrcode",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "toml",
@@ -432,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-types"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bincode",
  "chrono",

@@ -70,11 +70,12 @@ describe('useShellCommandProcessor', () => {
     mockConfig = {
       getTargetDir: () => '/test/dir',
       getShouldUseNodePtyShell: () => false,
+      getChildProcessEnv: () => ({ COSH_SESSION_ID: 'test-session-id' }),
       getShellExecutionConfig: () => ({
         terminalHeight: 20,
         terminalWidth: 80,
       }),
-    } as Config;
+    } as unknown as Config;
     mockGeminiClient = { addHistory: vi.fn() } as unknown as GeminiClient;
 
     vi.mocked(os.platform).mockReturnValue('linux');
@@ -152,6 +153,7 @@ describe('useShellCommandProcessor', () => {
       expect.any(Object),
       false,
       expect.any(Object),
+      { COSH_SESSION_ID: 'test-session-id' },
     );
     expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise));
   });
@@ -274,6 +276,7 @@ describe('useShellCommandProcessor', () => {
         expect.any(Object),
         false, // enableInteractiveShell
         expect.any(Object),
+        { COSH_SESSION_ID: 'test-session-id' },
       );
 
       // Wait for the async PID update to happen.
@@ -416,6 +419,7 @@ describe('useShellCommandProcessor', () => {
       expect.any(Object),
       false,
       expect.any(Object),
+      { COSH_SESSION_ID: 'test-session-id' },
     );
   });
 

@@ -4,13 +4,16 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::types::AgentEvent;
+use crate::types::{AgentEvent, AgentRequest};
 
 use super::claude::{
     is_terminal_agent_event, line_progress, send_agent_event, terminate_process,
     update_completion_flags,
 };
-use super::cosh_core::commit_pending_session_for_scope;
+use super::cosh_core::{
+    commit_pending_session_for_scope, invalidate_resume_on_session_failure, mark_recovery_failure,
+    terminal_events_for_session_commit, SessionResumeAttempt, SessionRuntimeState,
+};
 use super::{
     agent_event_is_provider_progress, control_protocol, record_cancellation_pending_session,
     run_provider_process_loop, spawn_provider_child, AdapterError, AgentRunHandle,
@@ -19,12 +22,171 @@ use super::{
     ProviderRunOutcome, ProviderStdinMode,
 };
 
+pub(super) fn run_sync_cosh_core_process(
+    request: &AgentRequest,
+    prepared: &PreparedInvocation,
+    session_state: &Arc<Mutex<SessionRuntimeState>>,
+    session_scope: &str,
+    resume_attempt: &SessionResumeAttempt,
+    sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
+) -> Result<(), AdapterError> {
+    let pending_session = Arc::new(Mutex::new(None));
+    let mut observed_resumability = None;
+    let mut recovery_finalized = false;
+    let result = (|| {
+        sink(AgentEvent::StatusChanged {
+            run_id: request.id.clone(),
+            phase: "starting".to_string(),
+            message: "starting cosh-core headless backend".to_string(),
+        })?;
+
+        let mut child = spawn_provider_child(
+            prepared,
+            "cosh-core",
+            ProviderStdinMode::Null,
+            ProviderPromptArgMode::TrailingArgIfNonEmpty,
+        )?;
+        let child_pid = Arc::new(Mutex::new(Some(child.id())));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation_artifacts = ProviderCancellationArtifactStore::default();
+        let mut parser =
+            ClaudeStreamParser::new(request.id.clone(), Some(Arc::clone(&pending_session)));
+        let mut completed = false;
+        let mut failed = false;
+        let mut terminal_events = Vec::new();
+        let (process_tx, process_rx) = mpsc::channel();
+        let outcome = run_provider_process_loop(
+            request.id.clone(),
+            "cosh-core",
+            &mut child,
+            child_pid,
+            cancelled,
+            cancellation_artifacts,
+            &process_tx,
+            |line| {
+                let events = parser.parse_line(&line);
+                observed_resumability = parser.session_resumable();
+                let progressed = events.iter().any(agent_event_is_provider_progress);
+                for event in events {
+                    update_completion_flags(&event, &mut completed, &mut failed);
+                    if is_terminal_agent_event(&event) {
+                        terminal_events.push(event);
+                    } else {
+                        sink(event)?;
+                    }
+                }
+                Ok(line_progress(progressed))
+            },
+            || Ok(Vec::new()),
+        );
+        let (process_events, transport_error) = drain_process_events(&process_rx);
+        let transport_failed = matches!(outcome, ProviderRunOutcome::Failed);
+        let exit_failure = match outcome {
+            ProviderRunOutcome::Cancelled => {
+                let _ = commit_pending_session_for_scope(
+                    false,
+                    true,
+                    session_state,
+                    &pending_session,
+                    session_scope,
+                    observed_resumability,
+                    resume_attempt,
+                );
+                recovery_finalized = true;
+                for event in process_events {
+                    sink(event)?;
+                }
+                if let Some(error) = transport_error {
+                    return Err(error);
+                }
+                return Ok(());
+            }
+            ProviderRunOutcome::Failed => None,
+            ProviderRunOutcome::Exited {
+                status,
+                stderr_tail,
+            } if !status.success() => Some(exit_failure_message(&status, &stderr_tail)),
+            ProviderRunOutcome::Exited { .. } => None,
+        };
+
+        let had_terminal_result = !terminal_events.is_empty();
+        let finish_result = parser.finish(&mut |event| {
+            update_completion_flags(&event, &mut completed, &mut failed);
+            if is_terminal_agent_event(&event) {
+                terminal_events.push(event);
+                Ok(())
+            } else {
+                sink(event)
+            }
+        });
+        suppress_synthetic_completion_after_transport_failure(
+            transport_failed,
+            had_terminal_result,
+            &mut completed,
+            &mut failed,
+            &mut terminal_events,
+        );
+        replace_synthetic_completion_for_nonzero_exit(
+            &request.id,
+            exit_failure,
+            had_terminal_result,
+            &mut completed,
+            &mut failed,
+            &mut terminal_events,
+        );
+        observed_resumability = parser.session_resumable();
+        invalidate_resume_on_session_failure(
+            resume_attempt,
+            parser.session_error_code(),
+            parser.session_error_phase(),
+            &terminal_events,
+            session_state,
+        );
+        let commit_outcome = commit_pending_session_for_scope(
+            completed,
+            failed,
+            session_state,
+            &pending_session,
+            session_scope,
+            observed_resumability,
+            resume_attempt,
+        );
+        recovery_finalized = true;
+        for event in
+            terminal_events_for_session_commit(&request.id, terminal_events, commit_outcome)
+        {
+            sink(event)?;
+        }
+        for event in process_events {
+            sink(event)?;
+        }
+        if let Some(error) = transport_error {
+            return Err(error);
+        }
+        finish_result?;
+        Ok(())
+    })();
+
+    if result.is_err() && !recovery_finalized {
+        let _ = commit_pending_session_for_scope(
+            false,
+            true,
+            session_state,
+            &pending_session,
+            session_scope,
+            observed_resumability,
+            resume_attempt,
+        );
+    }
+    result
+}
+
 pub(super) fn start_control_protocol_cosh_core_process(
     run_id: String,
     prepared: PreparedInvocation,
-    session_state: Arc<Mutex<Option<String>>>,
-    session_cwd: Arc<Mutex<Option<String>>>,
+    session_state: Arc<Mutex<SessionRuntimeState>>,
     session_scope: String,
+    resume_attempt: SessionResumeAttempt,
 ) -> AgentRunHandle {
     let (event_tx, event_rx) = mpsc::channel();
     let (approval_tx, approval_rx) = mpsc::channel::<ApprovalResponse>();
@@ -71,6 +233,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
         ) {
             Ok(child) => child,
             Err(err) => {
+                let _ = mark_recovery_failure(&session_state, &resume_attempt, &err.message);
                 let _ = event_tx.send(Err(err));
                 return;
             }
@@ -174,6 +337,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
         let mut completed = false;
         let mut failed = false;
         let mut terminal_events = Vec::new();
+        let (process_tx, process_rx) = mpsc::channel();
         let outcome = run_provider_process_loop(
             run_id.clone(),
             "cosh-core",
@@ -181,7 +345,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
             Arc::clone(&child_pid),
             Arc::clone(&cancelled),
             cancellation_artifacts_for_thread.clone(),
-            &event_tx,
+            &process_tx,
             |line| {
                 if let Some(capabilities) = control_protocol::parse_initialize_capabilities(&line) {
                     if let Ok(mut current) = control_capabilities_for_loop.lock() {
@@ -307,15 +471,37 @@ pub(super) fn start_control_protocol_cosh_core_process(
                 Ok(line_progress(progressed))
             },
             || {
-                Ok(pending_control_tool_call
+                let events = pending_control_tool_call
                     .borrow_mut()
-                    .flush_stalled(control_protocol::PENDING_CONTROL_TOOL_CALL_GRACE))
+                    .flush_stalled(control_protocol::PENDING_CONTROL_TOOL_CALL_GRACE);
+                for event in events {
+                    send_agent_event(&event_tx, event);
+                }
+                Ok(Vec::new())
             },
         );
 
-        match &outcome {
-            ProviderRunOutcome::Cancelled | ProviderRunOutcome::Failed => {
+        let (process_events, transport_error) = drain_process_events(&process_rx);
+        let transport_failed = matches!(outcome, ProviderRunOutcome::Failed);
+        let exit_failure = match &outcome {
+            ProviderRunOutcome::Cancelled => {
                 writer_done.store(true, Ordering::SeqCst);
+                invalidate_resume_on_session_failure(
+                    &resume_attempt,
+                    parser.session_error_code(),
+                    parser.session_error_phase(),
+                    &terminal_events,
+                    &session_state,
+                );
+                let _ = commit_pending_session_for_scope(
+                    false,
+                    true,
+                    &session_state,
+                    &pending_session_for_thread,
+                    &session_scope_for_thread,
+                    parser.session_resumable(),
+                    &resume_attempt,
+                );
                 record_cancellation_pending_session(
                     &cancellation_artifacts_for_thread,
                     "cosh-core",
@@ -325,22 +511,24 @@ pub(super) fn start_control_protocol_cosh_core_process(
                         .ok()
                         .and_then(|session| session.clone()),
                 );
+                for event in process_events {
+                    send_agent_event(&event_tx, event);
+                }
+                if let Some(error) = transport_error {
+                    let _ = event_tx.send(Err(error));
+                }
                 return;
             }
+            ProviderRunOutcome::Failed => None,
             ProviderRunOutcome::Exited {
                 status,
                 stderr_tail,
-            } => {
-                if !status.success() {
-                    writer_done.store(true, Ordering::SeqCst);
-                    let error = stderr_tail.trim().to_string();
-                    send_agent_event(&event_tx, AgentEvent::AgentFailed { run_id, error });
-                    return;
-                }
-            }
-        }
+            } if !status.success() => Some(exit_failure_message(status, stderr_tail)),
+            ProviderRunOutcome::Exited { .. } => None,
+        };
 
-        let _ = parser.finish(&mut |event| {
+        let had_terminal_result = !terminal_events.is_empty();
+        let finish_result = parser.finish(&mut |event| {
             for event in pending_control_tool_call.borrow_mut().stage_or_emit(event) {
                 update_completion_flags(&event, &mut completed, &mut failed);
                 if is_terminal_agent_event(&event) {
@@ -352,18 +540,47 @@ pub(super) fn start_control_protocol_cosh_core_process(
             }
             Ok(())
         });
-        if matches!(outcome, ProviderRunOutcome::Exited { ref status, .. } if status.success()) {
-            commit_pending_session_for_scope(
-                completed,
-                failed,
-                &session_state,
-                &session_cwd,
-                &pending_session_for_thread,
-                &session_scope_for_thread,
-            );
-        }
+        suppress_synthetic_completion_after_transport_failure(
+            transport_failed,
+            had_terminal_result,
+            &mut completed,
+            &mut failed,
+            &mut terminal_events,
+        );
+        replace_synthetic_completion_for_nonzero_exit(
+            &run_id,
+            exit_failure,
+            had_terminal_result,
+            &mut completed,
+            &mut failed,
+            &mut terminal_events,
+        );
+        invalidate_resume_on_session_failure(
+            &resume_attempt,
+            parser.session_error_code(),
+            parser.session_error_phase(),
+            &terminal_events,
+            &session_state,
+        );
+        let commit_outcome = commit_pending_session_for_scope(
+            completed,
+            failed,
+            &session_state,
+            &pending_session_for_thread,
+            &session_scope_for_thread,
+            parser.session_resumable(),
+            &resume_attempt,
+        );
+        let terminal_events =
+            terminal_events_for_session_commit(&run_id, terminal_events, commit_outcome);
         for event in terminal_events {
             send_agent_event(&event_tx, event);
+        }
+        for event in process_events {
+            send_agent_event(&event_tx, event);
+        }
+        if let Some(error) = transport_error.or_else(|| finish_result.err()) {
+            let _ = event_tx.send(Err(error));
         }
     });
 
@@ -376,6 +593,67 @@ pub(super) fn start_control_protocol_cosh_core_process(
         pending_provider_session: Some(pending_session),
         cancellation_artifacts,
     }
+}
+
+pub(super) fn exit_failure_message(status: &std::process::ExitStatus, stderr_tail: &str) -> String {
+    let stderr = stderr_tail.trim();
+    if stderr.is_empty() {
+        format!("cosh-core exited with status {status}")
+    } else {
+        stderr.to_string()
+    }
+}
+
+pub(super) fn replace_synthetic_completion_for_nonzero_exit(
+    run_id: &str,
+    exit_failure: Option<String>,
+    had_terminal_result: bool,
+    completed: &mut bool,
+    failed: &mut bool,
+    terminal_events: &mut Vec<AgentEvent>,
+) {
+    let Some(error) = exit_failure.filter(|_| !had_terminal_result) else {
+        return;
+    };
+    // Parser finish synthesizes completion for legacy zero-result providers. A nonzero
+    // process exit is authoritative only when no structured terminal result was parsed.
+    terminal_events.clear();
+    *completed = false;
+    *failed = true;
+    terminal_events.push(AgentEvent::AgentFailed {
+        run_id: run_id.to_string(),
+        error,
+    });
+}
+
+pub(super) fn suppress_synthetic_completion_after_transport_failure(
+    transport_failed: bool,
+    had_terminal_result: bool,
+    completed: &mut bool,
+    failed: &mut bool,
+    terminal_events: &mut Vec<AgentEvent>,
+) {
+    if !transport_failed || had_terminal_result {
+        return;
+    }
+    terminal_events.clear();
+    *completed = false;
+    *failed = true;
+}
+
+pub(super) fn drain_process_events(
+    receiver: &mpsc::Receiver<Result<AgentEvent, AdapterError>>,
+) -> (Vec<AgentEvent>, Option<AdapterError>) {
+    let mut events = Vec::new();
+    let mut first_error = None;
+    for event in receiver.try_iter() {
+        match event {
+            Ok(event) => events.push(event),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    (events, first_error)
 }
 
 #[cfg(test)]

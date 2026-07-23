@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[path = "mod.rs"]
 mod implementation;
 
@@ -9,4 +10,9 @@ pub use implementation::{
     COMMAND_OUTPUT_REF_MAX_BYTES, SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
-pub(crate) use implementation::{set_request_context_binding, AgentContextBinding};
+#[allow(unused_imports)]
+pub(crate) use implementation::{
+    set_request_context_binding, AgentContextBinding, BuiltinFactRecord, BuiltinFindingFacts,
+    EvaluatedHookFinding, HighMemoryProcessFacts, HookProvenance, MemoryPressureFacts,
+    MetricsConfidence, ProcessMemoryFact, ShellEnvironmentSnapshot,
+};

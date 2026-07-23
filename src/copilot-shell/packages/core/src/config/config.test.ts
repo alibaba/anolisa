@@ -328,6 +328,46 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('child process environment', () => {
+    it('pins the correlation id across chat session changes', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'chat-session',
+        subprocessSessionId: 'launcher-correlation',
+      });
+
+      expect(
+        config.getChildProcessEnv({
+          CUSTOM_ENV: 'custom-value',
+          COSH_SESSION_ID: 'server-override',
+        }),
+      ).toEqual(
+        expect.objectContaining({
+          CUSTOM_ENV: 'custom-value',
+          COSH_SESSION_ID: 'launcher-correlation',
+        }),
+      );
+
+      config.startNewSession('new-chat-session');
+
+      expect(config.getSessionId()).toBe('new-chat-session');
+      expect(config.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+        'launcher-correlation',
+      );
+    });
+
+    it('defaults the correlation id to the initial chat session id', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'initial-session',
+      });
+
+      expect(config.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+        'initial-session',
+      );
+    });
+  });
+
   describe('model switching with different credentials (OpenAI)', () => {
     it('should refresh auth when switching to model with different envKey', async () => {
       // This test verifies the fix for switching between modelProvider models

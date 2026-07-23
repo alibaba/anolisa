@@ -1,13 +1,16 @@
 //! Shared helpers for tier1 / tier2 command handlers.
 //!
-//! Access to the skeleton-stable command inputs: [`FsLayout`],
-//! [`InstalledState`], [`Catalog`], and repo configuration. Keep this module
-//! thin — handlers compose these calls; we do not introduce a service layer here.
+//! Access to the skeleton-stable command inputs: [`FsLayout`], the v5
+//! [`StateStore`], and repo configuration. Keep this module thin —
+//! handlers compose these calls; we do not introduce a service layer here.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use anolisa_core::ObjectKind;
 use anolisa_core::adapter::manager::{AdapterManager, VisibleRoot};
-use anolisa_core::{Catalog, CatalogLayers, InstalledState, ObjectKind, ObjectStatus};
+use anolisa_core::domain::InstallationScope;
+use anolisa_core::facts::{JournalEvidence, JournalInventory};
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::color::Palette;
@@ -17,9 +20,6 @@ use crate::packaged;
 use crate::repo_config::{RepoConfig, RepoConfigProvisioning};
 use crate::response::CliError;
 
-/// Subdirectory under `datadir` and `etc_dir` where component
-/// manifests live (e.g. `share/anolisa/manifests`, `etc/anolisa/manifests`).
-const MANIFESTS_SUBDIR: &str = "manifests";
 /// State subdirectory where install stores the exact component contract
 /// used for each installed component.
 const INSTALLED_COMPONENT_MANIFESTS_SUBDIR: &str = "component-manifests";
@@ -29,33 +29,7 @@ const INSTALLED_COMPONENT_MANIFEST_FILE: &str = "component.toml";
 /// Build the layout for the active install mode, honoring `--prefix`
 /// (system-mode) and the current process user's home (user-mode).
 pub fn resolve_layout(ctx: &CliContext) -> FsLayout {
-    match ctx.install_mode {
-        InstallMode::System => FsLayout::system(ctx.prefix.clone()),
-        InstallMode::User => {
-            let home = anolisa_env::EnvService::detect().home;
-            FsLayout::user(home)
-        }
-    }
-}
-
-/// Refuse a handler-level system-only path when called with user-mode context.
-///
-/// The dispatcher handles normal CLI entry. This guard protects direct calls
-/// from tests and shared command helpers that bypass the dispatcher.
-pub(crate) fn require_system_mode(
-    ctx: &CliContext,
-    command: &str,
-    reason: &str,
-    sudo_command: &str,
-) -> Result<(), CliError> {
-    if ctx.install_mode == InstallMode::System {
-        return Ok(());
-    }
-
-    Err(CliError::InvalidArgument {
-        command: command.to_string(),
-        reason: format!("{reason}; run `{sudo_command}`"),
-    })
+    ctx.layout().clone()
 }
 
 /// Build a consistent package-transaction permission error.
@@ -63,6 +37,35 @@ pub(crate) fn package_permission_error(command: &str, bin: &str, action: &str) -
     CliError::Runtime {
         command: command.to_string(),
         reason: format!("permission denied running {bin}; re-run the {action} with sudo"),
+    }
+}
+
+/// Renders an explicit-scope remediation command so diagnostics never rely
+/// on the caller's default installation mode.
+pub(crate) fn scoped_component_command(
+    scope: InstallationScope,
+    operation: &str,
+    component: &str,
+) -> String {
+    let mode = match scope {
+        InstallationScope::System => InstallMode::System,
+        InstallationScope::User { .. } => InstallMode::User,
+    };
+    scoped_component_command_for_mode(mode, operation, component)
+}
+
+pub(crate) fn scoped_component_command_for_mode(
+    mode: InstallMode,
+    operation: &str,
+    component: &str,
+) -> String {
+    match mode {
+        InstallMode::System => {
+            format!("sudo anolisa --install-mode system {operation} {component}")
+        }
+        InstallMode::User => {
+            format!("anolisa --install-mode user {operation} {component}")
+        }
     }
 }
 
@@ -90,7 +93,10 @@ fn render_repo_config_provisioning(ctx: &CliContext, provisioning: &RepoConfigPr
         return;
     }
     let color = Palette::new(ctx.no_color);
-    match provisioning {
+    // Routed through `suspend_output` so these persistent lines cannot
+    // interleave with a live activity spinner (issue #1452); a no-op when no
+    // spinner is running, which is the case for most callers.
+    crate::progress::suspend_output(|| match provisioning {
         RepoConfigProvisioning::Existing => {}
         RepoConfigProvisioning::Downloaded { url, dest } => {
             println!(
@@ -115,7 +121,7 @@ fn render_repo_config_provisioning(ctx: &CliContext, provisioning: &RepoConfigPr
                 reason,
             );
         }
-    }
+    });
 }
 
 /// Controls whether a failed persistence of downloaded repo config is fatal.
@@ -162,39 +168,31 @@ pub(crate) fn load_repo_config(
     command: &str,
     persist_policy: RepoPersistPolicy,
 ) -> Result<RepoConfig, CliError> {
-    let repo_load = RepoConfig::load(layout, ctx.dry_run).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: err.to_string(),
-    })?;
+    let repo_load =
+        RepoConfig::load(layout, ctx.dry_run, ctx.packaged_data_probe()).map_err(|err| {
+            CliError::Runtime {
+                command: command.to_string(),
+                reason: err.to_string(),
+            }
+        })?;
     enforce_repo_persist_policy(&repo_load.provisioning, persist_policy, command)?;
     render_repo_config_provisioning(ctx, &repo_load.provisioning);
     Ok(repo_load.config)
 }
 
-/// Load `InstalledState` from the layout's `state_dir/installed.toml`.
-/// A missing file yields `Default` — fresh installs are not an error.
-pub fn load_installed_state(ctx: &CliContext, command: &str) -> Result<InstalledState, CliError> {
+/// Load the v5 [`StateStore`] for this context, migrating a legacy state file
+/// in memory. A missing file is a fresh store.
+pub fn load_state_store(ctx: &CliContext, command: &str) -> Result<StateStore, CliError> {
     let layout = resolve_layout(ctx);
     let path = layout.state_dir.join("installed.toml");
-    InstalledState::load(&path).map_err(|err| CliError::InvalidArgument {
-        command: command.to_string(),
-        reason: format!(
-            "failed to load installed state at {}: {err}",
-            path.display()
-        ),
-    })
-}
-
-/// Refuse lifecycle mutation of a visible component that is not writable by
-/// the current install mode. Missing visible records are left to the caller's
-/// existing "not installed" error path.
-pub(crate) fn reject_visible_non_writable_component(
-    ctx: &CliContext,
-    command: &str,
-    component: &str,
-) -> Result<(), CliError> {
-    let view = StateView::load(ctx, command, StateVisibility::UserPlusSystem)?;
-    reject_visible_non_writable_component_from_view(&view, command, component)
+    StateStore::load_for_layout(&path, anolisa_platform::privilege::effective_uid(), &layout)
+        .map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "failed to load installed state at {}: {err}",
+                path.display()
+            ),
+        })
 }
 
 fn reject_visible_non_writable_component_from_view(
@@ -205,10 +203,149 @@ fn reject_visible_non_writable_component_from_view(
     view.reject_non_writable_component_mutation(command, component)
 }
 
-/// Resolve a user-supplied component name to the stable state key.
+/// Resolve an install target without treating a read-only system record as
+/// the installation being mutated.
 ///
-/// Commands that address existing state (uninstall, forget, update, restart,
-/// doctor, adapter, logs) should call this before `find_object`.
+/// Exact identities across the visible user-plus-system view still precede
+/// repository aliases. The returned state view keeps planning scoped to its
+/// writable root, so a user install can create a user record that shadows an
+/// existing system installation without inheriting or changing it.
+pub(crate) fn resolve_install_target(
+    input: &str,
+    ctx: &CliContext,
+    command: &str,
+) -> Result<(String, StateView, bool), CliError> {
+    resolve_lifecycle_target(input, ctx, command, false)
+}
+
+/// Resolve a lifecycle target and reject a visible installation that the
+/// current invocation cannot mutate.
+///
+/// Missing targets are returned unchanged for the planner's normal
+/// `not-installed` path. Exact component names and package identities are
+/// resolved from visible state before repository aliases are considered.
+pub(crate) fn resolve_mutation_target(
+    input: &str,
+    ctx: &CliContext,
+    command: &str,
+) -> Result<(String, StateView), CliError> {
+    let writable_state = load_state_store(ctx, command)?;
+    let layout = resolve_layout(ctx);
+    let journal_dir = layout.state_dir.join("journal");
+    let inventory = JournalInventory::load(JournalEvidence::new(
+        &journal_dir,
+        &writable_state.operations,
+    ))
+    .map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to inspect pending operation journals: {err}"),
+    })?;
+    let writable_journal_identity = inventory.recoverable_for(input).is_some();
+    let view = StateView::load_with_writable_state(
+        ctx,
+        command,
+        StateVisibility::UserPlusSystem,
+        writable_state,
+    )?;
+
+    if writable_journal_identity {
+        return Ok((input.to_string(), view));
+    }
+    resolve_lifecycle_target_from_view(input, command, true, view, || {
+        component_alias_from_repo_index(input, ctx, command)
+    })
+    .map(|(component, view, _)| (component, view))
+}
+
+/// Resolve an adapter target across visible component and local receipt
+/// identities without requiring the source component's state to be writable.
+pub(crate) fn resolve_adapter_target(
+    input: &str,
+    ctx: &CliContext,
+    command: &str,
+) -> Result<(String, StateView), CliError> {
+    let writable_state = load_state_store(ctx, command)?;
+    let view = StateView::load_with_writable_state(
+        ctx,
+        command,
+        StateVisibility::UserPlusSystem,
+        writable_state,
+    )?;
+    resolve_adapter_target_from_view(input, command, view, || {
+        component_alias_from_repo_index(input, ctx, command)
+    })
+}
+
+fn resolve_adapter_target_from_view(
+    input: &str,
+    command: &str,
+    view: StateView,
+    alias: impl FnOnce() -> String,
+) -> Result<(String, StateView), CliError> {
+    let exact_identity = view.has_exact_component(input)
+        || !view
+            .writable
+            .state
+            .adapter_claims_for_component(input)
+            .is_empty();
+    if !exact_identity {
+        view.reject_incomplete_alias_visibility(command, input)?;
+    }
+    let component = if exact_identity {
+        input.to_string()
+    } else {
+        alias()
+    };
+    Ok((component, view))
+}
+
+fn resolve_lifecycle_target(
+    input: &str,
+    ctx: &CliContext,
+    command: &str,
+    reject_read_only: bool,
+) -> Result<(String, StateView, bool), CliError> {
+    let writable_state = load_state_store(ctx, command)?;
+    let view = StateView::load_with_writable_state(
+        ctx,
+        command,
+        StateVisibility::UserPlusSystem,
+        writable_state,
+    )?;
+    resolve_lifecycle_target_from_view(input, command, reject_read_only, view, || {
+        component_alias_from_repo_index(input, ctx, command)
+    })
+}
+
+fn resolve_lifecycle_target_from_view(
+    input: &str,
+    command: &str,
+    reject_read_only: bool,
+    view: StateView,
+    alias: impl FnOnce() -> String,
+) -> Result<(String, StateView, bool), CliError> {
+    let exact_identity = view.has_exact_component(input);
+    if reject_read_only
+        && let Some(component) = view.resolve_mutation_component_identity(command, input)?
+    {
+        return Ok((component, view, true));
+    }
+    // Install is allowed to create an independent writable-scope identity,
+    // but incomplete visibility cannot prove that an alias is not an exact
+    // name in the missing root. Pin the literal input instead of remapping it.
+    let literal_identity = exact_identity || !view.unavailable_roots.is_empty();
+    let component = if literal_identity {
+        input.to_string()
+    } else {
+        alias()
+    };
+    if reject_read_only {
+        reject_visible_non_writable_component_from_view(&view, command, &component)?;
+    }
+    Ok((component, view, literal_identity))
+}
+
+/// Resolve a user-supplied component name to the stable state key.
 ///
 /// 1. Exact state match wins — a component installed under its literal name
 ///    is never re-mapped.
@@ -217,21 +354,21 @@ fn reject_visible_non_writable_component_from_view(
 ///    no rpmdb/dnf queries are triggered.
 /// 3. Falls back to the literal input when resolution is ambiguous or the
 ///    component index is unavailable.
-pub(crate) fn lookup_component_name(
+pub(crate) fn lookup_component_name_in_store(
     input: &str,
-    installed: &InstalledState,
+    store: &anolisa_core::state_store::StateStore,
     ctx: &CliContext,
     command: &str,
 ) -> String {
-    // 1. Exact state match wins.
-    if installed
-        .find_object(ObjectKind::Component, input)
-        .is_some()
-    {
+    if store.contains_record(ObjectKind::Component, input) {
         return input.to_string();
     }
+    component_alias_from_repo_index(input, ctx, command)
+}
 
-    // 2. Try in-memory alias resolution via the repo-side component index.
+/// Steps 2–3 of component-name resolution: consult the repo-side component
+/// index for package-name aliases, falling back to the literal input.
+fn component_alias_from_repo_index(input: &str, ctx: &CliContext, command: &str) -> String {
     let layout = resolve_layout(ctx);
     let repo_config = load_repo_config(ctx, &layout, command, RepoPersistPolicy::BestEffort).ok();
     let env = anolisa_env::EnvService::detect();
@@ -285,167 +422,110 @@ fn validate_component_path_segment(component: &str, command: &str) -> Result<(),
     Ok(())
 }
 
-/// Load the layered catalog.
-///
-/// Layers (low → high precedence):
-///   1. **bundled** — packaged manifests under `datadir/manifests` (the
-///      install-time location). Falls back to the dev-tree manifests
-///      (`CARGO_MANIFEST_DIR/../../manifests`) when the packaged location is
-///      absent so `cargo run` in the source tree works without an install.
-///   2. **overlay** — `manifests_overlay` (e.g. `/etc/anolisa/manifests` or
-///      `~/.config/anolisa/manifests`) attached as the `system` or `user`
-///      layer per `ctx.install_mode`. Optional: skipped when the directory
-///      does not exist.
-///
-/// The overlay used to be passed as `bundled` with no system/user layers —
-/// that meant any overlay completely replaced the in-tree catalog (and an
-/// empty overlay produced an empty catalog). The proper Catalog contract is
-/// that the bundled layer is always-present and overlays stack on top.
-pub fn load_bundled_catalog(ctx: &CliContext, command: &str) -> Result<Catalog, CliError> {
-    let layout = resolve_layout(ctx);
-    let bundled = discovered_packaged_manifests_root(&layout)
-        .or_else(dev_tree_manifests)
-        .unwrap_or_else(|| layout.datadir.join(MANIFESTS_SUBDIR));
-    load_catalog_from_layers(&layout, ctx.install_mode, bundled, command)
-}
-
-/// Load the layered catalog for a concrete filesystem layout.
-///
-/// Scoped read-only views may inspect records from a physical root that is
-/// not the current write root. Callers pass the root's layout and scope so
-/// bundled and overlay manifests are loaded from the same physical root as
-/// the state record being projected.
-pub fn load_catalog_for_layout(
-    layout: &FsLayout,
-    install_mode: InstallMode,
-    command: &str,
-) -> Result<Catalog, CliError> {
-    let bundled = trusted_manifests_root(layout, install_mode)
-        .or_else(dev_tree_manifests)
-        .unwrap_or_else(|| layout.datadir.join(MANIFESTS_SUBDIR));
-    load_catalog_from_layers(layout, install_mode, bundled, command)
-}
-
-fn load_catalog_from_layers(
-    layout: &FsLayout,
-    install_mode: InstallMode,
-    bundled: PathBuf,
-    command: &str,
-) -> Result<Catalog, CliError> {
-    let overlay = layout.manifests_overlay.clone();
-    let overlay = overlay.is_dir().then_some(overlay);
-    let (system, user) = match install_mode {
-        InstallMode::System => (overlay, None),
-        InstallMode::User => (None, overlay),
-    };
-
-    let layers = CatalogLayers {
-        bundled,
-        system,
-        user,
-    };
-    Catalog::load(layers).map_err(|err| CliError::InvalidArgument {
-        command: command.to_string(),
-        reason: format!("failed to load catalog: {err}"),
-    })
-}
-
-fn trusted_manifests_root(layout: &FsLayout, install_mode: InstallMode) -> Option<PathBuf> {
-    match install_mode {
-        InstallMode::System => trusted_system_manifests_root(layout),
-        InstallMode::User => discovered_packaged_manifests_root(layout),
+/// Wire-friendly status label for a v5
+/// [`Installation`](anolisa_core::domain::Installation), same vocabulary as
+/// [`installation_status_str`] vocabulary: a delegated adopted/observed row
+/// reports its management relation (the legacy state collapsed both into one
+/// `adopted` status), any other row reports its lifecycle health.
+pub(crate) fn installation_status_str(
+    installation: &anolisa_core::domain::Installation,
+) -> &'static str {
+    use anolisa_core::domain::{LifecycleStatus, ManagementRelation, ProviderBinding};
+    if installation.status == LifecycleStatus::Installed
+        && let ProviderBinding::Delegated { relation, .. } = &installation.binding
+    {
+        match relation {
+            ManagementRelation::Adopted { .. } => return "adopted",
+            ManagementRelation::Observed => return "observed",
+            ManagementRelation::Managed { .. } => {}
+        }
     }
-}
-
-fn trusted_system_manifests_root(layout: &FsLayout) -> Option<PathBuf> {
-    let local = layout.datadir.join(MANIFESTS_SUBDIR);
-    if local.is_dir() {
-        return Some(local);
-    }
-    layout
-        .package_datadir()
-        .map(|datadir| datadir.join(MANIFESTS_SUBDIR))
-        .filter(|candidate| candidate.is_dir())
-}
-
-fn discovered_packaged_manifests_root(layout: &FsLayout) -> Option<PathBuf> {
-    // Discover the packaged datadir (`<prefix>/share/anolisa/`) using
-    // the shared probe in [`crate::packaged`] — that helper honors the
-    // `ANOLISA_DATA_DIR` env override and binary-location lookup so a
-    // user-mode CLI still finds the system-installed datadir under
-    // `/usr/local/share/anolisa/` when one is staged by
-    // `install-anolisa.sh`. Falls back to `layout.datadir` for the
-    // pre-P1-A install layout.
-    let datadir = packaged::packaged_datadir_root(layout).unwrap_or_else(|| layout.datadir.clone());
-    let candidate = datadir.join(MANIFESTS_SUBDIR);
-    candidate.is_dir().then_some(candidate)
-}
-
-fn dev_tree_manifests() -> Option<PathBuf> {
-    let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("manifests");
-    candidate.is_dir().then_some(candidate)
-}
-
-/// Wire-friendly label for an [`ObjectStatus`] value. Shared between the
-/// `status` and `list` handlers so both surfaces speak the same vocabulary
-/// (matches launch spec §7.1: `installed | degraded | disabled | failed |
-/// adopted`). The `"not_installed"` label is produced separately by callers
-/// when no `InstalledObject` exists at all.
-pub(crate) fn object_status_str(status: ObjectStatus) -> &'static str {
-    match status {
-        ObjectStatus::Installed => "installed",
-        ObjectStatus::Partial => "degraded",
-        ObjectStatus::Disabled => "disabled",
-        ObjectStatus::Failed => "failed",
-        ObjectStatus::Adopted => "adopted",
+    match installation.status {
+        LifecycleStatus::Installed => "installed",
+        LifecycleStatus::Partial => "degraded",
+        LifecycleStatus::Disabled => "disabled",
+        LifecycleStatus::Failed => "failed",
     }
 }
 
 /// True iff the wire status label denotes a component that is actively
-/// serving (i.e. `installed`, `degraded`, or `adopted`). Used by
+/// serving (i.e. `installed`, `degraded`, `adopted`, or `observed`). Used by
 /// `list --enabled` to exclude `disabled`/`failed`/`not_installed`.
 pub(crate) fn status_is_enabled(status_label: &str) -> bool {
-    matches!(status_label, "installed" | "degraded" | "adopted")
+    matches!(
+        status_label,
+        "installed" | "degraded" | "adopted" | "observed"
+    )
 }
 
 /// Build an [`AdapterManager`] for the active layout, shared between
 /// `adapter` and `status` handlers.
 pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
-    let layout = resolve_layout(ctx);
-    let env = anolisa_env::EnvService::detect();
-    let mut manager = AdapterManager::new(layout.clone(), Some(env.home), env.user);
+    let (mut manager, layout) = new_adapter_manager(ctx);
 
     match StateView::load(ctx, "adapter", StateVisibility::UserPlusSystem) {
-        Ok(view) => {
-            let roots = view
-                .visible_roots
-                .iter()
-                .map(|root| visible_root_for_adapter(&root.layout))
-                .collect();
-            manager.set_visible_roots(roots);
-            for warning in view.warnings {
-                manager.push_visibility_warning(warning);
-            }
-        }
+        Ok(view) => configure_adapter_manager(&mut manager, &view, ctx.packaged_data_probe()),
         Err(_) => {
-            manager.set_visible_roots(vec![visible_root_for_adapter(&layout)]);
+            manager.set_visible_roots(vec![visible_root_for_adapter(
+                &layout,
+                ctx.packaged_data_probe(),
+            )]);
         }
     }
 
     manager
 }
 
-fn visible_root_for_adapter(layout: &FsLayout) -> VisibleRoot {
-    VisibleRoot {
-        state_dir: layout.state_dir.clone(),
-        contract_datadir_roots: adapter_contract_datadir_roots(layout),
+/// Build an adapter manager from the same state visibility snapshot used to
+/// resolve a component-specific adapter target.
+pub(crate) fn build_adapter_manager_from_view(
+    ctx: &CliContext,
+    view: &StateView,
+) -> AdapterManager {
+    let (mut manager, _) = new_adapter_manager(ctx);
+    configure_adapter_manager(&mut manager, view, ctx.packaged_data_probe());
+    manager
+}
+
+fn new_adapter_manager(ctx: &CliContext) -> (AdapterManager, FsLayout) {
+    let layout = resolve_layout(ctx);
+    let env = anolisa_env::EnvService::detect();
+    (
+        AdapterManager::new(layout.clone(), Some(env.home), env.user),
+        layout,
+    )
+}
+
+fn configure_adapter_manager(
+    manager: &mut AdapterManager,
+    view: &StateView,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) {
+    let roots = view
+        .visible_roots
+        .iter()
+        .map(|root| visible_root_for_adapter(&root.layout, packaged_data_probe))
+        .collect();
+    manager.set_visible_roots(roots);
+    for warning in &view.warnings {
+        manager.push_visibility_warning(warning.clone());
     }
 }
 
-fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
+fn visible_root_for_adapter(
+    layout: &FsLayout,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) -> VisibleRoot {
+    VisibleRoot {
+        state_dir: layout.state_dir.clone(),
+        contract_datadir_roots: adapter_contract_datadir_roots(layout, packaged_data_probe),
+    }
+}
+
+fn adapter_contract_datadir_roots(
+    layout: &FsLayout,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) -> Vec<PathBuf> {
     // Two independent datadir-discovery mechanisms are layered here:
     //
     //   packaged_datadir_root()  — runtime probe: env override → exe-sibling
@@ -462,7 +542,7 @@ fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
     // exe-sibling probe handles relocated installs; the FHS constant handles
     // cross-install-method discovery (raw binary + RPM components).
     let mut roots = vec![layout.datadir.clone()];
-    if let Some(packaged) = packaged::packaged_datadir_root(layout)
+    if let Some(packaged) = packaged::packaged_datadir_root(layout, packaged_data_probe)
         && !roots.contains(&packaged)
     {
         roots.push(packaged);
@@ -488,10 +568,11 @@ fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
 /// Returns the number of entries migrated. Errors in individual
 /// components are silently skipped (conservative: the entry stays
 /// `kind = File` and the integrity probe reports `symlink_refused`).
-pub fn migrate_v3_symlinks(state: &mut InstalledState, layout: &FsLayout) -> usize {
+pub fn migrate_v3_symlinks(store: &mut StateStore, layout: &FsLayout) -> usize {
     use std::collections::HashMap;
     use std::fs;
 
+    use anolisa_core::domain::ProviderBinding;
     use anolisa_core::expand_layout_placeholders;
     use anolisa_core::manifest::{ComponentManifest, FileKind};
     use anolisa_core::path_safety::validate_owned_path;
@@ -531,28 +612,35 @@ pub fn migrate_v3_symlinks(state: &mut InstalledState, layout: &FsLayout) -> usi
         Ok(hex_lower(&hasher.finalize()))
     }
 
-    if state.schema_version >= 4 {
+    // Pre-v4 symlink entries can only exist on records that came through the
+    // legacy-file migration; a native v5 file was written by code that already
+    // records symlinks as symlinks.
+    if !store.migrated_from_legacy() {
         return 0;
     }
 
     let mut migrated = 0usize;
 
-    for obj in &mut state.objects {
-        if obj.kind != ObjectKind::Component {
+    for installation in &mut store.installations {
+        if installation.kind != ObjectKind::Component {
             continue;
         }
-        let has_legacy = obj.files.iter().any(|f| f.kind == OwnedFileKind::File);
+        let name = installation.name.clone();
+        let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+            continue;
+        };
+        let has_legacy = artifact.files.iter().any(|f| f.kind == OwnedFileKind::File);
         if !has_legacy {
             continue;
         }
 
-        if validate_component_path_segment(&obj.name, "migrate").is_err() {
+        if validate_component_path_segment(&name, "migrate").is_err() {
             continue;
         }
         let manifest_path = layout
             .state_dir
             .join(INSTALLED_COMPONENT_MANIFESTS_SUBDIR)
-            .join(&obj.name)
+            .join(&name)
             .join(INSTALLED_COMPONENT_MANIFEST_FILE);
         let toml_str = match fs::read_to_string(&manifest_path) {
             Ok(s) => s,
@@ -576,18 +664,15 @@ pub fn migrate_v3_symlinks(state: &mut InstalledState, layout: &FsLayout) -> usi
                 Some(t) => t,
                 None => continue,
             };
-            let dest = match expand_layout_placeholders(
-                dest_template,
-                layout,
-                &[("component", &obj.name)],
-            ) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+            let dest =
+                match expand_layout_placeholders(dest_template, layout, &[("component", &name)]) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
             let referent = match expand_layout_placeholders(
                 referent_template,
                 layout,
-                &[("component", &obj.name)],
+                &[("component", &name)],
             ) {
                 Ok(p) => p,
                 Err(_) => continue,
@@ -603,7 +688,7 @@ pub fn migrate_v3_symlinks(state: &mut InstalledState, layout: &FsLayout) -> usi
             continue;
         }
 
-        for file in &mut obj.files {
+        for file in &mut artifact.files {
             if file.kind != OwnedFileKind::File {
                 continue;
             }
@@ -654,9 +739,22 @@ pub fn migrate_v3_symlinks(state: &mut InstalledState, layout: &FsLayout) -> usi
 mod tests {
     use super::*;
 
-    use anolisa_core::state::{InstalledObject, Ownership, SubscriptionScope};
+    use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus, DriverPayload, OpenClawClaim};
+    use anolisa_core::state::{InstalledObject, ObjectStatus, Ownership, SubscriptionScope};
 
-    use crate::commands::state_view::{ScopedStateRoot, StateScope};
+    use crate::commands::state_view::{ScopedStateRoot, StateScope, UnavailableStateRoot};
+
+    #[test]
+    fn remediation_commands_preserve_the_explicit_scope() {
+        assert_eq!(
+            scoped_component_command(InstallationScope::System, "repair", "cosh"),
+            "sudo anolisa --install-mode system repair cosh"
+        );
+        assert_eq!(
+            scoped_component_command(InstallationScope::User { uid: 1000 }, "repair", "cosh"),
+            "anolisa --install-mode user repair cosh"
+        );
+    }
 
     fn test_component(name: &str) -> InstalledObject {
         InstalledObject {
@@ -685,15 +783,36 @@ mod tests {
         }
     }
 
-    fn state_with_objects(objects: Vec<InstalledObject>) -> InstalledState {
-        let mut state = InstalledState::default();
-        for object in objects {
-            state.upsert_object(object);
-        }
-        state
+    fn state_with_objects(objects: Vec<InstalledObject>) -> StateStore {
+        let migration = anolisa_core::state_migration::migrate_state(
+            &objects,
+            anolisa_core::domain::InstallationScope::System,
+        );
+        assert!(
+            migration.quarantined.is_empty(),
+            "fixtures must migrate cleanly"
+        );
+        let mut store = StateStore::empty();
+        store.installations = migration.active;
+        store
     }
 
-    fn scoped_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
+    fn state_with_quarantined_object(mut object: InstalledObject) -> StateStore {
+        object.install_backend = None;
+        object.ownership = None;
+        object.managed = false;
+        let migration = anolisa_core::state_migration::migrate_state(
+            &[object],
+            anolisa_core::domain::InstallationScope::System,
+        );
+        assert!(migration.active.is_empty());
+        assert_eq!(migration.quarantined.len(), 1);
+        let mut store = StateStore::empty();
+        store.quarantined = migration.quarantined;
+        store
+    }
+
+    fn scoped_view(user_state: StateStore, system_state: StateStore) -> StateView {
         let user_root = ScopedStateRoot {
             scope: StateScope::User,
             layout: FsLayout::user_with_overrides(
@@ -718,14 +837,48 @@ mod tests {
         StateView {
             writable: user_root.clone(),
             visible_roots: vec![user_root, system_root],
+            unavailable_roots: Vec::new(),
             warnings: Vec::new(),
+        }
+    }
+
+    fn view_with_unavailable_system(user_state: StateStore) -> StateView {
+        let mut view = scoped_view(user_state, StateStore::empty());
+        let system_root = view.visible_roots.pop().expect("system root");
+        view.unavailable_roots.push(UnavailableStateRoot {
+            scope: StateScope::System,
+            state_path: system_root.state_path,
+            reason: "future state schema".to_string(),
+        });
+        view
+    }
+
+    fn test_adapter_claim(component: &str) -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: 1,
+            component: component.to_string(),
+            framework: "openclaw".to_string(),
+            plugin_id: None,
+            adapter_type: None,
+            enabled_at: "2026-01-01T00:00:00Z".to_string(),
+            resource_root: PathBuf::from("/tmp/adapter-resource"),
+            bundle_digest: None,
+            driver_schema: 1,
+            status: ClaimStatus::Enabled,
+            resources: Vec::new(),
+            driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
+                state_dir_resource: "state".to_string(),
+                plugin_resource: "plugin".to_string(),
+                skill_resources: Vec::new(),
+                config_resources: Vec::new(),
+            }),
         }
     }
 
     #[test]
     fn reject_visible_non_writable_component_blocks_read_only_system_view() {
         let view = scoped_view(
-            InstalledState::default(),
+            StateStore::empty(),
             state_with_objects(vec![test_component("system-tool")]),
         );
 
@@ -752,7 +905,7 @@ mod tests {
 
     #[test]
     fn reject_visible_non_writable_component_keeps_missing_targets_unchanged() {
-        let view = scoped_view(InstalledState::default(), InstalledState::default());
+        let view = scoped_view(StateStore::empty(), StateStore::empty());
 
         reject_visible_non_writable_component_from_view(
             &view,
@@ -760,6 +913,227 @@ mod tests {
             "missing-tool",
         )
         .expect("missing targets should continue into the existing not-installed path");
+    }
+
+    #[test]
+    fn install_keeps_system_exact_identity_but_targets_writable_scope() {
+        let view = scoped_view(
+            state_with_objects(vec![test_component("cosh")]),
+            state_with_objects(vec![test_component("legacy-name")]),
+        );
+
+        let (target, resolved_view, exact_identity) = resolve_lifecycle_target_from_view(
+            "legacy-name",
+            "install legacy-name",
+            false,
+            view,
+            || "cosh".to_string(),
+        )
+        .expect("a system record must not block a user-scope install");
+
+        assert_eq!(target, "legacy-name");
+        assert!(exact_identity);
+        assert!(
+            resolved_view
+                .writable
+                .state
+                .find(ObjectKind::Component, "cosh")
+                .is_some(),
+            "the existing user alias target remains a separate record",
+        );
+        assert!(
+            resolved_view
+                .writable
+                .state
+                .find(ObjectKind::Component, "legacy-name")
+                .is_none(),
+            "install planning must see the exact identity as fresh in user scope",
+        );
+    }
+
+    #[test]
+    fn mutation_rejects_system_exact_before_repo_alias() {
+        let view = scoped_view(
+            state_with_objects(vec![test_component("cosh")]),
+            state_with_quarantined_object(test_component("legacy-name")),
+        );
+        let alias_consulted = std::cell::Cell::new(false);
+
+        let err = resolve_lifecycle_target_from_view(
+            "legacy-name",
+            "forget legacy-name",
+            true,
+            view,
+            || {
+                alias_consulted.set(true);
+                "cosh".to_string()
+            },
+        )
+        .expect_err("the read-only system identity must win over a user alias target");
+
+        assert_eq!(err.code(), "PERMISSION_DENIED");
+        assert!(
+            !alias_consulted.get(),
+            "exact identity must skip alias lookup"
+        );
+        assert!(err.reason().contains("legacy-name"));
+        assert!(err.reason().contains("system-scope"));
+    }
+
+    #[test]
+    fn mutation_rejects_system_package_identity_before_repo_alias() {
+        let mut system_component = test_component("legacy-name");
+        system_component.raw_package = Some("copilot-shell".to_string());
+        let view = scoped_view(
+            state_with_objects(vec![test_component("cosh")]),
+            state_with_objects(vec![system_component]),
+        );
+
+        let result = resolve_lifecycle_target_from_view(
+            "copilot-shell",
+            "forget copilot-shell",
+            true,
+            view,
+            || "cosh".to_string(),
+        );
+
+        let err = result.expect_err("the visible system package identity must win");
+        assert_eq!(err.code(), "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn mutation_resolves_writable_package_identity_before_repo_alias() {
+        let mut package_owner = test_component("user-tool");
+        package_owner.raw_package = Some("legacy-name".to_string());
+        let view = scoped_view(
+            state_with_objects(vec![package_owner, test_component("cosh")]),
+            StateStore::empty(),
+        );
+        let alias_consulted = std::cell::Cell::new(false);
+
+        let (target, _, state_identity) = resolve_lifecycle_target_from_view(
+            "legacy-name",
+            "forget legacy-name",
+            true,
+            view,
+            || {
+                alias_consulted.set(true);
+                "cosh".to_string()
+            },
+        )
+        .expect("the writable package owner must be resolved directly");
+
+        assert_eq!(target, "user-tool");
+        assert!(state_identity);
+        assert!(
+            !alias_consulted.get(),
+            "state identity must skip repo alias"
+        );
+    }
+
+    #[test]
+    fn mutation_rejects_package_identity_claimed_by_multiple_components() {
+        let mut first = test_component("first");
+        first.raw_package = Some("shared-package".to_string());
+        let mut second = test_component("second");
+        second.raw_package = Some("shared-package".to_string());
+        let view = scoped_view(state_with_objects(vec![first, second]), StateStore::empty());
+
+        let err = resolve_lifecycle_target_from_view(
+            "shared-package",
+            "forget shared-package",
+            true,
+            view,
+            || "repo-target".to_string(),
+        )
+        .expect_err("ambiguous state package identity must fail closed");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("first"));
+        assert!(err.reason().contains("second"));
+    }
+
+    #[test]
+    fn mutation_includes_quarantine_in_package_identity_ambiguity() {
+        let mut active = test_component("active");
+        active.raw_package = Some("shared-package".to_string());
+        let mut quarantine = state_with_quarantined_object(test_component("quarantined-system"));
+        quarantine.quarantined[0].record.raw_package = Some("shared-package".to_string());
+        let view = scoped_view(state_with_objects(vec![active]), quarantine);
+
+        let err = resolve_lifecycle_target_from_view(
+            "shared-package",
+            "repair shared-package",
+            true,
+            view,
+            || "repo-target".to_string(),
+        )
+        .expect_err("quarantined package claims must remain authoritative");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("active"));
+        assert!(err.reason().contains("quarantined-system"));
+    }
+
+    #[test]
+    fn adapter_target_keeps_visible_system_exact_before_repo_alias() {
+        let view = scoped_view(
+            state_with_objects(vec![test_component("cosh")]),
+            state_with_objects(vec![test_component("legacy-name")]),
+        );
+        let alias_consulted = std::cell::Cell::new(false);
+
+        let (target, _) = resolve_adapter_target_from_view(
+            "legacy-name",
+            "adapter enable legacy-name",
+            view,
+            || {
+                alias_consulted.set(true);
+                "cosh".to_string()
+            },
+        )
+        .expect("system component must remain a visible adapter source");
+
+        assert_eq!(target, "legacy-name");
+        assert!(!alias_consulted.get());
+    }
+
+    #[test]
+    fn adapter_target_rejects_alias_when_system_visibility_is_incomplete() {
+        let view = view_with_unavailable_system(state_with_objects(vec![test_component("cosh")]));
+
+        let err = resolve_adapter_target_from_view(
+            "legacy-name",
+            "adapter disable legacy-name",
+            view,
+            || "cosh".to_string(),
+        )
+        .expect_err("incomplete visibility must block adapter alias inference");
+
+        assert!(err.reason().contains("visible state is incomplete"));
+        assert!(err.reason().contains("legacy-name"));
+    }
+
+    #[test]
+    fn adapter_target_keeps_exact_receipt_when_system_visibility_is_incomplete() {
+        let mut user_state = state_with_objects(vec![test_component("cosh")]);
+        user_state.upsert_adapter_claim(test_adapter_claim("legacy-name"));
+        let view = view_with_unavailable_system(user_state);
+        let alias_consulted = std::cell::Cell::new(false);
+
+        let (target, _) = resolve_adapter_target_from_view(
+            "legacy-name",
+            "adapter disable legacy-name",
+            view,
+            || {
+                alias_consulted.set(true);
+                "cosh".to_string()
+            },
+        )
+        .expect("an exact local receipt remains safely addressable");
+
+        assert_eq!(target, "legacy-name");
+        assert!(!alias_consulted.get());
     }
 
     /// Verify that `package_datadir()` is wired into the system-mode
@@ -773,7 +1147,8 @@ mod tests {
     fn system_mode_wiring_discovers_package_datadir_contract() {
         use anolisa_core::adapter::manager::AdapterManager;
         use anolisa_core::state::{
-            InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership, SubscriptionScope,
+            InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind,
+            ObjectStatus, Ownership, SubscriptionScope,
         };
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -792,7 +1167,11 @@ mod tests {
 
         // Seed state: sec-core adopted.
         let state_dir = &layout.state_dir;
-        let mut state = InstalledState::default();
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            ..InstalledState::default()
+        };
         state.upsert_object(InstalledObject {
             kind: ObjectKind::Component,
             name: "sec-core".to_string(),
@@ -862,63 +1241,6 @@ dest = "{datadir}/adapters/sec-core/openclaw/"
     }
 
     #[test]
-    fn system_scoped_catalog_ignores_data_dir_env_override() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let layout = FsLayout::system(Some(tmp.path().join("system")));
-        let env_datadir = tmp.path().join("env-datadir");
-        let env_runtime = env_datadir.join("manifests/runtime");
-        let system_runtime = layout.datadir.join("manifests/runtime");
-        std::fs::create_dir_all(&env_runtime).expect("mkdir env runtime");
-        std::fs::create_dir_all(&system_runtime).expect("mkdir system runtime");
-        std::fs::write(
-            env_runtime.join("agentsight.toml"),
-            r#"
-[component]
-name = "agentsight"
-version = "env"
-"#,
-        )
-        .expect("write env manifest");
-        std::fs::write(
-            system_runtime.join("agentsight.toml"),
-            r#"
-[component]
-name = "agentsight"
-version = "system"
-"#,
-        )
-        .expect("write system manifest");
-
-        let _guard = crate::packaged::DataDirEnvGuard::set(&env_datadir);
-        let catalog =
-            load_catalog_for_layout(&layout, InstallMode::System, "status").expect("catalog");
-
-        assert_eq!(
-            catalog.layers.bundled,
-            layout.datadir.join("manifests"),
-            "system-scoped catalog must use the system layout, not ANOLISA_DATA_DIR",
-        );
-        assert_eq!(
-            catalog
-                .component("agentsight")
-                .map(|m| m.component.version.as_str()),
-            Some("system")
-        );
-    }
-
-    /// `object_status_str` must cover every variant of `ObjectStatus` and
-    /// produce the exact wire vocabulary the spec promises. If a new variant
-    /// is added, this test forces us to extend the mapping.
-    #[test]
-    fn object_status_str_covers_full_vocabulary() {
-        assert_eq!(object_status_str(ObjectStatus::Installed), "installed");
-        assert_eq!(object_status_str(ObjectStatus::Partial), "degraded");
-        assert_eq!(object_status_str(ObjectStatus::Disabled), "disabled");
-        assert_eq!(object_status_str(ObjectStatus::Failed), "failed");
-        assert_eq!(object_status_str(ObjectStatus::Adopted), "adopted");
-    }
-
-    #[test]
     fn status_is_enabled_excludes_disabled_failed_and_unknown() {
         assert!(status_is_enabled("installed"));
         assert!(status_is_enabled("degraded"));
@@ -934,6 +1256,7 @@ version = "system"
             FileOwner, InstalledObject, InstalledState, ObjectKind, ObjectStatus, OwnedFile,
             OwnedFileKind, Ownership, SubscriptionScope,
         };
+        use anolisa_core::state_store::StateStore;
         use anolisa_platform::fs_layout::FsLayout;
         use sha2::{Digest, Sha256};
 
@@ -976,6 +1299,31 @@ version = "system"
             InstalledState {
                 schema_version: 3,
                 ..Default::default()
+            }
+        }
+
+        /// Persist a v3-shaped legacy state and load it back as the v5 store,
+        /// so `migrated_from_legacy()` holds — the gate `migrate_v3_symlinks`
+        /// checks in production.
+        fn seed_v3_store(layout: &FsLayout, objects: Vec<InstalledObject>) -> StateStore {
+            let mut state = v3_state();
+            for object in objects {
+                state.upsert_object(object);
+            }
+            std::fs::create_dir_all(&layout.state_dir).expect("mkdir state dir");
+            let path = layout.state_dir.join("installed.toml");
+            state.save(&path).expect("seed v3 state");
+            StateStore::load(&path, 0).expect("load store")
+        }
+
+        fn owned_files<'a>(store: &'a StateStore, name: &str) -> &'a [OwnedFile] {
+            match &store
+                .find(ObjectKind::Component, name)
+                .expect("component in store")
+                .binding
+            {
+                anolisa_core::domain::ProviderBinding::Owned { artifact } => &artifact.files,
+                other => panic!("expected owned component, found {other:?}"),
             }
         }
 
@@ -1030,13 +1378,12 @@ type = "symlink"
                 kind: OwnedFileKind::File,
                 referent: None,
             };
-            let mut state = v3_state();
-            state.upsert_object(sample_object("tokenless", vec![owned]));
+            let mut store = seed_v3_store(&layout, vec![sample_object("tokenless", vec![owned])]);
 
-            let count = super::migrate_v3_symlinks(&mut state, &layout);
+            let count = super::migrate_v3_symlinks(&mut store, &layout);
             assert_eq!(count, 1);
 
-            let file = &state.objects[0].files[0];
+            let file = &owned_files(&store, "tokenless")[0];
             assert_eq!(file.kind, OwnedFileKind::Symlink);
             assert_eq!(file.referent.as_deref(), Some(referent.as_path()));
             assert!(file.sha256.is_none());
@@ -1080,12 +1427,14 @@ type = "symlink"
                 kind: OwnedFileKind::File,
                 referent: None,
             };
-            let mut state = v3_state();
-            state.upsert_object(sample_object("tokenless", vec![owned]));
+            let mut store = seed_v3_store(&layout, vec![sample_object("tokenless", vec![owned])]);
 
-            let count = super::migrate_v3_symlinks(&mut state, &layout);
+            let count = super::migrate_v3_symlinks(&mut store, &layout);
             assert_eq!(count, 0);
-            assert_eq!(state.objects[0].files[0].kind, OwnedFileKind::File);
+            assert_eq!(
+                owned_files(&store, "tokenless")[0].kind,
+                OwnedFileKind::File
+            );
         }
 
         #[test]
@@ -1130,12 +1479,14 @@ type = "symlink"
                 kind: OwnedFileKind::File,
                 referent: None,
             };
-            let mut state = v3_state();
-            state.upsert_object(sample_object("tokenless", vec![owned]));
+            let mut store = seed_v3_store(&layout, vec![sample_object("tokenless", vec![owned])]);
 
-            let count = super::migrate_v3_symlinks(&mut state, &layout);
+            let count = super::migrate_v3_symlinks(&mut store, &layout);
             assert_eq!(count, 0);
-            assert_eq!(state.objects[0].files[0].kind, OwnedFileKind::File);
+            assert_eq!(
+                owned_files(&store, "tokenless")[0].kind,
+                OwnedFileKind::File
+            );
         }
 
         #[test]
@@ -1176,12 +1527,14 @@ type = "symlink"
                 kind: OwnedFileKind::File,
                 referent: None,
             };
-            let mut state = v3_state();
-            state.upsert_object(sample_object("tokenless", vec![owned]));
+            let mut store = seed_v3_store(&layout, vec![sample_object("tokenless", vec![owned])]);
 
-            let count = super::migrate_v3_symlinks(&mut state, &layout);
+            let count = super::migrate_v3_symlinks(&mut store, &layout);
             assert_eq!(count, 0);
-            assert_eq!(state.objects[0].files[0].kind, OwnedFileKind::File);
+            assert_eq!(
+                owned_files(&store, "tokenless")[0].kind,
+                OwnedFileKind::File
+            );
         }
 
         #[test]
@@ -1197,12 +1550,14 @@ type = "symlink"
                 kind: OwnedFileKind::File,
                 referent: None,
             };
-            let mut state = v3_state();
-            state.upsert_object(sample_object("tokenless", vec![owned]));
+            let mut store = seed_v3_store(&layout, vec![sample_object("tokenless", vec![owned])]);
 
-            let count = super::migrate_v3_symlinks(&mut state, &layout);
+            let count = super::migrate_v3_symlinks(&mut store, &layout);
             assert_eq!(count, 0);
-            assert_eq!(state.objects[0].files[0].kind, OwnedFileKind::File);
+            assert_eq!(
+                owned_files(&store, "tokenless")[0].kind,
+                OwnedFileKind::File
+            );
         }
 
         #[test]
@@ -1218,16 +1573,20 @@ type = "symlink"
                 kind: OwnedFileKind::File,
                 referent: None,
             };
-            let mut state = v3_state();
-            state.upsert_object(sample_object("../../../etc", vec![owned]));
+            let mut store =
+                seed_v3_store(&layout, vec![sample_object("../../../etc", vec![owned])]);
 
-            let count = super::migrate_v3_symlinks(&mut state, &layout);
+            let count = super::migrate_v3_symlinks(&mut store, &layout);
             assert_eq!(count, 0);
         }
 
         #[test]
         #[cfg(unix)]
-        fn migrate_skips_when_schema_v4() {
+        /// A native v5 store (not derived from a legacy file) never runs the
+        /// symlink upgrade — its records were written by code that already
+        /// records symlinks as symlinks.
+        #[allow(clippy::items_after_statements)]
+        fn migrate_skips_native_v5_store() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
             std::fs::create_dir_all(&layout.bin_dir).expect("mkdir bindir");
@@ -1266,13 +1625,20 @@ type = "symlink"
                 kind: OwnedFileKind::File,
                 referent: None,
             };
-            let mut state = InstalledState::default();
-            state.upsert_object(sample_object("tokenless", vec![owned]));
-            assert_eq!(state.schema_version, 4);
+            // Round-trip through a *v5* file: save the migrated store, then
+            // reload it — the reload is a native v5 load.
+            let store = seed_v3_store(&layout, vec![sample_object("tokenless", vec![owned])]);
+            let path = layout.state_dir.join("installed.toml");
+            store.save(&path).expect("persist v5 store");
+            let mut store = StateStore::load(&path, 0).expect("reload v5 store");
+            assert!(!store.migrated_from_legacy());
 
-            let count = super::migrate_v3_symlinks(&mut state, &layout);
+            let count = super::migrate_v3_symlinks(&mut store, &layout);
             assert_eq!(count, 0);
-            assert_eq!(state.objects[0].files[0].kind, OwnedFileKind::File);
+            assert_eq!(
+                owned_files(&store, "tokenless")[0].kind,
+                OwnedFileKind::File
+            );
         }
     }
 

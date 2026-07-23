@@ -1,5 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::os::fd::AsFd;
+use std::path::Path;
 
 use crate::audit::AuditEntry;
 use crate::config::MemoryConfig;
@@ -133,6 +135,30 @@ pub fn memory_observe(
     }
 
     let n = svc.write(&path, &body, false)?;
+
+    // Synchronously upsert the new observation into the BM25 index so it
+    // is immediately searchable by auto-recall hooks. Without this, the
+    // notify watcher's debounce (~200 ms) creates a window where a
+    // `before_prompt_build` hook firing right after `memory_observe`
+    // returns empty results and silently skips injection (#1462).
+    // Resource impact: memory_observe is called once per user observation
+    // (interactive, low frequency), not in bulk import scenarios. The synchronous
+    // reindex is a one-time operation per observation; the notify watcher handles
+    // any subsequent updates asynchronously.
+    if let Some(ref index) = svc.index {
+        // Read the actual file mtime from the filesystem rather than
+        // using Utc::now(). The watcher's flush path uses
+        // store::mtime_ms_of(&meta) for time-decay scoring; using a
+        // synthetic timestamp here would create a mismatch with the
+        // subsequent redundant upsert and skew decay-based ranking.
+        let mtime_ms = crate::safe_fs::metadata(svc.mount.root_fd.as_fd(), Path::new(&path))
+            .map(|m| crate::index::store::mtime_ms_of(&m))
+            .unwrap_or_else(|_| Utc::now().timestamp_millis());
+        if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n) {
+            tracing::warn!("synchronous reindex after observe failed for {path}: {e}");
+        }
+    }
+
     svc.audit_log(AuditEntry::new(TOOL).path(path.clone()).bytes(n));
     Ok(path)
 }

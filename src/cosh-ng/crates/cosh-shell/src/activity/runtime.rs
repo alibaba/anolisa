@@ -53,6 +53,7 @@ pub(super) fn record_activity_rows(
 pub(crate) struct ActivityRecordPolicy {
     pub(crate) suppress_provider_native_shell: bool,
     pub(crate) shell_evidence_tool_available: bool,
+    pub(crate) origin: AgentRunOrigin,
 }
 
 pub(crate) fn record_activity_rows_with_policy(
@@ -106,10 +107,14 @@ pub(crate) fn record_activity_rows_with_policy(
                     if covered_by_control_permission {
                         continue;
                     }
-                    let provider_shell_command =
-                        provider_shell_command_for_tool_call(state, tool_id.as_deref(), input);
+                    let provider_shell_command = provider_shell_command_for_tool_call(
+                        state,
+                        run_id,
+                        tool_id.as_deref(),
+                        input,
+                    );
                     if policy.suppress_provider_native_shell {
-                        if provider_shell_transcript_seen(state, tool_id.as_deref()) {
+                        if provider_shell_transcript_seen(state, run_id, tool_id.as_deref()) {
                             continue;
                         }
                         if provider_shell_command.as_deref().is_some_and(|command| {
@@ -118,7 +123,9 @@ pub(crate) fn record_activity_rows_with_policy(
                                 .provider_foreground_shell_command_seen(command)
                         }) {
                             if let Some(tool_id) = tool_id.as_deref() {
-                                state.control.mark_provider_shell_transcript_seen(tool_id);
+                                state
+                                    .control
+                                    .mark_provider_shell_transcript_seen(run_id, tool_id);
                             }
                             continue;
                         }
@@ -201,9 +208,11 @@ pub(crate) fn record_activity_rows_with_policy(
                     .record_provider_tool_output_delta(run_id, tool_id, stream, text);
                 if state
                     .control
-                    .provider_tool_is_control_permission_shell(tool_id)
-                    || (state.control.provider_tool_is_shell(tool_id)
-                        && state.control.provider_shell_transcript_seen(tool_id))
+                    .provider_tool_is_control_permission_shell(run_id, tool_id)
+                    || (state.control.provider_tool_is_shell(run_id, tool_id)
+                        && state
+                            .control
+                            .provider_shell_transcript_seen(run_id, tool_id))
                 {
                     update_tool_output_invocation(
                         state,
@@ -248,7 +257,7 @@ pub(crate) fn record_activity_rows_with_policy(
                 if is_shell_tool_name(tool_name) {
                     state
                         .control
-                        .mark_provider_control_permission_shell_tool(tool_use_id);
+                        .mark_provider_control_permission_shell_tool(run_id, tool_use_id);
                 }
                 let row = provider_tool_request_row(
                     state,
@@ -279,9 +288,11 @@ pub(crate) fn record_activity_rows_with_policy(
             } => {
                 if state
                     .control
-                    .provider_tool_is_control_permission_shell(tool_id)
-                    || (state.control.provider_tool_is_shell(tool_id)
-                        && state.control.provider_shell_transcript_seen(tool_id))
+                    .provider_tool_is_control_permission_shell(run_id, tool_id)
+                    || (state.control.provider_tool_is_shell(run_id, tool_id)
+                        && state
+                            .control
+                            .provider_shell_transcript_seen(run_id, tool_id))
                 {
                     complete_tool_invocation(
                         state,
@@ -293,7 +304,7 @@ pub(crate) fn record_activity_rows_with_policy(
                     );
                     continue;
                 } else {
-                    let row = tool_completed_row(state, run_id, tool_id, status);
+                    let row = tool_completed_row(state, run_id, tool_id, status, policy.origin);
                     complete_tool_invocation(
                         state,
                         run_id,
@@ -358,17 +369,26 @@ pub(super) fn tool_call_invocation_id(
         .unwrap_or_else(|| format!("{run_id}:event-{event_index}"))
 }
 
-fn provider_shell_transcript_seen(state: &InlineState, tool_id: Option<&str>) -> bool {
-    tool_id.is_some_and(|tool_id| state.control.provider_shell_transcript_seen(tool_id))
+fn provider_shell_transcript_seen(
+    state: &InlineState,
+    run_id: &str,
+    tool_id: Option<&str>,
+) -> bool {
+    tool_id.is_some_and(|tool_id| {
+        state
+            .control
+            .provider_shell_transcript_seen(run_id, tool_id)
+    })
 }
 
 fn provider_shell_command_for_tool_call(
     state: &InlineState,
+    run_id: &str,
     tool_id: Option<&str>,
     input: &str,
 ) -> Option<String> {
     tool_id
-        .and_then(|tool_id| state.control.provider_tool().command(tool_id))
+        .and_then(|tool_id| state.control.provider_tool().command(run_id, tool_id))
         .map(|command| command.command.clone())
         .or_else(|| shell_command_from_tool_call_input(input))
 }
@@ -401,7 +421,7 @@ fn provider_native_shell_auto_approved_row(
     let id = next_activity_id(state, "tool");
     let subject = tool_id.unwrap_or(tool_name).to_string();
     let command = tool_id
-        .and_then(|tool_id| state.control.provider_tool().command(tool_id))
+        .and_then(|tool_id| state.control.provider_tool().command(run_id, tool_id))
         .map(|command| command.command.as_str())
         .unwrap_or(input);
     let mut detail = format!(
@@ -571,21 +591,23 @@ fn tool_completed_row(
     run_id: &str,
     tool_id: &str,
     status: &str,
+    origin: AgentRunOrigin,
 ) -> RuntimeActivityRow {
     let id = next_activity_id(state, "tool");
-    let interactive_handoff = maybe_queue_interactive_shell_handoff(state, tool_id, status);
-    let stderr = state.control.provider_tool().stderr(tool_id);
+    let interactive_handoff =
+        maybe_queue_interactive_shell_handoff(state, run_id, tool_id, status, origin);
+    let stderr = state.control.provider_tool().stderr(run_id, tool_id);
     let stderr_summary = stderr.and_then(first_error_line);
     let mut summary = if matches!(status, "error" | "failed" | "interrupted") {
         match stderr_summary.as_deref() {
-            Some(line) => format!("{line}; [Details] {id}"),
-            None => format!("[Details] {id}"),
+            Some(line) => line.to_string(),
+            None => status.to_string(),
         }
     } else {
         status.to_string()
     };
     let mut detail = format!("tool: {tool_id}\nstatus: {status}");
-    if let Some(command) = state.control.provider_tool().command(tool_id) {
+    if let Some(command) = state.control.provider_tool().command(run_id, tool_id) {
         detail.push_str(&format!(
             "\nprovider_native_shell_command: {}",
             command.command
@@ -624,12 +646,14 @@ fn tool_completed_row(
 
 fn maybe_queue_interactive_shell_handoff(
     state: &mut InlineState,
+    run_id: &str,
     tool_id: &str,
     status: &str,
+    origin: AgentRunOrigin,
 ) -> Option<PendingInteractiveShellHandoff> {
     state
         .control
-        .queue_interactive_shell_handoff_for_tool_failure(tool_id, status)
+        .queue_interactive_shell_handoff_for_tool_failure(run_id, tool_id, status, origin)
 }
 
 pub(super) fn truncate_activity_preview(value: &str, max_chars: usize) -> String {
@@ -683,7 +707,7 @@ pub(crate) fn record_approved_shell_handoff_blocks(
         if let Some(tool_use_id) = handoff_request.tool_use_id.as_deref() {
             state
                 .control
-                .mark_provider_shell_transcript_seen(tool_use_id);
+                .mark_provider_shell_transcript_seen(&handoff_request.run_id, tool_use_id);
             if let Some(active_run) = state.agent_run.active.as_mut() {
                 if active_run.request.id == handoff_request.run_id {
                     active_run.mark_host_completed_tool(tool_use_id);
@@ -792,9 +816,9 @@ fn tool_output_row(
     let provider_native_shell_command = state
         .control
         .provider_tool()
-        .command(tool_id)
+        .command(run_id, tool_id)
         .map(|command| command.command.as_str());
-    let provider_shell_tool = state.control.provider_tool_is_shell(tool_id);
+    let provider_shell_tool = state.control.provider_tool_is_shell(run_id, tool_id);
     RuntimeActivityRow {
         id: id.clone(),
         run_id: run_id.to_string(),

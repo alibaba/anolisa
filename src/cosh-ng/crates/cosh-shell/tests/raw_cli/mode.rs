@@ -146,6 +146,7 @@ fn raw_cli_mode_approval_and_analysis_use_zh_language_env() {
         "fake",
         "/mode approval trust\n\
          /mode approval trust confirm\n\
+         /mode analysis smart\n\
          /mode analysis auto\n\
          /mode analysis manual\n\
          exit\n",
@@ -160,11 +161,15 @@ fn raw_cli_mode_approval_and_analysis_use_zh_language_env() {
     assert!(output.contains("模式已设置为 trust。"), "{output}");
     assert!(output.contains("分析模式"), "{output}");
     assert!(
-        output.contains("命令失败时评估 hooks；只对真实失败自动触发 Agent 分析。"),
+        output.contains("命令失败或系统诊断输出有价值时评估；展示洞察供你复核。"),
         "{output}"
     );
     assert!(
-        output.contains("已禁用 hooks 和自动分析；使用 slash 命令手动触发。"),
+        output.contains("仅对少量高置信故障自动触发 Agent 分析；其他情况仍先提示。"),
+        "{output}"
+    );
+    assert!(
+        output.contains("已关闭被动建议和自动分析；使用 slash 命令手动触发。"),
         "{output}"
     );
     assert!(!output.contains("bash: /mode"), "{output}");
@@ -191,6 +196,52 @@ fn raw_cli_mode_approval_card_uses_zh_language_env() {
     assert!(output.contains("模式已设置为 recommend。"), "{output}");
     assert!(!output.contains("bash: /mode"), "{output}");
     assert_no_migrated_english_ui_labels(&output, MODE_ZH_FORBIDDEN_UI);
+}
+
+#[test]
+fn raw_cli_mode_analysis_card_selects_auto_for_current_session() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "zh-CN")],
+        vec![
+            (b"/mode analysis\n".to_vec(), Duration::from_millis(500)),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(1_000)),
+            (b"/help\n".to_vec(), Duration::from_millis(200)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("分析模式"), "{output}");
+    assert!(output.contains("建议模式（推荐）"), "{output}");
+    assert!(
+        output.contains("自动分析（命令失败后可能自动启动 Agent）"),
+        "{output}"
+    );
+    assert!(output.contains("关闭主动介入"), "{output}");
+    assert!(output.contains("模式已设置为 auto。"), "{output}");
+    assert!(output.contains("模式: auto. 策略: auto."), "{output}");
+    assert!(!output.contains("bash: /mode"), "{output}");
+}
+
+#[test]
+fn raw_cli_mode_analysis_card_cancel_keeps_current_session_mode() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "zh-CN")],
+        vec![
+            (b"/mode analysis\n".to_vec(), Duration::from_millis(500)),
+            (b"\x03".to_vec(), Duration::from_millis(1_000)),
+            (b"/help\n".to_vec(), Duration::from_millis(200)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("分析模式"), "{output}");
+    assert!(output.contains("模式未改变: smart。"), "{output}");
+    assert!(output.contains("模式: auto. 策略: smart."), "{output}");
+    assert!(!output.contains("bash: /mode"), "{output}");
 }
 
 #[test]

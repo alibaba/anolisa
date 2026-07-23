@@ -54,8 +54,10 @@ BuildRequires:  systemd-rpm-macros
 Requires:       agent-sec-cli = %{version}-%{release}
 Requires:       agent-sec-cosh-hook = %{version}-%{release}
 Requires:       agent-sec-codex-hook = %{version}-%{release}
+Requires:       agent-sec-qoder-hook = %{version}-%{release}
 Requires:       agent-sec-openclaw-hook = %{version}-%{release}
 Requires:       agent-sec-hermes-hook = %{version}-%{release}
+Requires:       agent-sec-qwen-code-hook = %{version}-%{release}
 Requires:       agent-sec-skills = %{version}-%{release}
 
 %description
@@ -97,7 +99,7 @@ Built with maturin as a Rust native Python extension.
 %systemd_user_preun agent-sec-core.service
 
 %postun -n agent-sec-cli
-%systemd_user_postun agent-sec-core.service
+%systemd_user_postun_with_restart agent-sec-core.service
 
 # =============================================================================
 # Subpackage 2: agent-sec-cosh-hook
@@ -158,7 +160,30 @@ Provides OS-level security guardrails for Hermes Agent via agent-sec-cli.
 %license LICENSE
 
 # =============================================================================
-# Subpackage 5: agent-sec-skills
+# Subpackage 5: agent-sec-qwen-code-hook
+# =============================================================================
+%package -n agent-sec-qwen-code-hook
+Summary:        Qwen Code extension for agent security
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-qwen-code-hook
+Qwen Code security extension powered by agent-sec-core.
+Provides prompt and PII policy enforcement, lifecycle observability, and
+managed Skill Ledger validation through Qwen Code command hooks.
+
+%files -n agent-sec-qwen-code-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/scripts/deploy.sh
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/observability_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/pii_checker_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/skill_ledger_hook.py
+/opt/agent-sec/qwen-code-extension/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 6: agent-sec-skills
 # =============================================================================
 %package -n agent-sec-skills
 Summary:        Agent security skill definitions for copilot-shell
@@ -174,7 +199,7 @@ Includes skill-ledger, code-scanner, prompt-scanner and related skill definition
 %license LICENSE
 
 # =============================================================================
-# Subpackage 6: agent-sec-codex-hook
+# Subpackage 7: agent-sec-codex-hook
 # =============================================================================
 %package -n agent-sec-codex-hook
 Summary:        Codex plugin security hooks
@@ -190,6 +215,24 @@ and skill ledger verification for Codex agent.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/codex-plugin/install.sh
 /opt/agent-sec/codex-plugin/
+%license LICENSE
+
+# =============================================================================
+# Subpackage 8: agent-sec-qoder-hook
+# =============================================================================
+%package -n agent-sec-qoder-hook
+Summary:        Qoder plugin security hooks
+Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
+
+%description -n agent-sec-qoder-hook
+Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
+
+%files -n agent-sec-qoder-hook
+%defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/qoder-plugin/install.sh
+/opt/agent-sec/qoder-plugin/
 %license LICENSE
 
 # =============================================================================

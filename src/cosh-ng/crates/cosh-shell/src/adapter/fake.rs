@@ -1,7 +1,7 @@
 use crate::evidence::{provider_safe_command_fact_line, terminal_output_id};
 use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode};
 
-use super::{first_token, AdapterError, AgentAdapter, AgentBackendCapabilities};
+use super::{AdapterError, AgentAdapter, AgentBackendCapabilities};
 use control_protocol::emit_fake_control_protocol_stream;
 use fixtures::{
     extract_fake_approval_result, extract_fake_pending_answer, extract_fake_tool_result,
@@ -42,6 +42,7 @@ impl AgentAdapter for FakeAgentAdapter {
     }
 
     fn run(&self, request: &AgentRequest) -> Result<Vec<AgentEvent>, AdapterError> {
+        let language = crate::language_config_status().effective;
         if let Some(input) = &request.user_input {
             let run_id = format!("fake-run-{}", request.command_block.id);
             if let Some(answer) = extract_fake_pending_answer(input) {
@@ -238,6 +239,13 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                 ]);
             }
+            if request
+                .context_hints
+                .iter()
+                .any(|hint| hint == "__cosh_request_source=insight_prompt")
+            {
+                return Ok(fake_bound_insight_events(request, language, run_id));
+            }
             if input.contains("adapter crash") {
                 return Err(AdapterError {
                     message: "fake adapter crashed".to_string(),
@@ -398,7 +406,12 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                     AgentEvent::TextDelta {
                         run_id: run_id.clone(),
-                        text: format!("Received shell prompt request: {input}"),
+                        text: match language {
+                            crate::Language::EnUs => {
+                                format!("Received shell prompt request: {input}")
+                            }
+                            crate::Language::ZhCn => format!("已收到 Shell 提示请求：{input}"),
+                        },
                     },
                     AgentEvent::ToolCall {
                         run_id: run_id.clone(),
@@ -637,6 +650,30 @@ impl AgentAdapter for FakeAgentAdapter {
                     },
                 ]);
             }
+            if input.contains("recommendation fixture") {
+                let summary = match language {
+                    crate::Language::EnUs => {
+                        "Explicit compatibility fixture for display-only recommendations."
+                    }
+                    crate::Language::ZhCn => "用于验证仅展示推荐兼容性的显式 fixture。",
+                };
+                return Ok(vec![
+                    AgentEvent::Recommendation {
+                        run_id: run_id.clone(),
+                        summary: summary.to_string(),
+                        commands: vec![
+                            "pwd".to_string(),
+                            "echo $PATH".to_string(),
+                            "printf 'fixture recommendation\\n'".to_string(),
+                        ],
+                        auto_execute: false,
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "recommendation fixture completed".to_string(),
+                    },
+                ]);
+            }
             if input.contains("misroute terminal output read") {
                 if let Some(output_id) =
                     first_request_output_id(request).or_else(|| first_terminal_output_id(input))
@@ -712,12 +749,22 @@ impl AgentAdapter for FakeAgentAdapter {
                 },
                 AgentEvent::TextDelta {
                     run_id: run_id.clone(),
-                    text: format!("Received shell prompt request: {input}"),
+                    text: match language {
+                        crate::Language::EnUs => format!("Received shell prompt request: {input}"),
+                        crate::Language::ZhCn => format!("已收到 Shell 提示请求：{input}"),
+                    },
                 },
                 AgentEvent::Recommendation {
                     run_id: run_id.clone(),
-                    summary: "Ask the configured Agent backend for recommend-only shell guidance."
-                        .to_string(),
+                    summary: match language {
+                        crate::Language::EnUs => {
+                            "Ask the configured Agent backend for recommend-only shell guidance."
+                                .to_string()
+                        }
+                        crate::Language::ZhCn => {
+                            "请使用已配置的 Agent 后端提供仅建议的 Shell 指引。".to_string()
+                        }
+                    },
                     commands: Vec::new(),
                     auto_execute: false,
                 },
@@ -737,21 +784,16 @@ impl AgentAdapter for FakeAgentAdapter {
             },
             AgentEvent::TextDelta {
                 run_id: run_id.clone(),
-                text: format!(
-                    "The command `{}` failed with exit code {}.",
-                    request.command_block.command, request.command_block.exit_code
-                ),
-            },
-            AgentEvent::Recommendation {
-                run_id: run_id.clone(),
-                summary: "Inspect the command, working directory, and captured terminal output."
-                    .to_string(),
-                commands: vec![
-                    "pwd".to_string(),
-                    "echo $PATH".to_string(),
-                    format!("{} --help", first_token(&request.command_block.command)),
-                ],
-                auto_execute: false,
+                text: match crate::language_config_status().effective {
+                    crate::Language::EnUs => format!(
+                        "The command `{}` failed with exit code {}.",
+                        request.command_block.command, request.command_block.exit_code
+                    ),
+                    crate::Language::ZhCn => format!(
+                        "命令 `{}` 以退出码 {} 失败。",
+                        request.command_block.command, request.command_block.exit_code
+                    ),
+                },
             },
             AgentEvent::AgentCompleted {
                 run_id,
@@ -806,6 +848,42 @@ impl AgentAdapter for FakeAgentAdapter {
 
         emit_fake_slow_stream(input, request, sink)
     }
+}
+
+fn fake_bound_insight_events(
+    request: &AgentRequest,
+    language: crate::Language,
+    run_id: String,
+) -> Vec<AgentEvent> {
+    let text = match (language, request.command_block.exit_code) {
+        (crate::Language::EnUs, 0) => {
+            "Analyzed the bounded output evidence without executing another command.".to_string()
+        }
+        (crate::Language::ZhCn, 0) => "已基于有界输出证据完成分析，未执行其他命令。".to_string(),
+        (crate::Language::EnUs, exit_code) => format!(
+            "The command `{}` failed with exit code {exit_code}.",
+            request.command_block.command
+        ),
+        (crate::Language::ZhCn, exit_code) => format!(
+            "命令 `{}` 以退出码 {exit_code} 失败。",
+            request.command_block.command
+        ),
+    };
+    vec![
+        AgentEvent::StatusChanged {
+            run_id: run_id.clone(),
+            phase: "analyzing".to_string(),
+            message: "analyzing bounded insight evidence".to_string(),
+        },
+        AgentEvent::TextDelta {
+            run_id: run_id.clone(),
+            text,
+        },
+        AgentEvent::AgentCompleted {
+            run_id,
+            summary: "analysis completed without executing commands".to_string(),
+        },
+    ]
 }
 
 fn first_terminal_output_id(input: &str) -> Option<String> {

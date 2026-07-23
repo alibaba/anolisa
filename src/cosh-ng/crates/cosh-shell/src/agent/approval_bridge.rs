@@ -13,6 +13,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
     run_request: Option<&AgentRequest>,
+    origin: AgentRunOrigin,
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<bool> {
@@ -27,6 +28,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
             state,
             event,
             run_request,
+            origin,
             adapter.capabilities().control_protocol && !provider_tool_call_fallback,
         ) else {
             continue;
@@ -81,6 +83,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
     run_request: Option<&AgentRequest>,
+    origin: AgentRunOrigin,
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<bool> {
@@ -95,6 +98,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             state,
             event,
             run_request,
+            origin,
             adapter.capabilities().control_protocol && !provider_tool_call_fallback,
         ) else {
             continue;
@@ -209,10 +213,11 @@ fn provider_native_shell_result_already_visible(
     request: &RuntimeApprovalRequest,
 ) -> bool {
     !request.provider_shell_request_kind.is_control_permission()
-        && request
-            .tool_use_id
-            .as_deref()
-            .is_some_and(|tool_id| state.control.provider_shell_transcript_output_seen(tool_id))
+        && request.tool_use_id.as_deref().is_some_and(|tool_id| {
+            state
+                .control
+                .provider_shell_transcript_output_seen(&request.run_id, tool_id)
+        })
 }
 
 fn provider_native_shell_covered_by_foreground(
@@ -231,7 +236,9 @@ fn mark_provider_native_shell_request_transcript_seen(
     request: &RuntimeApprovalRequest,
 ) {
     if let Some(tool_id) = request.tool_use_id.as_deref() {
-        state.control.mark_provider_shell_transcript_seen(tool_id);
+        state
+            .control
+            .mark_provider_shell_transcript_seen(&request.run_id, tool_id);
     }
 }
 
@@ -337,9 +344,11 @@ fn duplicate_host_executed_shell_result_delivered(
     let Some(request_id) = request.request_id.as_deref() else {
         return false;
     };
-    state
-        .control
-        .provider_host_executed_shell_result_delivered(request_id, request.tool_use_id.as_deref())
+    state.control.provider_host_executed_shell_result_delivered(
+        &request.run_id,
+        request_id,
+        request.tool_use_id.as_deref(),
+    )
 }
 
 fn run_already_approved_shell_tool(state: &InlineState, run_id: &str) -> bool {
@@ -585,6 +594,7 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: vec![
@@ -625,6 +635,7 @@ mod tests {
             &mut state,
             &[governed],
             Some(&analysis_only_request()),
+            AgentRunOrigin::Standard,
             &mut output,
             &adapter,
         )
@@ -641,7 +652,7 @@ mod tests {
         state
             .control
             .provider_tool_mut()
-            .claim_host_executed_shell_result("ctrl-1", Some("toolu-1"))
+            .claim_host_executed_shell_result("run-1", "ctrl-1", Some("toolu-1"))
             .expect("claim host result");
         let request = shell_request(
             ProviderShellRequestKind::ControlPermission,
@@ -652,6 +663,13 @@ mod tests {
         assert_eq!(
             shell_request_policy_decision(&state, None, &request),
             ShellRequestPolicyDecision::DenyDuplicateHostExecuted
+        );
+
+        let mut next_run_request = request;
+        next_run_request.run_id = "run-2".to_string();
+        assert_eq!(
+            shell_request_policy_decision(&state, None, &next_run_request),
+            ShellRequestPolicyDecision::Continue
         );
     }
 
@@ -694,6 +712,7 @@ mod tests {
         RuntimeApprovalRequest {
             id: "req-1".to_string(),
             run_id: "run-1".to_string(),
+            origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),
             cwd: "/tmp".to_string(),
             source: "test",

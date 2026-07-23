@@ -1059,9 +1059,9 @@ impl SkillFs {
 
                 // D1.3-demo: rename observes both old and new owning
                 // skill. If they're identical the controller's
-                // per-skill debounce coalesces them; if they differ
-                // the controller schedules independent refreshes for
-                // each side.
+                // per-skill debounce coalesces both relative paths; if
+                // they differ the controller schedules independent
+                // refreshes for each side.
                 // L1: cross-namespace renames between inbox and
                 // `/skills` were rejected above, so the old/new sides
                 // here are either both inbox or both non-inbox. Inbox
@@ -1172,13 +1172,7 @@ impl SkillFs {
                         observe_pair(self, skill, rel.as_deref(), *is_inbox);
                     }
                     if let Some((new_skill, new_rel, is_inbox)) = &new_skill_path {
-                        let same_as_old = old_skill_path
-                            .as_ref()
-                            .map(|(old_skill, _, _)| old_skill == new_skill)
-                            .unwrap_or(false);
-                        if !same_as_old {
-                            observe_pair(self, new_skill, new_rel.as_deref(), *is_inbox);
-                        }
+                        observe_pair(self, new_skill, new_rel.as_deref(), *is_inbox);
                     }
                 }
                 self.emit_event(

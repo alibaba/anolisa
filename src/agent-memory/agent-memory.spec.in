@@ -114,14 +114,11 @@ install -p -m 0644 config/systemd/anolisa-memory@.service %{buildroot}%{_useruni
 install -d -m 0755 %{buildroot}%{_tmpfilesdir}
 install -p -m 0644 config/systemd/anolisa-memory-tmpfiles.conf %{buildroot}%{_tmpfilesdir}/anolisa-memory.conf
 
-# Install documentation (CHANGELOG + user manual EN/ZH).
-# The v2 design doc and the standalone agent-memory-user-manual.md from
-# the openclaw branch are dropped in favour of the consolidated bilingual
-# user_manual.md / user_manual.zh.md introduced in the v0.1.0 rewrite.
+# Install documentation (CHANGELOG only). The bilingual user manual moved
+# to the repository-level docs/user-guide tree and is published with the
+# ANOLISA documentation, not packaged per-component.
 install -d -m 0755 %{buildroot}%{_docdir}/%{name}
 install -p -m 0644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
-install -p -m 0644 docs/user_manual.md %{buildroot}%{_docdir}/%{name}/user_manual.md
-install -p -m 0644 docs/user_manual.zh.md %{buildroot}%{_docdir}/%{name}/user_manual.zh.md
 
 # Install adapter bundle per FHS spec.
 # anolisa-adapter-ctl scans %{_datadir}/anolisa/adapters/*/manifest.json.
@@ -163,8 +160,6 @@ install -m 0644 adapters/agent-memory/openclaw/dist/index.js %{buildroot}%{_data
 %{_userunitdir}/anolisa-memory@.service
 %{_tmpfilesdir}/anolisa-memory.conf
 %doc %{_docdir}/%{name}/CHANGELOG.md
-%doc %{_docdir}/%{name}/user_manual.md
-%doc %{_docdir}/%{name}/user_manual.zh.md
 # Adapter bundle (anolisa-adapter-ctl auto-discovery)
 %dir %{_datadir}/anolisa/adapters
 %dir %{_datadir}/anolisa/adapters/agent-memory
@@ -203,6 +198,21 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Jul 17 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.4-1
+- fix(memory): auto-recall returns empty results after observe — synchronously reindex after memory_observe so before_prompt_build hook finds new content (#1520)
+- fix(memory): install.sh sets allowConversationAccess for hooks (#1521)
+
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.3-1
+- fix(memory): normalize OpenClaw content blocks to string before trigger matching (auto-capture was coercing array to "[object Object]")
+- fix(memory): add BM25 OR fallback when AND returns 0 rows (natural-language queries with unknown words now return partial matches)
+- fix(memory): sanitize audit_log to prevent user query content leakage (replace raw query prefix with len= format)
+
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.2-1
+- fix(memory): sanitize memory_observe hints with newline/control-char replacement so they round-trip through the frontmatter reader (Windows paths with backslashes)
+- feat(memory): add `max_hint_bytes` (default 512) with `MEMORY_MAX_HINT_BYTES` env override; propagate `&MemoryConfig` through memory_observe and the MCP server
+- fix(memory): honor `INSTALL_PROFILE` in Makefile so `make install INSTALL_PROFILE=user PREFIX=$HOME/.local` no longer needs root (adapter resources under `$(PREFIX)/share/anolisa`)
+- test(memory): add safe_fs security-boundary unit tests; fix cargo fmt drift on `tests/safe_fs_tests.rs`
+
 * Fri Jul 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.1-1
 - fix(memory): unblock vector/hybrid search on tokio runtime (thread runtime handle into index worker, block_in_place in search)
 - fix(memory): stop leaking .git internals via memory_get_context (reserved-path filter covers .git/)

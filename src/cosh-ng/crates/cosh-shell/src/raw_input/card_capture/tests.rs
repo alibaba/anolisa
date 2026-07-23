@@ -7,6 +7,7 @@ fn question_capture_custom_option_waits_for_text_before_submit() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -34,6 +35,7 @@ fn question_capture_strips_bracketed_paste_wrappers() {
         option_count: 0,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -54,12 +56,40 @@ fn question_capture_strips_bracketed_paste_wrappers() {
 }
 
 #[test]
+fn secret_question_capture_marks_input_as_sensitive() {
+    let capture = RawInputCapture::Question {
+        id: "auth-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: true,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"hunter2\n"),
+        vec![
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "h".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hu".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hun".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunt".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunte".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunter".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunter2".to_string()),
+            RawInputEvent::CardSecretAnswer("hunter2".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn question_capture_strips_split_bracketed_paste_wrappers() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -87,6 +117,7 @@ fn question_capture_ignores_tilde_control_sequences() {
         option_count: 0,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -108,6 +139,7 @@ fn question_capture_ignores_removed_answer_slash() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -146,6 +178,7 @@ fn question_capture_still_submits_selected_option() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -166,6 +199,7 @@ fn question_capture_multiple_toggles_options_and_submits_indices() {
         option_count: 3,
         allow_free_text: true,
         multiple: true,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -188,6 +222,7 @@ fn question_capture_multiple_preserves_checked_options_with_custom_answer() {
         option_count: 3,
         allow_free_text: true,
         multiple: true,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -240,6 +275,44 @@ fn mode_capture_uses_initial_selected_option() {
     assert_eq!(
         state.consume(&capture, b"\n"),
         vec![RawInputEvent::ModeSet("mode".to_string(), 1)]
+    );
+}
+
+#[test]
+fn mode_capture_supports_tab_and_shift_tab_navigation() {
+    let capture = RawInputCapture::Mode {
+        id: "mode".to_string(),
+        option_count: 3,
+        selected: 1,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\t\x1b[Z"),
+        vec![
+            RawInputEvent::ModeFocus("mode".to_string(), 2),
+            RawInputEvent::ModeFocus("mode".to_string(), 1),
+        ]
+    );
+}
+
+#[test]
+fn mode_capture_supports_escape_and_ctrl_c_cancel() {
+    let capture = RawInputCapture::Mode {
+        id: "mode".to_string(),
+        option_count: 3,
+        selected: 0,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x1b\x1b\x03"),
+        vec![
+            RawInputEvent::ModeCancel("mode".to_string()),
+            RawInputEvent::ModeCancel("mode".to_string()),
+        ]
     );
 }
 
@@ -297,6 +370,60 @@ fn config_language_capture_selects_language_and_cancels() {
 }
 
 #[test]
+fn session_capture_navigates_toggles_deletes_and_resumes() {
+    let capture = RawInputCapture::Session {
+        id: "session-panel".to_string(),
+        option_count: 3,
+        selected: 0,
+        confirming_clear: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"j d"),
+        vec![
+            RawInputEvent::SessionFocus("session-panel".to_string(), 1),
+            RawInputEvent::SessionToggle("session-panel".to_string(), 1),
+            RawInputEvent::SessionDelete("session-panel".to_string()),
+        ]
+    );
+
+    state.apply_capture(&capture);
+    assert_eq!(
+        state.consume(&capture, b"\x1b[B\n"),
+        vec![
+            RawInputEvent::SessionFocus("session-panel".to_string(), 2),
+            RawInputEvent::SessionResume("session-panel".to_string(), 2),
+        ]
+    );
+}
+
+#[test]
+fn session_clear_confirmation_accepts_and_cancels() {
+    let capture = RawInputCapture::Session {
+        id: "session-panel".to_string(),
+        option_count: 0,
+        selected: 0,
+        confirming_clear: true,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"y"),
+        vec![RawInputEvent::SessionClearConfirm(
+            "session-panel".to_string()
+        )]
+    );
+    state.apply_capture(&capture);
+    assert_eq!(
+        state.consume(&capture, &[0x03]),
+        vec![RawInputEvent::SessionCancel("session-panel".to_string())]
+    );
+}
+
+#[test]
 fn approval_capture_handles_split_escape_arrow_sequence() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),
@@ -305,8 +432,7 @@ fn approval_capture_handles_split_escape_arrow_sequence() {
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
 
-    assert!(state.consume(&capture, b"\x1b").is_empty());
-    assert!(state.consume(&capture, b"[").is_empty());
+    assert!(state.consume(&capture, b"\x1b[").is_empty());
     assert_eq!(
         state.consume(&capture, b"C\n"),
         vec![
@@ -325,9 +451,8 @@ fn approval_capture_escape_then_enter_cancels_without_submit() {
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
 
-    assert!(state.consume(&capture, b"\x1b").is_empty());
     assert_eq!(
-        state.consume(&capture, b"\n"),
+        state.consume(&capture, b"\x1b"),
         vec![RawInputEvent::CardCancel("req-1".to_string())]
     );
 }
@@ -339,6 +464,7 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -349,9 +475,8 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
     );
 
     state.apply_capture(&capture);
-    assert!(state.consume(&capture, b"\x1b").is_empty());
     assert_eq!(
-        state.consume(&capture, b"\n"),
+        state.consume(&capture, b"\x1b"),
         vec![RawInputEvent::QuestionCancel("q-1".to_string())]
     );
 }

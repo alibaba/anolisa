@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, anolisa, cosh-ng
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -27,6 +27,7 @@ SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
 MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
+COSH_DIR="${ROOT_DIR}/src/cosh-ng"
 SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
 
 # gVisor upstream release (overridable via env). Format: YYYYMMDD
@@ -223,7 +224,7 @@ build_agent_sec_core() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh-extension,openclaw-plugin,hermes-plugin,scripts,tools}
+    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh-extension,openclaw-plugin,hermes-plugin,qwen-code-extension,qoder-plugin,scripts,tools}
 
     # skills: use cp -rp dir/. to include hidden files/directories
     cp -rp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
@@ -249,10 +250,20 @@ build_agent_sec_core() {
         --exclude='__pycache__' \
         hermes-plugin/src hermes-plugin/scripts | tar -xf - -C "$pkg_dir/"
 
+    # qwen-code-extension (exclude Python cache artifacts)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        qwen-code-extension/ | tar -xf - -C "$pkg_dir/"
+
     # codex-plugin (hooks + install script + .agents registry, exclude __pycache__)
     tar -cf - -C "${SEC_DIR}" \
         --exclude='__pycache__' \
         codex-plugin/hooks-plugin codex-plugin/install.sh codex-plugin/.agents | tar -xf - -C "$pkg_dir/"
+
+    # qoder-plugin (hooks + install script, exclude __pycache__)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        qoder-plugin/ | tar -xf - -C "$pkg_dir/"
 
 
     # Include agent-sec-cli source for maturin wheel build
@@ -410,7 +421,7 @@ build_agentsight() {
     [ -f "${SIGHT_DIR}/scripts/agentsight.service" ] && cp "${SIGHT_DIR}/scripts/agentsight.service" "$pkg_dir/"
     [ -f "${SIGHT_DIR}/scripts/agentsight-start.sh" ] && cp "${SIGHT_DIR}/scripts/agentsight-start.sh" "$pkg_dir/agentsight-start"
     [ -f "${SIGHT_DIR}/README.md" ] && cp "${SIGHT_DIR}/README.md" "$pkg_dir/"
-    [ -f "${SIGHT_DIR}/README_CN.md" ] && cp "${SIGHT_DIR}/README_CN.md" "$pkg_dir/"
+    [ -f "${SIGHT_DIR}/README_zh.md" ] && cp "${SIGHT_DIR}/README_zh.md" "$pkg_dir/"
     [ -f "${SIGHT_DIR}/LICENSE" ] && cp "${SIGHT_DIR}/LICENSE" "$pkg_dir/"
 
     # component.toml — spec %install installs it to %{_datadir}/anolisa/components/agentsight/
@@ -485,14 +496,18 @@ build_tokenless() {
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
     # Note: third_party/rtk must be included — it's built separately via --manifest-path
     # Adapter config files (manifest.json, package.json, openclaw.plugin.json, plugin.yaml)
-    # are excluded because they are generated from .in templates by
-    # stamp-adapter-templates during rpmbuild %build (make build-openclaw-plugin).
+    # and the component contract (component.toml) are excluded because they are
+    # generated from .in templates by stamp-adapter-templates during rpmbuild
+    # %build (make build-openclaw-plugin). Excluding them ensures the RPM build
+    # always regenerates from the authoritative .in template, preventing stale
+    # contracts from shipping (see GH-1470).
     tar -cf - -C "$TOKEN_DIR" \
         --exclude='target' \
         --exclude='.git' \
         --exclude='node_modules' \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
+        --exclude='.anolisa/component.toml' \
         --exclude='adapters/tokenless/manifest.json' \
         --exclude='adapters/tokenless/openclaw/package.json' \
         --exclude='adapters/tokenless/openclaw/openclaw.plugin.json' \
@@ -621,6 +636,76 @@ build_agent_memory() {
 }
 
 # =============================================================================
+# anolisa
+# =============================================================================
+build_anolisa() {
+    log "=========================================="
+    log "Building RPM: anolisa"
+    log "=========================================="
+
+    log "Step 1/3: Creating source tarball from committed snapshot..."
+    local snapshot_tmp
+    snapshot_tmp=$(mktemp -d)
+    (
+        trap 'rm -rf -- "$snapshot_tmp"' EXIT
+        local extract_dir="${snapshot_tmp}/source"
+        mkdir -p "$extract_dir"
+
+        # Both source archives must share this snapshot so a dirty worktree
+        # cannot pair committed sources with dependencies from another revision.
+        git -C "$ROOT_DIR" archive --format=tar HEAD:src/anolisa |
+            tar -xf - -C "$extract_dir"
+
+        local spec_in="${extract_dir}/anolisa.spec.in"
+        if [ ! -f "$spec_in" ]; then
+            err "Spec template not found in committed snapshot: $spec_in"
+            return 1
+        fi
+
+        local version="${VERSION:-}"
+        if [ -z "$version" ]; then
+            version=$(grep -m1 '^version = ' "${extract_dir}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+        fi
+        if [ -z "$version" ]; then
+            err "Cannot determine anolisa version from committed Cargo.toml. Set VERSION to override it."
+            return 1
+        fi
+
+        local pkg_name
+        pkg_name=$(parse_spec_name "$spec_in")
+        local pkg_dir="${snapshot_tmp}/${pkg_name}"
+        mv "$extract_dir" "$pkg_dir"
+        spec_in="${pkg_dir}/anolisa.spec.in"
+
+        local tarball_name="${pkg_name}-${version}.tar.gz"
+        local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+        local spec_file
+        spec_file=$(process_spec_template "$spec_in" "$version")
+
+        tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$snapshot_tmp" "$pkg_name"
+
+        log "Step 2/3: Creating vendor tarball ${vendor_tarball_name}..."
+        local vendor_tmp
+        vendor_tmp=$(mktemp -d)
+        (
+            trap 'rm -rf -- "$vendor_tmp"' EXIT
+            (
+                cd "$pkg_dir"
+                cargo vendor --locked "${vendor_tmp}/vendor" >/dev/null
+            )
+            tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" vendor
+        )
+
+        log "Step 3/3: Running rpmbuild..."
+        "$RPMBUILD" -ba --nodeps \
+            --define "_topdir ${BUILD_DIR}" \
+            "$spec_file"
+
+        ok "anolisa RPM built successfully"
+    )
+}
+
+# =============================================================================
 # skillfs
 # =============================================================================
 build_skillfs() {
@@ -697,6 +782,67 @@ EOF
         "$spec_file"
 
     ok "skillfs RPM built successfully"
+}
+
+# =============================================================================
+# cosh-ng
+# =============================================================================
+build_cosh_ng() {
+    log "=========================================="
+    log "Building RPM: cosh-ng"
+    log "=========================================="
+
+    local spec_in="${COSH_DIR}/cosh-ng.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    # Version from env, Cargo.toml workspace, then spec fallback
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${COSH_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        err "Could not derive cosh-ng version from VERSION env, Cargo.toml, or ${spec_in}"
+        exit 1
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    # Single Source0 tarball: spec %build is plain `cargo build --workspace --release`
+    # (online), %prep is `%setup -q` which expects top-level dir `%{name}-%{version}`.
+    log "Step 1/2: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "$pkg_dir"
+
+    # cosh-ng ships component.toml at repo root — must be in the tarball because
+    # spec %install does `install -m 0644 component.toml ...`.
+    tar -cf - -C "$COSH_DIR" \
+        --exclude='target' \
+        --exclude='.git' \
+        --exclude='node_modules' \
+        . | tar -xf - -C "$pkg_dir"
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    log "Step 2/2: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "cosh-ng RPM built successfully"
 }
 
 # =============================================================================
@@ -972,6 +1118,8 @@ usage() {
     echo "  tokenless                 Build tokenless RPM"
     echo "  agent-memory              Build agent-memory RPM"
     echo "  skillfs                   Build skillfs RPM"
+    echo "  anolisa                   Build anolisa RPM"
+    echo "  cosh-ng                   Build cosh-ng RPM"
     echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
     echo "  containerd-shim-runsc-v1  Build containerd-shim-runsc-v1 RPM (sandbox)"
     echo "  atelet                    Build atelet RPM (sandbox, placeholder)"
@@ -1028,6 +1176,12 @@ case "$TARGET" in
     skillfs)
         build_skillfs
         ;;
+    anolisa)
+        build_anolisa
+        ;;
+    cosh-ng)
+        build_cosh_ng
+        ;;
     gvisor-runsc)
         build_gvisor_runsc
         ;;
@@ -1054,6 +1208,8 @@ case "$TARGET" in
         build_tokenless
         build_agent_memory
         build_skillfs
+        build_anolisa
+        build_cosh_ng
         ;;
     *)
         err "Unknown package: $TARGET"

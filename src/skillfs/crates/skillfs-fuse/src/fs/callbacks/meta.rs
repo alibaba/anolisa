@@ -1053,6 +1053,85 @@ impl SkillFs {
             stat.f_frsize as u32,
         );
     }
+
+    fn check_activated_access_result(
+        &self,
+        read_path: &Path,
+        write_path: &Path,
+        mask: i32,
+        req: &Request,
+    ) -> i32 {
+        if mask == libc::F_OK {
+            return self.check_physical_access_result(read_path, mask, req);
+        }
+
+        let read_mask = mask & (libc::R_OK | libc::X_OK);
+        if read_mask != 0 {
+            let result = self.check_physical_access_result(read_path, read_mask, req);
+            if result != 0 {
+                return result;
+            }
+        }
+
+        if (mask & libc::W_OK) != 0 {
+            return self.check_physical_access_result(write_path, libc::W_OK, req);
+        }
+
+        0
+    }
+
+    fn flat_access_read_path(
+        &self,
+        skill_name: &str,
+        relative_path: Option<&Path>,
+    ) -> Option<std::path::PathBuf> {
+        let live_dir = self.source_base().join(skill_name);
+        if self.is_staging_skill_root(skill_name)
+            || self.is_pending_install(skill_name)
+            || relative_path.is_some_and(|relative| {
+                self.is_post_publish_grace_allowed(skill_name, Some(relative))
+            })
+        {
+            return Some(match relative_path {
+                Some(relative) => live_dir.join(relative),
+                None => live_dir,
+            });
+        }
+
+        self.skill_read_dir(skill_name)
+            .map(|dir| match relative_path {
+                Some(relative) => dir.join(relative),
+                None => dir,
+            })
+    }
+
+    fn nested_access_read_path(
+        &self,
+        category: &str,
+        skill_name: &str,
+        relative_path: Option<&Path>,
+    ) -> Option<std::path::PathBuf> {
+        let nested_id = Self::hermes_skill_id(category, skill_name);
+        let live_dir = self.source_base().join(category).join(skill_name);
+        if self.is_staging_skill_root(&nested_id)
+            || self.is_pending_install(&nested_id)
+            || relative_path.is_some_and(|relative| {
+                self.is_post_publish_grace_allowed(&nested_id, Some(relative))
+            })
+        {
+            return Some(match relative_path {
+                Some(relative) => live_dir.join(relative),
+                None => live_dir,
+            });
+        }
+
+        self.hermes_nested_skill_read_dir(category, skill_name)
+            .map(|dir| match relative_path {
+                Some(relative) => dir.join(relative),
+                None => dir,
+            })
+    }
+
     pub(in crate::fs) fn access_impl(
         &mut self,
         req: &Request,
@@ -1158,8 +1237,14 @@ impl SkillFs {
                         reply.ok();
                     }
                 } else {
-                    let file_path = self.source_base().join(skill_name).join("SKILL.md");
-                    let result = self.check_physical_access_result(&file_path, mask, req);
+                    let live_path = self.source_base().join(skill_name).join("SKILL.md");
+                    let read_path =
+                        match self.flat_access_read_path(skill_name, Some(Path::new("SKILL.md"))) {
+                            Some(path) => path,
+                            None => return reply.error(libc::ENOENT),
+                        };
+                    let result =
+                        self.check_activated_access_result(&read_path, &live_path, mask, req);
                     if result == 0 {
                         reply.ok();
                     } else {
@@ -1212,8 +1297,15 @@ impl SkillFs {
                             return;
                         }
                     }
-                    let file_path = self.source_base().join(skill_name).join(relative_path);
-                    let result = self.check_physical_access_result(&file_path, mask, req);
+                    let live_path = self.source_base().join(skill_name).join(relative_path);
+                    let read_path = match self
+                        .flat_access_read_path(skill_name, Some(relative_path.as_path()))
+                    {
+                        Some(path) => path,
+                        None => return reply.error(libc::ENOENT),
+                    };
+                    let result =
+                        self.check_activated_access_result(&read_path, &live_path, mask, req);
                     if result == 0 {
                         reply.ok();
                     } else {
@@ -1236,12 +1328,38 @@ impl SkillFs {
                     reply.error(result);
                 }
             }
-            PathType::NestedSkillDir { .. } | PathType::NestedSkillMd { .. } => {
-                let physical = match self.resolve_physical_path(&path) {
-                    Some(p) => p,
+            PathType::NestedSkillDir {
+                ref category,
+                ref skill_name,
+            } => {
+                let live_path = self.source_base().join(category).join(skill_name);
+                let read_path = match self.nested_access_read_path(category, skill_name, None) {
+                    Some(path) => path,
                     None => return reply.error(libc::ENOENT),
                 };
-                let result = self.check_physical_access_result(&physical, mask, req);
+                let result = self.check_activated_access_result(&read_path, &live_path, mask, req);
+                if result == 0 {
+                    reply.ok();
+                } else {
+                    reply.error(result);
+                }
+            }
+            PathType::NestedSkillMd {
+                ref category,
+                ref skill_name,
+            } => {
+                let relative_path = Path::new("SKILL.md");
+                let live_path = self
+                    .source_base()
+                    .join(category)
+                    .join(skill_name)
+                    .join(relative_path);
+                let read_path =
+                    match self.nested_access_read_path(category, skill_name, Some(relative_path)) {
+                        Some(path) => path,
+                        None => return reply.error(libc::ENOENT),
+                    };
+                let result = self.check_activated_access_result(&read_path, &live_path, mask, req);
                 if result == 0 {
                     reply.ok();
                 } else {
@@ -1288,11 +1406,20 @@ impl SkillFs {
                         return;
                     }
                 }
-                let physical = match self.resolve_physical_path(&path) {
-                    Some(p) => p,
+                let live_path = self
+                    .source_base()
+                    .join(category)
+                    .join(skill_name)
+                    .join(relative_path);
+                let read_path = match self.nested_access_read_path(
+                    category,
+                    skill_name,
+                    Some(relative_path.as_path()),
+                ) {
+                    Some(path) => path,
                     None => return reply.error(libc::ENOENT),
                 };
-                let result = self.check_physical_access_result(&physical, mask, req);
+                let result = self.check_activated_access_result(&read_path, &live_path, mask, req);
                 if result == 0 {
                     reply.ok();
                 } else {

@@ -14,18 +14,17 @@ CLI resolution: prefers the installed ``agent-sec-cli`` binary; falls back
 to ``python -m agent_sec_cli.cli`` when the binary is not on PATH.
 """
 
+# ruff: noqa: I001
+
 import json
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
-import uuid
 from typing import List, Tuple
 
 import pytest
-
-TELEMETRY_LOG_PATH_ENV = "AGENT_SEC_TELEMETRY_LOG_PATH"
 
 # Ensure the testdata package under unit-test/code_scanner is importable.
 _TESTDATA_DIR = (
@@ -38,7 +37,12 @@ _HELPERS_DIR = pathlib.Path(__file__).resolve().parents[1] / "_helpers"
 if str(_HELPERS_DIR) not in sys.path:
     sys.path.insert(0, str(_HELPERS_DIR))
 
-from telemetry_jsonl import wait_for_telemetry_record  # noqa: E402
+from telemetry_jsonl import (  # noqa: E402
+    TELEMETRY_LOG_PATH_ENV,
+    is_l1_telemetry_allowed,
+    telemetry_file_offset,
+    wait_for_telemetry_record,
+)
 from testdata.scan_test_data import SCAN_TEST_CASES  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -83,6 +87,7 @@ def _run_scan(
     proc = subprocess.run(
         cmd,
         capture_output=True,
+        check=False,
         text=True,
         timeout=30,
         env=os.environ.copy() if env is None else env,
@@ -139,19 +144,22 @@ class TestBasicScan:
         assert len(result["findings"]) > 0
 
     def test_scan_code_cli_writes_telemetry(self, tmp_path: pathlib.Path) -> None:
+        if not is_l1_telemetry_allowed():
+            pytest.skip("system telemetry is disabled or its sentinel is unreadable")
         telemetry_path = tmp_path / "agent-sec-core.jsonl"
         telemetry_path.write_text("", encoding="utf-8")
-        trace_id = f"e2e-code-telemetry-{uuid.uuid4()}"
+        start_offset = telemetry_file_offset(telemetry_path)
+        canary = "CUSTOMER-CANARY-CODE-TELEMETRY"
         trace_context = {
-            "trace_id": trace_id,
-            "agent_name": "cosh",
+            "trace_id": "trace-CUSTOMER-CANARY-CODE-TELEMETRY",
+            "agent_name": "qwencode",
         }
         env = os.environ.copy()
         env[TELEMETRY_LOG_PATH_ENV] = str(telemetry_path)
 
         result = _parse_result(
             _run_scan(
-                "echo telemetry",
+                f"echo {canary}",
                 top_level_args=["--trace-context", json.dumps(trace_context)],
                 env=env,
             )
@@ -160,17 +168,23 @@ class TestBasicScan:
         assert result["verdict"] == "pass"
         telemetry = wait_for_telemetry_record(
             telemetry_path,
-            trace_id=trace_id,
             event_type="code_scan",
+            start_offset=start_offset,
         )
-        assert telemetry["component.name"] == "agent-sec-core"
-        assert telemetry["component.agent_name"] == "cosh"
-        assert telemetry["seccore.category"] == "code_scan"
-        assert telemetry["seccore.request"] == {
-            "code": "echo telemetry",
-            "language": "bash",
-            "mode": "regex",
+        assert set(telemetry) == {
+            "component.name",
+            "component.version",
+            "component.agent_name",
+            "seccore.event_type",
+            "seccore.category",
+            "seccore.result",
+            "seccore.timestamp",
+            "seccore.verdict",
+            "seccore.elapsed_ms",
         }
+        assert telemetry["component.agent_name"] == "qwencode"
+        assert telemetry["seccore.category"] == "code_scan"
+        assert canary not in json.dumps(telemetry, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

@@ -175,6 +175,10 @@ fn resolve_ops_path(env_val: Option<&str>) -> PathBuf {
 /// Best-effort JSONL ops writer.
 pub struct SlsOpsWriter {
     path: PathBuf,
+    /// Telemetry disable sentinel. Pinned to the production sentinel in
+    /// [`SlsOpsWriter::new`] (no override path exists); tests inject a temp path
+    /// so the gate does not depend on the host's real sentinel.
+    sentinel: PathBuf,
 }
 
 impl Default for SlsOpsWriter {
@@ -190,13 +194,28 @@ impl SlsOpsWriter {
         let env_val = std::env::var(SLS_OPS_PATH_ENV).ok();
         Self {
             path: resolve_ops_path(env_val.as_deref()),
+            sentinel: PathBuf::from(skillfs_fuse::security::TELEMETRY_DISABLED_SENTINEL),
         }
     }
 
-    /// Create a writer targeting an explicit path (for tests).
+    /// Create a writer targeting an explicit path (for tests). The telemetry
+    /// sentinel is pointed at a sibling path the tests never create, isolating
+    /// them from the host's real `/etc/anolisa/.telemetry_disabled`.
     #[cfg(test)]
     fn with_path(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        let path = path.into();
+        let sentinel = path
+            .parent()
+            .map(|p| p.join(".telemetry_disabled"))
+            .unwrap_or_else(|| PathBuf::from(skillfs_fuse::security::TELEMETRY_DISABLED_SENTINEL));
+        Self { path, sentinel }
+    }
+
+    /// Override the telemetry sentinel path (tests only).
+    #[cfg(test)]
+    fn with_sentinel(mut self, sentinel: impl Into<PathBuf>) -> Self {
+        self.sentinel = sentinel.into();
+        self
     }
 
     /// Append one ops record as a JSONL line (open + append + close).
@@ -205,6 +224,12 @@ impl SlsOpsWriter {
     /// file creation. Serialization or write failures are logged via
     /// `tracing::warn` and swallowed; they never change CLI behavior.
     pub fn write(&self, record: &SlsOpsRecord) {
+        // Re-check the disable sentinel on every write (before serialization
+        // and open) so creating/removing it takes effect immediately without
+        // restarting; disabled is a normal state, so skip silently.
+        if !skillfs_fuse::security::telemetry_allowed_at(&self.sentinel) {
+            return;
+        }
         if !self.path.exists() {
             return;
         }
@@ -305,6 +330,25 @@ mod tests {
         let obj: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(obj["component.name"], "skillfs");
         assert_eq!(obj["ops_name"], "list");
+    }
+
+    #[test]
+    fn disabled_sentinel_suppresses_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skillfs.jsonl");
+        std::fs::File::create(&path).unwrap();
+
+        // Sentinel present -> the write is suppressed even though the log file
+        // exists.
+        let sentinel = dir.path().join(".telemetry_disabled");
+        std::fs::File::create(&sentinel).unwrap();
+        let writer = SlsOpsWriter::with_path(&path).with_sentinel(&sentinel);
+        writer.write(&SlsOpsRecord::new("list", 3, None));
+
+        assert!(
+            std::fs::read_to_string(&path).unwrap().is_empty(),
+            "disabled telemetry must not append any record"
+        );
     }
 
     #[test]

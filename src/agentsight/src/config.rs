@@ -516,11 +516,49 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
 
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read existing config at {path:?}"))?;
+
+    // If the file is not valid JSON at all, leave it untouched so the caller's
+    // load_from_file → parse_json_rules surfaces "JSON parse error: ..." and
+    // AgentSight::new emits its `Failed to load config from {path:?}: {e},
+    // using embedded defaults` warn log. Auto-upgrade is only meaningful for
+    // *valid* JSON whose schema_version is outdated; silently overwriting an
+    // invalid file masks the parse error and breaks the documented fallback
+    // contract (see issue #1502).
+    if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+        return Ok(());
+    }
+
     let on_disk_version = extract_schema_version(&content);
 
     if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
         return Ok(());
     }
+
+    // Shallow-merge: start from the embedded default, overlay all top-level
+    // keys the user has set (except schema_version itself), then bump version.
+    // This preserves user customizations (cmdline rules, https rules,
+    // codex_offsets, feature overrides) while adding any NEW sections from the
+    // default that the old config was missing. Fixes #1496 — the previous
+    // implementation did a destructive overwrite that silently lost user data.
+    let mut base: serde_json::Value = serde_json::from_str(DEFAULT_AGENTS_JSON)
+        .expect("embedded DEFAULT_AGENTS_JSON must be valid");
+    let user: serde_json::Value =
+        serde_json::from_str(&content).expect("JSON validity already confirmed above");
+
+    if let (Some(base_obj), Some(user_obj)) = (base.as_object_mut(), user.as_object()) {
+        for (key, value) in user_obj {
+            if key == "schema_version" {
+                continue;
+            }
+            base_obj.insert(key.clone(), value.clone());
+        }
+        base_obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()),
+        );
+    }
+
+    let merged = serde_json::to_string_pretty(&base).expect("merged config must serialize");
 
     let backup = {
         let ts = std::time::SystemTime::now()
@@ -529,12 +567,12 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
             .unwrap_or(0);
         path.with_extension(format!("json.bak.{ts}"))
     };
-    std::fs::rename(path, &backup)
+    std::fs::copy(path, &backup)
         .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
-    std::fs::write(path, DEFAULT_AGENTS_JSON)
-        .with_context(|| format!("Failed to write updated agents config to {path:?}"))?;
+    std::fs::write(path, &merged)
+        .with_context(|| format!("Failed to write merged config to {path:?}"))?;
     log::info!(
-        "Config schema_version {:?} < {}, overwrote {path:?} (backup at {backup:?})",
+        "Config schema_version {:?} < {}, merged user config with defaults at {path:?} (backup at {backup:?})",
         on_disk_version,
         CURRENT_SCHEMA_VERSION
     );
@@ -804,6 +842,9 @@ pub struct AgentsightConfig {
     pub https_rules: Vec<HttpsRule>,
     /// User-defined HTTP targets (IP/port endpoints + domains for tcpsniff)
     pub http_targets: Vec<HttpTarget>,
+    /// Whether FFI mode emits raw HTTPS fallback events.
+    /// This is configured only through the C API and is not part of agentsight.json.
+    pub ffi_enable_raw_https: bool,
 
     // --- Config File Path ---
     /// Path to JSON configuration file
@@ -891,6 +932,7 @@ impl Default for AgentsightConfig {
             cmdline_rules: Vec::new(),
             https_rules: Vec::new(),
             http_targets: Vec::new(),
+            ffi_enable_raw_https: false,
 
             // Config file path default
             config_path: None,
@@ -2073,5 +2115,128 @@ mod tests {
             extract_schema_version(&content),
             Some(CURRENT_SCHEMA_VERSION)
         );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_leaves_invalid_json_untouched() {
+        // Regression for issue #1502: an unparseable config file must NOT be
+        // silently backed up + overwritten with the default. The caller's
+        // load_from_file → parse_json_rules surfaces "JSON parse error: ..."
+        // and AgentSight::new emits its "using embedded defaults" warn log.
+        // Auto-upgrade is only meaningful for valid JSON with an outdated
+        // schema_version.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let invalid = "NOT_VALID_JSON_AT_ALL{{{";
+        std::fs::write(&path, invalid).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        // File content must be unchanged — no silent overwrite.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        // No backup file should be created either.
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(
+            backups.is_empty(),
+            "invalid JSON must not trigger backup+overwrite"
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_leaves_truncated_json_untouched() {
+        // Same regression, with a truncated-JSON variant (parses as partial
+        // JSON, fails serde_json::from_str). Should also be left untouched.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let truncated = r#"{"cmdline": {"allow": [{"rule": ["*cosh*""#;
+        std::fs::write(&path, truncated).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), truncated);
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(backups.is_empty());
+    }
+
+    #[test]
+    fn ensure_default_agents_config_preserves_user_cmdline_rules_on_merge() {
+        // Regression for #1496: when migrating a valid v1 config to v2, user
+        // customizations (cmdline rules, etc.) must survive — not be overwritten
+        // with the embedded default. Discriminating: reverting to the old
+        // overwrite logic would lose "MyCustomAgent" and fail this test.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let user_config = r#"{
+            "schema_version": 1,
+            "cmdline": {
+                "allow": [
+                    {"rule": ["*mycustomagent*"], "agent_name": "MyCustomAgent"}
+                ],
+                "deny": [{"rule": ["*noisy*"]}]
+            },
+            "https": [{"rule": ["custom.api.example.com"]}]
+        }"#;
+        std::fs::write(&path, user_config).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        // User's custom agent rule must survive migration
+        assert!(
+            result.contains("MyCustomAgent"),
+            "user cmdline rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("custom.api.example.com"),
+            "user https rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("*noisy*"),
+            "user deny rule lost during migration: {result}"
+        );
+        // schema_version must be bumped to current
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            migrated["schema_version"].as_u64().unwrap() as u32,
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_adds_missing_sections_on_merge() {
+        // A v1 config that only has cmdline should gain features/runtime_limits
+        // from the default after migration — verifies additive merge.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let minimal_v1 = r#"{
+            "cmdline": {"allow": [{"rule": ["*test*"], "agent_name": "Test"}]}
+        }"#;
+        std::fs::write(&path, minimal_v1).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        // New sections from default must be present
+        assert!(
+            migrated.get("features").is_some(),
+            "features section not added from default"
+        );
+        assert!(
+            migrated.get("runtime_limits").is_some(),
+            "runtime_limits section not added from default"
+        );
+        // User's original rule must still be there
+        assert!(result.contains("Test"), "user rule lost");
     }
 }

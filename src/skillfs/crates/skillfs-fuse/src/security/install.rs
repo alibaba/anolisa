@@ -1526,7 +1526,7 @@ mod tests {
         let events = client.events();
         let mutation_events: Vec<_> = events
             .iter()
-            .filter(|e| e.skill_name == "demo-weather" && e.event_kind == "write")
+            .filter(|e| e.skill_id == "demo-weather" && e.event_kind == "write")
             .collect();
         assert_eq!(
             mutation_events.len(),
@@ -1583,7 +1583,7 @@ mod tests {
         let events = client.events();
         let matching: Vec<_> = events
             .iter()
-            .filter(|e| e.skill_name == "demo-weather")
+            .filter(|e| e.skill_id == "demo-weather")
             .collect();
         assert!(
             matching.is_empty(),

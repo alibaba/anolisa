@@ -32,7 +32,8 @@ pub(crate) use crate::hooks::{HookSourceInfo, RegisteredHookInfo};
 pub(crate) use crate::i18n::{I18n, MessageId};
 pub(crate) use crate::ledger::build_command_blocks;
 pub(crate) use crate::parser::{
-    agent_request_confirmed_by_events, agent_request_from_intercepted_input,
+    agent_request_confirmed_by_events, agent_request_for_auto_failure,
+    agent_request_from_insight_binding, agent_request_from_intercepted_input,
     approval_command_from_event, event_cancels_failed_command_analysis,
     event_confirms_failed_command_analysis, event_requests_agent_cancel,
     failed_command_agent_request_after_confirmation as agent_request_after_confirmation,
@@ -62,14 +63,13 @@ pub(crate) use crate::types::{
 };
 pub(crate) use crate::ui::{
     approval_action_at, health_uses_startup_row, hook_approval_action_at, hook_warning_icon,
-    primary_health_prompt_suggestion, render_transcript, ActivityDetailsPanelModel,
-    ActivityPanelModel, ActivityRowModel, ActivityToolRowModel, AgentStatusAnimation,
-    ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
-    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
-    CommandAssessmentSummaryModel, HealthBannerModel, HookWarningView, MarkdownStreamBlock,
-    NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
-    RecommendationActionPanelModel, RecommendationPanelModel, ToolInvocationCardModel,
-    ToolInvocationDensity, ToolInvocationTone,
+    render_transcript, ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel,
+    ActivityToolRowModel, AgentStatusAnimation, ApprovalDetailsPanelModel,
+    ApprovalJournalEntryModel, ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel,
+    ApprovalReceiptPanelModel, CommandAssessmentSummaryModel, HealthBannerModel, HookWarningView,
+    MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel,
+    RatatuiInlineRenderer, RecommendationActionPanelModel, RecommendationPanelModel,
+    ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
 };
 
 #[cfg(test)]
@@ -86,7 +86,11 @@ pub(crate) use crate::activity::runtime::{
     render_provider_native_shell_transcript, ActivityRecordPolicy,
 };
 pub(crate) use crate::agent::events::flush_held_agent_events;
-pub(crate) use crate::agent::run::{start_agent_run, stop_active_agent_run_without_rendering};
+pub(crate) use crate::agent::run::{
+    control_queue_has_capacity, start_agent_run, start_agent_run_control_response,
+    start_agent_run_with_origin_disposition, stop_active_agent_run_without_rendering,
+    AgentRunOrigin, AgentStartDisposition, AgentStartIntent,
+};
 pub(crate) use crate::approval::approved_tool::{
     request_is_executable_bash_tool, request_is_readonly_builtin_tool,
 };

@@ -1,7 +1,5 @@
 mod en;
-mod en_approval;
 mod message_id;
-mod message_id_all;
 mod zh;
 
 use crate::config::Language;
@@ -46,6 +44,57 @@ fn message(language: Language, id: MessageId) -> &'static str {
 mod tests {
     use super::{I18n, MessageId};
     use crate::config::Language;
+    use std::fs;
+    use std::path::Path;
+
+    const EXPECTED_CATALOG_DOMAINS: &[&str] = &[
+        "activity",
+        "agent",
+        "approval",
+        "config",
+        "debug",
+        "health",
+        "help",
+        "hook_details",
+        "hooks",
+        "insight",
+        "modes",
+        "question",
+        "recommendation",
+        "session",
+        "startup",
+    ];
+
+    fn catalog_modules(directory: &str) -> Vec<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/i18n")
+            .join(directory);
+        let mut modules = fs::read_dir(path)
+            .expect("read i18n catalog directory")
+            .map(|entry| entry.expect("read i18n catalog entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .map(|path| {
+                path.file_stem()
+                    .expect("i18n catalog module stem")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        modules.sort();
+        modules
+    }
+
+    #[test]
+    fn language_catalog_modules_match_message_id_domains() {
+        let domains = EXPECTED_CATALOG_DOMAINS
+            .iter()
+            .map(|domain| (*domain).to_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(catalog_modules("message_id"), domains);
+        assert_eq!(catalog_modules("en"), domains);
+        assert_eq!(catalog_modules("zh"), domains);
+    }
 
     #[test]
     fn all_messages_have_en_and_zh_values() {
@@ -56,16 +105,23 @@ mod tests {
     }
 
     #[test]
+    fn message_id_keeps_fieldless_enum_compatibility() {
+        for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
+            assert_eq!(id as usize, ordinal);
+        }
+    }
+
+    #[test]
     fn format_replaces_known_args_and_keeps_missing_args() {
         let i18n = I18n::new(Language::EnUs);
         let text = i18n.format(
             MessageId::StartupAdapterLine,
-            &[("adapter", "qwen"), ("shell", "bash")],
+            &[("adapter", "qwen"), ("shell", "bash"), ("approval", "auto")],
         );
 
         assert!(text.contains("qwen"));
         assert!(text.contains("bash"));
-        assert!(text.contains("{mode}"));
+        assert!(text.contains("{analysis}"));
     }
 
     #[test]
@@ -77,7 +133,10 @@ mod tests {
             .contains("/config language"));
         assert!(i18n
             .t(MessageId::RecommendationFooter)
-            .contains("[Copy] [Insert] [Details]"));
+            .contains("未执行任何命令"));
+        assert!(!i18n
+            .t(MessageId::RecommendationFooter)
+            .contains("[Details]"));
         assert!(i18n.t(MessageId::ApprovalToolInputLabel).contains("Tool"));
         assert!(i18n.t(MessageId::HelpSummaryConfig).contains("语言"));
         assert!(i18n

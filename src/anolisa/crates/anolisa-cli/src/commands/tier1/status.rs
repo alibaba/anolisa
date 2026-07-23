@@ -8,48 +8,30 @@
 //!
 //! This handler reports state-on-disk plus live read-only probes. Every
 //! persisted field in [`ComponentRecord`] is projected straight from
-//! [`InstalledObject`]; synthesized data is limited to read-only rpmdb,
-//! integrity, adapter, and manifest health observations.
+//! [`Installation`]; synthesized data is limited to read-only rpmdb,
+//! integrity, adapter, and manifest health observations. Quarantined
+//! legacy records are surfaced as `needs-attention` rows with their exits
+//! (`repair`/`forget`) — `status` is the only command that shows them
+//! unprompted. Nothing here ever writes state.
 
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use serde::Serialize;
 
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
 use anolisa_core::adapter::claim::ClaimStatus;
 #[cfg(test)]
 use anolisa_core::adapter::manager::AdapterSourceStatus;
 use anolisa_core::adapter::manager::ScanEntry;
-use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
-use anolisa_core::{
-    Catalog, HealthEntry, HealthSpec, InstalledObject, IntegrityStatus, RpmMetadata, ServiceState,
-    check_owned_file, service_for_install_mode as service_factory,
-};
+use anolisa_core::domain::{Installation, ProviderBinding};
+use anolisa_core::state::ObjectKind;
+use anolisa_core::state_migration::QuarantineReason;
 #[cfg(test)]
-use anolisa_core::{InstalledState, ObjectKind};
-
-/// Wall-clock ceiling for a single manifest command-kind probe. `status`
-/// is read-only; a hostile or buggy probe must not be able to hang the
-/// CLI. 5s is generous for the smoke-test probes the spec describes
-/// (`<bindir>/agentsight --help`) while keeping the worst case bounded.
-const COMMAND_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Polling cadence for the command-probe wait loop. Mirrors the hook
-/// runner — sub-second responsiveness for fast probes without burning
-/// CPU.
-const COMMAND_PROBE_POLL: Duration = Duration::from_millis(25);
-
-/// Single-character glyphs that turn the command string into a shell
-/// expression. Manifest probes are validated *not* to contain any of
-/// these — we never run them through `sh -c`, so anything that requires
-/// a shell to interpret is, by definition, not a valid probe.
-const SHELL_METACHARS: &[char] = &[
-    ';', '|', '&', '>', '<', '$', '`', '\\', '{', '}', '(', ')', '*', '?', '~', '!', '\n', '\r',
-    '\'', '"',
-];
+use anolisa_core::state_store::StateStore;
+use anolisa_core::{
+    CheckEnv, CheckOutcome, CheckStatus, ComponentManifest, HealthEntry, IntegrityStatus,
+    ServiceManager, ServiceProbes, check_owned_file, run_check,
+    service_for_install_mode as service_factory, user_service_for_install_mode,
+};
 use anolisa_env::EnvService;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
@@ -58,7 +40,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
-use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView, StateVisibility};
+use crate::commands::state_view::{StateScope, StateView, StateVisibility};
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::BackendConfig;
@@ -100,9 +82,10 @@ pub(crate) struct AdapterSummaryRecord {
 }
 
 /// JSON-shaped record for a single component, used in both the wire
-/// envelope and the human renderer. Fields are projected straight from
-/// the matching [`InstalledObject`] on disk; optional/empty fields are
-/// skipped when absent so synthetic `not_installed` records stay compact.
+/// envelope and the human renderer. Fields are projected straight from the
+/// matching [`Installation`] on disk;
+/// optional/empty fields are skipped when absent so synthetic
+/// `not_installed` records stay compact.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComponentRecord {
     pub(crate) name: String,
@@ -148,74 +131,49 @@ pub(crate) struct ComponentRecord {
     pub(crate) provisioned_packages: Vec<String>,
 }
 
+/// JSON-shaped record for a quarantined legacy record: migration preserved
+/// it verbatim because provenance could not be established, so no intent
+/// except `repair`/`forget` will touch it. Surfaced by `status` as
+/// `needs-attention` — the record is invisible to every other command, and
+/// this is where the user finds out it exists.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct QuarantinedRecord {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) scope: String,
+    /// Always `needs-attention`.
+    pub(crate) status: &'static str,
+    pub(crate) version: String,
+    /// Why migration refused to classify the record.
+    pub(crate) reason: String,
+    /// Suggested exit: `repair` rebuilds from system reality, `forget`
+    /// drops the record.
+    pub(crate) hint: String,
+}
+
 #[derive(Serialize)]
 struct StatusPayload {
     components: Vec<ComponentRecord>,
+    /// Quarantined legacy records needing user action; absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    quarantined: Vec<QuarantinedRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct ScopedCatalogs {
-    entries: Vec<ScopedCatalog>,
-}
-
-#[derive(Debug)]
-struct ScopedCatalog {
-    state_path: PathBuf,
-    catalog: Catalog,
-}
-
-impl ScopedCatalogs {
-    pub(crate) fn load(view: &StateView, command: &str) -> Self {
-        let entries = view
-            .visible_roots
-            .iter()
-            .filter_map(|root| {
-                common::load_catalog_for_layout(
-                    &root.layout,
-                    install_mode_for_scope(root.scope),
-                    command,
-                )
-                .ok()
-                .map(|catalog| ScopedCatalog {
-                    state_path: root.state_path.clone(),
-                    catalog,
-                })
-            })
-            .collect();
-        Self { entries }
-    }
-
-    #[cfg(test)]
-    fn from_entries(entries: Vec<(PathBuf, Catalog)>) -> Self {
-        Self {
-            entries: entries
-                .into_iter()
-                .map(|(state_path, catalog)| ScopedCatalog {
-                    state_path,
-                    catalog,
-                })
-                .collect(),
-        }
-    }
-
-    pub(crate) fn catalog_for(&self, root: &ScopedStateRoot) -> Option<&Catalog> {
-        self.entries
-            .iter()
-            .find(|entry| entry.state_path == root.state_path)
-            .map(|entry| &entry.catalog)
-    }
+/// Selects which records an aggregate read-only view should project.
+#[derive(Clone, Copy)]
+pub(crate) enum AggregateRecordSelection {
+    /// Project only the effective record for each component name.
+    ActiveOnly,
+    /// Project every readable scope record, including shadowed records.
+    AllVisible,
 }
 
 pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     let mut view = StateView::load(ctx, COMMAND, StateVisibility::UserPlusSystem)?;
     migrate_view_states(&mut view);
     let layout = common::resolve_layout(ctx);
-    // Catalogs are best-effort: if manifests are missing or malformed for a
-    // scoped root, status still reports state-on-disk plus integrity. Manifest
-    // health checks are additive and must not mask a working install.
-    let catalogs = ScopedCatalogs::load(&view, COMMAND);
     let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
 
     let query = RpmPackageQuery::system();
@@ -238,11 +196,21 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         .as_ref()
         .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
 
+    let system_scope_service = service_factory(InstallMode::System.as_str(), &env);
+    let current_system_service = service_factory(ctx.install_mode.as_str(), &env);
+    let user_service = user_service_for_install_mode(ctx.install_mode.as_str(), &env);
+    let service_backends = ServiceProbeBackends {
+        system_scope: system_scope_service.as_ref(),
+        current_system: current_system_service.as_ref(),
+        user: user_service.as_ref(),
+    };
+
     let mut records = select_components_from_view(
         &view,
-        &catalogs,
         selected_component.as_deref(),
+        AggregateRecordSelection::AllVisible,
         adapter_scan.as_ref().map(|r| r.entries.as_slice()),
+        Some(&service_backends),
         Some(&query),
     );
 
@@ -262,11 +230,14 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         }
     }
 
+    let quarantined = select_quarantined_from_view(&view, selected_component.as_deref());
+
     if ctx.json {
         return render_json(
             COMMAND,
             StatusPayload {
                 components: records,
+                quarantined,
                 warnings: view.warnings,
             },
         );
@@ -275,8 +246,64 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     if !ctx.quiet {
         render_warnings(&view.warnings);
         render_human(&records, ctx.verbose, ctx.no_color);
+        render_quarantined(&quarantined, ctx.no_color);
     }
     Ok(())
+}
+
+/// Project the quarantined records of every visible root, optionally
+/// filtered to one name. Read-only, like everything else in `status`:
+/// the records stay on disk untouched until `repair` or `forget`.
+fn select_quarantined_from_view(
+    view: &StateView,
+    selected: Option<&str>,
+) -> Vec<QuarantinedRecord> {
+    view.visible_roots
+        .iter()
+        .flat_map(|root| {
+            root.state
+                .quarantined
+                .iter()
+                .filter(|q| selected.is_none_or(|name| q.record.name == name))
+                .map(|q| {
+                    let scope = root.scope.label();
+                    let repair = scoped_component_command(scope, "repair", &q.record.name);
+                    let forget = scoped_component_command(scope, "forget", &q.record.name);
+                    QuarantinedRecord {
+                        name: q.record.name.clone(),
+                        kind: kind_label(q.record.kind).to_string(),
+                        scope: scope.to_string(),
+                        status: "needs-attention",
+                        version: q.record.version.clone(),
+                        reason: quarantine_reason_text(&q.reason),
+                        hint: format!(
+                            "run `{repair}` to rebuild the record from system reality, or `{forget}` to drop it"
+                        ),
+                    }
+                })
+        })
+        .collect()
+}
+
+fn kind_label(kind: ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::Component => "component",
+        ObjectKind::Adapter => "adapter",
+        ObjectKind::Osbase => "osbase",
+        ObjectKind::Capability => "capability",
+    }
+}
+
+fn quarantine_reason_text(reason: &QuarantineReason) -> String {
+    match reason {
+        QuarantineReason::UnknownBackend { backend } => format!(
+            "its record names install backend '{backend}', which this version cannot interpret"
+        ),
+        QuarantineReason::NoEvidence => {
+            "its record carries no provenance evidence (no ownership, backend, source, or file list)"
+                .to_string()
+        }
+    }
 }
 
 pub(crate) fn migrate_view_states(view: &mut StateView) {
@@ -289,38 +316,62 @@ pub(crate) fn migrate_view_states(view: &mut StateView) {
 }
 
 fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliContext) -> String {
-    if view
-        .visible_components()
-        .iter()
-        .any(|record| record.object.name == input)
-    {
+    if view.has_exact_component(input) {
         return input.to_string();
     }
-    common::lookup_component_name(input, &view.writable.state, ctx, COMMAND)
+    common::lookup_component_name_in_store(input, &view.writable.state, ctx, COMMAND)
 }
 
-const fn install_mode_for_scope(scope: StateScope) -> InstallMode {
-    match scope {
-        StateScope::User => InstallMode::User,
-        StateScope::System => InstallMode::System,
+/// Scope-routed service managers for the manifest health probe, built once
+/// per invocation. Mirrors doctor's routing: system units on a system-scope
+/// record probe through the real system manager regardless of invocation
+/// mode; user units probe through the invocation's user manager (only a
+/// user-mode invocation carries the caller's session bus).
+pub(crate) struct ServiceProbeBackends<'a> {
+    /// Answers system-scope units on system-scope records.
+    pub(crate) system_scope: &'a dyn ServiceManager,
+    /// Answers system-scope units on user-scope records: the invocation-mode
+    /// factory, a real manager only in a system-mode invocation.
+    pub(crate) current_system: &'a dyn ServiceManager,
+    /// Answers user-scope units (`systemctl --user`).
+    pub(crate) user: &'a dyn ServiceManager,
+}
+
+impl ServiceProbeBackends<'_> {
+    /// System-unit manager for a record living in `scope` ("system"/"user").
+    fn system_for_record_scope(&self, scope: &str) -> &dyn ServiceManager {
+        if scope == "system" {
+            self.system_scope
+        } else {
+            self.current_system
+        }
     }
 }
 
-/// Pure selector: project [`InstalledState`] down to component records,
+/// Pure selector: project the [`StateStore`] down to component records,
 /// optionally filtered to a single name. Extracted so tests can exercise
 /// the filtering/synthetic-not-installed logic without mocking
-/// `CliContext` or touching the filesystem.
+/// `CliContext` or touching the filesystem. Service probes answer
+/// unsupported here — routing is exercised through `record_from_object`
+/// with injected backends.
 #[cfg(test)]
 pub(crate) fn select_components(
-    state: &InstalledState,
+    state: &StateStore,
     layout: &FsLayout,
-    catalog: Option<&Catalog>,
     install_mode: &str,
     name: Option<&str>,
     adapter_scan: Option<&[ScanEntry]>,
 ) -> Vec<ComponentRecord> {
-    let installed: Vec<&InstalledObject> = state
-        .objects
+    use anolisa_core::NotSupportedServiceManager;
+
+    let quiet = NotSupportedServiceManager::new("service probes disabled in this selector".into());
+    let backends = ServiceProbeBackends {
+        system_scope: &quiet,
+        current_system: &quiet,
+        user: &quiet,
+    };
+    let installed: Vec<&Installation> = state
+        .installations
         .iter()
         .filter(|o| o.kind == ObjectKind::Component)
         .collect();
@@ -329,7 +380,7 @@ pub(crate) fn select_components(
         None => installed
             .iter()
             .map(|o| {
-                let mut rec = record_from_object(layout, catalog, install_mode, o);
+                let mut rec = record_from_object(layout, install_mode, Some(&backends), o);
                 apply_current_scope(&mut rec, layout, install_mode);
                 rec.adapters = adapter_summaries_for(&o.name, adapter_scan);
                 rec
@@ -337,7 +388,7 @@ pub(crate) fn select_components(
             .collect(),
         Some(target) => match installed.iter().find(|o| o.name == target) {
             Some(obj) => {
-                let mut rec = record_from_object(layout, catalog, install_mode, obj);
+                let mut rec = record_from_object(layout, install_mode, Some(&backends), obj);
                 apply_current_scope(&mut rec, layout, install_mode);
                 rec.adapters = adapter_summaries_for(&obj.name, adapter_scan);
                 vec![rec]
@@ -347,11 +398,16 @@ pub(crate) fn select_components(
     }
 }
 
+/// `manifest_probe` controls whether the projection executes each record's
+/// snapshot-declared health check: status passes its scope-routed backends,
+/// doctor passes `None` because it runs the same structured checks itself
+/// (with its own dry-run semantics) — there must be exactly one executor.
 pub(crate) fn select_components_from_view(
     view: &StateView,
-    catalogs: &ScopedCatalogs,
     name: Option<&str>,
+    aggregate_selection: AggregateRecordSelection,
     adapter_scan: Option<&[ScanEntry]>,
+    manifest_probe: Option<&ServiceProbeBackends<'_>>,
     rpm_query: Option<&dyn PackageQuery>,
 ) -> Vec<ComponentRecord> {
     let visible_components = view.visible_components();
@@ -359,7 +415,9 @@ pub(crate) fn select_components_from_view(
         None => visible_components
             .iter()
             .copied()
-            .filter(|record| record.active)
+            .filter(|record| {
+                record.active || matches!(aggregate_selection, AggregateRecordSelection::AllVisible)
+            })
             .collect(),
         Some(target) => visible_components
             .iter()
@@ -378,22 +436,16 @@ pub(crate) fn select_components_from_view(
     target_records
         .into_iter()
         .map(|record| {
-            let catalog = catalogs.catalog_for(record.root);
             let mut component = record_from_object(
                 &record.root.layout,
-                catalog,
                 record.scope().label(),
+                manifest_probe,
                 record.object,
             );
             component.adapters = adapter_summaries_for(&component.name, adapter_scan);
             apply_record_scope(&mut component, &record);
             if let Some(query) = rpm_query {
-                apply_rpm_drift_to_record(
-                    &mut component,
-                    record.object.rpm_metadata.as_ref(),
-                    query,
-                    &checked_at,
-                );
+                apply_rpm_drift_to_record(&mut component, record.object, query, &checked_at);
             }
             component
         })
@@ -530,16 +582,19 @@ pub(crate) enum RpmDrift {
 /// is a genuine divergence from the single recorded version, so it classifies
 /// as drift. `query` is injected so tests drive this without a live rpmdb.
 // pub(crate): driven by the cross-command MVP lifecycle test (#963).
-pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> Option<RpmDrift> {
-    match query.query_installed(&meta.package_name) {
+pub(crate) fn probe_rpm_drift(
+    package: &str,
+    recorded_evr: Option<&str>,
+    query: &dyn PackageQuery,
+) -> Option<RpmDrift> {
+    match query.query_installed(package) {
         Ok(Some(info)) => {
             let live = info.version.to_string();
-            match meta.evr.as_deref() {
+            match recorded_evr {
                 // Recorded EVR diverges from rpmdb: a manual dnf update/downgrade.
                 Some(recorded) if recorded != live => Some(RpmDrift::Drifted {
                     reason: format!(
-                        "rpmdb reports {live} for package {} but ANOLISA state records {recorded}",
-                        meta.package_name
+                        "rpmdb reports {live} for package {package} but ANOLISA state records {recorded}"
                     ),
                 }),
                 // EVR matches, or none recorded to compare against: no drift.
@@ -553,10 +608,7 @@ pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> O
         // The recorded version can no longer be trusted as-is, so surface it as
         // drift carrying the backend's own detail rather than guessing the cause.
         Err(PackageQueryError::UnexpectedOutput { detail, .. }) => Some(RpmDrift::Drifted {
-            reason: format!(
-                "rpmdb returned unexpected output for package {}: {detail}",
-                meta.package_name
-            ),
+            reason: format!("rpmdb returned unexpected output for package {package}: {detail}"),
         }),
         // rpm/dnf absent, or a spawn/permission/query failure: cannot prove
         // drift on an unrunnable query, so keep the recorded status untouched.
@@ -564,29 +616,41 @@ pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> O
     }
 }
 
+/// The (package, recorded EVR) pair the drift probe compares against rpmdb,
+/// when the installation is delegated with a resolved package.
+pub(crate) fn drift_probe_identity(installation: &Installation) -> Option<(&str, Option<&str>)> {
+    match &installation.binding {
+        ProviderBinding::Delegated {
+            package,
+            last_observed,
+            ..
+        } => package
+            .resolved_name()
+            .map(|name| (name, last_observed.as_ref().and_then(|o| o.evr.as_deref()))),
+        ProviderBinding::Owned { .. } => None,
+    }
+}
+
 fn apply_rpm_drift_to_record(
     record: &mut ComponentRecord,
-    rpm_meta: Option<&RpmMetadata>,
+    installation: &Installation,
     query: &dyn PackageQuery,
     checked_at: &str,
 ) {
     // Only adjudicate drift on a clean live projection; never demote a
     // failed/degraded/disabled record (see fn doc). This also bounds the
     // rpm -q probes below to the records that can actually drift.
-    if !matches!(record.status.as_str(), "installed" | "adopted") {
+    if !matches!(record.status.as_str(), "installed" | "adopted" | "observed") {
         return;
     }
-    let Some(meta) = rpm_meta else {
+    let Some((package, recorded_evr)) = drift_probe_identity(installation) else {
         return;
     };
-    let (status, reason) = match probe_rpm_drift(meta, query) {
+    let (status, reason) = match probe_rpm_drift(package, recorded_evr, query) {
         Some(RpmDrift::Drifted { reason }) => ("drifted", reason),
         Some(RpmDrift::Missing) => (
             "missing",
-            format!(
-                "package {} recorded in ANOLISA state is no longer present in rpmdb",
-                meta.package_name
-            ),
+            format!("package {package} recorded in ANOLISA state is no longer present in rpmdb"),
         ),
         None => return,
     };
@@ -625,69 +689,91 @@ fn adapter_summaries_for(component: &str, scan: Option<&[ScanEntry]>) -> Vec<Ada
 
 fn record_from_object(
     layout: &FsLayout,
-    catalog: Option<&Catalog>,
     install_mode: &str,
-    obj: &InstalledObject,
+    manifest_probe: Option<&ServiceProbeBackends<'_>>,
+    installation: &Installation,
 ) -> ComponentRecord {
     // Start from the state's last-known health entries, then layer the
     // live integrity probe on top. The integrity probe is authoritative
     // for owned-file existence and sha256; it can escalate the wire
     // status from `installed` to `degraded` or `failed` without us
     // touching the on-disk state.
-    let base_status = common::object_status_str(obj.status).to_string();
-    let mut health = obj.health.clone();
-    let (integrity_entries, integrity_status) = integrity_probe(layout, obj, &base_status);
+    let base_status = common::installation_status_str(installation).to_string();
+    let mut health = installation.health.clone();
+    let (integrity_entries, integrity_status) = integrity_probe(layout, installation, &base_status);
     health.extend(integrity_entries);
 
-    // Layer manifest-driven health checks on top. Each entry can escalate
-    // the wire status independently of integrity (a missing service unit
-    // can fail an otherwise-clean install). Probes are skipped when no
-    // catalog is loaded — fresh checkouts without a packaged catalog still
-    // get integrity-only behavior.
+    // Layer the manifest-declared health check on top, driven by the
+    // installed manifest snapshot (the same per-installation copy consumed
+    // by uninstall hooks, adapter discovery, and contract reconciliation).
     //
-    // rpm-observed objects are exempt: ANOLISA owns none of their files and
-    // does not lay out the raw artifact tree, so the manifest health checks
-    // (which assume that layout) would spuriously escalate an adopted row to
-    // degraded/failed (§8, review P2). The status stays `adopted`.
-    let manifest_status = match catalog {
-        Some(cat) if !obj.is_rpm_observed() => {
-            let (manifest_entries, escalated) =
-                manifest_health_probe(layout, cat, install_mode, obj, &integrity_status);
+    // Delegated rows are exempt regardless of relation: their file layout is
+    // selected by RPM macros rather than ANOLISA's raw-backend layout, so the
+    // manifest health checks (which assume that layout) would spuriously
+    // escalate a valid package. Delegated health remains adjudicated by the
+    // rpmdb drift probe after this projection.
+    let manifest_status = match manifest_probe {
+        Some(service_backends) if !installation.binding.is_delegated() => {
+            let (manifest_entries, escalated) = manifest_health_probe(
+                layout,
+                install_mode,
+                service_backends,
+                installation,
+                &integrity_status,
+            );
             health.extend(manifest_entries);
             escalated
         }
         _ => integrity_status,
     };
 
-    // Surface RPM provenance for adopted rpm-observed rows so human/JSON
-    // output shows the package/EVR/repo behind the `adopted` status.
-    let (rpm_package, rpm_evr, rpm_source_repo) = match &obj.rpm_metadata {
-        Some(meta) => (
-            Some(meta.package_name.clone()),
-            meta.evr.clone(),
-            meta.source_repo.clone(),
+    // Surface RPM provenance for delegated rows so human/JSON output shows
+    // the package/EVR/repo behind the record.
+    let (rpm_package, rpm_evr, rpm_source_repo) = match &installation.binding {
+        ProviderBinding::Delegated {
+            package,
+            last_observed,
+            ..
+        } => (
+            package.resolved_name().map(str::to_string),
+            last_observed.as_ref().and_then(|o| o.evr.clone()),
+            last_observed.as_ref().and_then(|o| o.source_repo.clone()),
         ),
-        None => (None, None, None),
+        ProviderBinding::Owned { .. } => (None, None, None),
     };
 
     ComponentRecord {
-        name: obj.name.clone(),
+        name: installation.name.clone(),
         status: manifest_status,
         scope: "none".to_string(),
         active: true,
         mutable_by_current_invocation: false,
         shadowed_by: None,
         state_path: None,
-        version: Some(obj.version.clone()),
-        installed_at: Some(obj.installed_at.clone()),
-        last_operation_id: obj.last_operation_id.clone(),
-        enabled_features: obj.enabled_features.clone(),
+        version: record_version(installation),
+        installed_at: Some(installation.installed_at.clone()),
+        last_operation_id: installation.last_operation_id.clone(),
+        enabled_features: installation.enabled_features.clone(),
         health,
         adapters: Vec::new(),
         rpm_package,
         rpm_evr,
         rpm_source_repo,
-        provisioned_packages: obj.provisioned_packages.clone(),
+        provisioned_packages: match &installation.binding {
+            ProviderBinding::Owned { artifact } => artifact.provisioned_packages.clone(),
+            ProviderBinding::Delegated { .. } => Vec::new(),
+        },
+    }
+}
+
+/// Displayed version: authoritative for owned artifacts; the last observed
+/// EVR (full EVR preferred, matching the legacy wire) for delegated rows.
+fn record_version(installation: &Installation) -> Option<String> {
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => Some(artifact.version.clone()),
+        ProviderBinding::Delegated { last_observed, .. } => last_observed
+            .as_ref()
+            .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone())),
     }
 }
 
@@ -706,7 +792,7 @@ fn record_from_object(
 /// to `degraded` would be a regression in the meaning of `disabled`.
 fn integrity_probe(
     layout: &FsLayout,
-    component: &InstalledObject,
+    component: &Installation,
     base_status: &str,
 ) -> (Vec<HealthEntry>, String) {
     let mut entries: Vec<HealthEntry> = Vec::new();
@@ -714,7 +800,13 @@ fn integrity_probe(
     let mut had_unverified = false;
     let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    for file in &component.files {
+    let files: &[anolisa_core::state::OwnedFile] = match &component.binding {
+        ProviderBinding::Owned { artifact } => &artifact.files,
+        // Delegated rows own no files; the native package manager verifies
+        // its own payload.
+        ProviderBinding::Delegated { .. } => &[],
+    };
+    for file in files {
         let result = check_owned_file(layout, file);
         if result == IntegrityStatus::Skipped {
             continue;
@@ -736,422 +828,112 @@ fn integrity_probe(
     // as-is so a disabled component does not get demoted by a stale
     // sha256 mismatch on disk.
     let escalated = match base_status {
-        "installed" | "adopted" if had_failure => "failed".to_string(),
-        "installed" | "adopted" if had_unverified => "degraded".to_string(),
+        "installed" | "adopted" | "observed" if had_failure => "failed".to_string(),
+        "installed" | "adopted" | "observed" if had_unverified => "degraded".to_string(),
         _ => base_status.to_string(),
     };
     (entries, escalated)
 }
 
-/// Look up the component's manifest in the layered catalog and run each
-/// declared `[[health_checks]]` entry. Three kinds are supported today
-/// (file/command/systemd); unknown kinds are reported verbatim with
-/// `status = "unsupported_kind"` so a future probe doesn't get silently
-/// dropped.
+/// Run the structured `[component.health_check]` declared by the installed
+/// manifest snapshot (`state_dir/component-manifests/<name>/component.toml`)
+/// through the shared health engine.
+///
+/// The snapshot is the same per-installation manifest copy consumed by
+/// uninstall hooks, adapter discovery, and contract reconciliation: the
+/// authoritative "what is installed here" record written at install time
+/// and refreshed by upgrade/repair. A missing snapshot is silent (adopted
+/// records and installs from before the snapshot machinery have nothing to
+/// probe); an unreadable one degrades the component — the record exists
+/// but cannot be verified.
 ///
 /// Escalation rules (status moves only toward more-broken):
-/// - required check fails → `"failed"`
-/// - optional check fails → `"degraded"`
-/// - service backend not supported (user mode, container, non-Linux) → entry
-///   marked `"not_supported"` and degrades to `"degraded"` (we can't prove
-///   the unit is up, but we have no positive failure either)
+/// - check failed → `"failed"`
+/// - check unsupported (cannot be proven either way: no service authority,
+///   probe path out of bounds, …) → `"degraded"`
 /// - on `"disabled"`/`"failed"`/`"not_installed"` the wire status is left
 ///   alone — the same rationale as integrity_probe.
 fn manifest_health_probe(
     layout: &FsLayout,
-    catalog: &Catalog,
     install_mode: &str,
-    component: &InstalledObject,
+    service_backends: &ServiceProbeBackends<'_>,
+    component: &Installation,
     base_status: &str,
 ) -> (Vec<HealthEntry>, String) {
     let mut entries: Vec<HealthEntry> = Vec::new();
-    let mut had_failure = false;
-    let mut had_degrade = false;
     let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-
-    // Lazily build the service manager — most checks won't need it, and
-    // a `EnvService::detect()` call in user mode shells out to `uname -r`.
-    let mut service_manager: Option<Box<dyn anolisa_core::ServiceManager>> = None;
-
-    // No manifest in the catalog — silent. This is the out-of-tree
-    // component case (the alpha contract); the integrity probe already
-    // covers everything the state file knows about.
-    if let Some(manifest) = catalog.component(&component.name) {
-        for check in &manifest.health_checks {
-            let optional = check.optional.unwrap_or(false);
-            let entry_name = format!(
-                "{}:{}:{}",
-                component.name,
-                check.kind,
-                check.name.as_deref().unwrap_or("(unnamed)")
-            );
-
-            let outcome = match check.kind.as_str() {
-                "file" => probe_file_check(layout, check),
-                "command" => probe_command_check(layout, check),
-                "systemd" => {
-                    if service_manager.is_none() {
-                        let env = EnvService::detect();
-                        service_manager = Some(service_factory(install_mode, &env));
-                    }
-                    let mgr = service_manager.as_deref().expect("service manager built");
-                    probe_systemd_check(mgr, check)
-                }
-                other => HealthOutcome {
-                    label: "unsupported_kind".to_string(),
-                    reason: Some(format!("manifest health kind '{other}' is not supported")),
-                    state: HealthCheckState::Unsupported,
-                },
-            };
-
-            match outcome.state {
-                HealthCheckState::Ok => {}
-                HealthCheckState::Unsupported => {
-                    had_degrade = true;
-                }
-                HealthCheckState::Failed if optional => {
-                    had_degrade = true;
-                }
-                HealthCheckState::Failed => {
-                    had_failure = true;
-                }
-            }
-            entries.push(HealthEntry {
-                name: entry_name,
-                status: outcome.label,
-                checked_at: checked_at.clone(),
-                reason: outcome.reason,
-            });
-        }
-    }
-
-    let escalated = match base_status {
-        "installed" | "adopted" if had_failure => "failed".to_string(),
-        "installed" | "adopted" if had_degrade => "degraded".to_string(),
+    let escalate = |broken: Option<&str>| match base_status {
+        "installed" | "adopted" | "observed" => broken.unwrap_or(base_status).to_string(),
         // Already escalated by the integrity probe — preserve "failed" /
         // "degraded" rather than letting a manifest "ok" downgrade it.
         _ => base_status.to_string(),
     };
-    (entries, escalated)
-}
 
-#[derive(Debug)]
-enum HealthCheckState {
-    Ok,
-    Failed,
-    Unsupported,
-}
-
-#[derive(Debug)]
-struct HealthOutcome {
-    label: String,
-    reason: Option<String>,
-    state: HealthCheckState,
-}
-
-/// Resolve `{bindir}` / `{datadir}` / `{etcdir}` placeholders in a
-/// manifest path. Manifests are written against logical roots so the
-/// same string works in system and user mode; the layout supplies the
-/// concrete path for the active install mode.
-fn expand_layout_placeholders(input: &str, layout: &FsLayout) -> String {
-    input
-        .replace("{bindir}", &layout.bin_dir.display().to_string())
-        .replace("{datadir}", &layout.datadir.display().to_string())
-        .replace("{etcdir}", &layout.etc_dir.display().to_string())
-        .replace("{statedir}", &layout.state_dir.display().to_string())
-}
-
-/// File-kind probe with two security guards layered on top of the
-/// "does this file exist" question:
-///
-///   1. `validate_owned_path` — a manifest pointing the probe at
-///      `/etc/passwd` or a `..`-traversal must NOT trigger a stat that
-///      could leak existence to a passive attacker via timing or
-///      surface a sensitive file in the wire output. External paths
-///      degrade to `out_of_bounds` / `Unsupported` so the component
-///      goes `degraded` (not `failed`) — the manifest is misauthored,
-///      not the install.
-///   2. `symlink_metadata` instead of `Path::exists()` — `exists()`
-///      follows symlinks, which means a manifest whose `probe` resolves
-///      to a path under `bin_dir` could still have someone plant
-///      `<bin_dir>/probe -> /etc/shadow` and turn `status` into a
-///      symlink-follow primitive. We treat symlinks themselves as
-///      `unsupported_target` so probes have to be authored against
-///      real files.
-fn probe_file_check(layout: &FsLayout, spec: &HealthSpec) -> HealthOutcome {
-    let raw = spec
-        .probe
-        .as_deref()
-        .or(spec.command.as_deref())
-        .unwrap_or("");
-    if raw.is_empty() {
-        return HealthOutcome {
-            label: "invalid_check".to_string(),
-            reason: Some("file check missing 'probe' (or 'command') path".to_string()),
-            state: HealthCheckState::Failed,
-        };
-    }
-    let expanded = expand_layout_placeholders(raw, layout);
-    let path = std::path::Path::new(&expanded);
-    if let Err(err) = validate_owned_path(layout, path) {
-        return HealthOutcome {
-            label: "out_of_bounds".to_string(),
-            reason: Some(format!(
-                "manifest probe path '{expanded}' rejected: {}",
-                boundary_reason(&err)
-            )),
-            state: HealthCheckState::Unsupported,
-        };
-    }
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => HealthOutcome {
-            label: "unsupported_target".to_string(),
-            reason: Some(format!(
-                "manifest probe path '{expanded}' is a symlink — refusing to follow"
-            )),
-            state: HealthCheckState::Unsupported,
-        },
-        Ok(meta) if !meta.file_type().is_file() => HealthOutcome {
-            // Non-regular targets (directory, fifo, socket, char/block
-            // device) cannot honestly satisfy a `kind = "file"` check.
-            // Returning `ok` for a directory turned a misauthored
-            // manifest into a silent green light; surfacing
-            // `not_regular_file` makes the manifest bug visible in the
-            // wire output without escalating the component to `failed`
-            // (the install itself is fine — the manifest is wrong).
-            label: "not_regular_file".to_string(),
-            reason: Some(format!(
-                "manifest probe path '{expanded}' is not a regular file"
-            )),
-            state: HealthCheckState::Unsupported,
-        },
-        Ok(_) => HealthOutcome {
-            label: "ok".to_string(),
-            reason: Some(format!("file present at {expanded}")),
-            state: HealthCheckState::Ok,
-        },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => HealthOutcome {
-            label: "missing_file".to_string(),
-            reason: Some(format!("expected file not present at {expanded}")),
-            state: HealthCheckState::Failed,
-        },
-        Err(err) => HealthOutcome {
-            label: "stat_error".to_string(),
-            reason: Some(format!("stat failed for '{expanded}': {err}")),
-            state: HealthCheckState::Failed,
-        },
-    }
-}
-
-fn boundary_reason(err: &PathBoundaryError) -> String {
-    match err {
-        PathBoundaryError::External { path } => {
-            format!("'{}' is outside ANOLISA-owned roots", path.display())
-        }
-        PathBoundaryError::Traversal { path } => {
-            format!("'{}' contains '.' or '..' segments", path.display())
-        }
-    }
-}
-
-/// Command-kind probe, hardened against the two attack surfaces a naïve
-/// `sh -c <manifest_string>` exposes:
-///
-///   1. **Arbitrary shell**: the probe runs *without* a shell. We split
-///      the command string on ASCII whitespace and run the first token
-///      as the executable, the rest as argv. Anything containing shell
-///      metacharacters (`;|&><$\` etc.) is refused — `status` is a
-///      read-only verb and must not let a third-party manifest run a
-///      pipeline, redirect to a file, or expand variables.
-///   2. **Arbitrary executable**: the executable must be an absolute
-///      path under an ANOLISA-owned root (after `{bindir}` placeholder
-///      expansion). A manifest that probes via `/usr/bin/curl` or a
-///      bare `true` is refused — the only commands `status` may run
-///      are ones the framework itself shipped + path-safety vetted.
-///   3. **Hang**: the spawned child is bounded by `COMMAND_PROBE_TIMEOUT`.
-///      A runaway probe is killed and the entry surfaces as `timeout`,
-///      escalating to `degraded` so the wire status reflects "couldn't
-///      verify" rather than the misleading "passed".
-fn probe_command_check(layout: &FsLayout, spec: &HealthSpec) -> HealthOutcome {
-    let raw = spec.command.as_deref().unwrap_or("");
-    if raw.is_empty() {
-        return HealthOutcome {
-            label: "invalid_check".to_string(),
-            reason: Some("command check missing 'command' string".to_string()),
-            state: HealthCheckState::Failed,
-        };
-    }
-    let expanded = expand_layout_placeholders(raw, layout);
-
-    if let Some(meta) = expanded.chars().find(|c| SHELL_METACHARS.contains(c)) {
-        return HealthOutcome {
-            label: "invalid_check".to_string(),
-            reason: Some(format!(
-                "manifest probe '{expanded}' contains shell metacharacter '{meta}' — \
-                 commands run without a shell, declare a single executable + plain args",
-            )),
-            state: HealthCheckState::Unsupported,
-        };
-    }
-
-    let mut tokens = expanded.split_ascii_whitespace();
-    let exe = match tokens.next() {
-        Some(e) => e,
-        None => {
-            return HealthOutcome {
-                label: "invalid_check".to_string(),
-                reason: Some("manifest probe is empty after placeholder expansion".to_string()),
-                state: HealthCheckState::Failed,
-            };
-        }
-    };
-    let args: Vec<&str> = tokens.collect();
-
-    let exe_path = std::path::Path::new(exe);
-    if !exe_path.is_absolute() {
-        return HealthOutcome {
-            label: "out_of_bounds".to_string(),
-            reason: Some(format!(
-                "manifest probe executable '{exe}' is not absolute — declare \
-                 the full `{{bindir}}/...` path",
-            )),
-            state: HealthCheckState::Unsupported,
-        };
-    }
-    if let Err(err) = validate_owned_path(layout, exe_path) {
-        return HealthOutcome {
-            label: "out_of_bounds".to_string(),
-            reason: Some(format!(
-                "manifest probe executable '{exe}' rejected: {}",
-                boundary_reason(&err)
-            )),
-            state: HealthCheckState::Unsupported,
-        };
-    }
-
-    let mut child = match Command::new(exe_path)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    let manifest = match common::installed_component_manifest_path(layout, &component.name, COMMAND)
     {
-        Ok(c) => c,
-        Err(err) => {
-            return HealthOutcome {
-                label: "command_error".to_string(),
-                reason: Some(format!("failed to spawn '{expanded}': {err}")),
-                state: HealthCheckState::Failed,
-            };
-        }
+        Ok(path) if path.is_file() => match ComponentManifest::from_file(&path) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                entries.push(HealthEntry {
+                    name: format!("{}:manifest_snapshot", component.name),
+                    status: "unreadable".to_string(),
+                    checked_at,
+                    reason: Some(format!(
+                        "failed to parse installed manifest snapshot: {err}"
+                    )),
+                });
+                return (entries, escalate(Some("degraded")));
+            }
+        },
+        _ => return (entries, base_status.to_string()),
     };
 
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return HealthOutcome {
-                        label: "ok".to_string(),
-                        reason: Some(format!("`{expanded}` exited 0")),
-                        state: HealthCheckState::Ok,
-                    };
-                }
-                return HealthOutcome {
-                    label: "command_failed".to_string(),
-                    reason: Some(format!(
-                        "`{expanded}` exited with status {}",
-                        status
-                            .code()
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "signal".to_string()),
-                    )),
-                    state: HealthCheckState::Failed,
-                };
-            }
-            Ok(None) => {
-                if started.elapsed() > COMMAND_PROBE_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return HealthOutcome {
-                        label: "timeout".to_string(),
-                        reason: Some(format!(
-                            "`{expanded}` exceeded {}s probe timeout",
-                            COMMAND_PROBE_TIMEOUT.as_secs(),
-                        )),
-                        state: HealthCheckState::Unsupported,
-                    };
-                }
-                std::thread::sleep(COMMAND_PROBE_POLL);
-            }
-            Err(err) => {
-                return HealthOutcome {
-                    label: "command_error".to_string(),
-                    reason: Some(format!("wait failed for '{expanded}': {err}")),
-                    state: HealthCheckState::Failed,
-                };
-            }
-        }
-    }
+    let Some(spec) = manifest.health_spec() else {
+        return (entries, base_status.to_string());
+    };
+
+    let outcome = run_check(
+        &spec,
+        &CheckEnv {
+            layout,
+            dry_run: false,
+            // Each `systemd_active` leaf routes to the manager owning its
+            // unit's declared scope — an aggregate spec may mix system-
+            // and user-scope services, so a single manager cannot answer
+            // the whole tree.
+            service_probes: Some(ServiceProbes {
+                system: service_backends.system_for_record_scope(install_mode),
+                user: service_backends.user,
+                declared: &manifest.install.services,
+            }),
+        },
+    );
+    let broken = match outcome.status {
+        CheckStatus::Failed => Some("failed"),
+        CheckStatus::Unsupported => Some("degraded"),
+        CheckStatus::Ok | CheckStatus::Skipped => None,
+    };
+    push_check_entries(&component.name, &outcome, &checked_at, &mut entries);
+
+    (entries, escalate(broken))
 }
 
-fn probe_systemd_check(
-    manager: &dyn anolisa_core::ServiceManager,
-    spec: &HealthSpec,
-) -> HealthOutcome {
-    let unit = match spec.unit.as_deref() {
-        Some(u) if !u.is_empty() => u,
-        _ => {
-            return HealthOutcome {
-                label: "invalid_check".to_string(),
-                reason: Some("systemd check missing 'unit' name".to_string()),
-                state: HealthCheckState::Failed,
-            };
-        }
-    };
-    if !manager.supported() {
-        let reason = manager
-            .unsupported_reason()
-            .unwrap_or("service manager not supported in this environment")
-            .to_string();
-        return HealthOutcome {
-            label: "not_supported".to_string(),
-            reason: Some(reason),
-            state: HealthCheckState::Unsupported,
-        };
-    }
-    match manager.probe_service(unit) {
-        Ok(outcome) => match outcome.state {
-            ServiceState::Active => HealthOutcome {
-                label: "ok".to_string(),
-                reason: Some(format!("unit '{unit}' is active")),
-                state: HealthCheckState::Ok,
-            },
-            ServiceState::NotInstalled => HealthOutcome {
-                label: "not_installed".to_string(),
-                reason: Some(format!("unit '{unit}' is not installed")),
-                state: HealthCheckState::Failed,
-            },
-            ServiceState::NotSupported => HealthOutcome {
-                label: "not_supported".to_string(),
-                reason: outcome
-                    .message
-                    .is_empty()
-                    .then(|| "service manager unsupported".to_string())
-                    .or(Some(outcome.message.clone())),
-                state: HealthCheckState::Unsupported,
-            },
-            other => HealthOutcome {
-                label: other.as_str().to_string(),
-                reason: Some(format!("unit '{unit}' state '{}'", other.as_str())),
-                state: HealthCheckState::Failed,
-            },
-        },
-        Err(err) => HealthOutcome {
-            label: "probe_error".to_string(),
-            reason: Some(format!("probe failed for '{unit}': {err}")),
-            state: HealthCheckState::Failed,
-        },
+/// Flatten a check-outcome tree into wire health entries: aggregates keep
+/// their summary row, leaves carry the probe detail.
+fn push_check_entries(
+    component: &str,
+    outcome: &CheckOutcome,
+    checked_at: &str,
+    entries: &mut Vec<HealthEntry>,
+) {
+    entries.push(HealthEntry {
+        name: format!("{component}:{}", outcome.spec_label),
+        status: outcome.status.as_str().to_string(),
+        checked_at: checked_at.to_string(),
+        reason: outcome.detail.clone(),
+    });
+    for child in &outcome.children {
+        push_check_entries(component, child, checked_at, entries);
     }
 }
 
@@ -1191,24 +973,25 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
         }
         // Observed = present in rpmdb but not yet tracked; point at adopt.
         if record.status == "observed" {
+            let adopt = scoped_component_command(&record.scope, "adopt", &record.name);
             println!(
-                "    {} run 'sudo anolisa adopt {}' to adopt as rpm-observed",
+                "    {} run '{adopt}' to record the system RPM as adopted",
                 color.label("hint:"),
-                record.name,
             );
         }
         // Drift / missing point at the repair / forget remediation (#960).
         if record.status == "drifted" {
+            let repair = scoped_component_command(&record.scope, "repair", &record.name);
             println!(
-                "    {} run 'anolisa repair {}' to refresh ANOLISA state from rpmdb",
+                "    {} run '{repair}' to refresh ANOLISA state from rpmdb",
                 color.label("hint:"),
-                record.name,
             );
         } else if record.status == "missing" {
+            let repair = scoped_component_command(&record.scope, "repair", &record.name);
+            let forget = scoped_component_command(&record.scope, "forget", &record.name);
             println!(
-                "    {} reinstall, or run 'anolisa forget {name}' to drop the stale state (repair cannot refresh a package gone from rpmdb)",
+                "    {} run '{repair}' to reconcile the missing installation, or '{forget}' to drop its stale record",
                 color.label("hint:"),
-                name = record.name,
             );
         }
         if verbose {
@@ -1279,6 +1062,14 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
     }
 }
 
+fn scoped_component_command(scope: &str, operation: &str, component: &str) -> String {
+    if scope == "system" {
+        format!("sudo anolisa --install-mode system {operation} {component}")
+    } else {
+        format!("anolisa --install-mode user {operation} {component}")
+    }
+}
+
 fn scope_metadata_pairs(record: &ComponentRecord) -> Vec<(&'static str, String)> {
     let mut pairs = vec![
         ("active", record.active.to_string()),
@@ -1299,6 +1090,30 @@ fn scope_metadata_pairs(record: &ComponentRecord) -> Vec<(&'static str, String)>
 fn render_warnings(warnings: &[String]) {
     for warning in warnings {
         eprintln!("warning: {warning}");
+    }
+}
+
+/// Render quarantined records after the component table. Each row names
+/// the record, why it was refused, and the two exits — without this
+/// section a quarantined record is invisible: every other command only
+/// mentions it when it happens to block them.
+fn render_quarantined(records: &[QuarantinedRecord], no_color: bool) {
+    if records.is_empty() {
+        return;
+    }
+    let color = Palette::new(no_color);
+    println!();
+    println!("{}", color.header("NEEDS ATTENTION"));
+    for record in records {
+        println!(
+            "{} {} ({}, {}) — quarantined: {}",
+            color.warn("!"),
+            record.name,
+            record.kind,
+            record.scope,
+            record.reason,
+        );
+        println!("    {} {}", color.label("hint:"), record.hint);
     }
 }
 
@@ -1323,10 +1138,22 @@ mod tests {
     use crate::repo_config::RepoConfig;
     use crate::resolution::resolve_rpm_component_name;
     use anolisa_core::{
-        FileOwner, HealthEntry, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
-        OwnedFile, OwnedFileKind, SubscriptionScope,
+        FileOwner, HealthEntry, InstalledObject, InstalledState, NotSupportedServiceManager,
+        ObjectKind, ObjectStatus, OwnedFile, OwnedFileKind, SubscriptionScope,
     };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn lifecycle_hints_preserve_record_scope() {
+        assert_eq!(
+            scoped_component_command("system", "repair", "agentsight"),
+            "sudo anolisa --install-mode system repair agentsight",
+        );
+        assert_eq!(
+            scoped_component_command("user", "forget", "cosh"),
+            "anolisa --install-mode user forget cosh",
+        );
+    }
 
     /// Build a system-mode FsLayout rooted under `prefix` and pre-create
     /// `bin_dir` so the path-safety guard in [`anolisa_core::check_owned_file`]
@@ -1345,6 +1172,37 @@ mod tests {
         FsLayout::system(Some(PathBuf::from("/tmp/anolisa-status-tests-noop")))
     }
 
+    /// Write an installed-manifest snapshot for `component` under the
+    /// layout's state_dir — the file `manifest_health_probe` consumes.
+    fn write_manifest_snapshot(layout: &FsLayout, component: &str, manifest: &str) {
+        let dir = layout.state_dir.join("component-manifests").join(component);
+        std::fs::create_dir_all(&dir).expect("snapshot dir");
+        std::fs::write(dir.join("component.toml"), manifest).expect("write snapshot");
+    }
+
+    /// View selector with quiet service backends, for tests that don't
+    /// exercise `systemd_active` routing.
+    fn select_components_from_view_quiet(
+        view: &StateView,
+        name: Option<&str>,
+        adapter_scan: Option<&[ScanEntry]>,
+        rpm_query: Option<&dyn PackageQuery>,
+    ) -> Vec<ComponentRecord> {
+        let quiet = NotSupportedServiceManager::new("service probes disabled in this test".into());
+        select_components_from_view(
+            view,
+            name,
+            AggregateRecordSelection::AllVisible,
+            adapter_scan,
+            Some(&ServiceProbeBackends {
+                system_scope: &quiet,
+                current_system: &quiet,
+                user: &quiet,
+            }),
+            rpm_query,
+        )
+    }
+
     /// Baseline component install record. Owned `files` default to empty
     /// so projection-only tests never touch the filesystem; integrity
     /// tests attach files explicitly before upserting.
@@ -1358,7 +1216,7 @@ mod tests {
             distribution_source: Some("builtin".to_string()),
             raw_package: None,
             install_backend: None,
-            ownership: None,
+            ownership: Some(Ownership::RawManaged),
             rpm_metadata: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-20260601-001".to_string()),
@@ -1375,6 +1233,22 @@ mod tests {
         }
     }
 
+    /// Migrate a v4 fixture state into a v5 store; fixtures must migrate
+    /// cleanly so tests exercise exactly the objects they seeded.
+    fn store_with(state: &InstalledState) -> StateStore {
+        let migration = anolisa_core::state_migration::migrate_state(
+            &state.objects,
+            anolisa_core::domain::InstallationScope::System,
+        );
+        assert!(
+            migration.quarantined.is_empty(),
+            "fixtures must migrate cleanly"
+        );
+        let mut store = StateStore::empty();
+        store.installations = migration.active;
+        store
+    }
+
     fn scoped_status_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
         let user_root = ScopedStateRoot {
             scope: StateScope::User,
@@ -1388,18 +1262,19 @@ mod tests {
             ),
             state_path: PathBuf::from("/tmp/anolisa-user-state/installed.toml"),
             writable: true,
-            state: user_state,
+            state: store_with(&user_state),
         };
         let system_root = ScopedStateRoot {
             scope: StateScope::System,
             layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
             state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
             writable: false,
-            state: system_state,
+            state: store_with(&system_state),
         };
         StateView {
             writable: user_root.clone(),
             visible_roots: vec![user_root, system_root],
+            unavailable_roots: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -1415,13 +1290,7 @@ mod tests {
         ));
         let view = scoped_status_view(user_state, system_state);
 
-        let records = select_components_from_view(
-            &view,
-            &ScopedCatalogs::default(),
-            Some("agentsight"),
-            None,
-            None,
-        );
+        let records = select_components_from_view_quiet(&view, Some("agentsight"), None, None);
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "agentsight");
@@ -1436,7 +1305,89 @@ mod tests {
     }
 
     #[test]
-    fn scoped_status_view_uses_catalog_from_record_root() {
+    fn quarantined_records_surface_as_needs_attention() {
+        use anolisa_core::state_migration::QuarantinedObject;
+
+        let mut view = scoped_status_view(InstalledState::default(), InstalledState::default());
+        view.visible_roots[0]
+            .state
+            .quarantined
+            .push(QuarantinedObject {
+                record: component_object("legacy-flatpak", "0.9.0", ObjectStatus::Installed),
+                reason: QuarantineReason::UnknownBackend {
+                    backend: "flatpak".to_string(),
+                },
+            });
+        view.visible_roots[1]
+            .state
+            .quarantined
+            .push(QuarantinedObject {
+                record: component_object("legacy-bare", "0.1.0", ObjectStatus::Installed),
+                reason: QuarantineReason::NoEvidence,
+            });
+
+        let all = select_quarantined_from_view(&view, None);
+        assert_eq!(all.len(), 2);
+
+        let flatpak = &all[0];
+        assert_eq!(flatpak.name, "legacy-flatpak");
+        assert_eq!(flatpak.kind, "component");
+        assert_eq!(flatpak.scope, "user");
+        assert_eq!(flatpak.status, "needs-attention");
+        assert_eq!(flatpak.version, "0.9.0");
+        assert!(flatpak.reason.contains("'flatpak'"), "{}", flatpak.reason);
+        assert!(
+            flatpak
+                .hint
+                .contains("anolisa --install-mode user repair legacy-flatpak")
+                && flatpak
+                    .hint
+                    .contains("anolisa --install-mode user forget legacy-flatpak"),
+            "{}",
+            flatpak.hint
+        );
+
+        let bare = &all[1];
+        assert_eq!(bare.scope, "system");
+        assert!(
+            bare.reason.contains("no provenance evidence"),
+            "{}",
+            bare.reason
+        );
+        assert!(
+            bare.hint
+                .contains("sudo anolisa --install-mode system repair legacy-bare")
+                && bare
+                    .hint
+                    .contains("sudo anolisa --install-mode system forget legacy-bare"),
+            "{}",
+            bare.hint
+        );
+
+        // A named query surfaces only the matching quarantined record —
+        // this is how `status <name>` explains why other intents refuse it.
+        let named = select_quarantined_from_view(&view, Some("legacy-bare"));
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].name, "legacy-bare");
+        assert!(select_quarantined_from_view(&view, Some("unrelated")).is_empty());
+    }
+
+    /// The `quarantined` key is new wire surface: it must be absent (not
+    /// `[]`) when nothing is quarantined, so existing consumers see an
+    /// unchanged envelope on healthy state.
+    #[test]
+    fn status_payload_omits_quarantined_when_empty() {
+        let payload = StatusPayload {
+            components: Vec::new(),
+            quarantined: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert!(json.get("quarantined").is_none(), "{json}");
+    }
+
+    #[test]
+    fn scoped_status_view_uses_snapshot_from_record_root() {
         let user_home = tempfile::tempdir().expect("user home");
         let user_layout = FsLayout::user_with_overrides(
             user_home.path().join("home"),
@@ -1453,36 +1404,25 @@ mod tests {
         let system_probe = system_layout.bin_dir.join("agentsight");
         std::fs::write(&system_probe, b"binary").expect("write system probe");
 
-        let user_manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
+        // The manifest snapshot lives under the record root's state_dir, so
+        // the probe path must resolve against the system root — the user
+        // root has no snapshot at all.
+        write_manifest_snapshot(
+            &system_layout,
+            "agentsight",
+            &format!(
+                r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
 
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-        "#,
-            user_layout.bin_dir.join("agentsight").display()
+                [component.health_check]
+                type = "file_exists"
+                path = "{}"
+            "#,
+                system_probe.display()
+            ),
         );
-        let system_manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-        "#,
-            system_probe.display()
-        );
-        let (user_catalog, _user_catalog_guard) =
-            catalog_with_component("agentsight", &user_manifest);
-        let (system_catalog, _system_catalog_guard) =
-            catalog_with_component("agentsight", &system_manifest);
 
         let user_state_path = user_layout.state_dir.join("installed.toml");
         let system_state_path = system_layout.state_dir.join("installed.toml");
@@ -1491,7 +1431,7 @@ mod tests {
             layout: user_layout,
             state_path: user_state_path.clone(),
             writable: true,
-            state: InstalledState::default(),
+            state: StateStore::empty(),
         };
         let mut system_state = InstalledState::default();
         system_state.upsert_object(component_object(
@@ -1504,19 +1444,16 @@ mod tests {
             layout: system_layout,
             state_path: system_state_path.clone(),
             writable: false,
-            state: system_state,
+            state: store_with(&system_state),
         };
         let view = StateView {
             writable: user_root.clone(),
             visible_roots: vec![user_root, system_root],
+            unavailable_roots: Vec::new(),
             warnings: Vec::new(),
         };
-        let catalogs = ScopedCatalogs::from_entries(vec![
-            (user_state_path, user_catalog),
-            (system_state_path, system_catalog),
-        ]);
 
-        let records = select_components_from_view(&view, &catalogs, Some("agentsight"), None, None);
+        let records = select_components_from_view_quiet(&view, Some("agentsight"), None, None);
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].scope, "system");
@@ -1524,17 +1461,9 @@ mod tests {
         let health = records[0]
             .health
             .iter()
-            .find(|entry| entry.name == "agentsight:file:binary")
-            .expect("system catalog health entry present");
+            .find(|entry| entry.name.starts_with("agentsight:file_exists"))
+            .expect("system snapshot health entry present");
         assert_eq!(health.status, "ok");
-        assert!(
-            health
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains(&system_probe.display().to_string())),
-            "health reason must use system manifest path: {:?}",
-            health.reason
-        );
     }
 
     #[test]
@@ -1553,13 +1482,33 @@ mod tests {
         ));
         let view = scoped_status_view(user_state, system_state);
 
-        let records = select_components_from_view(
-            &view,
-            &ScopedCatalogs::default(),
-            Some("agentsight"),
-            None,
-            None,
-        );
+        let records = select_components_from_view_quiet(&view, Some("agentsight"), None, None);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].scope, "user");
+        assert!(records[0].active);
+        assert_eq!(records[1].scope, "system");
+        assert!(!records[1].active);
+        assert_eq!(records[1].shadowed_by.as_deref(), Some("user"));
+    }
+
+    #[test]
+    fn unnamed_status_view_reports_shadowed_system_record() {
+        let mut user_state = InstalledState::default();
+        user_state.upsert_object(component_object(
+            "agentsight",
+            "0.2.0",
+            ObjectStatus::Installed,
+        ));
+        let mut system_state = InstalledState::default();
+        system_state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let view = scoped_status_view(user_state, system_state);
+
+        let records = select_components_from_view_quiet(&view, None, None, None);
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].scope, "user");
@@ -1582,16 +1531,16 @@ mod tests {
             layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
             state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
             writable: true,
-            state: system_state,
+            state: store_with(&system_state),
         };
         let view = StateView {
             writable: system_root.clone(),
             visible_roots: vec![system_root],
+            unavailable_roots: Vec::new(),
             warnings: Vec::new(),
         };
 
-        let records =
-            select_components_from_view(&view, &ScopedCatalogs::default(), None, None, None);
+        let records = select_components_from_view_quiet(&view, None, None, None);
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "agentsight");
@@ -1600,14 +1549,14 @@ mod tests {
 
     /// A missing `installed.toml` is the fresh-install case and must
     /// surface as an empty result, not an error. Verifies the helper
-    /// stack (`InstalledState::load` -> `select_components`) collapses
+    /// stack (`StateStore::load` -> `select_components`) collapses
     /// "no file" to "no components".
     #[test]
     fn missing_state_file_yields_empty_result() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("installed.toml");
-        let state = InstalledState::load(&path).expect("missing file is not an error");
-        let records = select_components(&state, &dummy_layout(), None, "system", None, None);
+        let state = StateStore::load(&path, 0).expect("missing file is not an error");
+        let records = select_components(&state, &dummy_layout(), "system", None, None);
         assert!(records.is_empty());
     }
 
@@ -1625,7 +1574,7 @@ mod tests {
             ObjectStatus::Partial,
         ));
 
-        let records = select_components(&state, &dummy_layout(), None, "system", None, None);
+        let records = select_components(&store_with(&state), &dummy_layout(), "system", None, None);
         assert_eq!(records.len(), 2);
         let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"agentsight"));
@@ -1648,9 +1597,8 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
-            None,
             "system",
             Some("ws-ckpt"),
             None,
@@ -1680,9 +1628,8 @@ mod tests {
         state.upsert_object(obj);
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
-            None,
             "system",
             Some("agentsight"),
             None,
@@ -1724,7 +1671,13 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "installed");
         // Exactly one integrity entry, status "ok", with the path in the name.
@@ -1759,7 +1712,13 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "failed", "missing file -> failed");
         let integrity = only
@@ -1793,7 +1752,13 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "failed", "sha mismatch -> failed");
         let integrity = only
@@ -1826,7 +1791,13 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
         let integrity = only
@@ -1857,7 +1828,13 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "disabled");
         // The integrity entry is still surfaced so users can see the drift,
@@ -1893,7 +1870,13 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "failed", "out-of-bounds path -> failed");
         let integrity = only
@@ -1911,49 +1894,31 @@ mod tests {
     // Manifest health probe tests
     // -----------------------------------------------------------------
 
-    /// Build a temporary catalog with a single component manifest under
-    /// `runtime/<name>.toml`. Returns the Catalog plus the tempdir guard
-    /// (dropping the guard wipes the manifests).
-    fn catalog_with_component(
-        name: &str,
-        component_toml: &str,
-    ) -> (anolisa_core::Catalog, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let runtime_dir = tmp.path().join("runtime");
-        std::fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
-        std::fs::write(runtime_dir.join(format!("{name}.toml")), component_toml)
-            .expect("write component manifest");
-        let catalog = anolisa_core::Catalog::load(anolisa_core::CatalogLayers::bundled_only(
-            tmp.path().to_path_buf(),
-        ))
-        .expect("catalog loads");
-        (catalog, tmp)
-    }
-
-    /// File-kind health check pointing at an existing file emits an `ok`
-    /// entry with the path in the reason and leaves the wire status at
-    /// `installed`.
+    /// Snapshot-declared check passing keeps the wire status at
+    /// `installed` and emits the engine's `ok` entry under the
+    /// `<component>:<check label>` name.
     #[test]
-    fn manifest_health_file_check_ok() {
+    fn manifest_health_snapshot_check_ok() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
         let probe_path = layout.bin_dir.join("agentsight");
         std::fs::write(&probe_path, b"binary").expect("write probe binary");
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
+            &format!(
+                r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
 
-        let manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-        "#,
-            probe_path.display()
+                [component.health_check]
+                type = "file_exists"
+                path = "{}"
+            "#,
+                probe_path.display()
+            ),
         );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
@@ -1963,9 +1928,8 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
-            Some(&catalog),
             "system",
             Some("agentsight"),
             None,
@@ -1975,156 +1939,223 @@ mod tests {
         let entry = only
             .health
             .iter()
-            .find(|h| h.name == "agentsight:file:binary")
-            .expect("file health entry present");
+            .find(|h| h.name.starts_with("agentsight:file_exists"))
+            .expect("snapshot health entry present");
         assert_eq!(entry.status, "ok");
+    }
+
+    /// Failing snapshot check escalates the wire status to `failed` with
+    /// the probe detail in the entry reason.
+    #[test]
+    fn manifest_health_snapshot_check_failure_escalates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(dir.path());
+        let missing = layout.bin_dir.join("ghost-binary");
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
+            &format!(
+                r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
+
+                [component.health_check]
+                type = "file_exists"
+                path = "{}"
+            "#,
+                missing.display()
+            ),
+        );
+
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
+        let only = &records[0];
+        assert_eq!(only.status, "failed", "failed check -> failed");
+        let entry = only
+            .health
+            .iter()
+            .find(|h| h.name.starts_with("agentsight:file_exists"))
+            .expect("snapshot health entry present");
+        assert_eq!(entry.status, "failed");
         assert!(
-            entry
-                .reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("file present"),
-            "reason mentions presence: {:?}",
+            entry.reason.as_deref().unwrap_or("").contains("missing"),
+            "reason names the missing file: {:?}",
             entry.reason
         );
     }
 
-    /// Required (default) file-kind check on a missing file escalates to
-    /// `failed` and emits a `missing_file` entry with a reason.
+    /// A user-scope record whose snapshot declares a user-scope service
+    /// probes `systemd_active` through the user manager — never the
+    /// system factory (deliberately unsupported in user mode, which would
+    /// spuriously degrade a healthy `systemctl --user` unit).
     #[test]
-    fn manifest_health_file_check_required_missing_fails() {
+    fn manifest_health_routes_user_scope_service_to_the_user_manager() {
+        use anolisa_core::{FakeServiceManager, ServiceOp, ServiceState};
+
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
-        let probe_path = layout.bin_dir.join("ghost-binary");
-
-        let manifest = format!(
+        write_manifest_snapshot(
+            &layout,
+            "agent-memory",
             r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
+                [component]
+                name = "agent-memory"
+                version = "0.1.0"
 
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-        "#,
-            probe_path.display()
+                [component.layout]
+                modes = ["system", "user"]
+
+                [[component.services]]
+                unit = "anolisa-memory@.service"
+                scope = "user"
+
+                [component.health_check]
+                type = "systemd_active"
+                service = "anolisa-memory@alice.service"
+            "#,
         );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
-            "agentsight",
+            "agent-memory",
             "0.1.0",
             ObjectStatus::Installed,
         ));
+        let store = store_with(&state);
 
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(only.status, "failed", "required missing file -> failed");
-        let entry = only
+        let system = FakeServiceManager::new();
+        let user = FakeServiceManager::new();
+        user.set_state(ServiceState::Active);
+        let backends = ServiceProbeBackends {
+            system_scope: &system,
+            current_system: &system,
+            user: &user,
+        };
+
+        let record = record_from_object(&layout, "user", Some(&backends), &store.installations[0]);
+
+        assert_eq!(record.status, "installed");
+        let entry = record
             .health
             .iter()
-            .find(|h| h.name == "agentsight:file:binary")
-            .expect("file health entry present");
-        assert_eq!(entry.status, "missing_file");
-        assert!(entry.reason.is_some(), "reason must be populated");
+            .find(|h| h.name.starts_with("agent-memory:systemd_active"))
+            .expect("systemd health entry present");
+        assert_eq!(entry.status, "ok");
+        assert_eq!(
+            user.calls(),
+            vec![(ServiceOp::Probe, "anolisa-memory@alice.service".to_string())]
+        );
+        assert!(
+            system.calls().is_empty(),
+            "system manager must not be probed for a user-scope unit"
+        );
     }
 
-    /// Optional file-kind check on a missing file degrades (not fails).
-    /// The same probe with `optional = true` must produce a degraded
-    /// status — not a failure — proving the optional flag is consumed.
+    /// A system-scope record whose health check targets a user-scope
+    /// service still routes to the user manager: probing the system
+    /// namespace would misreport a healthy user unit as failed.
     #[test]
-    fn manifest_health_file_check_optional_missing_degrades() {
+    fn manifest_health_routes_user_scope_service_on_a_system_record() {
+        use anolisa_core::{FakeServiceManager, ServiceOp, ServiceState};
+
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
-        let probe_path = layout.bin_dir.join("ghost-binary");
-
-        let manifest = format!(
+        write_manifest_snapshot(
+            &layout,
+            "agent-memory",
             r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
+                [component]
+                name = "agent-memory"
+                version = "0.1.0"
 
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-            optional = true
-        "#,
-            probe_path.display()
+                [component.layout]
+                modes = ["system", "user"]
+
+                [[component.services]]
+                unit = "anolisa-memory@.service"
+                scope = "user"
+
+                [component.health_check]
+                type = "systemd_active"
+                service = "anolisa-memory@alice.service"
+            "#,
         );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
-            "agentsight",
+            "agent-memory",
             "0.1.0",
             ObjectStatus::Installed,
         ));
+        let store = store_with(&state);
 
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
+        let system_scope = FakeServiceManager::new();
+        let current_system = FakeServiceManager::new();
+        let user = FakeServiceManager::new();
+        user.set_state(ServiceState::Active);
+        let backends = ServiceProbeBackends {
+            system_scope: &system_scope,
+            current_system: &current_system,
+            user: &user,
+        };
+
+        let record =
+            record_from_object(&layout, "system", Some(&backends), &store.installations[0]);
+
+        assert_eq!(record.status, "installed");
+        assert_eq!(
+            user.calls(),
+            vec![(ServiceOp::Probe, "anolisa-memory@alice.service".to_string())]
         );
-        let only = &records[0];
-        assert_eq!(only.status, "degraded", "optional missing file -> degraded");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:file:binary")
-            .expect("file health entry present");
-        assert_eq!(entry.status, "missing_file");
+        assert!(
+            system_scope.calls().is_empty() && current_system.calls().is_empty(),
+            "no system manager may be probed for a user-scope unit"
+        );
     }
 
-    /// Helper: write an executable shell script under `layout.bin_dir`.
-    /// Manifest probes are required to point at executables under an
-    /// ANOLISA-owned root, so tests that exercise the command path
-    /// stage their probe scripts here rather than reaching for `/bin/true`.
-    fn write_probe_script(layout: &FsLayout, name: &str, body: &str) -> PathBuf {
+    /// `binary_version` runs the declared binary end to end through the
+    /// shared engine: exit 0 keeps `installed`, a failing binary escalates.
+    #[test]
+    fn manifest_health_snapshot_binary_version_probes_the_binary() {
         use std::os::unix::fs::PermissionsExt;
-        let path = layout.bin_dir.join(name);
-        std::fs::write(&path, body).expect("write probe script");
-        let mut perm = std::fs::metadata(&path).expect("stat").permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&path, perm).expect("chmod");
-        path
-    }
 
-    /// Command-kind check that exits 0 stays `ok`. The probe is an
-    /// owned executable under `{bindir}` — the only kind of command
-    /// path-safety lets us run.
-    #[test]
-    fn manifest_health_command_check_succeeds() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
-        let probe = write_probe_script(&layout, "probe-ok", "#!/bin/sh\nexit 0\n");
+        std::fs::create_dir_all(&layout.bin_dir).expect("bin dir");
+        let exe = layout.bin_dir.join("agentsight");
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").expect("write probe script");
+        let mut perms = std::fs::metadata(&exe).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exe, perms).expect("chmod");
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
+            &format!(
+                r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
 
-        let manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "self-check"
-            kind = "command"
-            command = "{}"
-        "#,
-            probe.display()
+                [component.health_check]
+                type = "binary_version"
+                binary = "{}"
+            "#,
+                exe.display()
+            ),
         );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
@@ -2134,45 +2165,151 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
-            Some(&catalog),
+            "system",
+            Some("agentsight"),
+            None,
+        );
+        assert_eq!(records[0].status, "installed");
+
+        // Same component, now with a failing probe binary.
+        std::fs::write(&exe, "#!/bin/sh\nexit 3\n").expect("rewrite probe script");
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
+        assert_eq!(records[0].status, "failed", "non-zero probe -> failed");
+    }
+
+    /// A probe the engine refuses to run (path outside ANOLISA-owned
+    /// roots) is `unsupported`: the component degrades because nothing
+    /// was proven, but it is not reported broken. The path-safety rules
+    /// themselves are covered by the engine's own tests.
+    #[test]
+    fn manifest_health_out_of_bounds_probe_degrades() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(dir.path());
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
+            r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
+
+                [component.health_check]
+                type = "file_exists"
+                path = "/etc/passwd"
+            "#,
+        );
+
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
+        let only = &records[0];
+        assert_eq!(only.status, "degraded", "unsupported check -> degraded");
+        let entry = only
+            .health
+            .iter()
+            .find(|h| h.name.starts_with("agentsight:file_exists"))
+            .expect("snapshot health entry present");
+        assert_eq!(entry.status, "unsupported");
+    }
+
+    /// No snapshot on disk is the adopted / pre-snapshot case: silent, no
+    /// manifest entries, status untouched.
+    #[test]
+    fn manifest_health_missing_snapshot_is_silent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(dir.path());
+
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+
+        let records = select_components(
+            &store_with(&state),
+            &layout,
             "system",
             Some("agentsight"),
             None,
         );
         let only = &records[0];
         assert_eq!(only.status, "installed");
+        assert!(
+            only.health
+                .iter()
+                .all(|h| h.name.starts_with("integrity:") || !h.name.contains(':')),
+            "no manifest entries without a snapshot: {:?}",
+            only.health
+        );
+    }
+
+    /// An unreadable snapshot degrades the component and says why — the
+    /// record exists but its contract cannot be verified.
+    #[test]
+    fn manifest_health_unreadable_snapshot_degrades() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(dir.path());
+        write_manifest_snapshot(&layout, "agentsight", "not = [valid toml");
+
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("agentsight"),
+            None,
+        );
+        let only = &records[0];
+        assert_eq!(only.status, "degraded", "unreadable snapshot -> degraded");
         let entry = only
             .health
             .iter()
-            .find(|h| h.name == "agentsight:command:self-check")
-            .expect("command health entry present");
-        assert_eq!(entry.status, "ok");
+            .find(|h| h.name == "agentsight:manifest_snapshot")
+            .expect("snapshot parse entry present");
+        assert_eq!(entry.status, "unreadable");
     }
 
-    /// Required command-kind check that exits non-zero escalates to
-    /// `failed` and surfaces the exit status in the reason.
+    /// A snapshot with no declared check and no executable payload rows
+    /// has nothing to probe — silent, like the missing-snapshot case.
     #[test]
-    fn manifest_health_command_check_failure_escalates() {
+    fn manifest_health_snapshot_without_check_is_silent() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
-        let probe = write_probe_script(&layout, "probe-fail", "#!/bin/sh\nexit 1\n");
-
-        let manifest = format!(
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
             r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "self-check"
-            kind = "command"
-            command = "{}"
-        "#,
-            probe.display()
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
+            "#,
         );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
@@ -2182,421 +2319,46 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
-            Some(&catalog),
             "system",
             Some("agentsight"),
             None,
         );
-        let only = &records[0];
-        assert_eq!(only.status, "failed");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:command:self-check")
-            .expect("command health entry present");
-        assert_eq!(entry.status, "command_failed");
+        assert_eq!(records[0].status, "installed");
     }
 
-    /// File-kind check pointing outside the ANOLISA-owned roots must be
-    /// refused as `out_of_bounds` and degrade the wire status — never
-    /// stat the path. The component MUST NOT escalate to `failed`
-    /// (a misauthored probe is a manifest bug, not an install bug) but
-    /// must surface clearly in the wire output.
-    #[test]
-    fn manifest_health_file_check_refuses_external_path() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-
-        // /etc/passwd is outside every ANOLISA root regardless of host.
-        let manifest = r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "passwd"
-            kind = "file"
-            probe = "/etc/passwd"
-        "#;
-        let (catalog, _guard) = catalog_with_component("agentsight", manifest);
-
-        let mut state = InstalledState::default();
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(
-            only.status, "degraded",
-            "external probe path -> degraded, never failed",
-        );
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:file:passwd")
-            .expect("file health entry present");
-        assert_eq!(entry.status, "out_of_bounds");
-    }
-
-    /// File-kind check whose `probe` resolves to a symlink must NOT
-    /// follow the link — `unsupported_target` is the only safe answer.
-    /// Test wires a link that stays under `bin_dir` so `validate_owned_path`
-    /// passes and `symlink_metadata` is the guard that fires; the more
-    /// dangerous link-to-outside case is already caught by path-safety
-    /// (covered by `..._refuses_external_path`).
-    #[test]
-    #[cfg(unix)]
-    fn manifest_health_file_check_refuses_symlink_target() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-        // Real file + sibling symlink pointing at it. Both live under
-        // bin_dir, so path-safety passes; the symlink is the only thing
-        // the probe should refuse.
-        let real = layout.bin_dir.join("probe-target");
-        std::fs::write(&real, b"binary").expect("write target");
-        let link = layout.bin_dir.join("probe-link");
-        symlink(&real, &link).expect("symlink");
-
-        let manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-        "#,
-            link.display()
-        );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
-
-        let mut state = InstalledState::default();
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(only.status, "degraded");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:file:binary")
-            .expect("file health entry present");
-        assert_eq!(entry.status, "unsupported_target");
-    }
-
-    /// File-kind check whose `probe` resolves to a directory (or any
-    /// other non-regular file: fifo, socket, char/block device) must
-    /// NOT return `ok`. Before the fix, `symlink_metadata` succeeded on
-    /// a directory and the probe greenlit the install — turning a
-    /// misauthored manifest (probe pointing at a parent directory
-    /// instead of the binary) into a silent "everything is fine".
-    /// `not_regular_file` makes the manifest bug visible while keeping
-    /// the component `degraded` rather than `failed` (the install is
-    /// fine; the manifest is wrong).
-    #[test]
-    fn manifest_health_file_check_refuses_directory_target() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-        // Probe points at bin_dir itself — a real directory under an
-        // ANOLISA-owned root. Path-safety passes; the regular-file
-        // guard is the only thing left to refuse it.
-        let target = layout.bin_dir.clone();
-        std::fs::create_dir_all(&target).expect("mkdir target");
-
-        let manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-        "#,
-            target.display()
-        );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
-
-        let mut state = InstalledState::default();
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(
-            only.status, "degraded",
-            "directory target must escalate the component to degraded, not ok",
-        );
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:file:binary")
-            .expect("file health entry present");
-        assert_eq!(
-            entry.status, "not_regular_file",
-            "directory probe must surface as not_regular_file, not ok",
-        );
-    }
-
-    /// Command-kind check that names a bare or PATH-resolved executable
-    /// must be refused — the probe must declare an absolute path under
-    /// an ANOLISA-owned root. `true` is a builtin every shell ships;
-    /// the only way it would have run before this fix was through `sh -c`.
-    #[test]
-    fn manifest_health_command_check_refuses_bare_executable() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-
-        let manifest = r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "bare"
-            kind = "command"
-            command = "true"
-        "#;
-        let (catalog, _guard) = catalog_with_component("agentsight", manifest);
-
-        let mut state = InstalledState::default();
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(only.status, "degraded");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:command:bare")
-            .expect("command health entry present");
-        assert_eq!(entry.status, "out_of_bounds");
-    }
-
-    /// Command-kind check pointing at an absolute external executable
-    /// (e.g. `/bin/true`) must be refused with `out_of_bounds`. The
-    /// `validate_owned_path` guard fires on the executable, never letting
-    /// us run a third-party binary on the user's behalf during status.
-    #[test]
-    fn manifest_health_command_check_refuses_external_absolute_executable() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-
-        let manifest = r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "host-true"
-            kind = "command"
-            command = "/bin/true"
-        "#;
-        let (catalog, _guard) = catalog_with_component("agentsight", manifest);
-
-        let mut state = InstalledState::default();
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(only.status, "degraded");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:command:host-true")
-            .expect("command health entry present");
-        assert_eq!(entry.status, "out_of_bounds");
-    }
-
-    /// Command-kind check containing a shell metacharacter (pipe, redirect,
-    /// `;`, …) must be refused. `status` runs probes WITHOUT a shell, so
-    /// any probe that needs one is a misauthored manifest, not a runnable
-    /// command.
-    #[test]
-    fn manifest_health_command_check_refuses_shell_metacharacters() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-        // Path is fine; the trailing `; rm -rf /` is what must trip the guard.
-        let probe = write_probe_script(&layout, "probe-meta", "#!/bin/sh\nexit 0\n");
-
-        let manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "metachar"
-            kind = "command"
-            command = "{} ; echo hax"
-        "#,
-            probe.display()
-        );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
-
-        let mut state = InstalledState::default();
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "system",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(only.status, "degraded");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:command:metachar")
-            .expect("command health entry present");
-        assert_eq!(entry.status, "invalid_check");
-    }
-
-    /// systemd-kind check on a non-Linux / user-mode host degrades to
-    /// `not_supported` rather than failing — we cannot prove the unit's
-    /// state on a host without a service backend, but we don't have a
-    /// positive failure either. user mode in particular short-circuits
-    /// to NotSupported, which is a portable assertion across all CI
-    /// platforms (linux, darwin, etc.).
-    #[test]
-    fn manifest_health_systemd_check_unsupported_degrades() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-
-        let manifest = r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "service"
-            kind = "systemd"
-            unit = "agentsight.service"
-        "#;
-        let (catalog, _guard) = catalog_with_component("agentsight", manifest);
-
-        let mut state = InstalledState::default();
-        state.upsert_object(component_object(
-            "agentsight",
-            "0.1.0",
-            ObjectStatus::Installed,
-        ));
-
-        // user mode is the portable "no service backend" install_mode.
-        let records = select_components(
-            &state,
-            &layout,
-            Some(&catalog),
-            "user",
-            Some("agentsight"),
-            None,
-        );
-        let only = &records[0];
-        assert_eq!(only.status, "degraded", "unsupported -> degraded");
-        let entry = only
-            .health
-            .iter()
-            .find(|h| h.name == "agentsight:systemd:service")
-            .expect("systemd health entry present");
-        assert_eq!(entry.status, "not_supported");
-    }
-
-    /// Manifest health probes layer on top of integrity — a failed file
-    /// integrity check stays `failed` even when every manifest check
-    /// reports `ok`. Order of escalation: integrity is authoritative
-    /// downward, manifest is authoritative for additional escalation.
+    /// A failed integrity probe is never downgraded by a passing manifest
+    /// check: escalation only moves toward more-broken.
     #[test]
     fn manifest_health_does_not_downgrade_failed_integrity() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
-        let missing_owned = layout.bin_dir.join("missing-binary");
-        let probe = write_probe_script(&layout, "probe-ok-integ", "#!/bin/sh\nexit 0\n");
+        // The manifest probe target exists (check passes)...
+        let probe_path = layout.bin_dir.join("agentsight");
+        std::fs::write(&probe_path, b"binary").expect("write probe binary");
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
+            &format!(
+                r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
 
-        let manifest = format!(
-            r#"
-            [component]
-            name = "agentsight"
-            version = "0.1.0"
-
-            [[health_checks]]
-            name = "self-check"
-            kind = "command"
-            command = "{}"
-        "#,
-            probe.display()
+                [component.health_check]
+                type = "file_exists"
+                path = "{}"
+            "#,
+                probe_path.display()
+            ),
         );
-        let (catalog, _guard) = catalog_with_component("agentsight", &manifest);
 
+        // ...but an owned file is missing, so integrity already failed.
         let mut state = InstalledState::default();
         let mut comp = component_object("agentsight", "0.1.0", ObjectStatus::Installed);
         comp.files = vec![OwnedFile {
-            path: missing_owned,
+            path: layout.bin_dir.join("gone-payload"),
             owner: FileOwner::Anolisa,
             sha256: Some("deadbeef".to_string()),
             kind: OwnedFileKind::File,
@@ -2605,32 +2367,20 @@ mod tests {
         state.upsert_object(comp);
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
-            Some(&catalog),
             "system",
             Some("agentsight"),
             None,
         );
         let only = &records[0];
-        assert_eq!(
-            only.status, "failed",
-            "integrity failure dominates over a clean manifest probe",
-        );
-        // Both entries must be present: integrity surfaced the missing
-        // file, manifest surfaced the ok command.
-        assert!(
-            only.health
-                .iter()
-                .any(|h| h.name.starts_with("integrity:") && h.status == "missing_file"),
-            "integrity entry present",
-        );
-        assert!(
-            only.health
-                .iter()
-                .any(|h| h.name == "agentsight:command:self-check" && h.status == "ok"),
-            "manifest entry present",
-        );
+        assert_eq!(only.status, "failed", "manifest ok must not mask integrity");
+        let entry = only
+            .health
+            .iter()
+            .find(|h| h.name.starts_with("agentsight:file_exists"))
+            .expect("manifest entry still present");
+        assert_eq!(entry.status, "ok");
     }
 
     // -----------------------------------------------------------------
@@ -2668,9 +2418,8 @@ mod tests {
             ObjectStatus::Installed,
         ));
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
-            None,
             "system",
             Some("agentsight"),
             None,
@@ -2697,9 +2446,8 @@ mod tests {
             sample_scan_entry("agentsight", "openclaw", false),
         ];
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
-            None,
             "system",
             Some("tokenless"),
             Some(&scan),
@@ -2725,7 +2473,13 @@ mod tests {
         ));
 
         let scan = vec![sample_scan_entry("tokenless", "openclaw", true)];
-        let records = select_components(&state, &dummy_layout(), None, "system", None, Some(&scan));
+        let records = select_components(
+            &store_with(&state),
+            &dummy_layout(),
+            "system",
+            None,
+            Some(&scan),
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].adapters.len(), 1);
         assert_eq!(records[0].adapters[0].component, "tokenless");
@@ -2736,9 +2490,8 @@ mod tests {
         let state = InstalledState::default();
         let scan = vec![sample_scan_entry("ghost", "openclaw", false)];
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
-            None,
             "system",
             Some("ghost"),
             Some(&scan),
@@ -2917,24 +2670,28 @@ mod tests {
     /// health check would fail a raw install — ANOLISA owns none of its files
     /// and never laid out the raw tree, so those checks do not apply (§8).
     #[test]
-    fn rpm_observed_row_skips_manifest_health_escalation() {
+    fn delegated_rows_skip_manifest_health_escalation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
         let probe_path = layout.bin_dir.join("ghost-binary");
-        let manifest = format!(
-            r#"
-            [component]
-            name = "copilot-shell"
-            version = "2.3.0-1.al8"
+        // The snapshot declares a check that would fail a raw install
+        // (missing probe target).
+        write_manifest_snapshot(
+            &layout,
+            "copilot-shell",
+            &format!(
+                r#"
+                [component]
+                name = "copilot-shell"
+                version = "2.3.0-1.al8"
 
-            [[health_checks]]
-            name = "binary"
-            kind = "file"
-            probe = "{}"
-        "#,
-            probe_path.display()
+                [component.health_check]
+                type = "file_exists"
+                path = "{}"
+            "#,
+                probe_path.display()
+            ),
         );
-        let (catalog, _guard) = catalog_with_component("copilot-shell", &manifest);
 
         // Control: a raw install with the same failing check escalates.
         let mut raw_state = InstalledState::default();
@@ -2944,16 +2701,15 @@ mod tests {
             ObjectStatus::Installed,
         ));
         let raw = select_components(
-            &raw_state,
+            &store_with(&raw_state),
             &layout,
-            Some(&catalog),
             "system",
             Some("copilot-shell"),
             None,
         );
         assert_eq!(raw[0].status, "failed", "raw install must escalate");
 
-        // rpm-observed with the same catalog stays adopted and surfaces the
+        // rpm-observed with the same snapshot stays adopted and surfaces the
         // RPM provenance fields.
         let mut obs_state = InstalledState::default();
         obs_state.upsert_object(rpm_observed_object(
@@ -2962,9 +2718,8 @@ mod tests {
             "2.3.0-1.al8",
         ));
         let obs = select_components(
-            &obs_state,
+            &store_with(&obs_state),
             &layout,
-            Some(&catalog),
             "system",
             Some("copilot-shell"),
             None,
@@ -2973,6 +2728,31 @@ mod tests {
         assert_eq!(obs[0].rpm_package.as_deref(), Some("copilot-shell"));
         assert_eq!(obs[0].rpm_evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(obs[0].rpm_source_repo.as_deref(), Some("@System"));
+
+        // rpm-managed rows lay out files via RPM macros too: the same failing
+        // raw-layout check must not escalate a managed row either.
+        let mut managed_state = InstalledState::default();
+        let mut managed = rpm_observed_object("copilot-shell", "copilot-shell", "2.3.0-1.al8");
+        managed.status = ObjectStatus::Installed;
+        managed.ownership = Some(Ownership::RpmManaged);
+        managed.managed = true;
+        managed.adopted = false;
+        managed_state.upsert_object(managed);
+        let rows = select_components(
+            &store_with(&managed_state),
+            &layout,
+            "system",
+            Some("copilot-shell"),
+            None,
+        );
+        assert_eq!(rows[0].status, "installed", "rpm-managed must not escalate");
+        assert!(
+            !rows[0]
+                .health
+                .iter()
+                .any(|entry| entry.name.contains("file_exists")),
+            "rpm-managed rows must not run raw-layout manifest checks",
+        );
     }
 
     /// Configurable [`PackageQuery`] for the observed-probe tests.
@@ -3075,9 +2855,8 @@ name = "copilot-shell"
         )
         .unwrap_or_else(|| "copilot-shell".to_string());
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
-            None,
             "system",
             Some(&resolved),
             None,
@@ -3156,19 +2935,9 @@ name = "copilot-shell"
         }
     }
 
-    fn rpm_meta(package: &str, evr: &str) -> RpmMetadata {
-        RpmMetadata {
-            package_name: package.to_string(),
-            evr: Some(evr.to_string()),
-            arch: Some("x86_64".to_string()),
-            source_repo: Some("@System".to_string()),
-        }
-    }
-
     /// rpmdb EVR matching the recorded one is not drift.
     #[test]
     fn probe_rpm_drift_none_when_evr_matches() {
-        let meta = rpm_meta("copilot-shell", "2.3.0-1.al8");
         let q = FakeQuery {
             installed: vec![(
                 "copilot-shell".to_string(),
@@ -3176,13 +2945,12 @@ name = "copilot-shell"
             )],
             origins: Vec::new(),
         };
-        assert!(probe_rpm_drift(&meta, &q).is_none());
+        assert!(probe_rpm_drift("copilot-shell", Some("2.3.0-1.al8"), &q).is_none());
     }
 
     /// A newer rpmdb EVR than recorded (manual `dnf update`) is drift.
     #[test]
     fn probe_rpm_drift_detects_evr_mismatch() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = FakeQuery {
             installed: vec![(
                 "copilot-shell".to_string(),
@@ -3191,7 +2959,7 @@ name = "copilot-shell"
             origins: Vec::new(),
         };
         assert!(matches!(
-            probe_rpm_drift(&meta, &q),
+            probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q),
             Some(RpmDrift::Drifted { .. })
         ));
     }
@@ -3199,10 +2967,9 @@ name = "copilot-shell"
     /// The package gone from rpmdb (manual `rpm -e`) is Missing.
     #[test]
     fn probe_rpm_drift_detects_missing() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = FakeQuery::default();
         assert!(matches!(
-            probe_rpm_drift(&meta, &q),
+            probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q),
             Some(RpmDrift::Missing)
         ));
     }
@@ -3210,13 +2977,12 @@ name = "copilot-shell"
     /// A same-name multi-version rpmdb is surfaced as drift, not a silent pass.
     #[test]
     fn probe_rpm_drift_multi_version_is_drifted() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = ErrQuery(PackageQueryError::UnexpectedOutput {
             command: "rpm".to_string(),
             detail: "2 installed versions".to_string(),
         });
         assert!(matches!(
-            probe_rpm_drift(&meta, &q),
+            probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q),
             Some(RpmDrift::Drifted { .. })
         ));
     }
@@ -3224,11 +2990,10 @@ name = "copilot-shell"
     /// Missing rpm/dnf tooling cannot prove drift; the recorded status stands.
     #[test]
     fn probe_rpm_drift_tooling_missing_keeps_status() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = ErrQuery(PackageQueryError::CommandMissing {
             command: "rpm".to_string(),
         });
-        assert!(probe_rpm_drift(&meta, &q).is_none());
+        assert!(probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q).is_none());
     }
 
     /// The scoped status selector overrides an adopted rpm-observed row to
@@ -3249,13 +3014,8 @@ name = "copilot-shell"
             origins: Vec::new(),
         };
         let view = scoped_status_view(InstalledState::default(), state);
-        let records = select_components_from_view(
-            &view,
-            &ScopedCatalogs::default(),
-            Some("copilot-shell"),
-            None,
-            Some(&q),
-        );
+        let records =
+            select_components_from_view_quiet(&view, Some("copilot-shell"), None, Some(&q));
 
         assert_eq!(records[0].status, "drifted");
         assert!(
@@ -3279,13 +3039,8 @@ name = "copilot-shell"
         ));
         let q = FakeQuery::default();
         let view = scoped_status_view(InstalledState::default(), state);
-        let records = select_components_from_view(
-            &view,
-            &ScopedCatalogs::default(),
-            Some("copilot-shell"),
-            None,
-            Some(&q),
-        );
+        let records =
+            select_components_from_view_quiet(&view, Some("copilot-shell"), None, Some(&q));
 
         assert_eq!(records[0].status, "missing");
         assert!(
@@ -3308,13 +3063,7 @@ name = "copilot-shell"
         ));
         let q = FakeQuery::default();
         let view = scoped_status_view(InstalledState::default(), state);
-        let records = select_components_from_view(
-            &view,
-            &ScopedCatalogs::default(),
-            Some("agentsight"),
-            None,
-            Some(&q),
-        );
+        let records = select_components_from_view_quiet(&view, Some("agentsight"), None, Some(&q));
 
         assert_eq!(records[0].status, "installed", "raw row must not drift");
         assert!(
@@ -3341,13 +3090,8 @@ name = "copilot-shell"
             origins: Vec::new(),
         };
         let view = scoped_status_view(InstalledState::default(), state);
-        let records = select_components_from_view(
-            &view,
-            &ScopedCatalogs::default(),
-            Some("copilot-shell"),
-            None,
-            Some(&q),
-        );
+        let records =
+            select_components_from_view_quiet(&view, Some("copilot-shell"), None, Some(&q));
 
         assert_eq!(
             records[0].status, "failed",

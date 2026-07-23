@@ -577,7 +577,7 @@ fn raw_cli_ctrl_c_drops_late_fake_tool_artifact() {
 }
 
 #[test]
-fn raw_cli_ctrl_c_clears_queued_failed_command_analysis() {
+fn raw_cli_ctrl_c_cancels_active_agent_without_queueing_generic_failure() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
@@ -596,7 +596,7 @@ fn raw_cli_ctrl_c_clears_queued_failed_command_analysis() {
         ],
     );
 
-    assert!(output.contains("Agent queued"), "{output}");
+    assert!(!output.contains("Agent queued"), "{output}");
     assert!(output.contains("Agent cancelled"), "{output}");
     assert!(output.contains("after-queued-cancel"), "{output}");
     assert!(

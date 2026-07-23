@@ -34,6 +34,15 @@ kind = "raw-package"
 name = "copilot-shell"
 
 [[components]]
+name = "cosh-ng"
+display_name = "cosh-ng"
+summary = "Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface"
+
+[[components.backends]]
+kind = "raw"
+package = "cosh-ng"
+
+[[components]]
 name = "agentsight"
 display_name = "AgentSight"
 summary = "eBPF-based AI agent observability tool"
@@ -123,6 +132,10 @@ legacy_adopt = true
 name = "skillfs"
 display_name = "SkillFS"
 summary = "AI agent skill management via virtual filesystem"
+
+[[components.backends]]
+kind = "raw"
+package = "skillfs"
 
 [[components.backends]]
 kind = "rpm"

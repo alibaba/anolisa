@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
+use skillfs_core::os_adapter::OsAdapterStage;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+use skillfs_fuse::security::SkillEventSink;
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,6 +70,18 @@ pub fn fuse_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Returns `true` when SLS telemetry is enabled on the host, i.e. the real
+/// `/etc/anolisa/.telemetry_disabled` sentinel is absent.
+///
+/// Tests that mount with a `RuntimeMetricsSink` and assert metric records must
+/// skip when this is `false`: the production writer pins the real sentinel (no
+/// override exists), so a disabled host writes zero records and the assertions
+/// cannot hold. The enabled write path stays covered by the writer unit tests,
+/// which inject a temp sentinel.
+pub fn telemetry_enabled() -> bool {
+    skillfs_fuse::security::telemetry_allowed()
 }
 
 /// Skip the current test (early `return`) with a deterministic stderr line
@@ -169,6 +183,105 @@ impl MountFixture {
             source,
             None,
             Some(skillfs_fuse::SkillLayout::Hermes),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Mount in normal mode with an opt-in OS adapter transform stage.
+    pub fn normal_with_os_adapter<F: FnOnce(&Path)>(seed: F, stage: OsAdapterStage) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_now_with_layout(
+            MountMode::Normal,
+            source,
+            Some(mountpoint),
+            None,
+            Some(stage),
+            None,
+            None,
+        )
+    }
+
+    /// Mount in normal mode with optional adapter and an audit event sink.
+    pub fn normal_with_transform_audit<F: FnOnce(&Path)>(
+        seed: F,
+        os_adapter: Option<OsAdapterStage>,
+        event_sink: Arc<dyn SkillEventSink>,
+    ) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_now_with_layout(
+            MountMode::Normal,
+            source,
+            Some(mountpoint),
+            None,
+            os_adapter,
+            None,
+            Some(event_sink),
+        )
+    }
+
+    /// Mount in normal mode with explicit directive-stage and OS-adapter
+    /// configuration. `directive_enabled = Some(false)` disables the compiler
+    /// stage; `os_adapter = None` leaves only whatever the directive setting
+    /// selects (raw content when both are off).
+    pub fn normal_with_transforms<F: FnOnce(&Path)>(
+        seed: F,
+        directive_enabled: Option<bool>,
+        os_adapter: Option<OsAdapterStage>,
+    ) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_now_with_layout(
+            MountMode::Normal,
+            source,
+            Some(mountpoint),
+            None,
+            os_adapter,
+            directive_enabled,
+            None,
+        )
+    }
+
+    /// Mount in in-place Hermes mode with an opt-in OS adapter transform stage.
+    pub fn in_place_hermes_with_os_adapter<F: FnOnce(&Path)>(
+        seed: F,
+        stage: OsAdapterStage,
+    ) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        Self::mount_now_with_layout(
+            MountMode::InPlace,
+            source,
+            None,
+            Some(skillfs_fuse::SkillLayout::Hermes),
+            Some(stage),
+            None,
+            None,
+        )
+    }
+
+    /// Mount in in-place Hermes mode with an adapter and audit event sink.
+    pub fn in_place_hermes_with_transform_audit<F: FnOnce(&Path)>(
+        seed: F,
+        stage: OsAdapterStage,
+        event_sink: Arc<dyn SkillEventSink>,
+    ) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        Self::mount_now_with_layout(
+            MountMode::InPlace,
+            source,
+            None,
+            Some(skillfs_fuse::SkillLayout::Hermes),
+            Some(stage),
+            None,
+            Some(event_sink),
         )
     }
 
@@ -177,7 +290,7 @@ impl MountFixture {
         source: tempfile::TempDir,
         mountpoint: Option<tempfile::TempDir>,
     ) -> Self {
-        Self::mount_now_with_layout(mode, source, mountpoint, None)
+        Self::mount_now_with_layout(mode, source, mountpoint, None, None, None, None)
     }
 
     fn mount_now_with_layout(
@@ -185,6 +298,9 @@ impl MountFixture {
         source: tempfile::TempDir,
         mountpoint: Option<tempfile::TempDir>,
         skill_layout: Option<skillfs_fuse::SkillLayout>,
+        os_adapter: Option<OsAdapterStage>,
+        directive_enabled: Option<bool>,
+        event_sink: Option<Arc<dyn SkillEventSink>>,
     ) -> Self {
         let mut store = SkillStore::new();
         store.load_from_directory(source.path(), &ParseConfig::default());
@@ -198,7 +314,10 @@ impl MountFixture {
         let in_place = matches!(mode, MountMode::InPlace);
 
         let config = MountConfig {
+            event_sink,
             skill_layout,
+            os_adapter,
+            directive_enabled,
             ..MountConfig::default()
         };
 

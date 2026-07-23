@@ -1,6 +1,6 @@
 //! RPM/DNF backend for [`PackageTransaction`].
 //!
-//! Runs `dnf` transactions (`install`/`update`/`remove`) through the injectable
+//! Runs `dnf` transactions (`install`/`update`/`reinstall`/`remove`) through the injectable
 //! [`CommandRunner`] so the transaction can be tested with a fake runner
 //! instead of a live `dnf`. Only the spawn/exit classification lives here;
 //! privilege checks and state refresh stay in the CLI consumer.
@@ -56,14 +56,17 @@ impl<R: CommandRunner> RpmTransaction<R> {
     /// Run a non-interactive `dnf` transaction and classify the outcome.
     ///
     /// Shared by [`install`](PackageTransaction::install),
-    /// [`update`](PackageTransaction::update), and
+    /// [`update`](PackageTransaction::update),
+    /// [`reinstall`](PackageTransaction::reinstall), and
     /// [`remove`](PackageTransaction::remove) since they differ only in the
     /// dnf verb; `verb` is echoed into the [`TransactionFailed`] operation so
-    /// the caller can tell which transaction failed.
-    fn run_dnf(&self, verb: &str, package: &str) -> Result<(), PackageTransactionError> {
+    /// the caller can tell which transaction failed. All packages go into a
+    /// single dnf invocation, so the solver resolves the whole set at once
+    /// and the transaction commits or fails as a unit.
+    fn run_dnf(&self, verb: &str, packages: &[&str]) -> Result<(), PackageTransactionError> {
         // `-y` is required: ANOLISA orchestrates the lifecycle non-interactively,
         // so there is no TTY to answer dnf's confirmation prompt.
-        let args = self.dnf_args(verb, package);
+        let args = self.dnf_args(verb, packages);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self
             .runner
@@ -90,9 +93,11 @@ impl<R: CommandRunner> RpmTransaction<R> {
         })
     }
 
-    fn dnf_args(&self, verb: &str, package: &str) -> Vec<String> {
+    fn dnf_args(&self, verb: &str, packages: &[&str]) -> Vec<String> {
         let Some(repo) = &self.repo else {
-            return vec![verb.to_string(), "-y".to_string(), package.to_string()];
+            let mut args = vec![verb.to_string(), "-y".to_string()];
+            args.extend(packages.iter().map(|p| (*p).to_string()));
+            return args;
         };
 
         let mut args = vec!["-y".to_string()];
@@ -116,26 +121,35 @@ impl<R: CommandRunner> RpmTransaction<R> {
                 args.push(repo.id().to_string());
                 args.push("upgrade".to_string());
             }
+            "reinstall" => {
+                args.push("repository-packages".to_string());
+                args.push(repo.id().to_string());
+                args.push("reinstall".to_string());
+            }
             _ => {
                 args.push(verb.to_string());
             }
         }
-        args.push(package.to_string());
+        args.extend(packages.iter().map(|p| (*p).to_string()));
         args
     }
 }
 
 impl<R: CommandRunner> PackageTransaction for RpmTransaction<R> {
-    fn install(&self, package: &str) -> Result<(), PackageTransactionError> {
-        self.run_dnf("install", package)
+    fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.run_dnf("install", packages)
     }
 
-    fn update(&self, package: &str) -> Result<(), PackageTransactionError> {
-        self.run_dnf("update", package)
+    fn update(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.run_dnf("update", packages)
     }
 
-    fn remove(&self, package: &str) -> Result<(), PackageTransactionError> {
-        self.run_dnf("remove", package)
+    fn reinstall(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.run_dnf("reinstall", packages)
+    }
+
+    fn remove(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.run_dnf("remove", packages)
     }
 }
 
@@ -267,7 +281,7 @@ mod tests {
             "copilot-shell",
             ok_out(Some(0), "Upgraded:\n  copilot-shell\n", ""),
         );
-        t.update("copilot-shell").expect("update ok");
+        t.update(&["copilot-shell"]).expect("update ok");
     }
 
     #[test]
@@ -277,7 +291,7 @@ mod tests {
             "copilot-shell",
             ok_out(Some(0), "Installed:\n  copilot-shell\n", ""),
         );
-        t.install("copilot-shell").expect("install ok");
+        t.install(&["copilot-shell"]).expect("install ok");
     }
 
     #[test]
@@ -302,7 +316,47 @@ mod tests {
             ],
             ok_out(Some(0), "Installed:\n  copilot-shell\n", ""),
         );
-        t.install("copilot-shell").expect("install ok");
+        t.install(&["copilot-shell"]).expect("install ok");
+    }
+
+    #[test]
+    fn install_many_packages_share_one_dnf_invocation() {
+        // The whole point of the multi-package contract: one dnf process sees
+        // the full set, so the solver resolves it as a single transaction.
+        let t = RpmTransaction::with_runner(FakeCommandRunner {
+            dnf: Some(ok_out(Some(0), "Installed:\n  a b c\n", "")),
+            expected_verb: "install".to_string(),
+            expected_package: String::new(),
+            expected_args: Some(
+                ["install", "-y", "a", "b", "c"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+        });
+        t.install(&["a", "b", "c"]).expect("install ok");
+    }
+
+    #[test]
+    fn install_many_with_repo_appends_all_packages_after_verb() {
+        let t = txn_with_repo(
+            "install",
+            "a",
+            &[
+                "-y",
+                "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                "--enablerepo=anolisa-configured",
+                "--setopt=anolisa-configured.gpgcheck=1",
+                "repository-packages",
+                "anolisa-configured",
+                "install",
+                "a",
+                "b",
+                "c",
+            ],
+            ok_out(Some(0), "Installed:\n  a b c\n", ""),
+        );
+        t.install(&["a", "b", "c"]).expect("install ok");
     }
 
     #[test]
@@ -323,7 +377,63 @@ mod tests {
             ],
             ok_out(Some(0), "Upgraded:\n  copilot-shell\n", ""),
         );
-        t.update("copilot-shell").expect("update ok");
+        t.update(&["copilot-shell"]).expect("update ok");
+    }
+
+    #[test]
+    fn reinstall_success_returns_ok() {
+        let t = txn(
+            "reinstall",
+            "copilot-shell",
+            ok_out(Some(0), "Reinstalled:\n  copilot-shell\n", ""),
+        );
+        t.reinstall(&["copilot-shell"]).expect("reinstall ok");
+    }
+
+    #[test]
+    fn reinstall_with_repo_uses_repository_packages() {
+        // Like install/update, reinstall constrains the primary target to the
+        // configured repo so the payload comes from the repo ANOLISA trusts,
+        // not a same-EVR build in a host-enabled system repo.
+        let t = txn_with_repo(
+            "reinstall",
+            "copilot-shell",
+            &[
+                "-y",
+                "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                "--enablerepo=anolisa-configured",
+                "--setopt=anolisa-configured.gpgcheck=1",
+                "repository-packages",
+                "anolisa-configured",
+                "reinstall",
+                "copilot-shell",
+            ],
+            ok_out(Some(0), "Reinstalled:\n  copilot-shell\n", ""),
+        );
+        t.reinstall(&["copilot-shell"]).expect("reinstall ok");
+    }
+
+    #[test]
+    fn reinstall_nonzero_exit_records_reinstall_operation() {
+        let t = txn(
+            "reinstall",
+            "copilot-shell",
+            ok_out(
+                Some(1),
+                "",
+                "Error: Installed package copilot-shell not available.",
+            ),
+        );
+        let err = t.reinstall(&["copilot-shell"]).unwrap_err();
+        match err {
+            PackageTransactionError::TransactionFailed {
+                operation, stderr, ..
+            } => {
+                assert_eq!(operation, "reinstall");
+                assert!(stderr.contains("not available"));
+            }
+            other => panic!("expected TransactionFailed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -344,7 +454,7 @@ mod tests {
             ],
             ok_out(Some(0), "Removed:\n  copilot-shell\n", ""),
         );
-        t.remove("copilot-shell").expect("remove ok");
+        t.remove(&["copilot-shell"]).expect("remove ok");
     }
 
     #[test]
@@ -354,7 +464,7 @@ mod tests {
             "copilot-shell",
             ok_out(Some(0), "Removed:\n  copilot-shell\n", ""),
         );
-        t.remove("copilot-shell").expect("remove ok");
+        t.remove(&["copilot-shell"]).expect("remove ok");
     }
 
     #[test]
@@ -366,7 +476,7 @@ mod tests {
             "copilot-shell",
             ok_out(Some(1), "", "Error: No match for argument: copilot-shell"),
         );
-        let err = t.remove("copilot-shell").unwrap_err();
+        let err = t.remove(&["copilot-shell"]).unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed {
                 operation, stderr, ..
@@ -385,7 +495,7 @@ mod tests {
             "copilot-shell",
             ok_out(Some(1), "", "Error: nothing to do, repo unreachable"),
         );
-        let err = t.update("copilot-shell").unwrap_err();
+        let err = t.update(&["copilot-shell"]).unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed {
                 command,
@@ -411,7 +521,7 @@ mod tests {
             "copilot-shell",
             ok_out(Some(1), "", "Error: No match for argument"),
         );
-        let err = t.install("copilot-shell").unwrap_err();
+        let err = t.install(&["copilot-shell"]).unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed {
                 operation, stderr, ..
@@ -436,7 +546,7 @@ mod tests {
                 "",
             ),
         );
-        let err = t.update("copilot-shell").unwrap_err();
+        let err = t.update(&["copilot-shell"]).unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed { stderr, .. } => {
                 assert!(stderr.contains("superuser privileges"), "got: {stderr}");
@@ -448,7 +558,7 @@ mod tests {
     #[test]
     fn command_missing_maps_to_error() {
         let t = txn("update", "x", FakeOutcome::Err(io::ErrorKind::NotFound));
-        let err = t.update("x").unwrap_err();
+        let err = t.update(&["x"]).unwrap_err();
         assert!(matches!(
             err,
             PackageTransactionError::CommandMissing { command } if command == DNF
@@ -462,7 +572,7 @@ mod tests {
             "x",
             FakeOutcome::Err(io::ErrorKind::PermissionDenied),
         );
-        let err = t.update("x").unwrap_err();
+        let err = t.update(&["x"]).unwrap_err();
         assert!(matches!(
             err,
             PackageTransactionError::PermissionDenied { command } if command == DNF

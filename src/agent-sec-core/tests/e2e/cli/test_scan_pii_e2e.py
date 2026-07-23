@@ -45,6 +45,9 @@ def _run_cli(
     data_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["AGENT_SEC_DATA_DIR"] = str(data_dir)
+    home_dir = data_dir / "home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(home_dir)
     try:
         return subprocess.run(
             [*_command(mode), *args],
@@ -236,3 +239,124 @@ def test_scan_pii_raw_evidence_stays_out_of_security_events(
     )
     assert text not in details_text
     assert token not in details_text
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_scan_pii_loads_fixed_custom_regex_rules(mode: str, tmp_path: Path) -> None:
+    data_dir = tmp_path / mode / "custom-rules"
+    rules_path = (
+        data_dir / "home" / ".config" / "agent-sec" / "pii-checker" / "rules.yaml"
+    )
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text(
+        """
+- type: dogfood_order_no
+  regex: 'ORDER-[A-Z0-9]{8}'
+  severity: warn
+- type: dogfood_customer_token
+  regex: 'DFT-[A-Z0-9]{16}'
+  severity: deny
+""".lstrip(),
+        encoding="utf-8",
+    )
+    text = "order=ORDER-ABC12345 token=DFT-ABCDEF1234567890"
+
+    result = _run_cli(
+        mode,
+        "scan-pii",
+        "--text",
+        text,
+        "--source",
+        "tool_output",
+        "--format",
+        "json",
+        "--redact-output",
+        data_dir=data_dir,
+    )
+    data = _load_json(result)
+
+    assert data["verdict"] == "deny"
+    assert {
+        "dogfood_order_no",
+        "dogfood_customer_token",
+    }.issubset({finding["type"] for finding in data["findings"]})
+    assert data["summary"]["custom_rules"]["status"] == "loaded"
+    assert data["summary"]["custom_rules"]["rule_count"] == 2
+    assert "ORDER-ABC12345" not in data["redacted_text"]
+    assert "DFT-ABCDEF1234567890" not in data["redacted_text"]
+
+    events_result = _run_cli(
+        mode,
+        "events",
+        "--category",
+        "pii_scan",
+        "--output",
+        "json",
+        data_dir=data_dir,
+    )
+    assert events_result.returncode == 0, events_result.stderr
+    events = json.loads(events_result.stdout)
+    assert len(events) == 1
+    details = events[0]["details"]
+    details_text = json.dumps(details, ensure_ascii=False)
+    assert {
+        "dogfood_order_no",
+        "dogfood_customer_token",
+    }.issubset({finding["type"] for finding in details["result"]["findings"]})
+    assert details["result"]["summary"]["custom_rules"]["status"] == "loaded"
+    assert text not in details_text
+    assert "ORDER-[A-Z0-9]{8}" not in details_text
+    assert "DFT-[A-Z0-9]{16}" not in details_text
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_scan_pii_invalid_custom_rules_fail_open(mode: str, tmp_path: Path) -> None:
+    data_dir = tmp_path / mode / "invalid-custom-rules"
+    rules_path = (
+        data_dir / "home" / ".config" / "agent-sec" / "pii-checker" / "rules.yaml"
+    )
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    sensitive_pattern = "[private-business-pattern"
+    rules_path.write_text(
+        f"- type: dogfood_token\n  regex: '{sensitive_pattern}'\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli(
+        mode,
+        "scan-pii",
+        "--text",
+        "alice@company.cn",
+        "--format",
+        "json",
+        data_dir=data_dir,
+    )
+    data = _load_json(result)
+
+    assert data["verdict"] == "warn"
+    assert data["summary"]["custom_rules"]["status"] == "invalid"
+    assert data["summary"]["custom_rules"]["error_code"] == "invalid_regex"
+    assert "invalid_regex" in result.stderr
+    assert sensitive_pattern not in result.stderr
+
+    events_result = _run_cli(
+        mode,
+        "events",
+        "--category",
+        "pii_scan",
+        "--output",
+        "json",
+        data_dir=data_dir,
+    )
+    assert events_result.returncode == 0, events_result.stderr
+    events = json.loads(events_result.stdout)
+    assert len(events) == 1
+    details = events[0]["details"]
+    details_text = json.dumps(details, ensure_ascii=False)
+    custom_summary = details["result"]["summary"]["custom_rules"]
+    assert custom_summary["status"] == "invalid"
+    assert custom_summary["error_code"] == "invalid_regex"
+    assert len(custom_summary["ruleset_sha256"]) == 64
+    assert sensitive_pattern not in details_text
+    assert "alice@company.cn" not in details_text
+    assert ".config" not in details_text

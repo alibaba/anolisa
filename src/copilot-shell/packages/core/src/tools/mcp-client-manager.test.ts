@@ -43,9 +43,20 @@ describe('McpClientManager', () => {
       getPromptRegistry: () => ({}),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
+      getChildProcessEnv: () => ({ COSH_SESSION_ID: 'test-session-id' }),
     } as unknown as Config;
     const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
     await manager.discoverAllMcpTools(mockConfig);
+    expect(McpClient).toHaveBeenCalledWith(
+      'test-server',
+      {},
+      {},
+      {},
+      {},
+      false,
+      undefined,
+      { COSH_SESSION_ID: 'test-session-id' },
+    );
     expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
     expect(mockedMcpClient.discover).toHaveBeenCalledOnce();
   });

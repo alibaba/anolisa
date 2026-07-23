@@ -174,7 +174,7 @@ impl TokenComparison {
     pub fn formatted_change(&self) -> String {
         let sign = if self.change >= 0 { "+" } else { "" };
         let change_formatted = format_tokens(self.change.unsigned_abs());
-        let percent = format!("{:.0}%", self.change_percent.abs());
+        let percent = format!("{:.0}", self.change_percent.abs());
 
         if self.change >= 0 {
             format!("{sign}{change_formatted} (+{percent}%)")
@@ -740,5 +740,306 @@ mod tests {
 
         // Cleanup
         std::fs::remove_file("/tmp/test_tokens_query.db").ok();
+    }
+
+    fn unique_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentsight_token_{label}_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    fn make_record(timestamp_ns: u64, agent: Option<&str>, input: u64, output: u64) -> TokenRecord {
+        TokenRecord {
+            id: 0,
+            timestamp_ns,
+            pid: 1234,
+            comm: "python".to_string(),
+            agent: agent.map(str::to_string),
+            model: Some("gpt-4".to_string()),
+            provider: "openai".to_string(),
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_tokens: Some(7),
+            cache_read_tokens: Some(3),
+            request_id: Some("req-1".to_string()),
+            endpoint: Some("/v1/chat/completions".to_string()),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn test_time_period_display_and_previous_period() {
+        assert_eq!(TimePeriod::Today.to_string(), "今天");
+        assert_eq!(TimePeriod::Yesterday.to_string(), "昨天");
+        assert_eq!(TimePeriod::Week.to_string(), "本周");
+        assert_eq!(TimePeriod::LastWeek.to_string(), "上周");
+        assert_eq!(TimePeriod::Month.to_string(), "本月");
+        assert_eq!(TimePeriod::LastMonth.to_string(), "上月");
+
+        assert_eq!(TimePeriod::Today.previous_period(), TimePeriod::Yesterday);
+        assert_eq!(TimePeriod::Week.previous_period(), TimePeriod::LastWeek);
+        assert_eq!(TimePeriod::Month.previous_period(), TimePeriod::LastMonth);
+    }
+
+    #[test]
+    fn test_token_query_result_formatters() {
+        let result = TokenQueryResult {
+            period: "test".to_string(),
+            input_tokens: 1_500,
+            output_tokens: 2_000_000,
+            total_tokens: 2_001_500,
+            request_count: 1,
+            comparison: None,
+            breakdown: Vec::new(),
+        };
+
+        assert_eq!(result.formatted_input(), "1.5K");
+        assert_eq!(result.formatted_output(), "2.0M");
+        assert_eq!(result.formatted_total(), "2.0M");
+    }
+
+    #[test]
+    fn test_token_comparison_formatted_change() {
+        let up = TokenComparison {
+            previous_total: 100,
+            change: 50,
+            change_percent: 50.0,
+            trend: Trend::Up,
+        };
+        assert_eq!(up.formatted_change(), "+50 (+50%)");
+
+        let down = TokenComparison {
+            previous_total: 200,
+            change: -75,
+            change_percent: -37.5,
+            trend: Trend::Down,
+        };
+        assert_eq!(down.formatted_change(), "-75 (-38%)");
+    }
+
+    #[test]
+    fn test_insert_count_all_and_clear() {
+        let path = unique_db_path("insert_count_clear");
+        let mut store = TokenStore::new(&path);
+        let id = store
+            .insert(&make_record(1_000, Some("Agent-A"), 10, 5))
+            .unwrap();
+        assert!(id > 0);
+        assert_eq!(store.count(), 1);
+
+        let rows = store.all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agent.as_deref(), Some("Agent-A"));
+        assert_eq!(rows[0].cache_creation_tokens, Some(7));
+        assert_eq!(rows[0].cache_read_tokens, Some(3));
+
+        store.clear().unwrap();
+        assert_eq!(store.count(), 0);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_custom_table_isolated_from_default_table() {
+        let path = unique_db_path("custom_table");
+        let custom = TokenStore::with_table(&path, "custom_tokens");
+        custom
+            .insert(&make_record(1_000, Some("Agent-A"), 10, 5))
+            .unwrap();
+        assert_eq!(custom.count(), 1);
+
+        let default_store = TokenStore::new(&path);
+        assert_eq!(default_store.count(), 0);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_by_time_range_owned_filters_and_orders_desc() {
+        let path = unique_db_path("time_range");
+        let store = TokenStore::new(&path);
+        store
+            .insert(&make_record(1_000, Some("old"), 1, 1))
+            .unwrap();
+        store
+            .insert(&make_record(2_000, Some("mid"), 2, 2))
+            .unwrap();
+        store
+            .insert(&make_record(3_000, Some("new"), 3, 3))
+            .unwrap();
+
+        let rows = store.by_time_range_owned(1_500, 3_000);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].agent.as_deref(), Some("new"));
+        assert_eq!(rows[1].agent.as_deref(), Some("mid"));
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_by_last_hours_returns_recent_rows() {
+        let path = unique_db_path("last_hours");
+        let store = TokenStore::new(&path);
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        store
+            .insert(&make_record(
+                now_ns.saturating_sub(1_000),
+                Some("recent"),
+                1,
+                2,
+            ))
+            .unwrap();
+        store
+            .insert(&make_record(
+                now_ns.saturating_sub(3 * 3600 * 1_000_000_000),
+                Some("old"),
+                10,
+                20,
+            ))
+            .unwrap();
+
+        let rows = store.by_last_hours(1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agent.as_deref(), Some("recent"));
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_purge_before_deletes_old_records() {
+        let path = unique_db_path("purge_before");
+        let store = TokenStore::new(&path);
+        store
+            .insert(&make_record(1_000, Some("old"), 1, 1))
+            .unwrap();
+        store
+            .insert(&make_record(5_000, Some("new"), 2, 2))
+            .unwrap();
+
+        let deleted = store.purge_before(3_000).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(store.count(), 1);
+        assert_eq!(store.all()[0].agent.as_deref(), Some("new"));
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_checkpoint_succeeds() {
+        let path = unique_db_path("checkpoint");
+        let store = TokenStore::new(&path);
+        store
+            .insert(&make_record(1_000, Some("Agent-A"), 1, 1))
+            .unwrap();
+        store.checkpoint().unwrap();
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_query_by_hours_and_compare() {
+        let path = unique_db_path("hours_compare");
+        let store = TokenStore::new(&path);
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let hour_ns = 3600 * 1_000_000_000;
+        store
+            .insert(&make_record(
+                now_ns - 30 * 60 * 1_000_000_000,
+                Some("current"),
+                100,
+                50,
+            ))
+            .unwrap();
+        store
+            .insert(&make_record(
+                now_ns - hour_ns - 30 * 60 * 1_000_000_000,
+                Some("previous"),
+                20,
+                10,
+            ))
+            .unwrap();
+
+        let query = TokenQuery::new(&store);
+        let result = query.by_hours_with_compare(1);
+        assert_eq!(result.total_tokens, 150);
+        let comparison = result.comparison.expect("comparison should be populated");
+        assert_eq!(comparison.previous_total, 30);
+        assert_eq!(comparison.change, 120);
+        assert_eq!(comparison.trend, Trend::Up);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_query_by_period_with_compare_and_breakdown() {
+        let path = unique_db_path("period_breakdown");
+        let store = TokenStore::new(&path);
+        let (today_start, _) = TimePeriod::Today.time_range();
+        let (yesterday_start, _) = TimePeriod::Yesterday.time_range();
+
+        store
+            .insert(&make_record(today_start + 1_000, Some("Agent-A"), 100, 50))
+            .unwrap();
+        store
+            .insert(&make_record(today_start + 2_000, Some("Agent-A"), 30, 20))
+            .unwrap();
+        store
+            .insert(&make_record(today_start + 3_000, Some("Agent-B"), 10, 10))
+            .unwrap();
+        store
+            .insert(&make_record(
+                yesterday_start + 1_000,
+                Some("Agent-C"),
+                20,
+                10,
+            ))
+            .unwrap();
+
+        let query = TokenQuery::new(&store);
+        let compared = query.by_period_with_compare(TimePeriod::Today);
+        assert_eq!(compared.total_tokens, 220);
+        let comparison = compared.comparison.expect("comparison should exist");
+        assert_eq!(comparison.previous_total, 30);
+        assert_eq!(comparison.change, 190);
+        assert_eq!(comparison.trend, Trend::Up);
+
+        let with_breakdown = query.by_period_with_breakdown(TimePeriod::Today);
+        assert_eq!(with_breakdown.breakdown.len(), 2);
+        assert_eq!(with_breakdown.breakdown[0].name, "Agent-A");
+        assert_eq!(with_breakdown.breakdown[0].total_tokens, 200);
+        assert_eq!(with_breakdown.breakdown[0].request_count, 2);
+        assert!((with_breakdown.breakdown[0].percentage - 90.90).abs() < 0.1);
+
+        let full = query.full_query(TimePeriod::Today);
+        assert!(full.comparison.is_some());
+        assert_eq!(full.breakdown.len(), 2);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_breakdown_falls_back_to_comm_when_agent_missing() {
+        let path = unique_db_path("breakdown_comm");
+        let store = TokenStore::new(&path);
+        let (today_start, _) = TimePeriod::Today.time_range();
+        store
+            .insert(&make_record(today_start + 1_000, None, 10, 5))
+            .unwrap();
+
+        let query = TokenQuery::new(&store);
+        let result = query.by_period_with_breakdown(TimePeriod::Today);
+        assert_eq!(result.breakdown.len(), 1);
+        assert_eq!(result.breakdown[0].name, "python");
+        cleanup_db(&path);
     }
 }

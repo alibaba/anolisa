@@ -20,6 +20,7 @@ system built for AI Agent workloads.
 | [OS Skills](src/os-skills/) | Curated skill library for system administration, monitoring, security, DevOps, and cloud integration. |
 | [SkillFS](src/skillfs/) | FUSE-backed virtual filesystem for local agent skills and view-based `SKILL.md` exposure. Linux only. |
 | [ktuner](src/ktuner/) | Deterministic kernel-tuning engine for AI agents — evaluates 207 rules against the running system and outputs structured JSON tuning recommendations. Linux only. |
+| [Blaze](src/blaze/) | Per-host sandbox orchestrator daemon — manages sandbox instance lifecycles via HTTP API with policy-driven backend selection. Rust. |
 
 See each component's README for detailed documentation.
 

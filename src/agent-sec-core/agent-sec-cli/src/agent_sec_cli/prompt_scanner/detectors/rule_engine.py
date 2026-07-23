@@ -114,9 +114,10 @@ class RuleEngine(DetectionLayer):
         for rule in all_rules:
             if not rule.enabled or not rule.patterns:
                 continue
-            compiled_patterns = [
-                re.compile(p, re.IGNORECASE | re.DOTALL) for p in rule.patterns
-            ]
+            flags = re.IGNORECASE
+            if not rule.single_line:
+                flags |= re.DOTALL
+            compiled_patterns = [re.compile(p, flags) for p in rule.patterns]
             self._rules.append(
                 {
                     "id": rule.id,

@@ -135,7 +135,7 @@ impl IdResolver {
 
         let key = compose_key(agent_name, pid, text);
         let first_response_id = {
-            let mut guard = cache.lock().expect("IdResolver LRU mutex poisoned");
+            let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
             // 已有条目时直接复用首个 response_id；否则把当前 response_id
             // 写入作为锚点，让同一 key 后续调用得到稳定结果。
             if let Some(existing) = guard.get(&key) {
@@ -459,6 +459,38 @@ mod tests {
         let a = crash_fallback_id("session", "openclaw", 1001, "query-A");
         let b = crash_fallback_id("session", "openclaw", 1001, "query-B");
         assert_ne!(a, b);
+    }
+
+    /// After intentionally poisoning the session LRU cache mutex,
+    /// resolve should still operate via poison recovery.
+    #[test]
+    fn poison_recovery_cache_still_operational() {
+        let resolver = IdResolver::new();
+
+        // Poison the session_first_resp mutex
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = resolver.session_first_resp.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(result.is_err(), "Mutex should be poisoned");
+
+        // Exercise the poison-recovery path
+        let sid = resolver
+            .resolve_session_id(A, P, "poison-test", "resp-1")
+            .unwrap();
+        assert_eq!(sid.len(), 32);
+
+        // Same for conv cache — poison it, then exercise
+        let result2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = resolver.conv_first_resp.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(result2.is_err(), "Mutex should be poisoned");
+
+        let cid = resolver
+            .resolve_conversation_id(A, P, "poison-conv", "resp-2")
+            .unwrap();
+        assert_eq!(cid.len(), 32);
     }
 
     #[test]

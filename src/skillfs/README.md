@@ -37,7 +37,7 @@ mounted filesystem while ordinary skill files remain backed by the source tree.
 | Operation | Normal mount | In-place mount | Notes |
 | --- | --- | --- | --- |
 | `readdir` | Virtual view | Virtual view | Visibility comes from views plus the store. |
-| Read `SKILL.md` | Compiled output | Compiled output | Uses `compiler::compile`. |
+| Read `SKILL.md` | Configured transform output | Configured transform output | Directive/compiler stage by default; raw content when it is disabled with no other transform. |
 | Read other files | Passthrough | Passthrough | Reads the physical source file. |
 | Write `SKILL.md` | Passthrough + store reparse | Passthrough + store reparse | Directory name is the authoritative store key. |
 | `create` ordinary file | Passthrough | Passthrough | Does not update the store. |
@@ -90,7 +90,9 @@ SkillFS is a hybrid filesystem: a virtual directory view plus physical
 passthrough writes.
 
 - `readdir` is still controlled by the virtual view.
-- Reading `SKILL.md` returns compiled content, not the raw source file.
+- Reading `SKILL.md` returns compiled content by default; with the directive
+  stage disabled and no other transform, it returns the selected target's raw
+  content.
 - Other files read and write directly against the underlying filesystem.
 - Writing, creating, or writing after renaming `SKILL.md` reparses the file and
   updates `SharedSkillStore`.
@@ -235,6 +237,158 @@ heuristic command normalizations, for example:
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 
+## Read-Time Transform Pipeline
+
+`SKILL.md` reads pass through an ordered transform pipeline after the activation
+target (live source, trusted snapshot, or hidden) is resolved:
+
+```text
+activation target -> read selected bytes -> [directive/compiler stage]
+  -> [optional os_adapter stage] -> Agent-visible bytes
+```
+
+Both stages are optional and independent; the fixed order is
+`directive -> os_adapter`:
+
+- The **directive** stage is the conditional compiler above. It is **enabled by
+  default**, and when present it always runs first, so existing mounts stay
+  byte-for-byte identical to earlier releases. Disable it with
+  `[transforms.directive] enabled = false` (see below).
+- The **os_adapter** stage is opt-in, applies only to `SKILL.md`, and runs
+  second. It rewrites distribution-specific literals (package managers,
+  `-dev`/`-devel` package names, service unit names, filesystem paths) between
+  Ubuntu/Debian and Alinux/Anolis style.
+
+Any combination is valid: both stages (the default plus an enabled adapter),
+directive-only (the default), adapter-only (directive disabled), or neither —
+an empty pipeline serves the selected raw bytes unchanged. Initialization
+diagnostics report the actual enabled stage list, including an empty list.
+
+| Directive | OS adapter | Agent-visible `SKILL.md` |
+| --- | --- | --- |
+| enabled (default) | disabled (default) | Legacy compiler output |
+| enabled | enabled | Compiler output, then OS adaptation |
+| disabled | enabled | OS adaptation of raw selected bytes |
+| disabled | disabled | Raw selected bytes |
+
+Transforms never modify source files, snapshots, activation metadata, or the
+rule artifact. Hidden skills stay `ENOENT` and never enter the pipeline; a
+snapshot read is transformed from the snapshot and never falls back to the live
+source. The same pipeline applies to flat and Hermes nested `SKILL.md`. Only
+`SKILL.md` is adapted — other Markdown, shell, Python, and config files pass
+through unchanged.
+
+### Disabling the Directive Stage
+
+The directive/compiler stage stays enabled unless explicitly turned off:
+
+```toml
+[transforms.directive]
+enabled = false
+```
+
+When the `[transforms.directive]` section is absent, directive compilation
+remains enabled, so existing configurations are unaffected. Disabling it only
+affects the compiler stage; the OS adapter remains independently opt-in.
+
+### OS Adapter Configuration
+
+The OS adapter reuses the existing `--config <PATH>` TOML file (no new CLI
+flags). It is disabled unless explicitly enabled. When enabled without a
+`rules_path`, it uses the built-in catalog:
+
+```toml
+# /etc/skillfs/skillfs-security.toml
+[transforms.directive]
+enabled = true
+
+[transforms.os_adapter]
+enabled = true
+target_os = "alinux" # auto | ubuntu | alinux
+# rules_path = "/etc/skillfs/ubuntu-alinux.custom.yaml"
+```
+
+```bash
+skillfs mount /path/to/skills /mnt/skillfs \
+  --config /etc/skillfs/skillfs-security.toml
+```
+
+SkillFS **ships a built-in 311-rule Ubuntu/Alinux catalog** embedded in the
+binary from the repository asset, so the adapter works in source builds, RPMs,
+and containers without a separate file. Of those rules, 257 are
+`auto_apply: always` and 54 are `auto_apply: never`; compilation produces 223
+active substitutions toward Alinux and 192 toward Ubuntu. It remains opt-in.
+
+- `target_os = "auto"` detects the host distribution from the exact
+  `/etc/os-release` `ID` once at mount startup — `ubuntu`/`debian` map to Ubuntu
+  and `alinux`/`anolis` map to Alinux. Detection is **fail-closed**: `ID_LIKE`
+  is not consulted, so RHEL-family derivatives (Rocky, AlmaLinux, CentOS, …) do
+  not silently resolve to Alinux, and unrecognized hosts reject the mount. Set
+  `ubuntu` or `alinux` explicitly on other distributions.
+- `rules_path` is an **optional external override**. Omit it to use the built-in
+  catalog; set a non-empty path to load an external read-only artifact instead.
+  A present-but-blank path is rejected, not treated as the default. SkillFS
+  loads and validates the chosen artifact once at mount startup; the per-read
+  hot path performs only in-memory substitution — no model, network, or
+  subprocess call at any point.
+- TOML does not enable individual rules. `rules_path` replaces, rather than
+  merges with, the built-in catalog. To keep the defaults while enabling a
+  protected rule or adding a local mapping, copy
+  `crates/skillfs-core/assets/ubuntu-alinux.yaml` from the source checkout,
+  edit the copy, and configure its absolute path. Change the selected rule from
+  `auto_apply: never` to `always`, or append a complete custom rule. The
+  artifact is loaded once at mount startup, so remount after editing it. There
+  is currently no catalog overlay, hot reload, or export command.
+
+In the built-in catalog, high-confidence rules are `auto_apply: always`;
+medium- and low-confidence rules are `auto_apply: never`, so they protect
+matched spans but are never substituted.
+The rule artifact — built-in or external — is a top-level YAML sequence. Each
+entry declares the literal strings for each OS side, a `direction`, and an
+explicit `auto_apply` eligibility flag:
+
+```yaml
+- ubuntu: "apt-get install -y "
+  alinux: "dnf install -y "
+  direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  match: literal                    # literal | token — optional, defaults to literal
+  auto_apply: always                # always | never — REQUIRED
+```
+
+- `auto_apply` is **required** on every rule, including external override
+  artifacts. Only `auto_apply: always` rules are applied, and only in a
+  direction the resolved target permits. An artifact that omits `auto_apply` is
+  rejected at mount startup with an error naming the offending rule index.
+- `confidence` and `notes` are accepted as human annotations but carry no
+  behavior — eligibility is governed solely by `auto_apply`.
+- `match` is optional and defaults to `literal`, preserving substring matching
+  for existing artifacts. `match: token` requires ASCII-alphanumeric boundaries
+  at alphanumeric source edges in both directions: `cron` matches at EOF or
+  before whitespace/newlines/punctuation, but not inside `micron`, `crontab`,
+  `cronutils`, or `cron2`.
+- Substitution is a single non-cascading pass over the original bytes: at each
+  position the longest matching pattern wins (most specific first), so
+  overlapping patterns like `apache2` and `apache2-utils` never chain and file
+  order does not affect the result.
+- Ineligible patterns (`auto_apply: never`, identity, or direction-disallowed)
+  still match and are emitted unchanged, protecting their whole span so a shorter
+  eligible rule cannot rewrite inside them (e.g. a `never` `/etc/init.d/apache2`
+  is not touched by the `apache2` rule). Protection is deduplicated by
+  `(source, match)`: a substitution removes protection only for the same source
+  and mode. Different modes coexist; substitution wins only when its own mode
+  matches the input, otherwise matching protection still preserves the span.
+- A many-to-one forward mapping (several Ubuntu spellings → one Alinux package)
+  must resolve reverse ambiguity **explicitly**: mark exactly one pair
+  `bidirectional` (the canonical reverse) and the alternates
+  `ubuntu_to_alinux_only`. Two `bidirectional` rules that collide on the reverse
+  target are rejected as ambiguous.
+
+When `enabled = true`, a missing or unreadable external `rules_path`, a blank
+`rules_path`, malformed YAML, an invalid `direction`/`auto_apply`/`match` value,
+duplicate or ambiguous patterns, or an unrecognized `target_os = "auto"` host
+all fail the mount before it starts with an actionable error rather than a
+silently disabled adapter.
+
 ## Project Layout
 
 ```text
@@ -332,7 +486,11 @@ Related security surfaces:
   new skills; writes land in the source tree and completion can trigger the
   external security flow.
 - `--notify-socket <PATH>` sends debounced skill mutation notifications to an
-  external daemon.
+  external daemon. Notify v2 identifies the Skill with its canonical path and
+  complete flat or Hermes `skillId`; live/backing paths are resolved separately.
+  In-place notify mounts, and any notify mount with `--ledger-backing-root`,
+  require `--trusted-peer-exe` so the authenticated resolver is available
+  before the daemon accesses the source.
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
   and updates the resolver without a remount.
@@ -353,7 +511,24 @@ Related security surfaces:
 - `--control-socket <PATH>` with `--trusted-peer-exe <PATH>` starts a trusted
   Unix socket control plane. Trusted peers can write activation JSON or xattr
   through methods such as `meta.writeActivation` and
-  `meta.setActivationXattr`.
+  `meta.setActivationXattr`. The packaged Skill Ledger worker's executable is
+  `/usr/bin/python3.11` because it starts through `sys.executable`, not a
+  `skill-ledger` launcher.
+- The control plane is opt-in and authenticated. The endpoint is resolved by
+  priority: CLI `--control-socket` > `[control_socket].path` in the config >
+  the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`. A
+  trusted peer without an explicit path uses the default endpoint; an explicit
+  path without a trusted peer is a configuration error; neither leaves the
+  control plane off. The default never falls back to `/tmp` or `/var/tmp`, and
+  a second instance never unlinks an active endpoint.
+- `skill.resolveLiveSource` is a read-only query that maps a caller-supplied
+  canonical Skill directory to its physical live/backing source. It returns
+  `managed=true` (with the derived `skillId`, `relativeSkillDir`,
+  `liveSkillDir`, and the live directory's `(device, inode)` identity),
+  `managed=false` for a valid path outside the managed root, or a structured
+  error. Skill ids are derived from the canonical relative path, so both flat
+  (`my-skill`) and Hermes nested (`apple/apple-notes`) layouts resolve to full
+  ids. No `register`, `mountId`, or `generation` is required.
 
 ## Documentation
 
@@ -373,6 +548,12 @@ Related security surfaces:
   - Decision-command JSON protocol.
 - [docs/security/runtime-activation-implementation-plan.md](docs/security/runtime-activation-implementation-plan.md)
   - Activation, notify, reload, and backing-root integration.
+- [docs/design/control-socket-resolver.md](docs/design/control-socket-resolver.md)
+  - Control socket default endpoint and the read-only
+    `skill.resolveLiveSource` resolver (SkillFS S1).
+- [docs/design/notify-v2.md](docs/design/notify-v2.md) - Canonical Skill
+  identity and live-root separation for daemon change notifications (SkillFS
+  S2).
 - [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md)
   - Long-lived filesystem capability record.
 - [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX test matrix and

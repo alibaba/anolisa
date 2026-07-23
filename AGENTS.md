@@ -18,8 +18,9 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **SkillFS** (`skillfs`) | `src/skillfs/` | Rust / FUSE | Linux only |
 | **ws-ckpt** | `src/ws-ckpt/` | Rust + TypeScript | Linux only |
 | **ktuner** | `src/ktuner/` | Rust | Linux only |
+| **blaze** | `src/blaze/` | Rust | Linux only |
 
-> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, and `ktuner` require Linux. Do **not** attempt to build them on macOS or Windows.
+> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, and `blaze` require Linux. Do **not** attempt to build them on macOS or Windows.
 
 ## 2. Development Commands
 
@@ -90,11 +91,17 @@ cd src/ktuner
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+
+# blaze (Linux only, per-component)
+cd src/blaze
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 ## 3. Rust Common Conventions
 
-> Applies to all Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`.
+> Applies to all Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, `blaze`.
 
 ### 3.1 Comment Guidelines
 
@@ -267,6 +274,7 @@ When generating commits, detect the active tool and fill in the actual version. 
 | `src/anolisa/` | `anolisa` |
 | `src/skillfs/` | `skillfs` |
 | `src/ktuner/` | `ktuner` |
+| `src/blaze/` | `blaze` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
@@ -332,6 +340,7 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **anolisa** | [`src/anolisa/AGENTS.md`](src/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
 | **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
+| **blaze** | [`src/blaze/AGENTS.md`](src/blaze/AGENTS.md) | Two-crate workspace, sandbox backends, daemon lifecycle |
 
 ## 11.1 File Placement & Documentation Structure
 

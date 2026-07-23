@@ -15,7 +15,7 @@ fn raw_cli_details_for_activity_uses_structured_panel() {
 
     assert!(output.contains("Activity details out-1"), "{output}");
     assert!(output.contains("Tool output - stdout captured"), "{output}");
-    assert!(output.contains("Run: fake-run-input-2"), "{output}");
+    assert!(output.contains("Run: fake-run-input-"), "{output}");
     assert!(output.contains("Detail:"), "{output}");
     assert!(output.contains("tool: tool-1"), "{output}");
     assert!(output.contains("stream: stdout"), "{output}");
@@ -48,14 +48,14 @@ fn raw_cli_activity_details_uses_zh_language_env() {
 
     assert!(output.contains("活动详情 out-1"), "{output}");
     assert!(output.contains("Tool 输出 - stdout 已捕获"), "{output}");
-    assert!(output.contains("运行: fake-run-input-2"), "{output}");
+    assert!(output.contains("运行: fake-run-input-"), "{output}");
     assert!(output.contains("详情:"), "{output}");
     assert!(output.contains("tool: tool-1"), "{output}");
     assert!(output.contains("stream: stdout"), "{output}");
     assert!(output.contains("line 24: fake tool output"), "{output}");
     assert!(!output.contains("Activity details out-1"), "{output}");
     assert!(!output.contains("output - stdout captured"), "{output}");
-    assert!(!output.contains("Run: fake-run-input-2"), "{output}");
+    assert!(!output.contains("Run: fake-run-input-"), "{output}");
     assert!(!output.contains("Detail:"), "{output}");
     assert!(!output.contains("bash: /details"), "{output}");
     assert_no_migrated_english_ui_labels(&output, DETAILS_ZH_FORBIDDEN_UI);

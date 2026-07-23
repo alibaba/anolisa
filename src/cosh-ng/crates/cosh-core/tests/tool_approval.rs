@@ -66,7 +66,7 @@ fn initialize_then_shutdown() {
 fn user_message_produces_result() {
     let msgs = interact(&[
         r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
-        r#"{"type":"user","message":{"role":"user","content":"say hello"},"session_id":"s1","parent_tool_use_id":null}"#,
+        r#"{"type":"user","message":{"role":"user","content":"say hello"},"parent_tool_use_id":null}"#,
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 
@@ -75,7 +75,11 @@ fn user_message_produces_result() {
 
     let result = &results[0];
     assert!(!result["is_error"].as_bool().unwrap());
-    assert_eq!(result["session_id"], "s1");
+    let init = msgs
+        .iter()
+        .find(|message| message["type"] == "system" && message["subtype"] == "init")
+        .expect("system init");
+    assert_eq!(result["session_id"], init["session_id"]);
 }
 
 #[test]
@@ -101,28 +105,37 @@ fn config_override_approval_mode() {
 }
 
 #[test]
-fn session_id_from_user_message_propagates_to_result() {
+fn session_id_from_user_message_cannot_replace_initialized_identity() {
     let msgs = interact(&[
         r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
-        r#"{"type":"user","message":{"role":"user","content":"hi"},"session_id":"custom-sess-42","parent_tool_use_id":null}"#,
+        r#"{"type":"user","message":{"role":"user","content":"hi"},"session_id":"00000000-0000-4000-8000-000000000000","parent_tool_use_id":null}"#,
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 
+    let init = msgs
+        .iter()
+        .find(|message| message["type"] == "system" && message["subtype"] == "init")
+        .expect("system init");
     let result = msgs.iter().find(|m| m["type"] == "result").unwrap();
-    assert_eq!(result["session_id"], "custom-sess-42");
+    assert_eq!(result["session_id"], init["session_id"]);
+    assert_eq!(result["is_error"], true);
 }
 
 #[test]
 fn assistant_text_format_matches_cosh_shell() {
     let msgs = interact(&[
         r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
-        r#"{"type":"user","message":{"role":"user","content":"test"},"session_id":"s1","parent_tool_use_id":null}"#,
+        r#"{"type":"user","message":{"role":"user","content":"test"},"parent_tool_use_id":null}"#,
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 
     let assistant = msgs.iter().find(|m| m["type"] == "assistant");
     if let Some(a) = assistant {
-        assert_eq!(a["session_id"], "s1");
+        let init = msgs
+            .iter()
+            .find(|message| message["type"] == "system" && message["subtype"] == "init")
+            .expect("system init");
+        assert_eq!(a["session_id"], init["session_id"]);
         let content = a["message"]["content"].as_array().unwrap();
         assert!(!content.is_empty());
         assert_eq!(content[0]["type"], "text");
@@ -134,7 +147,7 @@ fn assistant_text_format_matches_cosh_shell() {
 fn result_has_duration_ms() {
     let msgs = interact(&[
         r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
-        r#"{"type":"user","message":{"role":"user","content":"test"},"session_id":"s1","parent_tool_use_id":null}"#,
+        r#"{"type":"user","message":{"role":"user","content":"test"},"parent_tool_use_id":null}"#,
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 

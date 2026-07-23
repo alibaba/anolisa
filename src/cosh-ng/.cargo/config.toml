@@ -1,8 +1,2 @@
-[source.crates-io]
-replace-with = 'mirror'
-
-[source.mirror]
-registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
-
 [net]
 git-fetch-with-cli = true

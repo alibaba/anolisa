@@ -572,9 +572,17 @@ impl Analyzer {
                     return None;
                 }
                 let req_body = stream.request_json_body();
-                let resp_body = stream
-                    .response_sse_json_array()
-                    .or_else(|| stream.response_json_body());
+                if let Some(sse_json) = stream.response_sse_json_array() {
+                    // SSE-shaped response: OpenAI/Anthropic semantics are already
+                    // reconstructed by the genai builder's SSE fallback from the raw
+                    // HttpRecord, so only SysOM (non-standard llmParamString / tool_use
+                    // envelope) still needs the typed parser here.
+                    return self
+                        .message
+                        .parse_by_path_sysom_only(&path, req_body.as_ref(), Some(&sse_json))
+                        .map(AnalysisResult::Message);
+                }
+                let resp_body = stream.response_json_body();
                 self.analyze_message(&path, req_body.as_ref(), resp_body.as_ref())
             }
             AggregatedResult::ResponseOnly { .. }
@@ -1440,6 +1448,159 @@ mod tests {
         if let Some(AnalysisResult::Token(record)) = token_result {
             assert_eq!(record.input_tokens, 20);
             assert_eq!(record.output_tokens, 8);
+        }
+    }
+
+    /// Build a minimal `Http2Stream` with an SSE-formatted response body
+    /// (`data: {...}\n\n`) so `response_sse_json_array()` detects it as SSE.
+    fn build_sse_http2_stream(
+        path: &str,
+        request_body: &[u8],
+        sse_chunk: &serde_json::Value,
+    ) -> crate::aggregator::Http2Stream {
+        use crate::aggregator::{ConnectionId, Http2Stream, StreamId};
+        use crate::parser::{Http2FrameType, ParsedHttp2Frame};
+        use crate::probes::sslsniff::SslEvent;
+        use std::rc::Rc;
+
+        let response_body = format!("data: {}\n\ndata: [DONE]\n\n", sse_chunk);
+        let body_bytes = response_body.into_bytes();
+
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1_000_000_000,
+            delta_ns: 0,
+            pid: 3000,
+            tid: 3000,
+            uid: 0,
+            len: body_bytes.len() as u32,
+            rw: 0,
+            comm: "python3".to_string(),
+            buf: body_bytes.clone(),
+            is_handshake: false,
+            ssl_ptr: 0x6000,
+        });
+
+        let req_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 900_000_000,
+            delta_ns: 0,
+            pid: 3000,
+            tid: 3000,
+            uid: 0,
+            len: request_body.len() as u32,
+            rw: 1,
+            comm: "python3".to_string(),
+            buf: request_body.to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x6000,
+        });
+
+        let mut stream = Http2Stream::new(
+            StreamId {
+                connection_id: ConnectionId {
+                    pid: 3000,
+                    ssl_ptr: 0x6000,
+                },
+                stream_id: 1,
+            },
+            900_000_000,
+        );
+        stream.request_headers = Some(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Headers,
+            flags: 0x4,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: 0,
+            source_event: Rc::clone(&req_event),
+        });
+        stream.decoded_request_headers = Some(vec![
+            (":method".to_string(), "POST".to_string()),
+            (":path".to_string(), path.to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+        stream.request_data_frames.push(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Data,
+            flags: 0x1,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: request_body.len(),
+            source_event: req_event,
+        });
+        stream.response_headers = Some(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Headers,
+            flags: 0x4,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: 0,
+            source_event: Rc::clone(&ssl_event),
+        });
+        stream.decoded_response_headers = Some(vec![
+            (":status".to_string(), "200".to_string()),
+            ("content-type".to_string(), "text/event-stream".to_string()),
+        ]);
+        stream.response_data_frames.push(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Data,
+            flags: 0x1,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: body_bytes.len(),
+            source_event: ssl_event,
+        });
+        stream.request_complete = true;
+        stream.response_complete = true;
+        stream.end_timestamp_ns = 1_100_000_000;
+        stream
+    }
+
+    #[test]
+    fn test_extract_message_from_http_skips_openai_sse() {
+        // SSE-shaped OpenAI response: branch A must NOT produce a
+        // ParsedApiMessage here anymore — provider/model/message semantics
+        // for this path are reconstructed solely from the raw HttpRecord by
+        // genai::GenAIBuilder's SSE fallback, so parsing it again in the
+        // analyzer would just duplicate that work.
+        let analyzer = Analyzer::new();
+        let request_body = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-h2-sse",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]
+        });
+        let stream = build_sse_http2_stream("/v1/chat/completions", request_body, &chunk);
+
+        let agg = AggregatedResult::Http2StreamComplete(stream);
+        let result = analyzer.extract_message_from_http(&agg);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_message_from_http_still_parses_sysom_sse() {
+        // SysOM's llmParamString/tool_use envelope has no HttpRecord-based
+        // fallback, so branch A must keep deep-parsing it even over SSE.
+        let analyzer = Analyzer::new();
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let request_body_val = serde_json::json!({"llmParamString": params.to_string()});
+        let request_body = request_body_val.to_string().into_bytes();
+        let chunk = serde_json::json!({
+            "choices": [{"message": {"content": "hi", "tool_use": null}}]
+        });
+        let stream =
+            build_sse_http2_stream("/api/v1/copilot/generate_copilot", &request_body, &chunk);
+
+        let agg = AggregatedResult::Http2StreamComplete(stream);
+        let result = analyzer.extract_message_from_http(&agg);
+        match result {
+            Some(AnalysisResult::Message(ParsedApiMessage::SysomMessage {
+                response: Some(resp),
+                ..
+            })) => {
+                assert_eq!(resp.choices[0].message.content, "hi");
+            }
+            other => panic!("expected SysomMessage with response, got {other:?}"),
         }
     }
 

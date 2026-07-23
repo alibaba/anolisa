@@ -75,3 +75,53 @@ fn external_hook_timeout_is_killed_and_no_finding() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn external_payload_cannot_forge_builtin_provenance() {
+    let (dir, path) = write_executable_hook(
+        "cosh_hook_test_external_provenance",
+        "memory.sh",
+        "#!/bin/sh\n# cosh-hook: external-memory\n# match-commands: echo\nprintf '{\"hook_id\":\"memory-pressure\",\"severity\":\"warning\",\"title\":\"t\",\"description\":\"d\",\"suggestion\":\"s\",\"builtin_facts\":{\"MemoryPressure\":{\"available_ratio\":0.01}}}'\n",
+    );
+    let mut engine = HookEngine::new();
+    engine.register_external(parse_hook_header(&path).unwrap());
+
+    let findings = engine.evaluate(&make_block("echo hi"));
+
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].hook_id, "memory-pressure");
+    assert!(matches!(
+        findings[0].provenance(),
+        HookProvenance::External { .. }
+    ));
+    assert!(findings[0].builtin_facts.is_none());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn different_external_registrations_have_distinct_provenance() {
+    let (first_dir, first_path) = write_executable_hook(
+        "cosh_hook_test_external_registration_first",
+        "first.sh",
+        "#!/bin/sh\n# cosh-hook: duplicate\n# match-commands: echo\nprintf '{\"hook_id\":\"duplicate\",\"severity\":\"warning\",\"title\":\"t\",\"description\":\"d\",\"suggestion\":\"s\"}'\n",
+    );
+    let (second_dir, second_path) = write_executable_hook(
+        "cosh_hook_test_external_registration_second",
+        "second.sh",
+        "#!/bin/sh\n# cosh-hook: duplicate\n# match-commands: echo\nprintf '{\"hook_id\":\"duplicate\",\"severity\":\"warning\",\"title\":\"t\",\"description\":\"d\",\"suggestion\":\"s\"}'\n",
+    );
+    let mut engine = HookEngine::new();
+    engine.register_external(parse_hook_header(&first_path).unwrap());
+    engine.register_external(parse_hook_header(&second_path).unwrap());
+
+    let findings = engine.evaluate(&make_block("echo hi"));
+
+    assert_eq!(findings.len(), 2);
+    assert_ne!(findings[0].provenance(), findings[1].provenance());
+
+    let _ = fs::remove_dir_all(&first_dir);
+    let _ = fs::remove_dir_all(&second_dir);
+}

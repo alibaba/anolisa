@@ -353,9 +353,9 @@ def test_daemon_skillfs_notify_refreshes_skill_ledger_activation(
             {
                 "method": "skill_ledger.skillfs_notify_change",
                 "params": {
-                    "schemaVersion": 1,
-                    "skillDir": str(skill_dir),
-                    "skillName": "weather",
+                    "schemaVersion": 2,
+                    "canonicalSkillDir": str(skill_dir),
+                    "skillId": "weather",
                     "eventKind": "write",
                     "paths": ["SKILL.md"],
                 },

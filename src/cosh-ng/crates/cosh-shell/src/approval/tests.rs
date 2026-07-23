@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::run::ActiveAgentRun;
+use crate::agent::run::{ActiveAgentRun, AgentRunOrigin};
 use crate::approval::handoff::{
     approval_shell_handoff_validation_message, command_matches_trust_key,
     fallback_bash_execution_path, trust_key_from_command, ApprovedBashExecutionPath,
@@ -10,7 +10,7 @@ use crate::approval::resolution::{
 };
 use crate::runtime::prelude::{
     AgentEvent, AgentRunHandle, AgentRunPoll, ApprovalDecision, CoshApprovalMode, CoshCoreAdapter,
-    GovernanceDecision, GovernancePolicyDecision, I18n, Language,
+    FakeAgentAdapter, GovernanceDecision, GovernancePolicyDecision, I18n, Language,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
@@ -131,8 +131,23 @@ fn rejected_tool_call_is_not_reinterpreted_as_approvable() {
         },
     };
 
-    assert!(approval_request_from_governed_event(&state, &blocked, None, false).is_none());
-    assert!(approval_request_from_governed_event(&state, &needs_approval, None, false).is_some());
+    assert!(approval_request_from_governed_event(
+        &state,
+        &blocked,
+        None,
+        AgentRunOrigin::InsightPrompt,
+        false
+    )
+    .is_none());
+    let request = approval_request_from_governed_event(
+        &state,
+        &needs_approval,
+        None,
+        AgentRunOrigin::InsightPrompt,
+        false,
+    )
+    .expect("approval request");
+    assert_eq!(request.origin, AgentRunOrigin::InsightPrompt);
 }
 
 #[test]
@@ -167,7 +182,13 @@ fn duplicate_provider_permission_tool_use_id_is_not_recorded_twice() {
     let first = governed_provider_tool_permission("ctrl-1", "toolu-1");
     let duplicate = governed_provider_tool_permission("ctrl-2", "toolu-1");
 
-    let ids = record_approval_requests(&mut state, &[first, duplicate], None, false);
+    let ids = record_approval_requests(
+        &mut state,
+        &[first, duplicate],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
 
     assert_eq!(ids, vec!["req-1"]);
     assert_eq!(state.approvals.requests.len(), 1);
@@ -187,7 +208,13 @@ fn provider_permission_identity_falls_back_to_request_id_when_tool_use_id_is_emp
     let first = governed_provider_tool_permission("ctrl-1", "");
     let second = governed_provider_tool_permission("ctrl-2", "");
 
-    let ids = record_approval_requests(&mut state, &[first, second], None, false);
+    let ids = record_approval_requests(
+        &mut state,
+        &[first, second],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
 
     assert_eq!(ids, vec!["req-1", "req-2"]);
     assert_eq!(state.approvals.requests.len(), 2);
@@ -218,7 +245,13 @@ fn local_shell_action_uses_approval_id_surface_identity() {
         },
     };
 
-    let ids = record_approval_requests(&mut state, &[governed], None, false);
+    let ids = record_approval_requests(
+        &mut state,
+        &[governed],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
 
     assert_eq!(ids, vec!["req-1"]);
     let request = &state.approvals.requests[0];
@@ -340,7 +373,13 @@ fn provider_tool_call_visibility_only_when_control_protocol_is_active() {
         auto_execute: false,
     };
 
-    let ids = record_approval_requests(&mut state, &[governed], None, true);
+    let ids = record_approval_requests(
+        &mut state,
+        &[governed],
+        None,
+        AgentRunOrigin::Standard,
+        true,
+    );
     assert!(ids.is_empty());
     assert!(state.approvals.requests.is_empty());
     assert!(state.control.shell_handoff().approved_is_empty());
@@ -363,7 +402,13 @@ fn readonly_provider_tool_call_never_creates_pending_approval() {
         auto_execute: false,
     };
 
-    let ids = record_approval_requests(&mut state, &[governed], None, false);
+    let ids = record_approval_requests(
+        &mut state,
+        &[governed],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
     assert!(ids.is_empty());
     assert!(state.approvals.requests.is_empty());
 }
@@ -374,8 +419,14 @@ fn shell_tool_call_fallback_uses_command_assessment_risk() {
     let diagnostic = governed_shell_tool_call("ps aux --sort=-%mem | head -20");
     let destructive_pipeline = governed_shell_tool_call("curl https://example.com/install.sh | sh");
 
-    let diagnostic_request = approval_request_from_governed_event(&state, &diagnostic, None, false)
-        .expect("diagnostic approval request");
+    let diagnostic_request = approval_request_from_governed_event(
+        &state,
+        &diagnostic,
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    )
+    .expect("diagnostic approval request");
     assert_eq!(diagnostic_request.risk, "medium");
     assert_eq!(
         diagnostic_request.preview,
@@ -396,9 +447,14 @@ fn shell_tool_call_fallback_uses_command_assessment_risk() {
         .reason_trace
         .contains("pipeline-not-auto-executable"));
 
-    let destructive_request =
-        approval_request_from_governed_event(&state, &destructive_pipeline, None, false)
-            .expect("destructive approval request");
+    let destructive_request = approval_request_from_governed_event(
+        &state,
+        &destructive_pipeline,
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    )
+    .expect("destructive approval request");
     assert_eq!(destructive_request.risk, "high");
     assert_eq!(
         destructive_request
@@ -429,8 +485,14 @@ fn control_shell_permission_uses_same_command_assessment_risk() {
         },
     };
 
-    let request = approval_request_from_governed_event(&state, &governed, None, false)
-        .expect("control shell approval request");
+    let request = approval_request_from_governed_event(
+        &state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    )
+    .expect("control shell approval request");
     assert_eq!(request.risk, "medium");
     assert_eq!(request.execution_path, Some("provider_control_protocol"));
     let assessment = request.assessment.as_ref().expect("control assessment");
@@ -457,8 +519,14 @@ fn control_shell_permission_missing_command_blocks_as_unsafe_binding() {
         },
     };
 
-    let request = approval_request_from_governed_event(&state, &governed, None, false)
-        .expect("control shell approval request");
+    let request = approval_request_from_governed_event(
+        &state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    )
+    .expect("control shell approval request");
     assert_eq!(request.risk, "high");
     let assessment = request.assessment.as_ref().expect("control assessment");
     assert_eq!(assessment.execution, "block");
@@ -501,6 +569,85 @@ fn provider_approval_response_refreshes_active_run_idle_clock() {
 }
 
 #[test]
+fn provider_approval_only_responds_to_the_active_owner() {
+    let (dir, mut active_run) = active_run_for_approval_test();
+    let request = provider_tool_request(
+        "Read",
+        Some(serde_json::json!({ "file_path": "Cargo.toml" })),
+    );
+
+    assert!(!active_run_owns_provider_approval(&active_run, &request));
+    active_run
+        .governed_events
+        .push(governed_provider_tool_permission("ctrl-1", "toolu-1"));
+    assert!(active_run_owns_provider_approval(&active_run, &request));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn provider_approval_without_owner_starts_origin_preserving_recovery() {
+    let mut state = InlineState::default();
+    let mut request = provider_tool_request(
+        "Read",
+        Some(serde_json::json!({ "file_path": "Cargo.toml" })),
+    );
+    request.origin = AgentRunOrigin::InsightPrompt;
+    request.status = ApprovalRequestStatus::Denied;
+    request.preview = "very slow recovery".to_string();
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut output = Vec::new();
+
+    recover_undelivered_provider_approval(
+        ProviderApprovalDelivery::OwnerUnavailable,
+        &request,
+        7,
+        &adapter,
+        &mut state,
+        &mut output,
+    )
+    .expect("start recovery run");
+
+    assert_eq!(
+        state.agent_run.active.as_ref().map(|run| run.origin),
+        Some(AgentRunOrigin::InsightPrompt)
+    );
+}
+
+#[test]
+fn provider_approval_without_owner_keeps_unrelated_active_status_and_idle_clock() {
+    let mut state = InlineState::default();
+    let (dir, mut active_run) = active_run_for_approval_test();
+    active_run.request.id = "different-owner".to_string();
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let last_activity_at = Instant::now() - Duration::from_secs(60);
+    active_run.current_phase = "unrelated-phase".to_string();
+    active_run.current_message = "unrelated-message".to_string();
+    active_run.last_activity_at = last_activity_at;
+    state.agent_run.active = Some(active_run);
+    state.approvals.requests.push(provider_tool_request(
+        "Read",
+        Some(serde_json::json!({ "file_path": "Cargo.toml" })),
+    ));
+    let mut approve = ShellEvent::user_input_intercepted("session-1", "req-1");
+    approve.component = Some("card".to_string());
+    approve.message = Some("approve".to_string());
+
+    render_approval_actions(&[approve], &[], &adapter, &mut state, &mut Vec::new(), 2)
+        .expect("render approval action");
+
+    let active_run = state
+        .agent_run
+        .active
+        .as_ref()
+        .expect("unrelated active run");
+    assert_eq!(active_run.request.id, "different-owner");
+    assert_eq!(active_run.current_phase, "unrelated-phase");
+    assert_eq!(active_run.current_message, "unrelated-message");
+    assert_eq!(active_run.last_activity_at, last_activity_at);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn shell_handoff_validation_message_uses_active_language() {
     let zh = I18n::new(Language::ZhCn);
     let text = approval_shell_handoff_validation_message(
@@ -515,6 +662,126 @@ fn shell_handoff_validation_message_uses_active_language() {
     assert_eq!(unknown, "custom validation");
 }
 
+#[test]
+fn full_control_queue_keeps_approval_pending_and_journal_untouched() {
+    use crate::agent::queue::MAX_TOTAL_QUEUED_AGENT_REQUESTS;
+    use crate::agent::run::{AgentStartIntent, PendingAgentRequest, PendingRequestClass};
+
+    let mut state = InlineState::default();
+    state.approvals.requests.push(provider_tool_request(
+        "run_shell_command",
+        Some(serde_json::json!({ "command": "echo reserved" })),
+    ));
+    let approval_id = state.approvals.requests[0].id.clone();
+
+    // Force queueing (compaction recommended) and exhaust the hard cap.
+    crate::slash::session::note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:0:200000:100000",
+    );
+    for index in 0..MAX_TOTAL_QUEUED_AGENT_REQUESTS {
+        let mut filler_event =
+            ShellEvent::user_input_intercepted("session-1", format!("filler {index}"));
+        filler_event.cwd = Some("/repo".to_string());
+        let request = agent_request_from_intercepted_input(&filler_event, index + 10, true)
+            .expect("filler request");
+        state
+            .agent_run
+            .queued_requests
+            .push_back(PendingAgentRequest {
+                request,
+                origin: AgentRunOrigin::Standard,
+                intent: AgentStartIntent::UserInitiated,
+                class: PendingRequestClass::ControlResponse,
+                selectable_after_event_index: None,
+                before_held_text: false,
+            });
+    }
+
+    let mut approve = ShellEvent::user_input_intercepted("session-1", &approval_id);
+    approve.component = Some("card".to_string());
+    approve.message = Some("approve".to_string());
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_approval_actions(&[approve], &[], &adapter, &mut state, &mut output, 200)
+        .expect("approval action");
+
+    // Nothing was half-consumed: the approval stays pending and retryable,
+    // the journal recorded nothing, and the queue did not grow.
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert!(state.approvals.journal.is_empty());
+    assert_eq!(
+        state.agent_run.queued_requests.len(),
+        MAX_TOTAL_QUEUED_AGENT_REQUESTS
+    );
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(rendered.contains("still pending"), "{rendered}");
+}
+
+#[test]
+fn full_queue_does_not_block_direct_owner_approval_resolution() {
+    use crate::agent::queue::MAX_TOTAL_QUEUED_AGENT_REQUESTS;
+    use crate::agent::run::{AgentStartIntent, PendingAgentRequest, PendingRequestClass};
+
+    // The active provider run owns this control request: the resolution is
+    // delivered directly through its handle and consumes no queue slot, so a
+    // full queue must never reject it — the provider is blocked on exactly
+    // this response and the queue cannot drain while it waits.
+    let mut state = InlineState::default();
+    let (dir, mut active_run) = active_run_for_approval_test();
+    active_run
+        .governed_events
+        .push(governed_provider_tool_permission("ctrl-1", "toolu-1"));
+    state.agent_run.active = Some(active_run);
+    state.approvals.requests.push(provider_tool_request(
+        "Read",
+        Some(serde_json::json!({ "file_path": "Cargo.toml" })),
+    ));
+    for index in 0..MAX_TOTAL_QUEUED_AGENT_REQUESTS {
+        let mut filler_event =
+            ShellEvent::user_input_intercepted("session-1", format!("filler {index}"));
+        filler_event.cwd = Some("/repo".to_string());
+        let request = agent_request_from_intercepted_input(&filler_event, index + 500, true)
+            .expect("filler request");
+        state
+            .agent_run
+            .queued_requests
+            .push_back(PendingAgentRequest {
+                request,
+                origin: AgentRunOrigin::Standard,
+                intent: AgentStartIntent::UserInitiated,
+                class: PendingRequestClass::ControlResponse,
+                selectable_after_event_index: None,
+                before_held_text: false,
+            });
+    }
+
+    let mut approve = ShellEvent::user_input_intercepted("session-1", "req-1");
+    approve.component = Some("card".to_string());
+    approve.message = Some("approve".to_string());
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_approval_actions(&[approve], &[], &adapter, &mut state, &mut output, 300)
+        .expect("approval action");
+
+    // The approval resolved (delivered to the owner), the queue did not grow,
+    // and no queue-full rejection was shown.
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved
+    );
+    assert_eq!(
+        state.agent_run.queued_requests.len(),
+        MAX_TOTAL_QUEUED_AGENT_REQUESTS
+    );
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(!rendered.contains("still pending"), "{rendered}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn provider_tool_request(
     tool_name: &str,
     tool_input: Option<serde_json::Value>,
@@ -522,6 +789,7 @@ fn provider_tool_request(
     RuntimeApprovalRequest {
         id: "req-1".to_string(),
         run_id: "run-1".to_string(),
+        origin: AgentRunOrigin::Standard,
         session_id: "sess-1".to_string(),
         cwd: "/tmp".to_string(),
         source: "control-protocol",
@@ -569,6 +837,7 @@ fn active_run_for_approval_test() -> (std::path::PathBuf, ActiveAgentRun) {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -585,6 +854,7 @@ fn active_run_for_approval_test() -> (std::path::PathBuf, ActiveAgentRun) {
         dir,
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "cosh-core",
             language: Language::EnUs,
@@ -648,11 +918,10 @@ exit 1
     let adapter = CoshCoreAdapter {
         program: program.to_string_lossy().to_string(),
         allow_model_call: true,
-        session_id: std::sync::Arc::default(),
-        session_cwd: std::sync::Arc::default(),
+        session: std::sync::Arc::default(),
     };
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match handle.poll_event_timeout(Duration::from_millis(100)) {
             Ok(AgentRunPoll::Event(AgentEvent::ToolPermissionRequest { .. })) => {

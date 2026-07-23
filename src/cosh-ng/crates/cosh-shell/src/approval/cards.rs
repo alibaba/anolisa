@@ -211,6 +211,7 @@ mod tests {
         RuntimeApprovalRequest {
             id: "req-zh".to_string(),
             run_id: "run-1".to_string(),
+            origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),
             cwd: "/tmp".to_string(),
             source: "control-protocol",

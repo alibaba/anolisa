@@ -12,6 +12,7 @@ from agent_sec_cli.prompt_scanner.result import (
     ThreatType,
     Verdict,
 )
+from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.backends.prompt_scan import (
     PromptScanBackend,
 )
@@ -79,8 +80,6 @@ class TestPromptScanBackendInit(unittest.TestCase):
         self.assertIsNotNone(backend)
 
     def test_backend_is_base_backend_subclass(self):
-        from agent_sec_cli.security_middleware.backends.base import BaseBackend
-
         backend = PromptScanBackend()
         self.assertIsInstance(backend, BaseBackend)
 
@@ -97,6 +96,7 @@ class TestPromptScanBackendEmptyInput(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.exit_code, 1)
         self.assertIn("no input text provided", result.error)
+        self.assertEqual(result.error_type, "ValueError")
 
     def test_whitespace_only_returns_failure(self):
         result = self.backend.execute(self.ctx, text="   \t\n  ")
@@ -123,6 +123,7 @@ class TestPromptScanBackendInvalidMode(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("invalid mode", result.error)
         self.assertIn("turbo", result.error)
+        self.assertEqual(result.error_type, "ValueError")
 
     def test_error_message_mentions_valid_modes(self):
         result = self.backend.execute(self.ctx, text="hello", mode="unknown_mode")

@@ -50,11 +50,11 @@ Expected shape:
   "ok": false,
   "data": {},
   "stdout": "",
-  "stderr": "prompt scanner is not ready: status=loading",
+  "stderr": "daemon request timed out after 30000 ms",
   "exit_code": 1,
   "error": {
-    "code": "unavailable",
-    "message": "prompt scanner is not ready: status=loading"
+    "code": "timeout",
+    "message": "daemon request timed out after 30000 ms"
   }
 }
 ```
@@ -63,8 +63,6 @@ Expected shape:
 
 - unknown daemon method
 - malformed daemon request
-- prompt scanner runtime unavailable, including preload states such as
-  `pending`, `downloading`, `loading`, or `degraded`
 - daemon method timeout
 - unexpected handler crash
 
@@ -123,12 +121,16 @@ Expected scanner error result shape:
 `scan-prompt` action results include:
 
 - `PASS`, `WARN`, and `DENY` scan verdicts: `ok=true`, `exit_code=0`
-- backend validation failures, such as missing/empty `text` or invalid `mode`:
+- backend validation failures, such as missing or empty `text`:
   `ok=true`, `exit_code=1`, with `stderr` describing the validation error
 - scanner-produced `ERROR` verdicts: `ok=true`, `exit_code=1`, with structured
   error verdict data
 - scanner domain exceptions that can be converted to an error verdict:
   `ok=true`, `exit_code=1`, with structured error verdict data
+- `standard` or `strict` requests made while the model is not ready run in
+  `fast` mode and return `ok=true` with `degraded=true` and a
+  `degraded_reason`; a degraded `deny` is rewritten to `warn` while the
+  original verdict is retained in `degraded_original_verdict`
 
 Caller behavior:
 
@@ -145,6 +147,36 @@ if response.ok:
 Callers should render structured action output before exiting with a non-zero
 action `exit_code`, so JSON consumers can still parse the error verdict. If an
 action failure has no structured output, callers should display `stderr`.
+
+## Prompt model preload state machine
+
+`daemon.health.data.prompt_scan.status` starts as `pending`. The one-shot
+preload job tries the local model load and probe before starting any download:
+
+```text
+pending -> loading -- success ------------------------> ready
+              |
+              +-- failure --> downloading
+                                |
+                                +-- failure --> degraded
+                                |
+                                +-- success --> loading (retry once)
+                                                 |
+                                                 +-- success --> ready
+                                                 +-- failure --> degraded
+
+active state -- cancellation --> stopped
+```
+
+On a cache hit, the state therefore moves directly from `loading` to `ready`
+and no download child is started. Any ordinary exception from the first local
+load/probe attempt triggers exactly one download/repair child and one
+load/probe retry, preserving the previous recovery opportunity without adding
+an unbounded retry loop. A child failure or retry failure moves the prompt
+runtime to `degraded`; the daemon process remains available and model-dependent
+scans use the `fast` fallback described above. Cancellation is not treated as a
+repairable failure. The one-shot job does not retry again until the daemon is
+restarted.
 
 ## Request parameters
 
@@ -165,5 +197,6 @@ Rules:
 - `mode` must be one of `fast`, `standard`, or `strict`.
 - `source` is optional and defaults to an empty string.
 
-Invalid `text` or `mode` is handled by the prompt scan backend and returned as
-an action failure: `ok=true`, `exit_code=1`.
+Missing or empty `text` is handled by the prompt scan backend and returned as
+an action failure: `ok=true`, `exit_code=1`. An unsupported `mode` is rejected
+at the daemon boundary as `ok=false` with error code `bad_request`.

@@ -39,7 +39,7 @@ SkillFS。
 
 ```bash
 # 推荐包安装
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # 开发者源码构建
 cd src/skillfs
@@ -204,7 +204,7 @@ default view 会直接出现在挂载后的 skill 视图中。Secondary views �
 | 操作 | 行为 |
 | --- | --- |
 | `readdir` | 由 views 和 runtime activation state 控制 |
-| 读取 `SKILL.md` | 返回编译后内容，不是原始 source 文本 |
+| 读取 `SKILL.md` | 默认返回编译后内容；directive stage 关闭且无其他 stage 时返回选定目标的 raw 内容 |
 | 读取普通文件 | 透传到底层物理 source 树 |
 | 写入 `SKILL.md` | 写透传，并重新解析 store |
 | 写入普通文件 | 写透传，不改变 skill 元数据 |
@@ -227,6 +227,163 @@ ownership 等元数据。`.skill-meta/**` 仍只允许 trusted metadata path 访
 Activation file mode 下，Activation JSON 表达 fallback 和 hidden 两种状态，不写
 current/live 状态。如果该模式下某个 skill 没有 activation JSON 或 activation
 xattr，SkillFS 会按 fail-safe 默认值将其视为 hidden。
+
+## 读时转换
+
+在解析出激活目标之后，`SKILL.md` 字节会先经过一条固定顺序的转换流水线，再交给
+agent：
+
+1. **directive** stage 执行条件编译（`@if` / `@else` / `@endif` 以及启发式命令
+   归一化），**默认开启**；开启时始终第一个执行，输出与旧版本一致。可通过
+   `[transforms.directive] enabled = false` 关闭。
+2. 可选的 **OS 适配器** stage 第二个执行，且只作用于 `SKILL.md`，在 Ubuntu/Debian
+   与 Alinux/Anolis 约定之间改写发行版相关字面量。
+
+两个 stage 都是可选的：可以两者都开、仅 directive（默认）、仅适配器（关闭
+directive），或两者都关闭——空流水线原样返回选中的字节。初始化诊断会报告实际
+启用的 stage 列表。
+
+| Directive | OS adapter | Agent 可见的 `SKILL.md` |
+| --- | --- | --- |
+| 开启（默认） | 关闭（默认） | 旧版 compiler 输出 |
+| 开启 | 开启 | compiler 输出，再执行 OS 适配 |
+| 关闭 | 开启 | 对选中的原始字节执行 OS 适配 |
+| 关闭 | 关闭 | 选中的原始字节 |
+
+流水线只影响 agent 读到的字节。源文件、可信 snapshot、激活元数据与规则文件都不会
+被修改。Hidden 技能保持隐藏且不进入流水线；fallback 读取只转换可信 snapshot，绝不
+回退到 live source。flat `<skill>/SKILL.md` 与 Hermes
+`<category>/<skill>/SKILL.md` 布局使用相同的流水线与 activation 顺序。snapshot 读取只
+解析、读取并转换选中的 snapshot；若 snapshot target 解析/定位失败，或其中的
+`SKILL.md` 无法读取，操作会返回错误（虚拟读取边界通常为 `ENOENT`），绝不会重试 live
+source。`getattr` 大小、部分读取与完整读取始终基于同一份转换结果。只有 `SKILL.md`
+会被适配——其他 Markdown、shell、Python 与配置文件原样透传。
+
+### 关闭 directive stage
+
+directive/compiler stage 默认开启，除非显式关闭：
+
+```toml
+[transforms.directive]
+enabled = false
+```
+
+`[transforms.directive]` 段不存在时保持开启，因此现有配置不受影响。关闭它只影响
+compiler stage；OS 适配器仍是独立的 opt-in 项。
+
+### 启用 OS 适配器
+
+OS 适配器默认关闭，通过现有的 `--config <PATH>` TOML 文件配置（不新增 CLI flag）。
+启用且未设置 `rules_path` 时使用内置规则目录：
+
+```toml
+# /etc/skillfs/skillfs-security.toml
+[transforms.directive]
+enabled = true
+
+[transforms.os_adapter]
+enabled = true
+target_os = "alinux" # auto | ubuntu | alinux
+# rules_path = "/etc/skillfs/ubuntu-alinux.custom.yaml"
+```
+
+```bash
+skillfs mount /path/to/skills /mnt/skillfs \
+  --config /etc/skillfs/skillfs-security.toml
+```
+
+SkillFS **内置一份 311 条规则的 Ubuntu/Alinux 规则目录**，通过仓库资产嵌入二进制，
+因此源码构建、RPM 与容器中无需额外文件即可工作，且仍是 opt-in。目录中 257 条为
+`auto_apply: always`，54 条为 `auto_apply: never` protection rule；编译后面向 Alinux
+有 223 条 active substitution，面向 Ubuntu 有 192 条。高置信度规则会应用；中/低
+置信度规则仅用于保护匹配 span。
+
+- `target_os = "auto"` 在挂载启动时读取一次 `/etc/os-release` 的精确 `ID` 选择
+  目标：`ubuntu`/`debian` 映射为 Ubuntu，`alinux`/`anolis` 映射为 Alinux。检测是
+  fail-closed 的：不参考 `ID_LIKE`，因此 RHEL 系衍生版（Rocky、AlmaLinux、CentOS
+  等）不会被静默判定为 Alinux，无法识别的宿主会拒绝挂载。其他发行版请显式设置
+  `ubuntu` 或 `alinux`。
+- `rules_path` 是可选的外部覆盖。省略即使用内置目录；设置非空路径则改为加载该外部
+  只读规则文件。留空会被拒绝，而不会当作默认值。SkillFS 在启动时一次性加载并校验所选
+  规则；读时路径只做内存内替换，不解析 YAML、不读取 `/etc/os-release`、不启动进程、
+  不访问网络或调用 LLM。
+- TOML 控制启用哪些 stage、目标 OS 与规则文件；YAML 规则文件控制单条映射及其资格。
+  TOML 不支持逐条启用规则。
+
+### 启用受保护规则和添加自定义规则
+
+规则文件（内置或外部）是顶层 YAML 序列。每条规则声明两侧 OS 的字面量、`direction`
+以及必填的 `auto_apply` 标记：
+
+```yaml
+- ubuntu: "apt-get install -y "
+  alinux: "dnf install -y "
+  direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  match: literal                    # literal | token —— 可选，默认 literal
+  auto_apply: always                # always | never —— 必填
+```
+
+`rules_path` 是**完整替换**，不是 overlay。若要保留全部内置映射，只定制选中的条目，
+请从源码 checkout 复制仓库资产：
+
+```bash
+cp src/skillfs/crates/skillfs-core/assets/ubuntu-alinux.yaml \
+  /etc/skillfs/ubuntu-alinux.custom.yaml
+```
+
+然后在 TOML 配置中设置
+`rules_path = "/etc/skillfs/ubuntu-alinux.custom.yaml"`。使用绝对路径可避免依赖挂载
+进程的工作目录。
+
+若要按本地策略启用一条受保护的中/低置信度规则，请在复制的规则文件中修改其
+`auto_apply` 值。例如：
+
+```yaml
+- ubuntu: "ufw"
+  alinux: "firewalld"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: low
+  notes: "enabled by local policy"
+```
+
+追加字段完整的条目即可定义本地映射：
+
+```yaml
+- ubuntu: "acme-agent-dev"
+  alinux: "acme-agent-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+  notes: "local package mapping"
+```
+
+`ubuntu`、`alinux`、`direction` 和 `auto_apply` 是必填字段；`match` 是可选字段；
+`confidence` 与 `notes` 是不影响行为的可选注解。外部文件还必须保留所有仍需使用的
+内置规则：SkillFS 不会将其与嵌入目录合并。规则只在挂载启动时加载一次，修改后需要
+重新挂载。当前没有 catalog overlay、hot reload、逐条规则 id 或 export 命令。
+
+- `auto_apply` 在每条规则上都是必填的（外部覆盖文件同样如此）；只有
+  `auto_apply: always` 的规则会被应用，且仅在目标允许的方向上生效。缺少
+  `auto_apply` 的规则文件会被拒绝，并给出指明出错规则序号的错误信息。
+- `confidence` 与 `notes` 作为注解被接受，但不影响行为——资格完全由 `auto_apply`
+  决定。
+- `match` 默认 `literal`，所以既有规则文件继续按子串匹配。`match: token` 会在两个
+  方向上检查 source 字母数字边缘的 ASCII 字母数字边界：`cron` 可在 EOF、空白、
+  换行或标点前匹配，但不会命中 `micron`、`crontab`、`cronutils` 或 `cron2` 的内部。
+- 替换是单遍非级联扫描：每个位置优先匹配最长的模式，因此重叠模式不会连锁改写，
+  且与文件顺序无关。
+- 不生效的模式（`auto_apply: never`、identity、方向不允许）仍会参与匹配并原样输出，
+  保护整个 span，使更短的可用规则无法改写其内部。protection 按 `(source, match)`
+  去重：substitution 只移除相同 source 和 mode 的 protection。不同 mode 可以共存；
+  只有 substitution 自身的 mode 命中当前输入时才优先，否则命中的 protection 仍会
+  保留整个 span。
+- 多对一的正向映射必须显式解决反向歧义：将一条标为 `bidirectional`（规范反向），
+  其余标为 `ubuntu_to_alinux_only`。在反向目标上冲突的 `bidirectional` 会被拒绝。
+
+启用后，缺失或不可读的外部 `rules_path`、留空的 `rules_path`、YAML 格式错误、缺失或
+非法的 `direction`/`auto_apply` 值、非法的 `match` 值、重复或冲突的模式，或
+`target_os = "auto"` 无法识别宿主，都会在挂载开始前以可执行的错误信息拒绝挂载。
 
 ## 安全集成
 
@@ -259,7 +416,10 @@ Agent 或 installer 通过 SkillFS 写入
 `--activation-events-log`，因为 SkillFS 需要触发源来启动 polling。
 
 对于 in-place activation 和 notify mount，需要设置 `--ledger-backing-root`，给
-daemon 一个可见的 backing source path：
+daemon 一个可见的 backing source path，并启用 authenticated resolver。Notify v2
+只携带 canonical identity，因此缺少 `--trusted-peer-exe` 的 in-place notify 配置会
+在启动阶段被拒绝。out-of-place notify mount 如果显式配置
+`--ledger-backing-root`，同样必须启用 resolver：
 
 ```bash
 skillfs mount /path/to/skills /path/to/skills \
@@ -267,6 +427,7 @@ skillfs mount /path/to/skills /path/to/skills \
   --security \
   --activation-mode file \
   --notify-socket /run/skill-ledger.sock \
+  --trusted-peer-exe /usr/bin/python3.11 \
   --ledger-backing-root /run/user/$UID/skillfs-ledger/source
 ```
 
@@ -275,19 +436,50 @@ skillfs mount /path/to/skills /path/to/skills \
 
 ### Control Socket
 
-可信 control socket 是生产环境推荐的 activation 写入路径：
+可信 control socket 是生产环境推荐的 activation 写入路径，也承载只读的
+resolver 查询：
 
 ```bash
 skillfs mount /path/to/skills /mnt/skillfs \
   --security \
   --activation-mode file \
   --control-socket /run/skillfs/control.sock \
-  --trusted-peer-exe /usr/bin/skill-ledger
+  --trusted-peer-exe /usr/bin/python3.11
 ```
 
 该 socket 要求 `--security --activation-mode file`，与 `--decision-command` 互斥，
 并且必须指定可信 peer executable。Peer 校验使用 Linux peer credential 和
 executable identity。
+
+packaged AgentSecCore daemon 使用 `sys.executable` 启动 Skill Ledger worker，该路径
+解析为 `/usr/bin/python3.11`；worker 并不是 `/usr/bin/skill-ledger` executable。
+使用自定义 virtual environment 时，请用启动 daemon 的同一个 interpreter 执行以下
+命令，并配置它输出的真实路径：
+
+```bash
+/path/to/ledger/python -c 'import os, sys; print(os.path.realpath(sys.executable))'
+```
+
+这个 M1 executable gate 信任的是 Python interpreter，而不是某个特定 module。请让
+SkillFS 与 Ledger worker 运行在相同 UID/security domain，并注意同一 UID 下使用相同
+interpreter 的其他进程也会通过 executable identity 校验。
+
+#### Endpoint 与优先级
+
+control plane 是 opt-in 且需认证的。endpoint 按优先级解析：
+
+1. CLI `--control-socket <PATH>`
+2. 配置文件 `[control_socket].path`
+3. 默认的每用户 endpoint `/run/user/<uid>/skillfs/control.sock`
+
+仅配置可信 peer 而未给显式 path 时使用默认 endpoint；仅给显式 path 而未配置可信
+peer 为配置错误；两者都没有则 control plane 保持关闭。默认 endpoint 绝不 fallback
+到 `/tmp` 或 `/var/tmp`——若 `/run/user/<uid>` 不可用，启动会返回明确且可操作的
+错误，此时必须显式传入 `--control-socket`。第二个实例绝不会 unlink 处于活跃状态
+的 endpoint；只有确认属于 SkillFS 且为 stale 的 socket 才会被回收。
+
+无需 `register`、`mountId` 或 `generation` 握手——endpoint 按 UID 稳定，resolver
+可直接查询。
 
 支持的 JSONL 请求示例：
 
@@ -296,7 +488,42 @@ executable identity。
 {"schemaVersion":"1","method":"status"}
 {"schemaVersion":"1","method":"meta.writeActivation","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
 {"schemaVersion":"1","method":"meta.setActivationXattr","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
+{"schemaVersion":"1","method":"skill.resolveLiveSource","canonicalSkillDir":"/path/to/skills/apple/apple-notes"}
 ```
+
+#### `skill.resolveLiveSource`
+
+只读查询，将 canonical Skill 目录映射到其物理 live/backing source。业务参数只有
+`canonicalSkillDir`，结果分三态：
+
+- **`managed=true`**——路径位于受管 canonical root 内且对应有效 live Skill 目录。
+  响应包含推导出的 `skillId`、`relativeSkillDir`、物理 `liveSkillDir`、live 目录的
+  `identity`（`device`、`inode`）以及 `transport`（`shared_path`）。查询是只读的：
+  不触发 scan、manifest、policy decide 或 activation write。
+- **`managed=false`**——请求格式合法且 `canonicalSkillDir` 是位于受管 root 之外的
+  合法绝对路径（`reason: not_managed`）。这是正常成功响应，调用方可直接管理该目录。
+- **structured error**——非绝对或非规范路径（包括重复或末尾 `/`）、非法 `..` 段、
+  symlink/path 逃逸、管理/保留目录、Skill 目录不存在、布局无效/缺少 `SKILL.md`、
+  live source 不可安全访问，或 peer 认证失败。这些绝不会伪装成 `managed=false`。
+
+skillId 由 canonical 相对路径推导，因此 flat（`my-skill`）和 Hermes nested
+（`apple/apple-notes`）布局都会解析为完整 id。S1 只实现单 source runtime；该 endpoint
+在未来多 canonical root 场景下仍共享。
+
+> 说明：`skill.resolveLiveSource`（SkillFS S1）是只读 resolver。notify v2 与删除态
+> 语义不属于 S1。
+
+#### Notify v2
+
+`skill_ledger.skillfs_notify_change` 使用 schema version 2。业务 payload 只包含
+`canonicalSkillDir`、完整 `skillId`、`eventKind` 和相对 `paths`。Flat id 保持完整
+（`weather`），Hermes id 保留两个分量（`category/weather`）。SkillFS 会排序、去重
+paths；空数组表示需要重新扫描整个 Skill，也用于超过路径数量上限的情况。
+
+canonical 目录由不跟随 source-root symlink 的绝对、词法规范化 source identity
+推导。物理 live/backing root 只供 activation 和 S1 resolver 使用，因此通知不会暴露
+backing 路径。daemon 必须直接接受 v2，并返回 `schemaVersion=2` 与
+`accepted=true`；不提供 v1 fallback 或协商。
 
 ### Trusted Mount-path Writer
 
@@ -338,6 +565,12 @@ SkillFS 支持面向 installer 的生命周期路径：
 `--activation-events-log <PATH>` 写 daemon-driven activation 流程中的 activation
 protocol events JSONL。
 
+启用 OS adapter 后，成功以只读方式打开 flat 或 Hermes 虚拟 `SKILL.md` 时，Open audit
+event 的 `detail` 会包含 content-free adapter context：
+`transform=os_adapter target_os=<target> rule_digest=<sha256>`。其中只记录启用的 stage、
+目标 OS 与规则文件 digest，绝不记录 source content、转换后 content、diff 或规则字面量。
+成功的逐 syscall Read event 仍不输出，避免高频 audit flooding。
+
 ### SLS Ops 和 Runtime Metrics
 
 SkillFS 会 best-effort 写 SLS records 到：
@@ -367,8 +600,8 @@ mount-session summary 仍共享同一个文件。
 | `--notify-socket <PATH>` | 向外部 daemon 发送 mutation event |
 | `--activation-events-log <PATH>` | 写 activation protocol events JSONL |
 | `--audit-log <PATH>` | 写 filesystem audit events JSONL |
-| `--control-socket <PATH>` | 接收可信 activation 写请求 |
-| `--trusted-peer-exe <PATH>` | 固定可信 control socket peer |
+| `--control-socket <PATH>` | 覆盖 control socket endpoint（默认 `/run/user/<uid>/skillfs/control.sock`） |
+| `--trusted-peer-exe <PATH>` | 固定可信 control socket peer（未给 path 时在默认 endpoint 启用 control plane） |
 | `--trusted-writer-exe <PATH>` | 固定可信 mount-path writer |
 | `--ledger-backing-root <PATH>` | 提供 daemon 可见的 source view |
 | `--decision-command <CMD>` | 使用旧 external decision 模式 |

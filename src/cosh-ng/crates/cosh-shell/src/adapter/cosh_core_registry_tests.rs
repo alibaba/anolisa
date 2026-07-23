@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use serde_json::Value;
 
 use super::cosh_core::CoshCoreAdapter;
@@ -8,8 +6,7 @@ fn test_adapter_with_program(program: &str) -> CoshCoreAdapter {
     CoshCoreAdapter {
         program: program.to_string(),
         allow_model_call: false,
-        session_id: Arc::new(Mutex::new(None)),
-        session_cwd: Arc::new(Mutex::new(None)),
+        session: Default::default(),
     }
 }
 

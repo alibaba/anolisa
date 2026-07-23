@@ -19,6 +19,7 @@
 #   tokenless tokenless         (Rust compression library, cross-platform)
 #   ws-ckpt  ws-ckpt           (Rust workspace checkpoint daemon)
 #   memory   agent-memory       (Rust MCP filesystem memory server, Linux only)
+#   cosh-ng  cosh-ng            (Rust Agent-OS CLI, core, and interactive shell)
 #   sight    agentsight         (eBPF / Rust, Linux only, NOT built by default)
 # ──────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -516,10 +517,10 @@ detect_distro() {
 
 # ─── component helpers ───
 
-# Default components (sight is excluded — it is optional and provides audit
-# capabilities only; use --component sight to include it explicitly).
+# Default components (cosh-ng and sight are excluded because they are optional;
+# use --component to include either explicitly).
 DEFAULT_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt memory)
-ALL_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt memory sight)
+ALL_COMPONENTS=(cosh skills sec-core tokenless ws-ckpt memory cosh-ng sight)
 
 active_components() {
     if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
@@ -748,7 +749,7 @@ install_build_tools() {
 }
 
 install_rust() {
-    step "Rust (for agent-sec-core, agentsight, tokenless, ws-ckpt, agent-memory)"
+    step "Rust (for agent-sec-core, cosh-ng, agentsight, tokenless, ws-ckpt, agent-memory)"
     local REQUIRED="1.91.0"
 
     local rust_pkg="rust" cargo_pkg="cargo"
@@ -1340,6 +1341,35 @@ check_ebpf_deps() {
     fi
 }
 
+install_cosh_ng_native_deps() {
+    step "Native dependencies (for cosh-ng)"
+
+    local missing=()
+    if ! cmd_exists pkg-config; then
+        if [[ "$PKG_BASE" == "rpm" ]]; then
+            missing+=("pkgconf-pkg-config")
+        else
+            missing+=("pkg-config")
+        fi
+    fi
+
+    if [[ "$PKG_BASE" == "rpm" ]]; then
+        rpm -q openssl-devel &>/dev/null || missing+=("openssl-devel")
+    else
+        dpkg -s libssl-dev &>/dev/null 2>&1 || missing+=("libssl-dev")
+    fi
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        ok "cosh-ng native dependencies already installed"
+        return 0
+    fi
+
+    info "Installing: ${missing[*]}"
+    # shellcheck disable=SC2086
+    as_root $PKG_INSTALL "${missing[@]}"
+    ok "cosh-ng native dependencies installed"
+}
+
 # ─── top-level dep installer ───
 
 install_just() {
@@ -1371,10 +1401,16 @@ do_install_deps() {
         step "Dependency plan"
         echo "DRY-RUN: detect Linux distribution and package manager"
         if want_component cosh || want_component sec-core || want_component sight; then
-            echo "DRY-RUN: check/install Node.js and build tools if needed"
+            echo "DRY-RUN: check/install Node.js if needed"
         fi
-        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
+        if want_component cosh || want_component sec-core || want_component cosh-ng || want_component sight; then
+            echo "DRY-RUN: check/install build tools if needed"
+        fi
+        if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             echo "DRY-RUN: check/install Rust toolchain if needed"
+        fi
+        if want_component cosh-ng; then
+            echo "DRY-RUN: check/install pkg-config and OpenSSL development files"
         fi
         if want_component tokenless; then
             echo "DRY-RUN: check/install just if needed"
@@ -1394,11 +1430,18 @@ do_install_deps() {
 
     if want_component cosh || want_component sec-core || want_component sight; then
         install_node
+    fi
+
+    if want_component cosh || want_component sec-core || want_component cosh-ng || want_component sight; then
         install_build_tools
     fi
 
-    if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
+    if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
         install_rust
+    fi
+
+    if want_component cosh-ng; then
+        install_cosh_ng_native_deps
     fi
 
     if want_component tokenless; then
@@ -1502,6 +1545,43 @@ build_sec_core() {
     else
         warn "Expected artifact $bin not found"
     fi
+}
+
+build_cosh_ng() {
+    step "Building cosh-ng"
+    local dir="$PROJECT_ROOT/src/cosh-ng"
+    [[ -d "$dir" ]] || die "Directory not found: $dir"
+
+    local component_root bin source
+    component_root="$(component_target_dir cosh-ng)"
+
+    if $DRY_RUN; then
+        echo "DRY-RUN: rm -rf $component_root"
+        echo "DRY-RUN: CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --manifest-path $dir/Cargo.toml --workspace --release"
+        for bin in cosh-cli cosh-core cosh-shell; do
+            echo "DRY-RUN: install $dir/target/release/$bin -> $component_root/bin/$bin"
+        done
+        ok "cosh-ng build plan generated"
+        return 0
+    fi
+
+    rm -rf "$component_root"
+    mkdir -p "$component_root/bin"
+
+    # Run from the repository root so Cargo honors user registry policy without
+    # discovering a component-local source replacement from parent traversal.
+    cd "$PROJECT_ROOT"
+    run_logged_timeout "${COSH_NG_BUILD_TIMEOUT:-1200}" \
+        "cargo build (cosh-ng workspace)" \
+        env CARGO_NET_GIT_FETCH_WITH_CLI=true \
+        cargo build --manifest-path "$dir/Cargo.toml" --workspace --release
+
+    for bin in cosh-cli cosh-core cosh-shell; do
+        source="$dir/target/release/$bin"
+        copy_file "$source" "$component_root/bin/$bin" 0755
+    done
+
+    ok "cosh-ng built successfully"
 }
 
 build_sight() {
@@ -1648,7 +1728,7 @@ do_build() {
     export PATH="$HOME/.local/bin:$PATH"
 
     if $DRY_RUN; then
-        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
+        if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             echo "DRY-RUN: configure cargo mirror for this build"
         fi
         if want_component cosh || want_component sec-core || want_component sight; then
@@ -1663,7 +1743,7 @@ do_build() {
         echo "DRY-RUN: rm -rf $OUTPUT_DIR"
         echo "DRY-RUN: mkdir -p $OUTPUT_DIR"
     else
-        if want_component sec-core || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
+        if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             _configure_cargo_mirror
         fi
         if want_component cosh || want_component sec-core || want_component sight; then
@@ -1686,6 +1766,7 @@ do_build() {
     if want_component cosh;      then build_cosh;         fi
     if want_component skills;    then build_skills;       fi
     if want_component sec-core;  then build_sec_core;     fi
+    if want_component cosh-ng;   then build_cosh_ng;      fi
     if want_component tokenless; then build_tokenless;    fi
     if want_component ws-ckpt;   then build_wsckpt;       fi
     if want_component memory;    then build_agent_memory;   fi
@@ -1805,6 +1886,36 @@ install_sec_core() {
     fi
 }
 
+install_cosh_ng() {
+    step "Installing cosh-ng"
+    local staged bin target
+    staged="$(component_target_dir cosh-ng)/bin"
+
+    if $DRY_RUN; then
+        for bin in cosh-cli cosh-core cosh-shell; do
+            echo "DRY-RUN: install -p -m 0755 $staged/$bin $INSTALL_BIN_DIR/$bin"
+        done
+        ok "cosh-ng install plan generated for ${INSTALL_BIN_DIR}/"
+        return 0
+    fi
+
+    for bin in cosh-cli cosh-core cosh-shell; do
+        [[ -f "$staged/$bin" ]] || die "Built cosh-ng binary not found: $staged/$bin"
+        target="$INSTALL_BIN_DIR/$bin"
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            as_root install -d -m 0755 "$INSTALL_BIN_DIR"
+            as_root install -p -m 0755 "$staged/$bin" "$target"
+        else
+            install -d -m 0755 "$INSTALL_BIN_DIR"
+            install -p -m 0755 "$staged/$bin" "$target"
+        fi
+    done
+
+    ok "cosh-ng installed to ${INSTALL_BIN_DIR}/{cosh-cli,cosh-core,cosh-shell}"
+    info "Start cosh-ng with: ${INSTALL_BIN_DIR}/cosh-shell"
+    info "The existing cosh launcher was not changed."
+}
+
 install_sight() {
     step "Installing agentsight"
     local dir="$PROJECT_ROOT/src/agentsight"
@@ -1903,6 +2014,7 @@ do_install() {
     if want_component cosh;      then install_cosh;         fi
     if want_component skills;    then install_skills;       fi
     if want_component sec-core;  then install_sec_core;     fi
+    if want_component cosh-ng;   then install_cosh_ng;      fi
     if want_component tokenless; then install_tokenless;    fi
     if want_component ws-ckpt;   then install_wsckpt;       fi
     if want_component memory;    then install_agent_memory; fi
@@ -1958,6 +2070,27 @@ uninstall_sec_core() {
     ok "agent-sec-core install removed (mode=${INSTALL_MODE})"
 }
 
+uninstall_cosh_ng() {
+    step "Uninstalling cosh-ng"
+    local bin
+
+    for bin in cosh-cli cosh-core cosh-shell; do
+        if $DRY_RUN; then
+            echo "DRY-RUN: rm -f $INSTALL_BIN_DIR/$bin"
+        elif [[ "$INSTALL_MODE" == "system" ]]; then
+            as_root rm -f "$INSTALL_BIN_DIR/$bin"
+        else
+            rm -f "$INSTALL_BIN_DIR/$bin"
+        fi
+    done
+
+    if $DRY_RUN; then
+        ok "cosh-ng uninstall plan generated"
+    else
+        ok "cosh-ng uninstalled; the existing cosh launcher was not changed"
+    fi
+}
+
 uninstall_sight() {
     step "Uninstalling agentsight"
     stop_systemd_service agentsight.service
@@ -2009,6 +2142,7 @@ do_uninstall() {
     if want_component cosh;      then uninstall_cosh;         fi
     if want_component skills;    then uninstall_skills;       fi
     if want_component sec-core;  then uninstall_sec_core;     fi
+    if want_component cosh-ng;   then uninstall_cosh_ng;      fi
     if want_component tokenless; then uninstall_tokenless;    fi
     if want_component ws-ckpt;   then uninstall_wsckpt;       fi
     if want_component memory;    then uninstall_agent_memory; fi
@@ -2186,11 +2320,11 @@ $(echo -e "${BOLD}Options:${NC}")
     --dry-run               Print actions without changing files or systemd state
     --interactive           Open a guided terminal flow before running
     --non-interactive       Explicit no-prompt mode; same as default, useful in CI to assert intent
-    --all                   Include optional components such as sight
+    --all                   Include optional components such as cosh-ng and sight
     --component <name>      Build/uninstall specific component (can be repeated).
-                                                    Valid names: cosh, skills, sec-core, sight, tokenless, ws-ckpt
-                                                    Default (no --component): cosh, skills, sec-core, tokenless, ws-ckpt
-                                                    (sight is optional; use --all or --component sight)
+                                                    Valid names: cosh, skills, sec-core, cosh-ng, memory, sight, tokenless, ws-ckpt
+                                                    Default (no --component): cosh, skills, sec-core, memory, tokenless, ws-ckpt
+                                                    (cosh-ng and sight are optional; use --all or --component)
     -h, --help              Show this help
 
 $(echo -e "${BOLD}Examples:${NC}")
@@ -2201,8 +2335,10 @@ $(echo -e "${BOLD}Examples:${NC}")
     $0 --no-install                                # Install deps + build (skip installation)
     $0 --ignore-deps                               # Build + install (skip dep install)
     $0 --deps-only                                 # Install deps only
-    $0 --all                                       # Build + install default components and agentsight
+    $0 --all                                       # Build + install default and optional components
     $0 --component cosh                            # Install deps + build + install copilot-shell
+    $0 --component cosh-ng                         # Build + install cosh-ng without replacing cosh
+    $0 --system --component cosh-ng                # Install cosh-ng binaries to /usr/local/bin
     $0 --no-install                                # Build target/ staging only
     $0 --component sec-core                          # Build + install sec-core to user paths
     $0 --system --component sec-core                 # Build + install sec-core to FHS system paths
@@ -2218,14 +2354,16 @@ $(echo -e "${BOLD}Components:${NC}")
   sec-core agent-sec-core     Security CLI + sandbox + hooks                    [default]
   tokenless tokenless         Rust token compression library (cross-platform)   [default]
   ws-ckpt  ws-ckpt           Rust workspace checkpoint daemon                   [default]
+  memory   agent-memory      Rust MCP filesystem memory server                   [default]
+  cosh-ng  cosh-ng           Rust Agent-OS CLI, core, and interactive shell      [optional]
   sight    agentsight         eBPF observability/audit agent (Linux only)        [optional]
 
 $(echo -e "${BOLD}What this script does:${NC}")
   1. Detects installed toolchains and queries system repositories for available versions
   2. Installs via system package manager (dnf/yum/apt) when repository versions meet requirements
   3. Falls back to upstream installers (nvm, rustup, uv) when system packages don't suffice
-  4. Builds default components in order: cosh -> skills -> sec-core -> tokenless -> ws-ckpt
-     (sight is optional — add --all or --component sight to include it)
+  4. Builds default components in order: cosh -> skills -> sec-core -> tokenless -> ws-ckpt -> memory
+     (cosh-ng and sight are optional — add --all or --component to include them)
   5. Installs components to the selected profile layout
          - prefix: ${INSTALL_PREFIX}
          - binaries: ${INSTALL_BIN_DIR}

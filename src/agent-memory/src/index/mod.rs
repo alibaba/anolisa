@@ -76,7 +76,7 @@ impl IndexHandle {
     }
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search(query, top_k, self.exclude_cold)
     }
 
@@ -87,18 +87,18 @@ impl IndexHandle {
         top_k: usize,
         agent_scope: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search_scoped(query, top_k, self.exclude_cold, agent_scope)
     }
 
     /// Deep search: include cold files too.
     pub fn search_deep(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search(query, top_k, false)
     }
 
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let raw = store.search_vec(query_vec, top_k)?;
         Ok(raw
             .into_iter()
@@ -117,19 +117,39 @@ impl IndexHandle {
         query_vec: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search_hybrid(query, query_vec, top_k)
+    }
+
+    /// Synchronously upsert a single file into the BM25 index. Used by
+    /// `memory_observe` to make freshly written memories immediately
+    /// searchable, closing the race window between the file write and the
+    /// notify watcher's next debounce flush (~200 ms).
+    ///
+    /// The notify watcher will later process the same inotify event and
+    /// issue a redundant upsert — this is harmless because `upsert` is
+    /// idempotent (DELETE + INSERT on the same rowid).
+    ///
+    /// Cold-file strategy: `upsert` inserts with `is_cold = 0` (warm) by
+    /// default, which is correct — a freshly observed file should be warm.
+    /// This matches the watcher's own upsert path, so there is no
+    /// behavioural divergence. The `compact()` method only marks files
+    /// cold when `access_count = 0 AND mtime_ms < cutoff`, so a newly
+    /// indexed file is unaffected regardless of which path inserts it.
+    pub fn reindex_file(&self, rel_path: &str, body: &str, mtime_ms: i64, size: u64) -> Result<()> {
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.upsert(rel_path, mtime_ms, size, body, None)
     }
 
     /// Compact the index: mark old, never-accessed files as cold.
     pub fn compact(&self, cold_after_days: u64) -> Result<usize> {
-        let mut store = self.store.lock().expect("index store poisoned");
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.compact(cold_after_days)
     }
 
     /// Return counts of warm vs cold files.
     pub fn warm_cold_counts(&self) -> Result<(usize, usize)> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.warm_cold_counts()
     }
 
@@ -144,7 +164,7 @@ impl IndexHandle {
     }
 
     pub fn count(&self) -> Result<usize> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.count()
     }
 

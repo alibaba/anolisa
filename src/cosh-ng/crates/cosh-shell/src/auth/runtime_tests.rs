@@ -1,7 +1,7 @@
 use super::runtime::*;
 use crate::runtime::prelude::{
-    AgentEvent, AuthProviderInfo, GovernanceDecision, GovernancePolicyDecision, GovernedEvent,
-    InlineState,
+    AgentEvent, AuthFieldInfo, AuthProviderInfo, GovernanceDecision, GovernancePolicyDecision,
+    GovernedEvent, InlineState, RawInputCapture,
 };
 
 fn provider(id: &str, label: &str) -> AuthProviderInfo {
@@ -46,4 +46,25 @@ fn record_auth_required_promotes_aliyun_from_legacy_order() {
     // Aliyun promoted to front; other providers keep their original relative order.
     assert_eq!(ids, ["aliyun", "dashscope", "openai_compat"]);
     assert!(stored.providers[0].label.contains("免费可用"));
+}
+
+#[test]
+fn pending_auth_capture_marks_secret_fields() {
+    let mut provider = provider("openai_compat", "OpenAI Compatible");
+    provider.fields.push(AuthFieldInfo {
+        name: "api_key".to_string(),
+        label: "API key".to_string(),
+        hint: None,
+        secret: true,
+        required: true,
+        placeholder: None,
+    });
+    let mut state = InlineState::default();
+    record_auth_required(&mut state, &[governed_auth_required(vec![provider])]);
+    state.auth.state.as_mut().unwrap().phase = AuthPhase::FillingField;
+
+    assert!(matches!(
+        pending_auth_capture(&state),
+        Some(RawInputCapture::Question { secret: true, .. })
+    ));
 }

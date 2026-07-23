@@ -9,7 +9,7 @@ ANOLISA is a server-side operating layer for AI Agent workloads. It provides Tok
 ## Install the CLI
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://agentic-os.sh/install.sh | bash
 ```
 
 > Alinux 4 users can also install via `sudo yum install anolisa`.
@@ -36,26 +36,28 @@ anolisa list
 
 ## Install Components
 
-Install components on demand. Most components run in user mode; `agentsight` and `agent-sec-core` require system mode (sudo).
+Install components on demand. The current `agentsight`, `agent-sec-core`,
+`ws-ckpt`, and `skillfs` artifacts require system mode; the other examples
+below support user mode.
 
 ```bash
 # Token optimization
 anolisa install tokenless
 
 # Workspace checkpoints (btrfs COW)
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 
 # Observability (requires sudo — eBPF needs root)
-sudo anolisa install agentsight
+sudo anolisa --install-mode system install agentsight
 
 # Security (requires sudo)
-sudo anolisa install agent-sec-core
+sudo anolisa --install-mode system install agent-sec-core
 
 # Persistent memory (MCP file-based)
 anolisa install agent-memory
 
 # Skill filesystem (FUSE virtual views)
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # OS skill library
 anolisa install os-skills
@@ -123,17 +125,17 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ### User Entry Points
 
 - [anolisa CLI Reference](user-guide/en/user-entrypoint/anolisa-cli.md)
-- [Copilot Shell](user-guide/en/user-entrypoint/copilot-shell.md)
+- [Copilot Shell](user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md)
 - [OS Skills](user-guide/en/user-entrypoint/os-skills.md)
 
 ### Runtime & Token Saving
 
 - [Workspace Checkpoints](user-guide/en/runtime/ws-ckpt.md)
 - [Skill Filesystem](user-guide/en/runtime/skillfs.md)
-- [Token Optimization](user-guide/en/token-saving/tokenless.md)
-- [Agent Memory](user-guide/en/token-saving/agent-memory.md)
+- [Token Optimization](user-guide/en/token-saving/tokenless/QUICKSTART.md)
+- [Agent Memory](user-guide/en/token-saving/agent-memory/QUICKSTART.md)
 
 ### Observability & Security
 
 - [AgentSight](user-guide/en/agent-observability/agentsight.md)
-- [AgentSecCore](user-guide/en/agent-security/agent-sec-core.md)
+- [AgentSecCore](user-guide/en/agent-security/agent-sec-core/QUICKSTART.md)

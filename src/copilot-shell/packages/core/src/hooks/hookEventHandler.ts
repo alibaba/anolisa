@@ -87,6 +87,7 @@ export class HookEventHandler {
     toolInput: Record<string, unknown>,
     skillContext?: import('./types.js').SkillToolContext,
     toolUseId?: string,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     debugLogger.info(
       `[Hook Debug] hookEventHandler.firePreToolUseEvent: tool=${toolName}`,
@@ -99,7 +100,12 @@ export class HookEventHandler {
       ...(toolUseId && { tool_use_id: toolUseId }),
     };
 
-    const result = await this.executeHooks(HookEventName.PreToolUse, input);
+    const result = await this.executeHooks(
+      HookEventName.PreToolUse,
+      input,
+      undefined,
+      signal,
+    );
     debugLogger.info(
       `[Hook Debug] hookEventHandler.firePreToolUseEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
     );
@@ -158,6 +164,7 @@ export class HookEventHandler {
     mcpContext?: McpToolContext,
     originalRequestName?: string,
     toolUseId?: string,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     debugLogger.info(
       `[Hook Debug] hookEventHandler.firePostToolUseEvent: tool=${toolName}`,
@@ -179,6 +186,7 @@ export class HookEventHandler {
       HookEventName.PostToolUse,
       input,
       context,
+      signal,
     );
     debugLogger.info(
       `[Hook Debug] hookEventHandler.firePostToolUseEvent: completed, outputs=${result.allOutputs.length}, errors=${result.errors.length}`,
@@ -362,11 +370,18 @@ export class HookEventHandler {
   /**
    * Execute hooks for a specific event (direct execution without MessageBus)
    * Used as fallback when MessageBus is not available
+   *
+   * The optional `signal` propagates caller cancellation (e.g. Ctrl+C) so
+   * hook process trees are terminated instead of being orphaned.
+   * Only the tool-use call sites (PreToolUse/PostToolUse) currently supply
+   * a signal; other events accept one but have no cancellation source yet,
+   * so their hooks are still bounded only by the per-hook timeout.
    */
   private async executeHooks(
     eventName: HookEventName,
     input: HookInput,
     context?: HookEventContext,
+    signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     try {
       // Create execution plan
@@ -397,6 +412,7 @@ export class HookEventHandler {
             input,
             onHookStart,
             onHookEnd,
+            signal,
           )
         : await this.hookRunner.executeHooksParallel(
             plan.hookConfigs,
@@ -404,6 +420,7 @@ export class HookEventHandler {
             input,
             onHookStart,
             onHookEnd,
+            signal,
           );
 
       // Aggregate results

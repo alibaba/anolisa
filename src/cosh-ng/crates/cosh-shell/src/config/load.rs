@@ -78,4 +78,15 @@ fn apply_env_overrides(config: &mut CoshConfig) {
     if let Ok(v) = std::env::var("COSH_SHELL_LANG") {
         apply_language_value(config, &v);
     }
+    if let Ok(v) = std::env::var("COSH_RECOMMENDATIONS_BASH_HISTORY") {
+        config.recommendations.bash_history = parse_bool_value(&v);
+    }
+}
+
+pub(crate) fn parse_recommendations_environment_override(value: Option<&str>) -> Option<bool> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }

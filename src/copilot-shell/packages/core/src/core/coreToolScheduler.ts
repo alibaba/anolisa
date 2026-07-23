@@ -871,6 +871,7 @@ export class CoreToolScheduler {
                 reqInfo.args,
                 skillContext,
                 reqInfo.callId,
+                signal,
               );
 
               if (hookOutput) {
@@ -1530,6 +1531,7 @@ export class CoreToolScheduler {
                     undefined,
                     undefined,
                     callId,
+                    signal,
                   );
 
                   if (postToolOutput) {

@@ -65,7 +65,19 @@ cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 # 安全审计
 cosh-cli audit check --action "rm -rf /var/log"
 # → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
+
+# 在当前工作空间恢复 Agent 对话
+cosh-shell --resume              # 打开交互式会话选择器
+cosh-shell --resume <session-id> # 选择已知的 provider 会话
 ```
+
+在 cosh-shell 中，可使用 `/session` 浏览会话、`/session status`
+查看已选择和已激活的身份，并通过 `/session clear ...` 在确认后清理旧记录。
+会话恢复会还原模型可见的对话上下文，但不会伪装成已恢复历史终端证据。记录
+默认保存在 `~/.copilot-shell/cosh-core/sessions/`，可通过
+`session.persist_dir` 修改根目录。项目会话配置和相对存储路径均从
+cosh-shell 传给 Core 的工作空间解析。详见
+[会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)。
 
 ## 命令参考
 
@@ -112,6 +124,14 @@ Agent 关键字段：`ok`（是否成功？）、`error.recoverable`（值得重
 3. **可逆操作** — checkpoint → 执行 → 失败时回滚
 4. **分类错误** — `recoverable` 告诉 Agent 是否该重试
 5. **预演模式** — 所有写操作支持 `--dry-run`，执行前预览
+
+## MCP 工具
+
+`cosh-core --headless` 可以通过 stdio 或 Streamable HTTP 连接受信任的 MCP Server，在启动时发现其工具，
+并以 `mcp__<server>__<tool>` 暴露给 Agent。MCP Server 仅从用户或系统级配置加载；
+除 `trust` 模式外，其工具调用都需要审批。可使用 `cosh-core mcp list`、`inspect`、`refresh`、
+`connect` 和 `disconnect` 管理已配置的 Server；状态输出不会包含凭据。详见
+[MCP 配置说明](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#mcp-server)。
 
 ## 日志
 

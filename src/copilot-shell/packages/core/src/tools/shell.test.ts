@@ -55,6 +55,9 @@ describe('ShellTool', () => {
       getExcludeTools: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getChildProcessEnv: vi
+        .fn()
+        .mockReturnValue({ COSH_SESSION_ID: 'test-session-id' }),
       getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi
         .fn()
@@ -329,6 +332,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
       expect(result.llmContent).toContain('Background PIDs: 54322');
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
@@ -356,6 +360,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
 
@@ -381,6 +386,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
 
@@ -406,6 +412,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
 
@@ -431,6 +438,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
 
@@ -459,6 +467,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
 
@@ -661,6 +670,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -691,6 +701,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -721,6 +732,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -751,6 +763,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -780,6 +793,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -809,6 +823,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -839,6 +854,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -875,6 +891,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -912,6 +929,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -942,6 +960,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
 
@@ -975,6 +994,7 @@ describe('ShellTool', () => {
           expect.any(AbortSignal),
           false,
           {},
+          { COSH_SESSION_ID: 'test-session-id' },
         );
       });
     });
@@ -1074,6 +1094,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
   });
@@ -1195,6 +1216,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
 
       // The signal passed should be different from the original signal
@@ -1233,6 +1255,7 @@ describe('ShellTool', () => {
         mockAbortSignal,
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
 
@@ -1318,6 +1341,7 @@ describe('ShellTool', () => {
         expect.any(AbortSignal),
         false,
         {},
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
   });

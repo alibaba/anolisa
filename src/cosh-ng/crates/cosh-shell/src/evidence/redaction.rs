@@ -1,5 +1,11 @@
+use std::sync::OnceLock;
+
+use regex::Regex;
+
 use crate::tools::{classify_command_interaction, OutputStability};
 use crate::types::{CommandBlock, CommandStatus};
+
+const PROVIDER_COMMAND_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCommandFacts {
@@ -16,33 +22,22 @@ pub struct ProviderCommandFacts {
 }
 
 pub fn redact_provider_command_text(command: &str) -> String {
-    let mut redacted = Vec::new();
-    let mut redact_next = false;
-    for token in command.split_whitespace() {
-        if redact_next {
-            redacted.push("<redacted>".to_string());
-            redact_next = false;
-            continue;
-        }
+    truncate_provider_command(redact_sensitive_text(command).0)
+}
 
-        let lower = token.to_ascii_lowercase();
-        if is_sensitive_value_flag(&lower) || lower == "bearer" {
-            redacted.push(token.to_string());
-            redact_next = true;
-            continue;
-        }
-        let (token, changed) = redact_sensitive_assignment_token(token);
-        if changed {
-            redacted.push(token);
-            continue;
-        }
-        if is_key_like_token(&token) {
-            redacted.push("<redacted>".to_string());
-        } else {
-            redacted.push(token.to_string());
-        }
+fn truncate_provider_command(mut command: String) -> String {
+    const MARKER: &str = " ... <truncated>";
+    if command.len() <= PROVIDER_COMMAND_MAX_BYTES {
+        return command;
     }
-    redacted.join(" ")
+
+    let mut end = PROVIDER_COMMAND_MAX_BYTES - MARKER.len();
+    while !command.is_char_boundary(end) {
+        end -= 1;
+    }
+    command.truncate(end);
+    command.push_str(MARKER);
+    command
 }
 
 pub fn terminal_output_id(shell_session_id: &str, command_id: &str) -> String {
@@ -66,8 +61,8 @@ pub fn provider_safe_command_facts(block: &CommandBlock) -> ProviderCommandFacts
     ProviderCommandFacts {
         id: block.id.clone(),
         command: redact_provider_command_text(&block.command),
-        cwd: block.cwd.clone(),
-        end_cwd: block.end_cwd.clone(),
+        cwd: redact_sensitive_text(&redact_home_path(&block.cwd)).0,
+        end_cwd: redact_sensitive_text(&redact_home_path(&block.end_cwd)).0,
         status,
         exit_code: block.exit_code,
         duration_ms: block.duration_ms,
@@ -77,64 +72,216 @@ pub fn provider_safe_command_facts(block: &CommandBlock) -> ProviderCommandFacts
     }
 }
 
-fn is_sensitive_value_flag(lower_token: &str) -> bool {
-    matches!(
-        lower_token,
-        "--password"
-            | "--passwd"
-            | "--token"
-            | "--secret"
-            | "--api-key"
-            | "--apikey"
-            | "--access-token"
-            | "--authorization"
-    )
+fn redact_home_path(value: &str) -> String {
+    let Ok(home) = std::env::var("HOME") else {
+        return value.to_string();
+    };
+    if home.is_empty() {
+        value.to_string()
+    } else {
+        value.replace(&home, "~")
+    }
 }
 
-fn redact_sensitive_assignment_token(token: &str) -> (String, bool) {
-    let Some(eq_pos) = token.find('=') else {
-        return (token.to_string(), false);
-    };
-    let key_start = token[..eq_pos]
-        .rfind(|ch: char| ['?', '&', '-'].contains(&ch))
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
-    let key = token[key_start..eq_pos].to_ascii_lowercase();
-    if !matches!(
-        key.as_str(),
-        "password"
-            | "passwd"
-            | "token"
-            | "secret"
-            | "api_key"
-            | "apikey"
-            | "access_token"
-            | "authorization"
-    ) {
-        return (token.to_string(), false);
+pub(crate) fn redact_sensitive_text(text: &str) -> (String, bool) {
+    let (mut redacted, mut changed) = redact_private_key_blocks(text);
+    for (pattern, replacement) in [
+        (cookie_header_pattern(), "$prefix<redacted>"),
+        (authorization_pattern(), "$prefix$scheme <redacted>"),
+        (bearer_pattern(), "$prefix<redacted>"),
+        (url_password_pattern(), "$prefix<redacted>@"),
+        (sensitive_flag_pattern(), "$prefix<redacted>"),
+        (sensitive_assignment_pattern(), "$prefix<redacted>"),
+        (github_token_pattern(), "<redacted>"),
+        (opaque_token_pattern(), "<redacted>"),
+        (jwt_pattern(), "<redacted>"),
+        (aws_access_key_pattern(), "$prefix<redacted>"),
+        (alibaba_access_key_pattern(), "<redacted>"),
+    ] {
+        let next = pattern.replace_all(&redacted, replacement).into_owned();
+        changed |= next != redacted;
+        redacted = next;
+    }
+    (redacted, changed)
+}
+
+fn redact_private_key_blocks(text: &str) -> (String, bool) {
+    let mut output = String::with_capacity(text.len());
+    let mut in_private_key = false;
+    let mut changed = false;
+
+    for line in text.split_inclusive('\n') {
+        if in_private_key {
+            changed = true;
+            if let Some((_, end)) = private_key_marker_range(line, "-----END ") {
+                output.push_str(&line[end..]);
+                in_private_key = false;
+            }
+            continue;
+        }
+        if let Some((start, end)) = private_key_marker_range(line, "-----BEGIN ") {
+            output.push_str(&line[..start]);
+            output.push_str("<redacted private key block>");
+            let remainder = &line[end..];
+            if let Some((_, private_key_end)) = private_key_marker_range(remainder, "-----END ") {
+                output.push_str(&remainder[private_key_end..]);
+            } else {
+                in_private_key = true;
+            }
+            changed = true;
+            continue;
+        }
+        output.push_str(line);
     }
 
-    let value_start = eq_pos + 1;
-    let value_end = token[value_start..]
-        .find('&')
-        .map(|idx| value_start + idx)
-        .unwrap_or(token.len());
-    let mut redacted = String::new();
-    redacted.push_str(&token[..value_start]);
-    redacted.push_str("<redacted>");
-    redacted.push_str(&token[value_end..]);
-    (redacted, true)
+    (output, changed)
 }
 
-fn is_key_like_token(token: &str) -> bool {
-    token.starts_with("ghp_")
-        || token.starts_with("github_pat_")
-        || token.starts_with("sk-")
-        || (token.starts_with("AKIA")
-            && token.len() >= 20
-            && token
-                .chars()
-                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()))
+fn private_key_marker_range(line: &str, marker: &str) -> Option<(usize, usize)> {
+    let upper = line.to_ascii_uppercase();
+    let start = upper.find(marker)?;
+    let marker_end = upper[start..].find("PRIVATE KEY-----")?;
+    Some((start, start + marker_end + "PRIVATE KEY-----".len()))
+}
+
+fn cookie_header_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"(?im)(?P<prefix>^(?:set-cookie|cookie)\s*:\s*).*$")
+            .unwrap_or_else(|_| unreachable!("static cookie pattern must compile"))
+    })
+}
+
+fn authorization_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(
+            r"(?i)(?P<prefix>\bauthorization\s*(?::|=)\s*)(?P<scheme>bearer|basic|token)?\s*(?P<value>[^\s,;&]+)",
+        )
+        .unwrap_or_else(|_| unreachable!("static authorization pattern must compile"))
+    })
+}
+
+fn bearer_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"(?i)(?P<prefix>\bbearer\s+)[A-Za-z0-9._~+/=-]+")
+            .unwrap_or_else(|_| unreachable!("static bearer pattern must compile"))
+    })
+}
+
+fn url_password_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"(?i)(?P<prefix>\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@/\s]+@")
+            .unwrap_or_else(|_| unreachable!("static URL password pattern must compile"))
+    })
+}
+
+fn sensitive_flag_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(
+            r#"(?ix)
+            (?P<prefix>
+                (?:^|\s)
+                --(?:password|passwd|passphrase|token|access[_-]?token|refresh[_-]?token|
+                     id[_-]?token|secret|client[_-]?secret|api[_-]?key|apikey|
+                     access[_-]?key[_-]?secret|security[_-]?token|authorization)
+                (?:=|\s+)
+            )
+            (?:
+                "(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
+            "#,
+        )
+        .unwrap_or_else(|_| unreachable!("static sensitive flag pattern must compile"))
+    })
+}
+
+fn sensitive_assignment_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(
+            r#"(?ix)
+            (?P<prefix>
+                ["']?
+                (?:alibaba[_-]?cloud[_-]?access[_-]?key[_-]?id|
+                   aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|
+                   aws[_-]?secret[_-]?access[_-]?key|access[_-]?key[_-]?secret|
+                   dashscope[_-]?api[_-]?key|openai[_-]?api[_-]?key|
+                   client[_-]?secret|security[_-]?token|refresh[_-]?token|
+                   access[_-]?token|github[_-]?token|id[_-]?token|
+                   password|passphrase|passwd|api[_-]?key|apikey|token|secret)
+                ["']?
+                \s*(?:=|:)\s*
+            )
+            (?:
+                "(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
+            "#,
+        )
+        .unwrap_or_else(|_| unreachable!("static sensitive assignment pattern must compile"))
+    })
+}
+
+fn github_token_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+            .unwrap_or_else(|_| unreachable!("static GitHub token pattern must compile"))
+    })
+}
+
+fn opaque_token_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(
+            r"\b(?:sk-[A-Za-z0-9_-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b",
+        )
+        .unwrap_or_else(|_| unreachable!("static opaque token pattern must compile"))
+    })
+}
+
+fn jwt_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+            .unwrap_or_else(|_| unreachable!("static JWT pattern must compile"))
+    })
+}
+
+fn aws_access_key_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"\b(?P<prefix>AKIA|ASIA)[A-Z0-9]{16}\b")
+            .unwrap_or_else(|_| unreachable!("static AWS access key pattern must compile"))
+    })
+}
+
+fn alibaba_access_key_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // The pattern is a compile-time constant covered by the tests below.
+        Regex::new(r"\bLTAI[A-Za-z0-9]{12,32}\b")
+            .unwrap_or_else(|_| unreachable!("static Alibaba access key pattern must compile"))
+    })
 }
 
 pub fn provider_safe_command_fact_line(block: &CommandBlock) -> String {
@@ -152,4 +299,187 @@ pub fn provider_safe_command_fact_line(block: &CommandBlock) -> String {
         output_id = facts.output_id,
         output_stability = facts.output_stability,
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_command_redacts_private_key_blocks_before_token_redaction() {
+        let command = "printf '%s' '-----BEGIN PRIVATE KEY-----\nsuper-secret-key-material\n-----END PRIVATE KEY-----' --token token-value";
+
+        let redacted = redact_provider_command_text(command);
+
+        assert!(redacted.contains("<redacted private key block>"));
+        assert!(redacted.contains("--token <redacted>"));
+        assert!(!redacted.contains("super-secret-key-material"));
+        assert!(!redacted.contains("token-value"));
+    }
+
+    #[test]
+    fn provider_command_is_utf8_safely_bounded() {
+        let command = format!("tool {} secret={}", "你".repeat(2_000), "x".repeat(8_000));
+
+        let redacted = redact_provider_command_text(&command);
+
+        assert!(redacted.len() <= PROVIDER_COMMAND_MAX_BYTES);
+        assert!(redacted.ends_with(" ... <truncated>"));
+        assert!(!redacted.contains(&"x".repeat(100)));
+    }
+
+    #[test]
+    fn redacts_assignments_flags_headers_and_urls() {
+        let input = concat!(
+            "ALIBABA_CLOUD_ACCESS_KEY_ID=LTAIexampleaccesskey ",
+            "OPENAI_API_KEY=sk-example-secret ",
+            "curl --password 'hunter2' --access-token=token-value ",
+            "'https://example.test/?client_secret=query-value&next=ok'\n",
+            "https://user:url-password@example.test/path\n",
+            r#"{"api_key":"json-value","password":"json-password"}"#,
+            "\nAuthorization: Basic dXNlcjpwYXNz\n",
+            "Cookie: session=private; other=value\n",
+        );
+
+        let (redacted, changed) = redact_sensitive_text(input);
+
+        assert!(changed);
+        for secret in [
+            "sk-example-secret",
+            "LTAIexampleaccesskey",
+            "hunter2",
+            "token-value",
+            "query-value",
+            "url-password",
+            "json-value",
+            "json-password",
+            "dXNlcjpwYXNz",
+            "session=private",
+            "other=value",
+        ] {
+            assert!(!redacted.contains(secret), "{redacted}");
+        }
+        assert!(redacted.contains("next=ok"), "{redacted}");
+    }
+
+    #[test]
+    fn redacts_complete_quoted_flag_and_assignment_values() {
+        let input = concat!(
+            "tool --password 'correct horse battery staple' ",
+            "--token=\"alpha beta\" password='gamma delta' --region cn"
+        );
+
+        let (redacted, changed) = redact_sensitive_text(input);
+
+        assert!(changed);
+        assert_eq!(
+            redacted,
+            "tool --password <redacted> --token=<redacted> password=<redacted> --region cn"
+        );
+    }
+
+    #[test]
+    fn redacts_escaped_quotes_and_whitespace_in_credential_values() {
+        let input = concat!(
+            r#"tool --password "correct horse\" battery staple" "#,
+            r#"--token=alpha\ beta password='gamma\' delta' "#,
+            r#"--secret escaped\ space --region cn; "#,
+            r#"tool --password "joined secret"tail deploy billing-api; "#,
+            "tool --token=line\\\ncontinued-tail deploy reports-api",
+            "; tool --password correct,horse|kubectl get pods",
+        );
+
+        let (redacted, changed) = redact_sensitive_text(input);
+
+        assert!(changed);
+        for secret in [
+            "battery staple",
+            "gamma\\' delta",
+            "escaped\\ space",
+            "tail deploy billing-api",
+            "continued-tail",
+            ",horse",
+        ] {
+            assert!(!redacted.contains(secret), "{redacted}");
+        }
+        assert!(redacted.contains("--region cn"), "{redacted}");
+        assert!(redacted.contains("billing-api"), "{redacted}");
+        assert!(redacted.contains("reports-api"), "{redacted}");
+        assert!(redacted.contains("|kubectl get pods"), "{redacted}");
+
+        let (unterminated, changed) =
+            redact_sensitive_text("tool --password \"unterminated secret tail");
+        assert!(changed);
+        assert_eq!(unterminated, "tool --password <redacted>");
+    }
+
+    #[test]
+    fn redacts_multiple_opaque_token_shapes() {
+        let slack_token = ["xoxb", "1234567890", "abcdefghijklmnop"].join("-");
+        let input = format!(
+            "{}{slack_token} {}",
+            concat!(
+                "Bearer first.secret.value and bearer second-secret ",
+                "ghp_abcdefghijklmnopqrstuvwxyz123456 ",
+                "github_pat_abcdefghijklmnopqrstuvwxyz123456 ",
+                "sk-abcdefghijklmnopqrstuvwxyz ",
+                "AKIA1234567890ABCDEF ",
+                "ASIA1234567890ABCDEF ",
+                "LTAI5tExampleAccessKey ",
+                "glpat-abcdefghijklmnopqrstuvwxyz ",
+                "npm_abcdefghijklmnopqrstuvwxyz123456 ",
+                "hf_abcdefghijklmnopqrstuvwxyz123456 ",
+            ),
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+        );
+
+        let (redacted, changed) = redact_sensitive_text(&input);
+
+        assert!(changed);
+        for secret in [
+            "first.secret.value",
+            "second-secret",
+            "ghp_",
+            "github_pat_",
+            "sk-abcdefghijklmnopqrstuvwxyz",
+            "AKIA1234567890ABCDEF",
+            "ASIA1234567890ABCDEF",
+            "LTAI5tExampleAccessKey",
+            "glpat-",
+            "npm_",
+            "hf_",
+            "xoxb-",
+            "eyJhbGciOiJIUzI1NiJ9",
+        ] {
+            assert!(!redacted.contains(secret), "{redacted}");
+        }
+        assert_eq!(
+            redacted
+                .to_ascii_lowercase()
+                .matches("bearer <redacted>")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn redacts_complete_private_key_blocks() {
+        let input = concat!(
+            "before\n",
+            "-----BEGIN PRIVATE KEY-----\n",
+            "private-key-body-must-not-survive\n",
+            "-----END PRIVATE KEY-----\n",
+            "after\n",
+        );
+
+        let (redacted, changed) = redact_sensitive_text(input);
+
+        assert!(changed);
+        assert_eq!(redacted, "before\n<redacted private key block>\nafter\n");
+    }
+
+    #[test]
+    fn leaves_non_secret_text_unchanged() {
+        let input = "cargo test --package cosh-shell\n";
+        assert_eq!(redact_sensitive_text(input), (input.to_string(), false));
+    }
 }

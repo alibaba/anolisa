@@ -98,4 +98,4 @@ cosh --list-extensions
 
 ## 相关文档
 
-- [Hook 开发指南](../developers/hooks/index.md) — 了解扩展如何注册 hooks
+- [Hook 开发指南](../../../../developer-guide/zh/copilot-shell/hooks/index.md) — 了解扩展如何注册 hooks

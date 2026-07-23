@@ -28,6 +28,29 @@ fn run_registry_request_with_context(
     home: &Path,
     cwd: Option<&Path>,
 ) -> Value {
+    run_registry_request_with_args(domain, action, params, home, cwd, &[])
+}
+
+fn run_registry_request_with_args(
+    domain: &str,
+    action: &str,
+    params: Value,
+    home: &Path,
+    cwd: Option<&Path>,
+    args: &[&str],
+) -> Value {
+    run_registry_request_with_args_and_env(domain, action, params, home, cwd, args, &[])
+}
+
+fn run_registry_request_with_args_and_env(
+    domain: &str,
+    action: &str,
+    params: Value,
+    home: &Path,
+    cwd: Option<&Path>,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Value {
     let bin = binary_path();
     let request = serde_json::json!({
         "type": "registry_request",
@@ -40,7 +63,17 @@ fn run_registry_request_with_context(
     let mut command = Command::new(&bin);
     command
         .arg("--registry")
+        .args(args)
         .env("HOME", home)
+        .env_remove("COSH_AI_PROVIDER")
+        .env_remove("COSH_MODEL")
+        .env_remove("OPENAI_BASE_URL")
+        .env_remove("DASHSCOPE_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ALIBABA_CLOUD_ACCESS_KEY_ID")
+        .env_remove("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+        .env_remove("ALIBABA_CLOUD_SECURITY_TOKEN")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -65,6 +98,66 @@ fn run_registry_request_with_context(
         .map(|l| serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}")))
         .next()
         .expect("expected at least one response line")
+}
+
+#[test]
+fn bare_registry_reports_env_only_auth_as_satisfied() {
+    let home = tempfile::tempdir().expect("temp home");
+    let resp = run_registry_request_with_args_and_env(
+        "auth",
+        "state",
+        Value::Null,
+        home.path(),
+        None,
+        &["--bare"],
+        &[
+            ("COSH_AI_PROVIDER", "gate4"),
+            ("COSH_MODEL", "gate4-model"),
+            ("OPENAI_BASE_URL", "http://127.0.0.1:1/v1"),
+            ("OPENAI_API_KEY", "test-env-only-key"),
+        ],
+    );
+
+    assert_eq!(resp["success"], true);
+    assert_eq!(resp["data"]["saved_providers"], serde_json::json!([]));
+    assert_eq!(resp["data"]["effective_auth_required"], false);
+}
+
+#[test]
+fn bare_registry_does_not_discover_project_skills() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let skill_dir = project.path().join(".copilot-shell/skills/project-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: project-skill\ndescription: project only\n---\n\nBody.",
+    )
+    .unwrap();
+
+    let regular = run_registry_request_with_args(
+        "skills",
+        "list",
+        Value::Null,
+        home.path(),
+        Some(project.path()),
+        &[],
+    );
+    let bare = run_registry_request_with_args(
+        "skills",
+        "list",
+        Value::Null,
+        home.path(),
+        Some(project.path()),
+        &["--bare"],
+    );
+
+    assert!(regular["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["name"] == "project-skill"));
+    assert!(bare["data"].as_array().unwrap().is_empty(), "{bare}");
 }
 
 #[test]

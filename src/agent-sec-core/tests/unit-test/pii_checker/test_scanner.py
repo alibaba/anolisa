@@ -2,7 +2,14 @@
 
 import pytest
 from agent_sec_cli.pii_checker.detectors.base import PiiCandidate
+from agent_sec_cli.pii_checker.models import PiiFinding
+from agent_sec_cli.pii_checker.redactor import redact_text
 from agent_sec_cli.pii_checker.scanner import DEFAULT_MAX_BYTES, PiiScanner
+
+
+@pytest.fixture(autouse=True)
+def _isolate_custom_rules_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 def _scan(text: str, **kwargs):
@@ -18,6 +25,7 @@ def test_pass_when_no_findings():
     assert result["ok"] is True
     assert result["verdict"] == "pass"
     assert result["findings"] == []
+    assert result["summary"]["custom_rules"]["status"] == "absent"
 
 
 def test_personal_data_findings_are_warn():
@@ -109,6 +117,37 @@ def test_custom_detector_can_be_injected():
     assert result["findings"][0]["metadata"]["detector"] == "local_model"
     assert result["findings"][0]["metadata"]["engine"] == "tiny_pii_v0"
     assert result["findings"][0]["metadata"]["model"] == "tiny-pii"
+    assert "custom_rules" not in result["summary"]
+
+
+def test_exact_type_and_span_duplicate_keeps_highest_confidence():
+    class DuplicateDetector:
+        name = "duplicate"
+        engine = "duplicate_v1"
+
+        def detect(self, text: str):
+            value = "bob@example.com"
+            start = text.index(value)
+            common = {
+                "pii_type": "email",
+                "category": "personal_data",
+                "severity": "warn",
+                "value": value,
+                "span": (start, start + len(value)),
+            }
+            return [
+                PiiCandidate(confidence=0.7, **common),
+                PiiCandidate(confidence=0.99, **common),
+            ]
+
+    result = (
+        PiiScanner(detectors=[DuplicateDetector()])
+        .scan("contact bob@example.com")
+        .to_dict()
+    )
+
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["confidence"] == 0.99
 
 
 def test_private_key_detected_and_redacted():
@@ -162,6 +201,60 @@ def test_redacted_text_keeps_structure_without_sensitive_values():
     assert "password=" in result["redacted_text"]
     assert "supersecretvalue12345" not in result["redacted_text"]
     assert "supersecretvalue12345" in result["findings"][0]["raw_evidence"]
+
+
+def test_redaction_merges_transitive_overlaps_and_uses_stable_custom_type():
+    findings = [
+        PiiFinding(
+            type="api_key",
+            category="credential",
+            severity="deny",
+            confidence=0.9,
+            evidence_redacted="abcd...[REDACTED]...wxyz",
+            span=(0, 4),
+        ),
+        PiiFinding(
+            type="beta_custom",
+            category="custom",
+            severity="deny",
+            confidence=1.0,
+            evidence_redacted="[BETA_CUSTOM_REDACTED]",
+            span=(3, 7),
+        ),
+        PiiFinding(
+            type="alpha_custom",
+            category="custom",
+            severity="deny",
+            confidence=1.0,
+            evidence_redacted="[ALPHA_CUSTOM_REDACTED]",
+            span=(6, 10),
+        ),
+    ]
+
+    assert redact_text("abcdefghij", findings) == "[ALPHA_CUSTOM_REDACTED]"
+
+
+def test_redaction_prefers_custom_warn_placeholder_over_builtin_deny():
+    findings = [
+        PiiFinding(
+            type="api_key",
+            category="credential",
+            severity="deny",
+            confidence=0.9,
+            evidence_redacted="0123...[REDACTED]...89",
+            span=(0, 6),
+        ),
+        PiiFinding(
+            type="custom_field",
+            category="custom",
+            severity="warn",
+            confidence=1.0,
+            evidence_redacted="[CUSTOM_FIELD_REDACTED]",
+            span=(2, 10),
+        ),
+    ]
+
+    assert redact_text("0123456789", findings) == "[CUSTOM_FIELD_REDACTED]"
 
 
 def test_quoted_secret_span_keeps_quote_boundaries_balanced():

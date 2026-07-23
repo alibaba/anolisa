@@ -24,6 +24,7 @@ class PromptScanBackend(BaseBackend):
                 success=False,
                 error="prompt_scan error: no input text provided",
                 exit_code=1,
+                error_type="ValueError",
             )
 
         try:
@@ -33,6 +34,7 @@ class PromptScanBackend(BaseBackend):
                 success=False,
                 error=f"prompt_scan error: invalid mode '{mode_str}'. Choose from: fast, standard, strict, multi_turn",
                 exit_code=1,
+                error_type="ValueError",
             )
 
         try:
@@ -51,7 +53,9 @@ class PromptScanBackend(BaseBackend):
             else:
                 result = scanner.scan(text, source=source if source else None)
         except Exception as exc:
-            return _scanner_error_result(f"Scanner error: {exc}")
+            return _scanner_error_result(
+                f"Scanner error: {exc}", error_type=type(exc).__name__
+            )
 
         has_error = result.verdict == Verdict.ERROR
         d = result.to_dict()
@@ -61,10 +65,15 @@ class PromptScanBackend(BaseBackend):
             data=d,
             stdout=json.dumps(d, indent=2, ensure_ascii=False),
             exit_code=1 if has_error else 0,
+            error_type="PromptScanError" if has_error else "",
         )
 
 
-def _scanner_error_result(message: str) -> ActionResult:
+def _scanner_error_result(
+    message: str,
+    *,
+    error_type: str = "PromptScanError",
+) -> ActionResult:
     data = {
         "schema_version": "1.0",
         "ok": False,
@@ -84,4 +93,5 @@ def _scanner_error_result(message: str) -> ActionResult:
         stdout=json.dumps(data, indent=2, ensure_ascii=False),
         error=message,
         exit_code=1,
+        error_type=error_type,
     )

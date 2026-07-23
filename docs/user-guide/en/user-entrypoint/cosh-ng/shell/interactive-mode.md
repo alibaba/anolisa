@@ -24,6 +24,8 @@ cosh-shell creates a pseudo-terminal pair via `openpty()` and starts a bash or z
 cosh-shell                    # Default: auto (auto-detect)
 cosh-shell --shell zsh        # Use zsh
 cosh-shell raw qwen --shell zsh
+cosh-shell --resume           # Open the session picker after shell startup
+cosh-shell --resume <id>      # Select a provider conversation to resume
 ```
 
 Shell selection priority:
@@ -84,8 +86,13 @@ User input in the shell is classified into the following types:
 | `/hooks [list\|enable\|disable] [name]` | Manage hooks |
 | `/extensions [list\|enable\|disable] [name]` | Manage extensions |
 | `/skills [list\|enable\|disable] [name]` | Manage skills |
+| `/session [status\|list\|resume <id>\|clear ...]` | Manage provider conversations |
+| `/resume [id]` | Alias for the session picker or session selection |
 | `/debug [state\|events\|adapter]` | Debug information |
 | `/auth` | Trigger authentication flow |
+
+See [Session Recovery](session-recovery.md) for picker keys, workspace scoping,
+clear confirmation, and recoverable error behavior.
 
 ## Startup Flow
 

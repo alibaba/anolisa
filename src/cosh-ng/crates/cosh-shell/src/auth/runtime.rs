@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::adapter::{AdapterInstance, CoshCoreAdapter};
+use crate::auth::completion::finish_auth_configuration;
 use crate::auth::provider_display::auth_required_providers_for_display;
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
@@ -188,21 +189,24 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
     match &auth.phase {
         AuthPhase::ManagingProviders => Some(RawInputCapture::Question {
             id: auth.id.clone(),
-            // existing providers + "+ Add new provider" option
             option_count: auth.existing_providers.len() + 1,
             allow_free_text: false,
             multiple: false,
+            secret: false,
         }),
         AuthPhase::ProviderAction { provider_idx } => {
             let existing = auth.existing_providers.get(*provider_idx);
-            let is_active = existing.map(|ep| ep.is_active).unwrap_or(false);
-            let editable = existing.map(|ep| ep.editable).unwrap_or(true);
-            let option_count = provider_action_options(is_active, editable).len();
+            let option_count = provider_action_options(
+                existing.is_some_and(|provider| provider.is_active),
+                existing.map(|provider| provider.editable).unwrap_or(true),
+            )
+            .len();
             Some(RawInputCapture::Question {
                 id: auth.id.clone(),
                 option_count,
                 allow_free_text: false,
                 multiple: false,
+                secret: false,
             })
         }
         AuthPhase::SelectingProvider => Some(RawInputCapture::Question {
@@ -210,18 +214,28 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
             option_count: auth.providers.len(),
             allow_free_text: false,
             multiple: false,
+            secret: false,
         }),
-        AuthPhase::FillingField => Some(RawInputCapture::Question {
-            id: auth.id.clone(),
-            option_count: 0,
-            allow_free_text: true,
-            multiple: false,
-        }),
+        AuthPhase::FillingField => {
+            let secret = auth
+                .providers
+                .get(auth.selected_provider)
+                .and_then(|provider| provider.fields.get(auth.current_field))
+                .is_some_and(|field| field.secret);
+            Some(RawInputCapture::Question {
+                id: auth.id.clone(),
+                option_count: 0,
+                allow_free_text: true,
+                multiple: false,
+                secret,
+            })
+        }
         AuthPhase::AliyunEcsChallenge { .. } => Some(RawInputCapture::Question {
             id: auth.id.clone(),
             option_count: 1,
             allow_free_text: false,
             multiple: false,
+            secret: false,
         }),
     }
 }
@@ -865,28 +879,7 @@ fn send_auth_response<W: std::io::Write>(
         }
     }
 
-    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    renderer.write_notice_panel(
-        output,
-        NoticePanelModel {
-            title: "Auth configured",
-            body: vec![format!(
-                "Provider: {} \u{2014} credentials saved.",
-                provider.label
-            )],
-            footer: None,
-        },
-    )?;
-
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        writeln!(output)?;
-        write!(output, "cosh-osc$ ")?;
-    } else {
-        state.trigger_pty_prompt = true;
-    }
-
-    output.flush()?;
-    Ok(())
+    finish_auth_configuration(state, output, &provider.label)
 }
 
 fn render_current_auth_panel<W: std::io::Write>(
@@ -1114,7 +1107,7 @@ pub(crate) fn render_auth_card_actions<W: std::io::Write>(
         if event.kind != ShellEventKind::UserInputIntercepted {
             continue;
         }
-        if event.component.as_deref() != Some("card") {
+        if !is_auth_card_component(event.component.as_deref()) {
             continue;
         }
         let dedup_key = stable_event_key("auth-card", event_index, event);
@@ -1154,6 +1147,10 @@ pub(crate) fn render_auth_card_actions<W: std::io::Write>(
         }
     }
     Ok(())
+}
+
+fn is_auth_card_component(component: Option<&str>) -> bool {
+    matches!(component, Some("card") | Some("card_secret"))
 }
 
 fn parse_card_id_usize(event: &ShellEvent) -> Option<(String, usize)> {

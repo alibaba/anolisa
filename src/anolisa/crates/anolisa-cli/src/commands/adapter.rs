@@ -39,8 +39,8 @@ use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus};
 use anolisa_core::adapter::driver::{AdapterStatusReport, DriverPlan};
 use anolisa_core::adapter::manager::{
-    AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOutcome, ScanEntry, ScanReport,
-    StatusReport,
+    AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOptions, EnableOutcome, ScanEntry,
+    ScanReport, StatusReport,
 };
 
 use crate::commands::common;
@@ -67,6 +67,19 @@ pub enum AdapterCommands {
         /// Target framework (e.g. `openclaw`). Omit when the component
         /// ships adapters for exactly one framework.
         framework: Option<String>,
+        /// Explicit safety bypass: authorize an unsafe plugin install.
+        ///
+        /// This is an explicit security-bypass authorization. When set,
+        /// ANOLISA is permitted to pass the OpenClaw framework's own
+        /// unsafe-install flag if the installed OpenClaw advertises it as
+        /// effective. Releases where that flag is a deprecated no-op are
+        /// rejected and require operator-owned `security.installPolicy`
+        /// configuration instead.
+        /// Only valid for an OpenClaw plugin adapter; using it with any
+        /// other framework or a skill-only adapter is rejected. Off by
+        /// default; a normal install never bypasses OpenClaw's checks.
+        #[arg(long)]
+        allow_unsafe_plugin_install: bool,
     },
     /// Disable a previously enabled adapter.
     Disable {
@@ -173,7 +186,13 @@ pub fn handle(args: AdapterArgs, ctx: &CliContext) -> Result<(), CliError> {
         AdapterCommands::Enable {
             component,
             framework,
-        } => handle_enable(ctx, &component, framework.as_deref()),
+            allow_unsafe_plugin_install,
+        } => handle_enable(
+            ctx,
+            &component,
+            framework.as_deref(),
+            allow_unsafe_plugin_install,
+        ),
         AdapterCommands::Disable {
             component,
             framework,
@@ -287,13 +306,20 @@ fn handle_enable(
     ctx: &CliContext,
     component: &str,
     framework: Option<&str>,
+    allow_unsafe_plugin_install: bool,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
-    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
-    let manager = build_manager(ctx);
+    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
+    let manager = common::build_adapter_manager_from_view(ctx, &view);
     let outcome = manager
-        .enable(&component, framework, ctx.dry_run)
+        .enable_with_options(
+            &component,
+            framework,
+            ctx.dry_run,
+            EnableOptions {
+                allow_unsafe_plugin_install,
+            },
+        )
         .map_err(|e| map_err(COMMAND, e))?;
 
     match outcome {
@@ -350,9 +376,8 @@ fn handle_disable(
     framework: Option<&str>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter disable";
-    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
-    let manager = build_manager(ctx);
+    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
+    let manager = common::build_adapter_manager_from_view(ctx, &view);
     let outcome: DisableOutcome = manager
         .disable(&component, framework, ctx.dry_run)
         .map_err(|e| map_err(COMMAND, e))?;
@@ -432,16 +457,16 @@ fn disable_target(outcome: &DisableOutcome) -> String {
 
 fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliError> {
     const COMMAND: &str = "adapter status";
-    let component = match component {
+    let (component, manager) = match component {
         Some(name) => {
-            let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-            Some(common::lookup_component_name(
-                name, &installed, ctx, COMMAND,
-            ))
+            let (component, view) = common::resolve_adapter_target(name, ctx, COMMAND)?;
+            (
+                Some(component),
+                common::build_adapter_manager_from_view(ctx, &view),
+            )
         }
-        None => None,
+        None => (None, build_manager(ctx)),
     };
-    let manager = build_manager(ctx);
     let report: StatusReport = manager
         .status(component.as_deref())
         .map_err(|e| map_err(COMMAND, e))?;
@@ -501,7 +526,9 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         | AdapterError::ResourceRootNotFound { .. }
         | AdapterError::ContractResourceRootNotFound { .. }
         | AdapterError::FrameworkNotDetected { .. }
+        | AdapterError::FrameworkVersionMismatch { .. }
         | AdapterError::BundleInvalid { .. }
+        | AdapterError::UnsafeInstallNotApplicable { .. }
         | AdapterError::ClaimValidation(_) => CliError::InvalidArgument {
             command: command.to_string(),
             reason: err.to_string(),
@@ -554,9 +581,14 @@ mod tests {
             AdapterCommands::Enable {
                 component,
                 framework,
+                allow_unsafe_plugin_install,
             } => {
                 assert_eq!(component, "tokenless");
                 assert!(framework.is_none());
+                assert!(
+                    !allow_unsafe_plugin_install,
+                    "unsafe install must default to false"
+                );
             }
             _ => panic!("expected enable"),
         }
@@ -568,6 +600,46 @@ mod tests {
             }
             _ => panic!("expected enable"),
         }
+    }
+
+    #[test]
+    fn enable_parses_allow_unsafe_plugin_install_flag() {
+        let cli = TestCli::try_parse_from([
+            "x",
+            "enable",
+            "tokenless",
+            "openclaw",
+            "--allow-unsafe-plugin-install",
+        ])
+        .expect("parse");
+        match cli.command {
+            AdapterCommands::Enable {
+                component,
+                framework,
+                allow_unsafe_plugin_install,
+            } => {
+                assert_eq!(component, "tokenless");
+                assert_eq!(framework.as_deref(), Some("openclaw"));
+                assert!(
+                    allow_unsafe_plugin_install,
+                    "flag must be captured when passed"
+                );
+            }
+            _ => panic!("expected enable"),
+        }
+    }
+
+    #[test]
+    fn unsafe_install_not_applicable_maps_to_invalid_argument() {
+        let err = map_err(
+            "adapter enable",
+            AdapterError::UnsafeInstallNotApplicable {
+                component: "agent-sec".to_string(),
+                framework: "hermes".to_string(),
+                adapter_type: None,
+            },
+        );
+        assert!(matches!(err, CliError::InvalidArgument { .. }));
     }
 
     #[test]

@@ -80,7 +80,7 @@ impl FactWriter {
                 fact.title,
                 fact.content.chars().take(100).collect::<String>()
             );
-            let mut s = store.lock().expect("store poisoned");
+            let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
             match s.detect_conflicts(&search_text, self.conflict_threshold) {
                 Ok(conflicts) => {
                     for (old_path, score) in &conflicts {
@@ -133,7 +133,7 @@ impl FactWriter {
                     .open(&self.jsonl_path)?;
                 *guard = Some(f);
             }
-            let f = guard.as_mut().unwrap();
+            let f = guard.as_mut().expect("just inserted");
             f.write_all(jsonl_line.as_bytes())?;
             f.sync_all()?;
         }

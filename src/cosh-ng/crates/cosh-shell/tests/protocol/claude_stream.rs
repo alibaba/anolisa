@@ -26,6 +26,7 @@ fn make_request(user_input: Option<&str>) -> AgentRequest {
                 terminal_output_ref: Some("terminal://session-1/cmd-1".to_string()),
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),

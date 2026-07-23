@@ -1,5 +1,39 @@
 use serde_json::json;
 
+use std::sync::Mutex;
+
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        EnvGuard { _lock: lock, key, prev }
+    }
+
+    fn set_spec(path: &str) -> Self {
+        Self::set("TOKENLESS_TOOL_READY_SPEC", path)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 #[test]
 fn normalize_dep_simple_string() {
     let dep = normalize_dep(&json!("jq"));
@@ -704,18 +738,17 @@ fn check_dep_missing_binary() {
 #[test]
 fn find_spec_path_error_when_none_exists() {
     // Override env to a nonexistent path and clear defaults
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", "/nonexistent/spec.json") };
+    let _guard = EnvGuard::set_spec("/nonexistent/spec.json");
     let result = find_spec_path();
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
-    // Result depends on whether any default path exists on the system
+    // Result depends on whether any default path exists on the system;
+    // the test exercises the code path without asserting a fixed outcome.
     let _ = result;
 }
 
 #[test]
 fn detect_system_manager_env_override() {
-    unsafe { std::env::set_var("TOKENLESS_PACKAGE_MANAGER", "test-mgr") };
+    let _guard = EnvGuard::set("TOKENLESS_PACKAGE_MANAGER", "test-mgr");
     let mgr = detect_system_manager();
-    unsafe { std::env::remove_var("TOKENLESS_PACKAGE_MANAGER") };
     assert_eq!(mgr, "test-mgr");
 }
 
@@ -834,6 +867,7 @@ fn format_status_all_variants() {
 }
 
 #[test]
+#[ignore]
 fn check_network_https_outbound() {
     // Just exercise the path — may or may not succeed depending on network
     let _ = check_network("https_outbound");
@@ -927,4 +961,520 @@ fn check_config_file_expanded_tilde() {
     // A file that almost certainly doesn't exist
     let result = check_config_file("~/.tokenless-nonexistent-cfg-xyz");
     assert!(!result);
+}
+
+fn write_test_spec(dir: &std::path::Path) -> std::path::PathBuf {
+    let spec_path = dir.join("test-spec.json");
+    let spec = serde_json::json!({
+        "TestTool": {
+            "required": ["ls"],
+            "recommended": ["cat"],
+            "config_files": [],
+            "permissions": [],
+            "network": [],
+            "aliases": ["test-tool", "tt"]
+        },
+        "MissingTool": {
+            "required": ["nonexistent_binary_xyz_99"],
+            "recommended": [],
+            "config_files": ["~/.nonexistent_config_xyz"],
+            "permissions": ["nonexistent_perm_xyz"],
+            "network": []
+        }
+    });
+    std::fs::write(&spec_path, serde_json::to_string(&spec).unwrap()).unwrap();
+    spec_path
+}
+
+fn write_versioned_spec(dir: &std::path::Path) -> std::path::PathBuf {
+    let spec_path = dir.join("versioned-spec.json");
+    let spec = serde_json::json!({
+        "VersionedTool": {
+            "required": [
+                {"binary": "bash", "version": ">=1.0", "package": "bash", "manager": "rpm"}
+            ],
+            "recommended": [
+                {"binary": "cat", "version": ">=0.1", "package": "coreutils", "manager": "rpm"}
+            ],
+            "config_files": ["~/.bashrc"],
+            "permissions": [],
+            "network": []
+        },
+        "_comment": "This is a comment key that should be skipped"
+    });
+    std::fs::write(&spec_path, serde_json::to_string(&spec).unwrap()).unwrap();
+    spec_path
+}
+
+#[test]
+fn check_tool_all_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let specs = load_spec(&spec_path).unwrap();
+    let result = check_tool("TestTool", specs.get("TestTool").unwrap());
+    assert_eq!(result.status, ReadyStatus::Ready);
+}
+
+#[test]
+fn check_tool_with_missing_dep() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let specs = load_spec(&spec_path).unwrap();
+    let result = check_tool("MissingTool", specs.get("MissingTool").unwrap());
+    assert_eq!(result.status, ReadyStatus::NotReady);
+    assert!(!result.required_results.is_empty());
+}
+
+#[test]
+fn check_tool_versioned_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_versioned_spec(dir.path());
+    let specs = load_spec(&spec_path).unwrap();
+    let result = check_tool("VersionedTool", specs.get("VersionedTool").unwrap());
+    // bash >= 1.0 should be available on any Linux
+    assert_eq!(result.status, ReadyStatus::Ready);
+    assert!(!result.config_results.is_empty());
+}
+
+#[test]
+fn generate_checklist_multiple_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let specs = load_spec(&spec_path).unwrap();
+    let results: Vec<ToolReadyResult> = specs
+        .keys()
+        .map(|name| check_tool(name, specs.get(name).unwrap()))
+        .collect();
+    let checklist = generate_checklist(&results);
+    assert!(checklist.contains("TestTool") || checklist.contains("MissingTool"));
+}
+
+#[test]
+fn format_dep_status_and_label_coverage() {
+    let avail = format_dep_status(&DepStatus::Available);
+    assert!(!avail.is_empty());
+    let missing = format_dep_status(&DepStatus::Missing);
+    assert!(!missing.is_empty());
+    let low = format_dep_status(&DepStatus::VersionLow {
+        installed: "1.0".to_string(),
+        required: "2.0".to_string(),
+    });
+    assert!(low.contains("1.0"));
+}
+
+#[test]
+fn build_json_result_not_ready_diagnostic() {
+    let result = build_json_result(
+        "TestTool",
+        &ReadyStatus::NotReady,
+        &[],
+        &["dep1".to_string(), "dep2".to_string()],
+    );
+    assert!(result["diagnostic"].as_str().unwrap().contains("NOT_READY"));
+    assert!(result["diagnostic"].as_str().unwrap().contains("dep1"));
+}
+
+#[test]
+#[ignore]
+fn check_network_https_resolves() {
+    let result = check_network("https://httpbin.org/status/200");
+    let _ = result;
+}
+
+#[test]
+fn run_all_text_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(None, true, false, false, false).is_ok());
+}
+
+#[test]
+fn run_all_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(None, true, false, false, true).is_ok());
+}
+
+#[test]
+fn run_checklist_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(None, false, false, true, false).is_ok());
+}
+
+#[test]
+fn run_specific_tool_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("TestTool"), false, false, false, false).is_ok());
+}
+
+#[test]
+fn run_specific_tool_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("TestTool"), false, false, false, true).is_ok());
+}
+
+#[test]
+fn run_alias_lookup_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("tt"), false, false, false, false).is_ok());
+}
+
+#[test]
+fn run_case_insensitive_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("testtool"), false, false, false, false).is_ok());
+}
+
+#[test]
+fn run_unknown_tool_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("UnknownTool"), false, false, false, false).is_ok());
+}
+
+#[test]
+fn run_unknown_tool_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("UnknownTool"), false, false, false, true).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn run_fix_skips_recommended_only_missing_deps() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_spec = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
+    let prev_fix = std::env::var_os("TOKENLESS_ENV_FIX_SCRIPT");
+
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = dir.path().join("recommended-only-spec.json");
+    let marker_path = dir.path().join("fix-called");
+    let fix_script_path = dir.path().join("env-fix.sh");
+    let spec = json!({
+        "Shell": {
+            "required": ["sh"],
+            "recommended": ["nonexistent_recommended_binary_xyz_99"],
+            "config_files": [],
+            "permissions": [],
+            "network": [],
+            "aliases": ["Bash"]
+        }
+    });
+    std::fs::write(&spec_path, serde_json::to_string(&spec).unwrap()).unwrap();
+    std::fs::write(
+        &fix_script_path,
+        format!("#!/bin/sh\ntouch '{}'\n", marker_path.display()),
+    )
+    .unwrap();
+    chmod_file(&fix_script_path, 0o755);
+
+    unsafe {
+        std::env::set_var("TOKENLESS_TOOL_READY_SPEC", &spec_path);
+        std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", &fix_script_path);
+    }
+
+    let result = run(Some("Shell"), false, true, false, true);
+
+    unsafe {
+        match prev_spec {
+            Some(v) => std::env::set_var("TOKENLESS_TOOL_READY_SPEC", v),
+            None => std::env::remove_var("TOKENLESS_TOOL_READY_SPEC"),
+        }
+        match prev_fix {
+            Some(v) => std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", v),
+            None => std::env::remove_var("TOKENLESS_ENV_FIX_SCRIPT"),
+        }
+    }
+
+    assert!(result.is_ok());
+    assert!(!marker_path.exists(), "recommended deps must not trigger auto-fix");
+}
+
+#[test]
+fn run_no_tool_no_all_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(None, false, false, false, false).is_err());
+}
+
+#[test]
+fn run_missing_tool_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("MissingTool"), false, false, false, false).is_ok());
+}
+
+#[test]
+fn run_missing_tool_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(Some("MissingTool"), false, false, false, true).is_ok());
+}
+
+#[test]
+fn run_versioned_all_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_versioned_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(None, true, false, false, false).is_ok());
+}
+
+#[test]
+fn run_versioned_all_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_versioned_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(None, true, false, false, true).is_ok());
+}
+
+#[test]
+fn run_versioned_checklist() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_versioned_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    assert!(run(None, false, false, true, false).is_ok());
+}
+
+#[test]
+fn load_spec_valid_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_test_spec(dir.path());
+    let specs = load_spec(&spec_path).unwrap();
+    assert!(specs.contains_key("TestTool"));
+    assert!(specs.contains_key("MissingTool"));
+    let test_tool = &specs["TestTool"];
+    assert_eq!(test_tool.aliases, vec!["test-tool", "tt"]);
+    assert_eq!(test_tool.required.len(), 1);
+    assert_eq!(test_tool.required[0].binary, "ls");
+}
+
+#[test]
+fn build_json_result_ready_with_diagnostic() {
+    let result = build_json_result(
+        "TestTool",
+        &ReadyStatus::NotReady,
+        &[],
+        &["missing-dep".to_string()],
+    );
+    assert_eq!(result["tool"], "TestTool");
+    assert!(result["diagnostic"].as_str().unwrap().contains("NOT_READY"));
+    assert!(result["missing"].as_array().unwrap().len() == 1);
+}
+
+#[test]
+fn build_json_result_with_fixed_and_missing() {
+    let result = build_json_result(
+        "TestTool",
+        &ReadyStatus::Ready,
+        &["fixed-dep".to_string()],
+        &["still-missing".to_string()],
+    );
+    assert!(result["fixed"].as_array().unwrap().len() == 1);
+    assert!(result["missing"].as_array().unwrap().len() == 1);
+}
+
+#[test]
+fn is_trusted_path_system_usr_share() {
+    let path = std::path::Path::new("/usr/share/doc");
+    if path.exists() {
+        assert!(is_trusted_path(path));
+    }
+}
+
+#[test]
+fn is_trusted_path_system_usr_local_share() {
+    let path = std::path::Path::new("/usr/local/share");
+    if path.exists() {
+        assert!(is_trusted_path(path));
+    }
+}
+
+#[test]
+fn is_trusted_path_nonexistent() {
+    let path = std::path::Path::new("/nonexistent/path/xyz");
+    assert!(!is_trusted_path(path));
+}
+
+#[test]
+fn is_trusted_path_owned_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("test_file");
+    std::fs::write(&file, "test").unwrap();
+    let result = is_trusted_path(&file);
+    assert!(result);
+}
+
+#[test]
+fn is_trusted_path_symlink_to_owned_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target_file");
+    std::fs::write(&target, "data").unwrap();
+    let link = dir.path().join("link_to_file");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let result = is_trusted_path(&link);
+    assert!(result);
+}
+
+#[test]
+fn is_trusted_path_symlink_to_system_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("link_to_usr_share");
+    if std::path::Path::new("/usr/share/doc").exists() {
+        std::os::unix::fs::symlink("/usr/share/doc", &link).unwrap();
+        let result = is_trusted_path(&link);
+        assert!(result);
+    }
+}
+
+#[test]
+fn is_trusted_path_broken_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("broken_link");
+    std::os::unix::fs::symlink("/nonexistent/target/xyz", &link).unwrap();
+    let result = is_trusted_path(&link);
+    assert!(!result);
+}
+
+#[test]
+fn is_trusted_path_symlink_in_different_dir() {
+    let dir1 = tempfile::tempdir().unwrap();
+    let dir2 = tempfile::tempdir().unwrap();
+    let target = dir1.path().join("target");
+    std::fs::write(&target, "data").unwrap();
+    let link = dir2.path().join("cross_dir_link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let result = is_trusted_path(&link);
+    assert!(result);
+}
+
+#[test]
+fn check_dep_available_ls() {
+    let dep = make_dep("ls");
+    let status = check_dep(&dep);
+    assert_eq!(status, DepStatus::Available);
+}
+
+#[test]
+fn check_dep_with_version_ls() {
+    let mut dep = make_dep("ls");
+    dep.version = Some(">=0.1".to_string());
+    let status = check_dep(&dep);
+    // ls doesn't have a useful --version, so it may report VersionLow
+    let _ = status;
+}
+
+#[test]
+fn check_dep_with_version_bash() {
+    let mut dep = make_dep("bash");
+    dep.version = Some(">=1.0".to_string());
+    let status = check_dep(&dep);
+    assert_eq!(status, DepStatus::Available);
+}
+
+#[test]
+fn check_dep_version_low() {
+    let mut dep = make_dep("bash");
+    dep.version = Some(">=999.0".to_string());
+    let status = check_dep(&dep);
+    match status {
+        DepStatus::VersionLow { installed, required } => {
+            assert_eq!(required, "999.0");
+            assert!(!installed.is_empty());
+        }
+        _ => panic!("Expected VersionLow"),
+    }
+}
+
+#[test]
+fn run_versioned_tool_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_versioned_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    let result = run(None, true, false, false, false);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_versioned_tool_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_versioned_spec(dir.path());
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
+    let result = run(None, true, false, false, true);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn resolve_package_with_apt_override() {
+    let mut dep = make_dep("curl");
+    dep.apt_package = Some("libcurl4".to_string());
+    let pkg = resolve_package(&dep);
+    // Will resolve based on detected system manager
+    assert!(!pkg.is_empty());
+}
+
+
+#[test]
+fn format_dep_status_label_all_variants() {
+    let avail = format_dep_status_label(&DepStatus::Available);
+    let missing = format_dep_status_label(&DepStatus::Missing);
+    let low = format_dep_status_label(&DepStatus::VersionLow {
+        installed: "1.0".to_string(),
+        required: "2.0".to_string(),
+    });
+    assert!(!avail.is_empty());
+    assert!(!missing.is_empty());
+    assert!(!low.is_empty());
+}
+
+#[test]
+fn resolve_manager_non_rpm() {
+    let result = resolve_manager("pip");
+    assert_eq!(result, "pip");
+}
+
+#[test]
+fn resolve_manager_rpm() {
+    let result = resolve_manager("rpm");
+    assert!(!result.is_empty());
+}
+
+#[test]
+fn extract_required_version_variations() {
+    assert_eq!(extract_required_version(">=1.2"), "1.2");
+    assert_eq!(extract_required_version(">1.2"), "1.2");
+    assert_eq!(extract_required_version("1.2"), "1.2");
+}
+
+#[test]
+fn normalize_dep_with_fallback() {
+    let dep = normalize_dep(&serde_json::json!({
+        "binary": "rtk",
+        "package": "rtk",
+        "manager": "pip",
+        "fallback": [
+            {"binary": "rtk-fallback", "url": "https://example.com/rtk"},
+            "not_an_object"
+        ]
+    }));
+    assert_eq!(dep.binary, "rtk");
+    assert_eq!(dep.manager, "pip");
+    assert_eq!(dep.fallback.len(), 1);
+    assert_eq!(dep.fallback[0].binary.as_deref(), Some("rtk-fallback"));
 }

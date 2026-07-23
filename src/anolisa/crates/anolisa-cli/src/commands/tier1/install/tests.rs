@@ -6,7 +6,8 @@
 
 use super::*;
 
-use anolisa_core::state::InstalledState;
+use anolisa_core::lock::{InstallLock, LockError};
+use anolisa_core::transaction::Transaction;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -25,19 +26,23 @@ use tar::{Builder, Header};
 use tempfile::tempdir;
 
 pub fn ctx_with_prefix(json: bool, prefix: Option<PathBuf>) -> CliContext {
-    CliContext {
-        install_mode: if prefix.is_some() {
-            InstallMode::System
-        } else {
-            InstallMode::User
+    let root = prefix
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("/tmp/anolisa-install-validation"));
+    let install_mode = if prefix.is_some() {
+        InstallMode::System
+    } else {
+        InstallMode::User
+    };
+    crate::test_support::context_for_root(
+        root,
+        install_mode,
+        prefix.clone(),
+        crate::test_support::TestContextOptions {
+            json,
+            ..Default::default()
         },
-        prefix,
-        json,
-        dry_run: false,
-        verbose: false,
-        quiet: true, // suppress stdout during tests
-        no_color: true,
-    }
+    )
 }
 
 pub fn args(component: &str) -> InstallArgs {
@@ -320,16 +325,6 @@ sha256 = "{sha}"
     format!("file://{}", v1.display())
 }
 
-pub fn write_overlay_manifest(layout: &FsLayout, component: &str, version: &str, modes: &[&str]) {
-    let runtime_dir = layout.manifests_overlay.join("runtime");
-    std::fs::create_dir_all(&runtime_dir).expect("create overlay runtime dir");
-    std::fs::write(
-        runtime_dir.join(format!("{component}.toml")),
-        component_manifest_toml(component, version, modes),
-    )
-    .expect("write overlay manifest");
-}
-
 pub fn write_conventional_repo(root: &Path) -> String {
     let env = anolisa_env::EnvService::detect();
     let artifact_dir = root
@@ -599,13 +594,16 @@ sha256 = "{sha}"
 pub struct NoTxn;
 
 impl PackageTransaction for NoTxn {
-    fn install(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("adopt-path test reached a delegated dnf install");
     }
-    fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn update(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("adopt-path test reached a dnf update");
     }
-    fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn reinstall(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        panic!("adopt-path test reached a dnf reinstall");
+    }
+    fn remove(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("adopt-path test reached a dnf remove");
     }
 }
@@ -617,12 +615,14 @@ pub fn handle_one_with_query(
     query: &dyn PackageQuery,
 ) -> Result<InstallOutcome, CliError> {
     let txn = NoTxn;
-    let exec = RpmExec {
-        query,
-        txn: &txn,
-        is_root: false,
-    };
-    handle_one_with_exec(component, args, ctx, &exec)
+    install_component_with_deps(&component, &args, ctx, query, &txn, false)
+}
+
+/// Load the v5 store the pipeline writes, for post-install assertions.
+pub fn load_store(ctx: &CliContext) -> anolisa_core::state_store::StateStore {
+    let layout = common::resolve_layout(ctx);
+    anolisa_core::state_store::StateStore::load(&layout.state_dir.join("installed.toml"), 0)
+        .expect("load store")
 }
 
 pub struct FakeInstaller {
@@ -635,6 +635,14 @@ pub struct FakeInstaller {
     pub install_succeeds: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
+    /// Optional lock path probed from inside `install`.
+    pub lock_probe: Option<PathBuf>,
+    pub lock_was_held: Cell<bool>,
+    package_appears_under_lock_path: Option<PathBuf>,
+    /// Optional installed.toml path replaced with a directory after dnf.
+    pub block_state_save: Option<PathBuf>,
+    pending_race: Option<(PathBuf, PathBuf, String)>,
+    pending_race_injected: Cell<bool>,
 }
 
 impl FakeInstaller {
@@ -647,6 +655,12 @@ impl FakeInstaller {
             install_succeeds: true,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
+            lock_probe: None,
+            lock_was_held: Cell::new(false),
+            package_appears_under_lock_path: None,
+            block_state_save: None,
+            pending_race: None,
+            pending_race_injected: Cell::new(false),
         }
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
@@ -657,6 +671,44 @@ impl FakeInstaller {
         self.install_succeeds = false;
         self
     }
+    pub fn expect_lock_held(mut self, path: PathBuf) -> Self {
+        self.lock_probe = Some(path);
+        self
+    }
+    pub fn package_appears_under_lock(mut self, path: PathBuf) -> Self {
+        self.package_appears_under_lock_path = Some(path);
+        self
+    }
+    pub fn failing_state_save(mut self, path: PathBuf) -> Self {
+        self.block_state_save = Some(path);
+        self
+    }
+
+    pub fn injecting_pending_journal(mut self, layout: &FsLayout, subject: &str) -> Self {
+        self.pending_race = Some((
+            layout.state_dir.join("installed.toml"),
+            layout.state_dir.join("journal"),
+            subject.to_string(),
+        ));
+        self
+    }
+
+    fn maybe_inject_pending_journal(&self) {
+        let Some((state_path, journal_dir, subject)) = &self.pending_race else {
+            return;
+        };
+        if self.pending_race_injected.replace(true) {
+            return;
+        }
+        let journal = Transaction::begin_with_subject(
+            "install",
+            Some(subject),
+            state_path.clone(),
+            journal_dir,
+        )
+        .expect("inject pending journal between preflight and lock");
+        drop(journal);
+    }
 
     fn component_capability(&self) -> String {
         rpm_component_provide(&self.package)
@@ -665,8 +717,14 @@ impl FakeInstaller {
 
 impl PackageQuery for FakeInstaller {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+        self.maybe_inject_pending_journal();
         if package != self.package {
             return Ok(None);
+        }
+        if let Some(path) = &self.package_appears_under_lock_path
+            && matches!(InstallLock::acquire(path), Err(LockError::Held { .. }))
+        {
+            *self.installed.borrow_mut() = Some(self.installs_to.clone());
         }
         Ok(self.installed.borrow().clone())
     }
@@ -725,9 +783,19 @@ impl PackageQuery for FakeInstaller {
 }
 
 impl PackageTransaction for FakeInstaller {
-    fn install(&self, package: &str) -> Result<(), PackageTransactionError> {
+    fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.install_calls.set(self.install_calls.get() + 1);
-        assert_eq!(package, self.package, "install targeted the wrong package");
+        assert_eq!(
+            packages,
+            [self.package.as_str()],
+            "install targeted the wrong package"
+        );
+        if let Some(path) = &self.lock_probe {
+            self.lock_was_held.set(matches!(
+                InstallLock::acquire(path),
+                Err(LockError::Held { .. })
+            ));
+        }
         if !self.install_succeeds {
             return Err(PackageTransactionError::TransactionFailed {
                 command: "dnf".to_string(),
@@ -738,12 +806,18 @@ impl PackageTransaction for FakeInstaller {
         }
         // rpmdb now holds the package, modelling dnf placing it.
         *self.installed.borrow_mut() = Some(self.installs_to.clone());
+        if let Some(path) = &self.block_state_save {
+            std::fs::create_dir_all(path).expect("block installed.toml save");
+        }
         Ok(())
     }
-    fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn update(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("delegated-install test must not run a dnf update");
     }
-    fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn reinstall(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        panic!("delegated-install test must not run a dnf reinstall");
+    }
+    fn remove(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("delegated-install test must not run a dnf remove");
     }
 }
@@ -756,6 +830,7 @@ pub struct FakeQuery {
     pub available_provides: Vec<(String, Vec<String>)>,
     pub package_provides: Vec<(String, Vec<String>)>,
     pub available_package_provides: Vec<(String, Vec<String>)>,
+    pub unexpected_installed: Vec<(String, String)>,
     pub multi_version: Vec<String>,
     pub origin_fails: bool,
     /// Simulate a host with no rpm/dnf: every rpmdb-touching query returns
@@ -769,6 +844,16 @@ impl PackageQuery for FakeQuery {
         if self.command_missing {
             return Err(PackageQueryError::CommandMissing {
                 command: "rpm".to_string(),
+            });
+        }
+        if let Some((_, detail)) = self
+            .unexpected_installed
+            .iter()
+            .find(|(name, _)| name == package)
+        {
+            return Err(PackageQueryError::UnexpectedOutput {
+                command: "rpm".to_string(),
+                detail: detail.clone(),
             });
         }
         if self.multi_version.iter().any(|p| p == package) {
@@ -926,11 +1011,6 @@ gpgcheck = false
     (tmp, ctx)
 }
 
-pub fn load_state(ctx: &CliContext) -> InstalledState {
-    let layout = common::resolve_layout(ctx);
-    InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
-}
-
 pub fn repo_with_rpm_map(pairs: &[(&str, &str)]) -> RepoConfig {
     let mut map = String::new();
     for (k, v) in pairs {
@@ -975,16 +1055,9 @@ pub fn package_component_provide(package: &str, component: &str) -> (String, Vec
 }
 
 pub fn target(component: &str, package: &str) -> RpmTarget {
-    RpmTarget::new(component, package)
-}
-
-pub fn situation_label(s: &RpmSituation) -> &'static str {
-    match s {
-        RpmSituation::Adoptable { .. } => "Adoptable",
-        RpmSituation::Absent { .. } => "Absent",
-        RpmSituation::NotAnolisaComponent => "NotAnolisaComponent",
-        RpmSituation::Ambiguous(_) => "Ambiguous",
-        RpmSituation::MultiVersion(_) => "MultiVersion",
+    RpmTarget {
+        component: component.to_string(),
+        package: package.to_string(),
     }
 }
 

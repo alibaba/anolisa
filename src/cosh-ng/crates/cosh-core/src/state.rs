@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::skill::COPILOT_CONFIG_DIR;
 
+#[cfg(test)]
+pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Sub-directory under `~/.copilot-shell/` containing state files.
 const STATES_DIR: &str = "states";
 
@@ -20,6 +23,8 @@ pub const EXTENSIONS_STATE: &str = "extensions.json";
 pub const HOOKS_STATE: &str = "hooks.json";
 /// State file for skill enable/disable status.
 pub const SKILLS_STATE: &str = "skills.json";
+/// State file for configured MCP servers disabled by the user.
+pub const MCP_SERVERS_STATE: &str = "mcp-servers.json";
 
 /// Unified state file schema: `{ "disabled": ["name1", "name2"] }`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -104,10 +109,6 @@ pub fn remove_disabled_set(filename: &str, names: &HashSet<String>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Global mutex to serialize tests that use COSH_STATES_DIR env var.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Helper: set COSH_STATES_DIR to a unique temp directory for this test.
     fn isolated_states_dir() -> tempfile::TempDir {
@@ -118,7 +119,7 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_empty() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_STATE_LOCK.lock().unwrap();
         let _tmp = isolated_states_dir();
         let result = load_disabled("nonexistent.json");
         assert!(result.is_empty());
@@ -126,7 +127,7 @@ mod tests {
 
     #[test]
     fn save_and_load_roundtrip() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_STATE_LOCK.lock().unwrap();
         let _tmp = isolated_states_dir();
         let mut disabled = HashSet::new();
         disabled.insert("foo".to_string());
@@ -139,7 +140,7 @@ mod tests {
 
     #[test]
     fn add_and_remove() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_STATE_LOCK.lock().unwrap();
         let _tmp = isolated_states_dir();
         add_disabled("test.json", "alpha").unwrap();
         add_disabled("test.json", "beta").unwrap();
@@ -156,7 +157,7 @@ mod tests {
 
     #[test]
     fn remove_disabled_set_removes_multiple() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_STATE_LOCK.lock().unwrap();
         let _tmp = isolated_states_dir();
         add_disabled("test.json", "a").unwrap();
         add_disabled("test.json", "b").unwrap();
@@ -173,7 +174,7 @@ mod tests {
 
     #[test]
     fn idempotent_add() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_STATE_LOCK.lock().unwrap();
         let _tmp = isolated_states_dir();
         add_disabled("test.json", "x").unwrap();
         add_disabled("test.json", "x").unwrap();

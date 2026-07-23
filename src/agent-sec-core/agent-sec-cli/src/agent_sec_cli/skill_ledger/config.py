@@ -24,6 +24,10 @@ from agent_sec_cli.skill_ledger.activation_policy import (
     validate_activation_policy,
 )
 from agent_sec_cli.skill_ledger.errors import ConfigError
+from agent_sec_cli.skill_ledger.path_identity import (
+    normalize_canonical_skill_dir,
+    validate_path_root_syntax,
+)
 from agent_sec_cli.skill_ledger.paths import get_config_dir
 from agent_sec_cli.skill_ledger.scanner.names import (
     CODE_SCANNER_NAME,
@@ -39,6 +43,7 @@ DEFAULT_SKILL_DIRS = [
     "~/.openclaw/skills/*",
     "~/.copilot-shell/skills/*",
     "~/.hermes/skills/**",
+    "~/.qoder/skills/*",
     "/usr/share/anolisa/skills/*",
 ]
 _IGNORED_RECURSIVE_DIRS = frozenset(
@@ -104,7 +109,9 @@ def _deep_merge_config(
     merged = dict(defaults)
     for key, user_val in user.items():
         if key == "managedSkillDirs" and isinstance(user_val, list):
-            merged["managedSkillDirs"] = _compact_skill_dirs([str(v) for v in user_val])
+            entries = [str(v) for v in user_val]
+            _validate_managed_skill_dir_entries(entries)
+            merged["managedSkillDirs"] = _compact_skill_dirs(entries)
         elif key == "scanners" and isinstance(user_val, list):
             # Index defaults by name for O(1) lookup
             by_name: dict[str, dict[str, Any]] = {}
@@ -125,6 +132,24 @@ def _deep_merge_config(
         else:
             merged[key] = user_val
     return merged
+
+
+def _validate_managed_skill_dir_entries(entries: list[str]) -> None:
+    """Reject entries that could create an ambiguous canonical identity."""
+    for entry in entries:
+        base = entry
+        if entry.endswith("/**"):
+            base = entry[:-3]
+        elif entry.endswith("/*"):
+            base = entry[:-2]
+        expanded = str(Path(base).expanduser())
+        try:
+            validate_path_root_syntax(
+                expanded,
+                subject=f"managedSkillDirs entry {entry!r}",
+            )
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
 
 
 def effective_skill_dir_entries(config: dict[str, Any]) -> list[str]:
@@ -205,7 +230,7 @@ def resolve_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:
 
 
 def resolve_managed_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:
-    """Expand only explicitly managed source/backing skill directories."""
+    """Expand only explicitly managed canonical skill directories."""
     if config is None:
         config = load_config()
     return _resolve_skill_dir_entries(managed_skill_dir_entries(config))
@@ -227,7 +252,7 @@ def _resolve_skill_dir_entries(entries: list[str]) -> list[Path]:
                     skill_dir = skill_file.parent
                     if _is_ignored_recursive_skill_dir(skill_dir, parent):
                         continue
-                    resolved = skill_dir.resolve()
+                    resolved = _lexical_path(skill_dir)
                     if resolved not in seen:
                         seen.add(resolved)
                         skill_dirs.append(skill_dir)
@@ -241,14 +266,14 @@ def _resolve_skill_dir_entries(entries: list[str]) -> list[Path]:
                         and not child.name.startswith(".")
                         and (child / _SKILL_MANIFEST).is_file()
                     ):
-                        resolved = child.resolve()
+                        resolved = _lexical_path(child)
                         if resolved not in seen:
                             seen.add(resolved)
                             skill_dirs.append(child)
         else:
             # Single directory — still requires SKILL.md
             if expanded.is_dir() and (expanded / _SKILL_MANIFEST).is_file():
-                resolved = expanded.resolve()
+                resolved = _lexical_path(expanded)
                 if resolved not in seen:
                     seen.add(resolved)
                     skill_dirs.append(expanded)
@@ -271,11 +296,11 @@ def _compact_skill_dirs(entries: list[str]) -> list[str]:
     recursive_parents: set[Path] = set()
     for entry in entries:
         if entry.endswith("/**"):
-            recursive_parents.add(Path(entry[:-3]).expanduser().resolve())
+            recursive_parents.add(_lexical_path(Path(entry[:-3]).expanduser()))
         elif entry.endswith("/*"):
             # Normalise: resolve ~ so "/home/user/.copilot-shell/skills/*"
             # and "~/.copilot-shell/skills/*" are treated as the same parent.
-            glob_parents.add(str(Path(entry[:-2]).expanduser().resolve()))
+            glob_parents.add(str(_lexical_path(Path(entry[:-2]).expanduser())))
 
     compacted: list[str] = []
     seen: set[str] = set()
@@ -286,7 +311,7 @@ def _compact_skill_dirs(entries: list[str]) -> list[str]:
 
         # Skip specific paths whose parent is covered by a glob
         if not entry.endswith(("/*", "/**")):
-            expanded = Path(entry).expanduser().resolve()
+            expanded = _lexical_path(Path(entry).expanduser())
             parent_str = str(expanded.parent)
             if parent_str in glob_parents:
                 continue
@@ -309,21 +334,47 @@ def _is_ignored_recursive_skill_dir(skill_dir: Path, root: Path) -> bool:
 
 
 def is_covered(skill_dir: Path, config: dict[str, Any] | None = None) -> bool:
-    """Return ``True`` if *skill_dir* would be discovered by current config."""
+    """Return whether current config lexically covers the canonical path."""
     if config is None:
         config = load_config()
-    resolved_target = skill_dir.resolve()
-    all_dirs = resolve_skill_dirs(config)
-    return any(d.resolve() == resolved_target for d in all_dirs)
+    return _is_path_covered_by_entries(
+        skill_dir,
+        effective_skill_dir_entries(config),
+    )
 
 
 def is_managed_covered(skill_dir: Path, config: dict[str, Any] | None = None) -> bool:
     """Return ``True`` if *skill_dir* is explicitly covered by managedSkillDirs."""
     if config is None:
         config = load_config()
-    resolved_target = skill_dir.resolve()
-    managed_dirs = resolve_managed_skill_dirs(config)
-    return any(d.resolve() == resolved_target for d in managed_dirs)
+    return _is_path_covered_by_entries(
+        skill_dir,
+        managed_skill_dir_entries(config),
+    )
+
+
+def _is_path_covered_by_entries(skill_dir: Path, entries: list[str]) -> bool:
+    """Match a canonical path against config entries without filesystem access."""
+    target = _lexical_path(skill_dir)
+    for entry in entries:
+        if entry.endswith("/**"):
+            root = _lexical_path(Path(entry[:-3]).expanduser())
+            if target.is_relative_to(root):
+                return True
+            continue
+        if entry.endswith("/*"):
+            parent = _lexical_path(Path(entry[:-2]).expanduser())
+            if target.parent == parent:
+                return True
+            continue
+        if target == _lexical_path(Path(entry).expanduser()):
+            return True
+    return False
+
+
+def _lexical_path(path: Path) -> Path:
+    """Normalize a path without following symlinks or requiring it to exist."""
+    return normalize_canonical_skill_dir(path)
 
 
 def remember_skill_dir(
@@ -344,21 +395,22 @@ def remember_skill_dir(
     if config is None:
         config = load_config()
 
+    skill_dir = _lexical_path(skill_dir.expanduser())
+
     if is_managed_covered(skill_dir, config):
         return None
 
     parent = skill_dir.parent
-    sibling_skills = (
-        [
+    try:
+        sibling_skills = [
             d
             for d in parent.iterdir()
             if d.is_dir()
             and not d.name.startswith(".")
             and (d / _SKILL_MANIFEST).is_file()
         ]
-        if parent.is_dir()
-        else []
-    )
+    except OSError:
+        sibling_skills = []
 
     if len(sibling_skills) >= 2:
         entry = str(parent) + "/*"

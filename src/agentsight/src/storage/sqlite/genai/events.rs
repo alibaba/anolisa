@@ -59,7 +59,7 @@ impl GenAISqliteStore {
         &self,
         trace_id: &str,
     ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
@@ -111,7 +111,7 @@ impl GenAISqliteStore {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
@@ -163,7 +163,7 @@ impl GenAISqliteStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
@@ -218,7 +218,7 @@ impl GenAISqliteStore {
         end_ns: i64,
         agent_name: Option<&str>,
     ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql = if agent_name.is_some() {
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
@@ -333,7 +333,7 @@ impl GenAISqliteStore {
         &self,
         event: &GenAISemanticEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let event_json = serde_json::to_string(event)?;
 
         match event {
@@ -556,7 +556,7 @@ impl GenAIExporter for GenAISqliteStore {
 
     fn export(&self, events: &[GenAISemanticEvent]) {
         // Batch buffering: accumulate events and flush when threshold is reached.
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.extend(events.iter().cloned());
         let pending_len = pending.len();
         drop(pending);

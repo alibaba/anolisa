@@ -371,6 +371,49 @@ def test_main_invalid_json_returns_noop_without_cli(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {}
 
 
+def test_main_oversized_payload_is_diagnosed_and_fail_open(monkeypatch, capsys):
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("subprocess.run should not be called")
+
+    payload = b"alice@example.com" + b"x" * observability_hook._MAX_PAYLOAD_SIZE
+    monkeypatch.setattr(observability_hook.subprocess, "run", fail_run)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(payload)))
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == (
+        "observability-hook: hook input exceeds "
+        f"{observability_hook._MAX_PAYLOAD_SIZE} bytes; skipping event\n"
+    )
+    assert "alice@example.com" not in captured.err
+
+
+def test_main_payload_at_size_limit_is_processed(monkeypatch, capsys):
+    prefix = (
+        b'{"hook_event_name":"UserPromptSubmit",'
+        b'"session_id":"session-123","run_id":"run-123",'
+        b'"prompt":"hello","padding":"'
+    )
+    suffix = b'"}'
+    padding_size = observability_hook._MAX_PAYLOAD_SIZE - len(prefix) - len(suffix)
+    payload = prefix + b"x" * padding_size + suffix
+    records = []
+    assert len(payload) == observability_hook._MAX_PAYLOAD_SIZE
+
+    monkeypatch.setattr(observability_hook, "_record_observability", records.append)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(payload)))
+
+    observability_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == ""
+    assert len(records) == 1
+    assert records[0]["metrics"]["prompt"] == "hello"
+
+
 @pytest.mark.parametrize(
     "subprocess_result",
     (

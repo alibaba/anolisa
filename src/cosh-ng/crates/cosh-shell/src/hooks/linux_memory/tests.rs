@@ -79,6 +79,33 @@ fn ps_eo_reordered_columns_hit() {
 }
 
 #[test]
+fn ps_pid_mem_and_rss_without_command_header_misses() {
+    let output = "\
+PID %MEM RSS
+1234 45.2 2376420
+";
+
+    assert!(parse_ps_process_rows(output).is_empty());
+    assert!(HighMemoryProcessHook::new()
+        .evaluate(&make_input("ps -eo pid,%mem,rss", output))
+        .is_none());
+}
+
+#[test]
+fn truncated_top_row_without_command_fails_closed() {
+    let output = "\
+top - 10:00:00 up 1 day,  load average: 0.10, 0.20, 0.30
+Tasks: 1 total, 1 running, 0 sleeping, 0 stopped, 0 zombie
+%Cpu(s): 1.0 us, 1.0 sy, 0.0 ni, 98.0 id
+MiB Mem : 1000.0 total, 100.0 free, 800.0 used, 100.0 buff/cache
+  PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 1234 root      20   0 1000000 900000 100000 S   1.0  90.0   0:10.00
+";
+
+    assert!(parse_top_process_rows(output).is_empty());
+}
+
+#[test]
 fn ps_custom_column_order_hit() {
     let output = "\
 RSS PID COMMAND %MEM
@@ -178,6 +205,24 @@ root      1234  3.1 25.2 5120000 2376420 ?     Sl   10:00   1:23 java -jar app.j
     let hook = HighMemoryProcessHook::new();
     let finding = hook.evaluate(&make_input("ps aux", output)).unwrap();
     assert_eq!(finding.severity, FindingSeverity::Info);
+}
+
+#[test]
+fn ps_percent_threshold_boundaries_use_percentage_units() {
+    for (mem_pct, expected) in [
+        ("19.9", None),
+        ("20.0", Some(FindingSeverity::Info)),
+        ("30.0", Some(FindingSeverity::Warning)),
+        ("50.0", Some(FindingSeverity::Critical)),
+    ] {
+        let output = format!("PID %MEM RSS COMMAND\n1234 {mem_pct} 2376420 java\n");
+        let finding = HighMemoryProcessHook::new().evaluate(&make_input("ps aux", &output));
+        assert_eq!(
+            finding.map(|finding| finding.severity),
+            expected,
+            "{mem_pct}"
+        );
+    }
 }
 
 #[test]
@@ -301,6 +346,25 @@ Swap:           8192        5200        2992
     let finding = hook.evaluate(&make_input("free -m", output)).unwrap();
     assert_eq!(finding.severity, FindingSeverity::Critical);
     assert!(finding.title.contains("1400 MiB / 32768 MiB"));
+}
+
+#[test]
+fn free_available_ratio_threshold_boundaries_are_inclusive() {
+    for (available, expected) in [
+        (101, None),
+        (100, Some(FindingSeverity::Warning)),
+        (50, Some(FindingSeverity::Critical)),
+    ] {
+        let output = format!(
+            "total used free shared buff/cache available\nMem: 1000 800 10 0 90 {available}\n"
+        );
+        let finding = MemoryPressureHook::new().evaluate(&make_input("free -m", &output));
+        assert_eq!(
+            finding.map(|finding| finding.severity),
+            expected,
+            "available={available}"
+        );
+    }
 }
 
 #[test]
@@ -598,17 +662,63 @@ Swap:           8192         100        8092
 }
 
 #[test]
-fn free_high_swap_is_info_when_available_memory_is_healthy() {
+fn free_high_swap_is_silent_when_available_memory_is_healthy() {
     let output = "\
                total        used        free      shared  buff/cache   available
 Mem:           32768       10200         380          16        2188       20000
 Swap:           8192        5200        2992
 ";
     let hook = MemoryPressureHook::new();
-    let finding = hook.evaluate(&make_input("free -m", output)).unwrap();
-    assert_eq!(finding.severity, FindingSeverity::Info);
-    assert!(finding.title.contains("Swap usage is high"));
-    assert!(finding.description.contains("swap used 63.5%"));
+    assert!(hook.evaluate(&make_input("free -m", output)).is_none());
+}
+
+#[test]
+fn high_memory_typed_facts_are_sorted_capped_and_use_basenames() {
+    let output = "\
+PID %MEM RSS COMMAND
+1 21.0 100 /usr/bin/one
+2 55.0 200 two
+3 35.0 300 three
+4 25.0 400 four
+";
+    let facts = HighMemoryProcessHook::new()
+        .builtin_facts(&make_input("ps -eo pid,%mem,rss,command", output))
+        .unwrap();
+    let BuiltinFindingFacts::HighMemoryProcesses(facts) = facts else {
+        panic!("expected process facts");
+    };
+
+    assert_eq!(facts.confidence, MetricsConfidence::High);
+    assert_eq!(facts.processes.len(), 3);
+    assert_eq!(
+        facts
+            .processes
+            .iter()
+            .map(|process| (process.pid.as_str(), process.command_basename.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("2", "two"), ("3", "three"), ("4", "four")]
+    );
+    assert_eq!(facts.processes[0].mem_pct, 55.0);
+    assert_eq!(facts.processes[0].rss_kib, Some(200));
+}
+
+#[test]
+fn pressure_typed_facts_preserve_confidence_and_ratios() {
+    let output = "\
+               total        used        free      shared  buff/cache   available
+Mem:            1000         850          20           0          70          80
+Swap:            200          50         150
+";
+    let facts = MemoryPressureHook::new()
+        .builtin_facts(&make_input("free -m", output))
+        .unwrap();
+    let BuiltinFindingFacts::MemoryPressure(facts) = facts else {
+        panic!("expected pressure facts");
+    };
+
+    assert_eq!(facts.confidence, MetricsConfidence::High);
+    assert_eq!(facts.available_ratio, 0.08);
+    assert_eq!(facts.swap_ratio, Some(0.25));
 }
 
 #[test]
