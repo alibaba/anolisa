@@ -3,36 +3,64 @@ name = "agentsight"
 version = "0.8.1"
 edition = "2024"
 
+[workspace]
+members = ["crates/agentsight-opt", "crates/agentsight-opt-store"]
+
+# Shared third-party dependency versions (AGENTS.md §3.3). Member crates
+# reference these via `{ workspace = true }`; the root crate is being
+# migrated to workspace deps incrementally.
+[workspace.dependencies]
+anyhow = "1.0.86"
+async-trait = "0.1.89"
+chrono = { version = "0.4.41", features = ["serde"] }
+futures = "0.3.32"
+log = "0.4.22"
+rig-core = "0.40.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "1.0.63"
+tokio = "1"
+tracing = "0.1"
+
 [features]
 default = ["server"]
-server = ["dep:actix-web", "dep:actix-cors", "dep:include_dir"]
+server = [
+    "dep:actix-web",
+    "dep:actix-cors",
+    "dep:include_dir",
+    "dep:agentsight-opt",
+    "dep:agentsight-opt-store",
+]
 
 [lib]
 name = "agentsight"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-anyhow = "1.0.86"
+agentsight-opt = { path = "crates/agentsight-opt", optional = true }
+agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
+anyhow = { workspace = true }
 async-stream = "0.3.6"
-async-trait = "0.1.89"
+async-trait = { workspace = true }
 byteorder = "1.5.0"
 cached = "0.52.0"
 capstone = "0.12.0"
-chrono = "0.4.41"
+chrono = { workspace = true }
 clru = "0.6.2"
 crossbeam-channel = "0.5.13"
 ctrlc = "3.4"
 daemonize = "0.5"
 ctor = "0.2.8"
 env_filter = "1.0"
-futures = "0.3.32"
+futures = { workspace = true }
 gimli = "0.30.0"
 glob = "0.3.1"
 httparse = "1.10.1"
 hpack = "0.3"
 libbpf-rs = "0.23.3"
 libc = "0.2.155"
-log = "0.4.22"
+log = { workspace = true }
 log4rs = "1.3.0"
 lru = "0.12.3"
 memmap2 = "0.9.4"
@@ -45,11 +73,11 @@ procfs = "0.16.0"
 protobuf = "3.5.1"
 read-process-memory = "0.1.6"
 regex = "1.10.5"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 base64 = "0.22"
 sha2 = "0.10.8"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { workspace = true }
 structopt = "0.3.26"
 # Tokenizer for text to token count conversion
 llm-tokenizer = "1.3"
@@ -65,7 +93,7 @@ symbolic-demangle = { version = "12.10.0", default-features = false, features = 
 ] }
 # LLM message format types for OpenAI SSE parsing
 # llm = { version = "1.2", features = ["openai"] }
-thiserror = "1.0.63"
+thiserror = { workspace = true }
 typed-arena = "2.0.2"
 uname = "0.1.1"
 uuid = { version = "1", features = ["v4"] }
