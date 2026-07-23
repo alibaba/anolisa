@@ -64,10 +64,8 @@ impl Tool for WriteFileTool {
 
         let lines = content.lines().count();
         let bytes = content.len();
-        Ok(ToolResult::success(format!(
-            "Wrote {bytes} bytes ({lines} lines) to {}",
-            path.display()
-        )))
+        let output = write_result_output(content, bytes, lines, &path);
+        Ok(ToolResult::success(output))
     }
 }
 
@@ -78,6 +76,44 @@ fn resolve_path(path_str: &str, cwd: &Path) -> std::path::PathBuf {
     } else {
         cwd.join(p)
     }
+}
+
+fn write_result_output(content: &str, bytes: usize, lines: usize, path: &Path) -> String {
+    let base_message = format!("Wrote {bytes} bytes ({lines} lines) to {}", path.display());
+    let placeholders = placeholder_markers(content);
+
+    if placeholders.is_empty() {
+        return base_message;
+    }
+
+    format!(
+        "WARNING: placeholder(s) detected: {}. Credential configuration may be incomplete; use an \
+         interactive input path.\n\n{base_message}",
+        placeholders.join(", "),
+    )
+}
+
+fn placeholder_markers(content: &str) -> Vec<&'static str> {
+    let upper = content.to_ascii_uppercase();
+    let mut markers = Vec::new();
+
+    if upper.contains("<REDACTED") {
+        markers.push("<redacted>");
+    }
+    if upper.contains("[REDACTED:") {
+        markers.push("[REDACTED:...]");
+    }
+    if upper
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| {
+            word.starts_with("YOUR_")
+                && (word.ends_with("_KEY") || word.ends_with("_TOKEN") || word.ends_with("_SECRET"))
+        })
+    {
+        markers.push("YOUR_*_KEY/TOKEN/SECRET");
+    }
+
+    markers
 }
 
 #[cfg(test)]
@@ -142,5 +178,47 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert!(dir.path().join("relative.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn write_redacted_content_warns_without_refusing_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool;
+        let path = dir.path().join("settings.json");
+        let content = r#"{\"token\": \"<redacted>\"}"#;
+
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": path, "content": content}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.output.starts_with("WARNING:"));
+        assert!(result.output.contains("WARNING:"));
+        assert!(result.output.contains("<redacted>"));
+        assert!(result.output.contains("interactive input path"));
+        assert!(result.output.contains("Wrote"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+    }
+
+    #[test]
+    fn detects_supported_placeholder_markers() {
+        let markers = placeholder_markers(
+            "<REDACTED private key block> [redacted: token] YOUR_API_KEY YOUR_ACCESS_TOKEN \
+             YOUR_DB_SECRET",
+        );
+
+        assert_eq!(
+            markers,
+            vec!["<redacted>", "[REDACTED:...]", "YOUR_*_KEY/TOKEN/SECRET"]
+        );
+    }
+
+    #[test]
+    fn ignores_non_placeholder_content() {
+        assert!(placeholder_markers("configured-token-value").is_empty());
     }
 }
