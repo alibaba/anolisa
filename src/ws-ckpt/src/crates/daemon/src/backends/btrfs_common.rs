@@ -73,8 +73,12 @@ pub async fn recover_orphan_backup(original_path: &str, subvol_path: &Path) -> R
                          refusing to overwrite user data. Inspect {:?} (likely contains \
                          data from interrupted init) and {:?}, move data out of {:?} or \
                          remove {:?} manually, then re-run init",
-                        backup_path, original_path, backup_path, original_path,
-                        original_path, backup_path
+                        backup_path,
+                        original_path,
+                        backup_path,
+                        original_path,
+                        original_path,
+                        backup_path
                     );
                 }
                 let _ = tokio::fs::remove_dir(original_path).await;
@@ -83,7 +87,9 @@ pub async fn recover_orphan_backup(original_path: &str, subvol_path: &Path) -> R
                 bail!(
                     "found orphan backup {:?} but {:?} is an unexpected file type; \
                      remove {:?} manually before retrying",
-                    backup_path, original_path, original_path
+                    backup_path,
+                    original_path,
+                    original_path
                 );
             }
             Err(_) => { /* original_path missing — fine, rename will create it */ }
@@ -1364,7 +1370,9 @@ mod tests {
         let orig = tmp.path().join("ws");
         let subvol = tmp.path().join("subvol");
         tokio::fs::create_dir(&orig).await.unwrap();
-        tokio::fs::write(orig.join("user.txt"), b"keep").await.unwrap();
+        tokio::fs::write(orig.join("user.txt"), b"keep")
+            .await
+            .unwrap();
 
         recover_orphan_backup(orig.to_str().unwrap(), &subvol)
             .await
@@ -1387,7 +1395,9 @@ mod tests {
         let subvol = tmp.path().join("subvol");
 
         tokio::fs::create_dir(&bak).await.unwrap();
-        tokio::fs::write(bak.join("foo.txt"), b"important").await.unwrap();
+        tokio::fs::write(bak.join("foo.txt"), b"important")
+            .await
+            .unwrap();
 
         recover_orphan_backup(orig.to_str().unwrap(), &subvol)
             .await
@@ -1408,7 +1418,9 @@ mod tests {
         let subvol = tmp.path().join("subvol");
 
         tokio::fs::create_dir(&bak).await.unwrap();
-        tokio::fs::write(bak.join("foo.txt"), b"keep").await.unwrap();
+        tokio::fs::write(bak.join("foo.txt"), b"keep")
+            .await
+            .unwrap();
         // Simulate a test fixture's `rm -rf + mkdir -p` leaving an empty dir.
         tokio::fs::create_dir(&orig).await.unwrap();
 
@@ -1434,7 +1446,9 @@ mod tests {
         let ghost = tmp.path().join("nonexistent-target");
 
         tokio::fs::create_dir(&bak).await.unwrap();
-        tokio::fs::write(bak.join("foo.txt"), b"keep").await.unwrap();
+        tokio::fs::write(bak.join("foo.txt"), b"keep")
+            .await
+            .unwrap();
         tokio::fs::symlink(&ghost, &orig).await.unwrap(); // dangling symlink
 
         recover_orphan_backup(orig.to_str().unwrap(), &subvol)
@@ -1460,7 +1474,9 @@ mod tests {
             .await
             .unwrap();
         tokio::fs::create_dir(&orig).await.unwrap();
-        tokio::fs::write(orig.join("racer.txt"), b"foreign").await.unwrap();
+        tokio::fs::write(orig.join("racer.txt"), b"foreign")
+            .await
+            .unwrap();
 
         let err = recover_orphan_backup(orig.to_str().unwrap(), &subvol)
             .await
@@ -1484,7 +1500,9 @@ mod tests {
         let subvol = tmp.path().join("subvol");
 
         tokio::fs::create_dir(&bak).await.unwrap();
-        tokio::fs::write(bak.join("user.txt"), b"keep").await.unwrap();
+        tokio::fs::write(bak.join("user.txt"), b"keep")
+            .await
+            .unwrap();
         tokio::fs::create_dir(&subvol).await.unwrap();
         tokio::fs::write(subvol.join("migrated.txt"), b"partial")
             .await
