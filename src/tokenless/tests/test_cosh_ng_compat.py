@@ -238,9 +238,14 @@ class TestVersionDetection(unittest.TestCase):
         self.assertTrue(cosh_ng_supports_replacement())
 
     def test_supports_replacement_no_version(self):
-        """Return True when version not set (non-Cosh-NG runtime)."""
+        """Return False when version not set (Cosh-NG running but version missing)."""
         os.environ.pop("COSH_NG_VERSION", None)
-        self.assertTrue(cosh_ng_supports_replacement())
+        self.assertFalse(cosh_ng_supports_replacement())
+
+    @patch.dict(os.environ, {"COSH_NG_VERSION": "invalid-version"})
+    def test_supports_replacement_unparseable_version(self):
+        """Return False when version is set but unparseable."""
+        self.assertFalse(cosh_ng_supports_replacement())
 
 
 class TestAgentIDAttribution(unittest.TestCase):

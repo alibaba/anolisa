@@ -125,11 +125,13 @@ def main() -> None:
     agent_id = _resolve_agent_id(cosh_ng)
 
     # 4. Cosh-NG version guard: fail open if replacement not supported.
-    # When Cosh-NG doesn't support the replacement field, compression
-    # would inject duplicate content (original + compressed summary).
+    # When Cosh-NG doesn't support the replacement field (version too old
+    # or version info unavailable), compression would inject duplicate
+    # content (original + compressed summary). Conservatively disable.
     if cosh_ng and not cosh_ng_supports_replacement():
         warn(
-            "Cosh-NG version does not support response replacement. "
+            "Cosh-NG version does not support response replacement "
+            "(version too old or not configured). "
             "Compression disabled to avoid duplicate injection."
         )
         skip()

@@ -491,15 +491,22 @@ def detect_cosh_ng_version() -> tuple | None:
 def cosh_ng_supports_replacement() -> bool:
     """Check whether the running Cosh-NG version supports response replacement.
 
-    Returns True if:
-    - Cosh-NG version is detected and >= COSH_NG_MIN_REPLACEMENT_VERSION
-    - Cosh-NG is not detected (non-Cosh-NG runtime, replacement is irrelevant)
+    Returns True only if Cosh-NG version is detected and >= COSH_NG_MIN_REPLACEMENT_VERSION.
 
-    Returns False if Cosh-NG is detected but version is too old.
+    Returns False if:
+    - Cosh-NG version is too old (< COSH_NG_MIN_REPLACEMENT_VERSION)
+    - Cosh-NG version cannot be determined (env var missing or unparseable),
+      to avoid duplicate content injection on Cosh-NG runtimes with misconfigured
+      or missing version information.
+
+    Note: Callers should check is_cosh_ng_runtime() before calling this function.
+    When not running under Cosh-NG, this function's return value is irrelevant
+    since the replacement field is never used.
     """
     version = detect_cosh_ng_version()
     if version is None:
-        # Not running under Cosh-NG (or version not set) — replacement
-        # support is irrelevant, so return True to not block compression.
-        return True
+        # Version not set or unparseable. When running under Cosh-NG with
+        # missing version info, conservatively disable compression to avoid
+        # "original response + compressed summary" duplicate injection.
+        return False
     return version >= COSH_NG_MIN_REPLACEMENT_VERSION
