@@ -21,6 +21,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
         return Ok(false);
     }
 
+    let mut blocked_approval_ids = Vec::new();
     for event in governed_events {
         let provider_tool_call_fallback = adapter.capabilities().control_protocol
             && matches!(event.event, AgentEvent::ToolCall { .. });
@@ -59,10 +60,22 @@ pub(crate) fn render_trusted_tool<W: Write>(
         }
         if !provider_tool_call_fallback && defer_fallback_bash_tool(state, request.clone(), output)?
         {
+            render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
         if handle_shell_request_policy(state, run_request, &request) {
+            render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
+        }
+        if trust_mode_blocks_shell_request(&mut request, AssessmentSource::ProviderShellTool) {
+            blocked_approval_ids.extend(record_approval_requests(
+                state,
+                std::slice::from_ref(event),
+                run_request,
+                origin,
+                false,
+            ));
+            continue;
         }
         let mut request = record_auto_approved_request(state, request);
         if apply_auto_approved_request_outcome(
@@ -72,11 +85,21 @@ pub(crate) fn render_trusted_tool<W: Write>(
             output,
         )? == AutoApprovalFlow::Handled
         {
+            render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
     }
 
+    render_approval_requests(state, &blocked_approval_ids, output)?;
     Ok(false)
+}
+
+fn trust_mode_blocks_shell_request(
+    request: &mut RuntimeApprovalRequest,
+    source: AssessmentSource,
+) -> bool {
+    refresh_shell_request_assessment(request, AssessmentPolicy::ask(source))
+        .is_some_and(|assessment| assessment.execution == ExecutionDecision::Block)
 }
 
 pub(crate) fn render_auto_approved_tool<W: Write>(
@@ -644,6 +667,50 @@ mod tests {
         assert!(handled);
         assert!(state.approvals.requests.is_empty());
         assert!(state.control.shell_handoff().approved_is_empty());
+    }
+
+    #[test]
+    fn trust_mode_routes_blocked_shell_request_batch_to_approval() {
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Trust,
+            ..InlineState::default()
+        };
+        let governed = ["run-1", "run-2"].map(|run_id| GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+            event: AgentEvent::ToolCall {
+                run_id: run_id.to_string(),
+                tool_id: None,
+                name: "Bash".to_string(),
+                input: "printf blocked\0binding".to_string(),
+            },
+            reason: "blocked shell binding".to_string(),
+            display_text: "blocked shell binding".to_string(),
+            auto_execute: false,
+        });
+        let mut output = Vec::new();
+
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &governed,
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render trusted approval");
+
+        assert_eq!(state.approvals.requests.len(), 2);
+        assert!(state.approvals.requests.iter().all(|request| {
+            request.status == ApprovalRequestStatus::Pending
+                && request
+                    .assessment
+                    .as_ref()
+                    .is_some_and(|assessment| assessment.execution == "block")
+        }));
+        assert_eq!(state.approvals.active_panel_id.as_deref(), Some("req-1"));
+        assert!(state.approvals.active_panel_height > 0);
     }
 
     #[test]
