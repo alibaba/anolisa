@@ -5,6 +5,15 @@ Reads a PreToolUse JSON from stdin, extracts the shell command,
 invokes ``rtk rewrite`` via subprocess, and writes a HookOutput
 JSON to stdout.
 
+Cosh-NG compatibility:
+    Cosh-NG reads ``hookSpecificOutput.tool_input`` as the input patch
+    (merged into tool params), while Codex/Copilot-Shell reads
+    ``updatedInput``. This hook emits both fields for cross-runtime
+    compatibility.
+
+    When running under Cosh-NG (detected via hook_event_name field in
+    input), the agent ID is set to ``cosh-ng`` for stats attribution.
+
 Hook point: **PreToolUse** — matcher: ``Shell``
 
 The agent ID is read from the TOKENLESS_AGENT_ID environment variable
@@ -26,7 +35,9 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    build_cosh_ng_pre_tool_output,
     forward_stderr,
+    is_cosh_ng_runtime,
     parse_version,
     resolve_binary,
     resolve_tool_call_id,
@@ -38,7 +49,34 @@ from hook_utils import (
 # -- constants ---------------------------------------------------------------
 
 _MIN_RTK_VERSION = (0, 35, 0)
-_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
+_FALLBACK_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
+_COSH_NG_AGENT_ID = "cosh-ng"
+
+
+# -- helpers -------------------------------------------------------------------
+
+
+def _resolve_agent_id(is_cosh_ng: bool) -> str:
+    """Return the appropriate agent ID for stats attribution."""
+    if is_cosh_ng:
+        return _COSH_NG_AGENT_ID
+    return _FALLBACK_AGENT_ID
+
+
+def _is_cosh_ng_pre_tool(input_data: dict) -> bool:
+    """Detect Cosh-NG for PreToolUse hooks.
+
+    Cosh-NG includes hook_event_name in the input (from HookInput
+    flattened fields). For PreToolUse, we check for this field
+    since tool_response is not available in PreToolUse input.
+    """
+    # Cosh-NG sends hook_event_name (snake_case from HookInput struct)
+    if input_data.get("hook_event_name") == "PreToolUse":
+        return True
+    # Fallback: check for Cosh-NG specific fields
+    if "hook_event_name" in input_data:
+        return True
+    return False
 
 
 # -- main --------------------------------------------------------------------
@@ -84,23 +122,27 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError, ValueError):
         skip()
 
-    # 5. Extract command
+    # 5. Detect Cosh-NG runtime
+    cosh_ng = _is_cosh_ng_pre_tool(input_data)
+    agent_id = _resolve_agent_id(cosh_ng)
+
+    # 6. Extract command
     tool_input = input_data.get("tool_input", {})
     cmd = tool_input.get("command", "")
     if not cmd:
         skip()
 
-    # 6. Rewrite via rtk
+    # 7. Rewrite via rtk
     env = os.environ.copy()
-    env["TOKENLESS_AGENT_ID"] = _AGENT_ID
+    env["TOKENLESS_AGENT_ID"] = agent_id
     session_id = input_data.get("session_id", "")
-    tool_use_id = resolve_tool_call_id(_AGENT_ID, input_data)
+    tool_use_id = resolve_tool_call_id(agent_id, input_data)
     if session_id:
         env["TOKENLESS_SESSION_ID"] = session_id
     if tool_use_id:
         env["TOKENLESS_TOOL_USE_ID"] = tool_use_id
 
-    write_context(_AGENT_ID, session_id, tool_use_id)
+    write_context(agent_id, session_id, tool_use_id)
 
     try:
         proc = subprocess.run(
@@ -131,17 +173,27 @@ def main() -> None:
     if not rewritten or rewritten == cmd:
         skip()
 
-    # 7. Build response
+    # 8. Build response
     updated_input = dict(tool_input)
     updated_input["command"] = rewritten
 
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "updatedInput": updated_input,
-        },
-    }
-    print(json.dumps(output))
+    if cosh_ng:
+        # Cosh-NG reads hookSpecificOutput.tool_input as the patch.
+        # Also emit updatedInput for Codex/Copilot-Shell compatibility.
+        output = build_cosh_ng_pre_tool_output(
+            tool_input=updated_input,
+            decision="allow",
+        )
+    else:
+        # Copilot-Shell/Codex reads updatedInput.
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": updated_input,
+            },
+        }
+
+    print(json.dumps(output, ensure_ascii=False))
 
 
 if __name__ == "__main__":

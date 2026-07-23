@@ -1,4 +1,5 @@
 """Shared utilities for tokenless Python hooks."""
+from __future__ import annotations
 
 import json
 import os
@@ -395,3 +396,110 @@ def parse_version(version_str: str) -> tuple | None:
     if m:
         return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     return None
+
+
+# -- Cosh-NG runtime detection -----------------------------------------------
+
+# Cosh-NG wraps tool_response as {"llmContent": "...", "returnDisplay": "..."}
+# in PostToolUse hooks (see cosh-ng hook.rs::wrap_tool_response).
+# Copilot-Shell and other runtimes pass tool_response as a plain string.
+# This detection is used to adapt hook output format for Cosh-NG compatibility.
+
+# Minimum Cosh-NG version that supports the `replacement` field in
+# PostToolUse hook output (introduced by issue #1614).
+# When running on an older Cosh-NG, response compression must be disabled
+# to avoid sending both original and compressed content to the model.
+COSH_NG_MIN_REPLACEMENT_VERSION = (0, 6, 0)
+
+
+def is_cosh_ng_runtime(input_data: dict) -> bool:
+    """Detect whether the hook is running under Cosh-NG.
+
+    Cosh-NG wraps tool_response as a JSON object with llmContent and
+    returnDisplay keys (see cosh-ng hook.rs::wrap_tool_response).
+    Copilot-Shell passes tool_response as a plain string.
+    """
+    tool_response = input_data.get("tool_response")
+    if not isinstance(tool_response, dict):
+        return False
+    return "llmContent" in tool_response
+
+
+def extract_llm_content(input_data: dict) -> str | None:
+    """Extract the model-visible llmContent from a Cosh-NG tool_response.
+
+    Returns None if tool_response is not a Cosh-NG wrapper or llmContent
+    is missing/empty.
+    """
+    tool_response = input_data.get("tool_response")
+    if not isinstance(tool_response, dict):
+        return None
+    llm_content = tool_response.get("llmContent")
+    if isinstance(llm_content, str) and llm_content:
+        return llm_content
+    return None
+
+
+def build_cosh_ng_post_tool_output(
+    replacement: str | None,
+    additional_context: str | None = None,
+) -> dict:
+    """Build a Cosh-NG-compatible PostToolUse hook output.
+
+    - replacement: the compressed model-visible content (replaces original).
+    - additional_context: environment attribution info (additive).
+    """
+    specific: dict = {"hookEventName": "PostToolUse"}
+    if replacement is not None:
+        specific["replacement"] = replacement
+    if additional_context is not None:
+        specific["additionalContext"] = additional_context
+    return {"hookSpecificOutput": specific}
+
+
+def build_cosh_ng_pre_tool_output(
+    tool_input: dict,
+    decision: str = "allow",
+) -> dict:
+    """Build a Cosh-NG-compatible PreToolUse hook output.
+
+    Cosh-NG reads hook_specific_output.tool_input as the input patch,
+    while Codex reads updatedInput. This emits both fields for
+    cross-runtime compatibility.
+    """
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "tool_input": tool_input,
+            "updatedInput": tool_input,
+        }
+    }
+
+
+def detect_cosh_ng_version() -> tuple | None:
+    """Detect Cosh-NG version from COSH_NG_VERSION environment variable.
+
+    Returns a (major, minor, patch) tuple or None if not set or unparseable.
+    """
+    version_str = os.environ.get("COSH_NG_VERSION", "")
+    if not version_str:
+        return None
+    return parse_version(version_str)
+
+
+def cosh_ng_supports_replacement() -> bool:
+    """Check whether the running Cosh-NG version supports response replacement.
+
+    Returns True if:
+    - Cosh-NG version is detected and >= COSH_NG_MIN_REPLACEMENT_VERSION
+    - Cosh-NG is not detected (non-Cosh-NG runtime, replacement is irrelevant)
+
+    Returns False if Cosh-NG is detected but version is too old.
+    """
+    version = detect_cosh_ng_version()
+    if version is None:
+        # Not running under Cosh-NG (or version not set) — replacement
+        # support is irrelevant, so return True to not block compression.
+        return True
+    return version >= COSH_NG_MIN_REPLACEMENT_VERSION
