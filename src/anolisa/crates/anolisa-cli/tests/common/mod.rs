@@ -4,6 +4,7 @@
 // intentionally uses a different subset of the shared process helpers.
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
@@ -12,14 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
-const SCRUBBED_ANOLISA_ENV: &[&str] = &[
-    "ANOLISA_DATA_DIR",
-    "ANOLISA_GROUP",
-    "ANOLISA_PREFIX",
-    "ANOLISA_REPO_CONFIG_URL",
-    "ANOLISA_RPM_REPO_ID",
-    "ANOLISA_SLS_ACCOUNT_ID",
-];
+const ANOLISA_ENV_PREFIX: &str = "ANOLISA_";
+const ANOLISA_DATA_DIR_ENV: &str = "ANOLISA_DATA_DIR";
 
 pub(crate) struct ProcessSandbox {
     _tmp: tempfile::TempDir,
@@ -30,6 +25,7 @@ pub(crate) struct ProcessSandbox {
     cache_home: PathBuf,
     runtime_dir: PathBuf,
     fake_bin: PathBuf,
+    packaged_data: PathBuf,
 }
 
 impl ProcessSandbox {
@@ -37,7 +33,9 @@ impl ProcessSandbox {
         let tmp = tempfile::tempdir().expect("process sandbox");
         let root = tmp.path();
         let fake_bin = root.join("fake-bin");
+        let packaged_data = root.join("packaged-data");
         std::fs::create_dir_all(&fake_bin).expect("fake bin");
+        std::fs::create_dir_all(&packaged_data).expect("packaged data");
         Self {
             home: root.join("home"),
             data_home: root.join("xdg-data"),
@@ -46,6 +44,7 @@ impl ProcessSandbox {
             cache_home: root.join("xdg-cache"),
             runtime_dir: root.join("xdg-runtime"),
             fake_bin,
+            packaged_data,
             _tmp: tmp,
         }
     }
@@ -70,8 +69,10 @@ impl ProcessSandbox {
     fn command(&self, arguments: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_anolisa"));
         command.args(arguments);
-        for key in SCRUBBED_ANOLISA_ENV {
-            command.env_remove(key);
+        for (key, _) in std::env::vars_os() {
+            if is_anolisa_env_key(&key) {
+                command.env_remove(key);
+            }
         }
         command
             .env("HOME", &self.home)
@@ -79,7 +80,8 @@ impl ProcessSandbox {
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("XDG_STATE_HOME", &self.state_home)
             .env("XDG_CACHE_HOME", &self.cache_home)
-            .env("XDG_RUNTIME_DIR", &self.runtime_dir);
+            .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+            .env(ANOLISA_DATA_DIR_ENV, &self.packaged_data);
 
         let mut path_entries = vec![self.fake_bin.clone()];
         if let Some(path) = std::env::var_os("PATH") {
@@ -89,6 +91,10 @@ impl ProcessSandbox {
         command.env("PATH", path);
         command
     }
+}
+
+fn is_anolisa_env_key(key: &OsStr) -> bool {
+    key.to_string_lossy().starts_with(ANOLISA_ENV_PREFIX)
 }
 
 struct ChildGuard(Child);
@@ -164,5 +170,17 @@ fn run_command(command: &mut Command, stdout: Stdio) -> Output {
         status,
         stdout: receive_bounded(stdout, deadline),
         stderr: receive_bounded(stderr, deadline),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anolisa_env_prefix_matches_future_controls_without_overmatching() {
+        assert!(is_anolisa_env_key(OsStr::new("ANOLISA_DATA_DIR")));
+        assert!(is_anolisa_env_key(OsStr::new("ANOLISA_FUTURE_SETTING")));
+        assert!(!is_anolisa_env_key(OsStr::new("NOT_ANOLISA_SETTING")));
     }
 }
