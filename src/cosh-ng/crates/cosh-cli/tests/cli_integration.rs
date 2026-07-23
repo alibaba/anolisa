@@ -929,7 +929,7 @@ fn test_checkpoint_create_skipped_is_success() {
             "checkpoint",
             "create",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--id",
             "snap-001",
             "--socket",
@@ -945,7 +945,7 @@ fn test_checkpoint_create_skipped_is_success() {
     assert_eq!(json["ok"], true);
     assert!(json["error"].is_null());
     assert_eq!(json["data"]["snapshot_id"], serde_json::Value::Null);
-    assert_eq!(json["data"]["workspace"], "/tmp/test-ws");
+    assert_eq!(json["data"]["workspace"], "/tmp");
     assert_eq!(json["data"]["skipped"], true);
     assert_eq!(json["data"]["reason"], reason);
     assert_eq!(json["meta"]["subsystem"], "checkpoint");
@@ -959,7 +959,7 @@ fn test_checkpoint_create_daemon_unavailable() {
             "checkpoint",
             "create",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--id",
             "snap-001",
             "--socket",
@@ -997,7 +997,7 @@ fn test_checkpoint_list_daemon_unavailable() {
             "checkpoint",
             "list",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--socket",
             "/tmp/nonexistent-ws-ckpt.sock",
         ])
@@ -1041,7 +1041,7 @@ fn test_checkpoint_init_daemon_unavailable() {
             "checkpoint",
             "init",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--socket",
             "/tmp/nonexistent-ws-ckpt.sock",
         ])
@@ -1063,7 +1063,7 @@ fn test_checkpoint_diff_daemon_unavailable() {
             "checkpoint",
             "diff",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--from",
             "snap-001",
             "--to",
@@ -1113,7 +1113,7 @@ fn test_checkpoint_restore_daemon_unavailable() {
             "restore",
             "snap-001",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--socket",
             "/tmp/nonexistent-ws-ckpt.sock",
         ])
@@ -1135,7 +1135,7 @@ fn test_checkpoint_recover_daemon_unavailable() {
             "checkpoint",
             "recover",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--socket",
             "/tmp/nonexistent-ws-ckpt.sock",
         ])
@@ -1157,7 +1157,7 @@ fn test_checkpoint_cleanup_daemon_unavailable() {
             "checkpoint",
             "cleanup",
             "--workspace",
-            "/tmp/test-ws",
+            "/tmp",
             "--socket",
             "/tmp/nonexistent-ws-ckpt.sock",
         ])
@@ -1822,4 +1822,112 @@ fn test_audit_policy_explain_newline_compound_returns_deny_with_matched_rule() {
     let data = &json["data"];
     assert_eq!(data["decision"]["outcome"], "Deny");
     assert_eq!(data["decision"]["matched_rule"], "shell-deny-git-mutating");
+}
+
+// --- Issue #1568: workspace path pre-validation ---
+
+#[test]
+fn test_checkpoint_diff_nonexistent_workspace_returns_not_found() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "diff",
+            "--workspace",
+            "/tmp/absolutely-nonexistent-workspace-xyz123",
+            "--from",
+            "snap-001",
+            "--to",
+            "snap-002",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointNotFound");
+    assert_eq!(json["error"]["recoverable"], false);
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"),
+        "error message should mention workspace does not exist"
+    );
+}
+
+#[test]
+fn test_checkpoint_init_nonexistent_workspace_returns_not_found() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "init",
+            "--workspace",
+            "/tmp/absolutely-nonexistent-workspace-xyz123",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointNotFound");
+    assert_eq!(json["error"]["recoverable"], false);
+}
+
+#[test]
+fn test_checkpoint_restore_nonexistent_workspace_returns_not_found() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "restore",
+            "snap-001",
+            "--workspace",
+            "/tmp/absolutely-nonexistent-workspace-xyz123",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointNotFound");
+    assert_eq!(json["error"]["recoverable"], false);
+}
+
+#[test]
+fn test_checkpoint_create_nonexistent_workspace_returns_not_found() {
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "create",
+            "--workspace",
+            "/tmp/absolutely-nonexistent-workspace-xyz123",
+            "--id",
+            "snap-001",
+            "--socket",
+            "/tmp/nonexistent-ws-ckpt.sock",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointNotFound");
+    assert_eq!(json["error"]["recoverable"], false);
 }
