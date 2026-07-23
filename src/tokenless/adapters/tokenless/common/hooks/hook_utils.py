@@ -352,19 +352,28 @@ def resolve_tool_call_id(agent_id: str, input_data: dict) -> str:
     return input_data.get("tool_use_id") or input_data.get("toolCallId", "")
 
 
-def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
-    """Write context file for rtk rewrite session tracking."""
-    os.makedirs(_CONTEXT_DIR, mode=0o700, exist_ok=True)
-    if os.path.islink(_CONTEXT_FILE):
-        os.unlink(_CONTEXT_FILE)
+def secure_write_text(path: str, content: str) -> None:
+    """Write a private hook state file (0o600, symlink-safe).
+
+    Shared hardening for state files under ~/.tokenless: the parent directory
+    is created 0o700, symlinks are refused (unlink + O_NOFOLLOW) and the file
+    stays owner-readable only, so hook state never leaks through a shared or
+    mounted HOME.
+    """
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    if os.path.islink(path):
+        os.unlink(path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(_CONTEXT_FILE, flags, 0o600)
+    fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(f"{agent_id}\n")
-        f.write(f"{session_id}\n")
-        f.write(f"{tool_use_id}\n")
+        f.write(content)
+
+
+def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
+    """Write context file for rtk rewrite session tracking."""
+    secure_write_text(_CONTEXT_FILE, f"{agent_id}\n{session_id}\n{tool_use_id}\n")
 
 
 def forward_stderr(proc: subprocess.CompletedProcess) -> None:

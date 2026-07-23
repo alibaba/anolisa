@@ -117,9 +117,13 @@ Step 2：tokenless compress-toon（无损 TOON 编码）
 
 使用共享的 `compress_response_hook.py`（与 copilot-shell 共用），通过 `hooks.json` 中的 `${QODER_TOKENLESS_HOOKS}` 变量引用共享 hook 路径。
 
+注意：对所有非 Claude Code 的 agent（路径 2/4 等共享该 hook 的运行时），`additionalContext` 中的载荷在 TOON 编码更小时是 **TOON 文本**而非 JSON。TOON 是面向 LLM 直接阅读的紧凑文本格式，集成方无需解码；仅在离线调试需要还原 JSON 时可用 `toon -d` 转换。
+
 ### 路径 5：Claude Code 插件（`PostToolUse` hook）
 
 通过 `run-hook.sh` 调度器定位共享 hook 脚本，调用 `compress_response_hook.py`。Claude Code 复制插件到版本化缓存目录，因此 `run-hook.sh` 通过 FHS 路径查找共享 hook。
+
+与其他 agent 不同，Claude Code 的 `additionalContext` 是**追加式**的（模型会同时看到原始工具结果和注入内容），因此压缩结果通过 `hookSpecificOutput.updatedToolOutput`（Claude Code >= 2.1.121）**替换**模型可见的工具结果，`additionalContext` 仅保留真正追加式的诊断信息（环境错误归因）。替换时会回填被压缩剥离的空 schema 字段（如 Bash 的 `stderr`/`interrupted`/`isImage`），保持内置工具输出结构不变；结构化响应不做 TOON 编码（TOON 为文本格式，会破坏 schema）。旧版本 Claude Code（< 2.1.121）或版本无法探测时 fail-open：直接透传原始结果，不注入重复内容。版本探测结果缓存于 `~/.tokenless/.claude-version`（0600 权限、拒绝符号链接，与其他 hook 状态文件一致），缓存键为 claude 二进制的路径+mtime+大小，升级 Claude Code 后自动失效重探，避免每次 PostToolUse 都启动 node CLI。
 
 ### 路径 6：Codex 插件（`PostToolUse` hook）
 
