@@ -820,11 +820,25 @@ impl CoshCore {
                     .await;
                 self.emit_hook_notifications(writer, &post_hook.notifications, Some(&tc.id));
 
+                // Precedence: block/deny > updated response > original,
+                // then append additional context.
                 let mut result = if let HookDecision::Block(reason) = &post_hook.decision {
                     ToolResult::error(format!("Post-tool hook denied: {reason}"))
-                } else if let Some(ref extra) = post_hook.additional_context {
+                } else if post_hook.updated_tool_response.is_some()
+                    || post_hook.additional_context.is_some()
+                {
+                    let base = post_hook
+                        .updated_tool_response
+                        .as_deref()
+                        .unwrap_or(&result.output);
+                    let output = if let Some(ref extra) = post_hook.additional_context {
+                        format!("{base}\n[Hook context] {extra}")
+                    } else {
+                        base.to_string()
+                    };
                     ToolResult {
-                        output: format!("{}\n[Hook context] {extra}", result.output),
+                        output,
+                        // Preserve the original is_error flag on normal replacement.
                         is_error: result.is_error,
                     }
                 } else {

@@ -40,6 +40,11 @@ from hook_utils import (
 _MIN_RTK_VERSION = (0, 35, 0)
 _AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 
+# Import Cosh-NG detection for stats attribution
+from hook_utils import detect_cosh_ng_runtime as _detect_cosh_ng
+if _detect_cosh_ng() is not None and _AGENT_ID == "tokenless":
+    _AGENT_ID = "cosh-ng"
+
 
 # -- main --------------------------------------------------------------------
 
@@ -132,12 +137,16 @@ def main() -> None:
         skip()
 
     # 7. Build response
+    # Emit both formats for runtime compatibility:
+    # - ``tool_input``: Cosh-NG partial patch (merges with original params)
+    # - ``updatedInput``: copilot-shell full replacement (legacy)
     updated_input = dict(tool_input)
     updated_input["command"] = rewritten
 
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
+            "tool_input": {"command": rewritten},
             "updatedInput": updated_input,
         },
     }
