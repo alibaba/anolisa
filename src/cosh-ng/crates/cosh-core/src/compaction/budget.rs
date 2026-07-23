@@ -234,6 +234,11 @@ impl ContextBudget {
             // model-derived budget.
             trigger_tokens = trigger_tokens.min(limit).min(usable_history);
         }
+        // Re-constrain the proportional target beneath a possibly tightened
+        // trigger. An absolute `auto_compact_token_limit` can pull the trigger
+        // below the ratio-derived target, so clamping here preserves the
+        // invariant `target <= trigger <= emergency <= usable_history`.
+        let target_tokens = ratio_of(usable_history, target_ratio).min(trigger_tokens);
 
         Self {
             context_window: window,
@@ -243,7 +248,7 @@ impl ContextBudget {
             usable_history,
             trigger_tokens,
             emergency_tokens: ratio_of(usable_history, emergency_ratio),
-            target_tokens: ratio_of(usable_history, target_ratio),
+            target_tokens,
             window_estimated: capability.source.is_estimated(),
         }
     }
@@ -376,7 +381,13 @@ mod tests {
         assert!(budget.trigger_tokens <= budget.usable_history);
         cfg.auto_compact_token_limit = Some(10_000);
         let tightened = ContextBudget::compute(capability, 12_000, &cfg);
+        assert_eq!(tightened.usable_history, 75_000);
         assert_eq!(tightened.trigger_tokens, 10_000);
+        // The proportional target (30% of 75k = 22.5k) sits above the tightened
+        // trigger; it must be pulled beneath it so the budget invariant holds.
+        assert_eq!(tightened.target_tokens, 10_000);
+        assert!(tightened.target_tokens <= tightened.trigger_tokens);
+        assert_budget_is_sane(&tightened);
     }
 
     #[test]
@@ -395,6 +406,7 @@ mod tests {
     fn assert_budget_is_sane(budget: &ContextBudget) {
         assert!(budget.trigger_tokens <= budget.usable_history);
         assert!(budget.emergency_tokens >= budget.trigger_tokens);
+        assert!(budget.emergency_tokens <= budget.usable_history);
         assert!(budget.target_tokens <= budget.trigger_tokens);
     }
 

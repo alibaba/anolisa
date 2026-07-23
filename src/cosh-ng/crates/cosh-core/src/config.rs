@@ -361,7 +361,20 @@ struct PartialSkillsConfig {
 struct PartialSessionConfig {
     auto_persist: Option<bool>,
     persist_dir: Option<String>,
-    compaction: Option<CompactionConfig>,
+    compaction: Option<PartialCompactionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialCompactionConfig {
+    enabled: Option<bool>,
+    auto: Option<bool>,
+    auto_compact_token_limit: Option<u64>,
+    trigger_ratio: Option<f64>,
+    emergency_ratio: Option<f64>,
+    target_ratio: Option<f64>,
+    preserve_recent_runs: Option<usize>,
+    model_context_window: Option<u64>,
+    model_max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -544,10 +557,40 @@ fn apply_session_layer(config: &mut SessionConfig, layer: &PartialSessionConfig)
     if let Some(ref value) = layer.persist_dir {
         config.persist_dir = value.clone();
     }
-    // The compaction table is replaced wholesale; omitted keys fall back to
-    // serde defaults, matching how hook definition lists are layered.
+    // The compaction table is merged field-by-field so a higher-priority
+    // layer that sets only one key does not reset the others to defaults.
     if let Some(ref value) = layer.compaction {
-        config.compaction = value.clone();
+        apply_compaction_layer(&mut config.compaction, value);
+    }
+}
+
+fn apply_compaction_layer(config: &mut CompactionConfig, layer: &PartialCompactionConfig) {
+    if let Some(value) = layer.enabled {
+        config.enabled = value;
+    }
+    if let Some(value) = layer.auto {
+        config.auto = value;
+    }
+    if let Some(value) = layer.auto_compact_token_limit {
+        config.auto_compact_token_limit = Some(value);
+    }
+    if let Some(value) = layer.trigger_ratio {
+        config.trigger_ratio = value;
+    }
+    if let Some(value) = layer.emergency_ratio {
+        config.emergency_ratio = value;
+    }
+    if let Some(value) = layer.target_ratio {
+        config.target_ratio = value;
+    }
+    if let Some(value) = layer.preserve_recent_runs {
+        config.preserve_recent_runs = value;
+    }
+    if let Some(value) = layer.model_context_window {
+        config.model_context_window = Some(value);
+    }
+    if let Some(value) = layer.model_max_output_tokens {
+        config.model_max_output_tokens = Some(value);
     }
 }
 
@@ -976,6 +1019,59 @@ max_tool_calls_per_turn = 20
             DEFAULT_EMERGENCY_RATIO
         );
         assert_eq!(config.session.compaction.target_ratio, DEFAULT_TARGET_RATIO);
+    }
+
+    #[test]
+    fn layered_compaction_merges_fields_without_wholesale_replacement() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+
+        // The user layer disables compaction and pins a large window.
+        std::fs::write(
+            &user_path,
+            "[session.compaction]\nenabled = false\nmodel_context_window = 200000\n",
+        )
+        .unwrap();
+        // The higher-priority project layer touches only the target ratio.
+        std::fs::write(&project_path, "[session.compaction]\ntarget_ratio = 0.2\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let compaction = &config.session.compaction;
+        // The project layer must not have reset the user-layer fields.
+        assert!(!compaction.enabled);
+        assert_eq!(compaction.model_context_window, Some(200_000));
+        // The project layer's explicit field is applied.
+        assert_eq!(compaction.target_ratio, 0.2);
+        // Fields set by neither layer keep their compiled-in defaults.
+        assert_eq!(compaction.trigger_ratio, DEFAULT_TRIGGER_RATIO);
+        assert_eq!(compaction.emergency_ratio, DEFAULT_EMERGENCY_RATIO);
+        assert!(compaction.auto);
+    }
+
+    #[test]
+    fn higher_priority_layer_overrides_lower_compaction_field() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+
+        std::fs::write(
+            &user_path,
+            "[session.compaction]\npreserve_recent_runs = 5\nauto = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            "[session.compaction]\npreserve_recent_runs = 9\n",
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let compaction = &config.session.compaction;
+        // The project layer's explicit value wins over the user layer's.
+        assert_eq!(compaction.preserve_recent_runs, 9);
+        // The user-layer field the project layer omitted is preserved.
+        assert!(compaction.auto);
     }
 
     #[test]
