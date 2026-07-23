@@ -371,15 +371,15 @@ mod tests {
 
     #[test]
     fn diagnostics_found_propagates_exit_without_error_render() {
-        let ctx = CliContext {
-            install_mode: crate::context::InstallMode::User,
-            prefix: None,
-            json: true,
-            dry_run: false,
-            verbose: false,
-            quiet: false,
-            no_color: true,
-        };
+        let sandbox = crate::test_support::TestSandbox::new();
+        let ctx = sandbox.context_with(
+            crate::context::InstallMode::User,
+            crate::test_support::TestContextOptions {
+                json: true,
+                quiet: false,
+                ..Default::default()
+            },
+        );
         let err = CliError::DiagnosticsFound {
             command: "doctor".to_string(),
         };

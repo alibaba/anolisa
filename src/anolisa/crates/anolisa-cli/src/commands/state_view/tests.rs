@@ -2,7 +2,7 @@ use anolisa_core::InstalledState;
 use anolisa_platform::fs_layout::FsLayout;
 use tempfile::tempdir;
 
-use crate::context::{CliContext, InstallMode};
+use crate::context::InstallMode;
 
 use super::*;
 use support::{component, user_layout, write_state};
@@ -172,15 +172,15 @@ fn system_mode_visibility_does_not_load_user_state() {
     let xdg_state = tmp.path().join("xdg-state");
     let user_layout = FsLayout::user_with_overrides(home, None, None, Some(xdg_state), None, None);
     write_state(&user_layout, vec![component("user-only")]);
-    let ctx = CliContext {
-        install_mode: InstallMode::System,
-        prefix: Some(system_prefix),
-        json: true,
-        dry_run: false,
-        verbose: false,
-        quiet: true,
-        no_color: true,
-    };
+    let ctx = crate::test_support::context_for_root(
+        tmp.path(),
+        InstallMode::System,
+        Some(system_prefix),
+        crate::test_support::TestContextOptions {
+            json: true,
+            ..Default::default()
+        },
+    );
 
     let view =
         StateView::load(&ctx, "test", StateVisibility::UserPlusSystem).expect("system state view");

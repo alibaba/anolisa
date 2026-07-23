@@ -1209,7 +1209,8 @@ pub(crate) fn complete_delegated_update(
         ));
     }
 
-    let refresh = refresh_datadir_contract_snapshot(layout, target, command);
+    let refresh =
+        refresh_datadir_contract_snapshot(layout, target, command, ctx.packaged_data_probe());
     if !ctx.quiet {
         for warning in &refresh.warnings {
             eprintln!("warning: {warning}");
@@ -1931,15 +1932,15 @@ pub(crate) mod tests {
     }
 
     fn self_ctx(prefix: PathBuf, dry_run: bool) -> CliContext {
-        CliContext {
-            install_mode: crate::context::InstallMode::System,
-            prefix: Some(prefix),
-            json: false,
-            dry_run,
-            verbose: false,
-            quiet: true,
-            no_color: true,
-        }
+        crate::test_support::context_for_root(
+            &prefix,
+            crate::context::InstallMode::System,
+            Some(prefix.clone()),
+            crate::test_support::TestContextOptions {
+                dry_run,
+                ..Default::default()
+            },
+        )
     }
 
     struct FakeSelfUpdateOps {
@@ -2415,15 +2416,15 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
-        CliContext {
+        crate::test_support::context_for_root(
+            &prefix,
             install_mode,
-            prefix: Some(prefix),
-            json: false,
-            dry_run,
-            verbose: false,
-            quiet: true,
-            no_color: true,
-        }
+            Some(prefix.clone()),
+            crate::test_support::TestContextOptions {
+                dry_run,
+                ..Default::default()
+            },
+        )
     }
 
     /// Build a legacy (v4) RPM-backed component object; the store migrates it

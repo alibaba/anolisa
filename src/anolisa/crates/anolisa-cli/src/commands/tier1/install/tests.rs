@@ -26,19 +26,23 @@ use tar::{Builder, Header};
 use tempfile::tempdir;
 
 pub fn ctx_with_prefix(json: bool, prefix: Option<PathBuf>) -> CliContext {
-    CliContext {
-        install_mode: if prefix.is_some() {
-            InstallMode::System
-        } else {
-            InstallMode::User
+    let root = prefix
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("/tmp/anolisa-install-validation"));
+    let install_mode = if prefix.is_some() {
+        InstallMode::System
+    } else {
+        InstallMode::User
+    };
+    crate::test_support::context_for_root(
+        root,
+        install_mode,
+        prefix.clone(),
+        crate::test_support::TestContextOptions {
+            json,
+            ..Default::default()
         },
-        prefix,
-        json,
-        dry_run: false,
-        verbose: false,
-        quiet: true, // suppress stdout during tests
-        no_color: true,
-    }
+    )
 }
 
 pub fn args(component: &str) -> InstallArgs {

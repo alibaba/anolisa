@@ -117,14 +117,16 @@ pub(crate) fn adopt_with_query(
     query: &dyn PackageQuery,
 ) -> Result<(), CliError> {
     let command = format!("{COMMAND} {target}");
+    if ctx.install_mode == InstallMode::User {
+        return Err(CliError::InvalidArgument {
+            command,
+            reason: "adopt is available only in system mode".to_string(),
+        });
+    }
     let layout = common::resolve_layout(ctx);
     let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = rpm_install::journal_dir(&layout);
-    let uid = privilege::effective_uid();
-    let scope = match ctx.install_mode {
-        InstallMode::System => InstallationScope::System,
-        InstallMode::User => InstallationScope::User { uid },
-    };
+    let scope = InstallationScope::System;
     let now = now_iso8601();
     let env = anolisa_env::EnvService::detect();
 
@@ -468,7 +470,8 @@ fn execute_adopt_plan(
     // Best-effort: snapshot the datadir component contract so adapter
     // commands can discover declared adapters. Missing or unwritable
     // contracts produce warnings, never failures.
-    for warning in snapshot_datadir_contract(layout, component, command) {
+    for warning in snapshot_datadir_contract(layout, component, command, ctx.packaged_data_probe())
+    {
         eprintln!("warning: {warning}");
     }
 
@@ -717,10 +720,12 @@ mod tests {
         package_provides: Vec<(String, Vec<String>)>,
         /// package → source repo for `installed_origin`.
         origins: Vec<(String, String)>,
+        calls: Cell<usize>,
     }
 
     impl PackageQuery for FakeQuery {
         fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            self.calls.set(self.calls.get() + 1);
             if self.multi_version.iter().any(|p| p == package) {
                 return Err(PackageQueryError::UnexpectedOutput {
                     command: "rpm".to_string(),
@@ -734,9 +739,11 @@ mod tests {
                 .map(|(_, info)| info.clone()))
         }
         fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            self.calls.set(self.calls.get() + 1);
             Ok(Vec::new())
         }
         fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
+            self.calls.set(self.calls.get() + 1);
             Ok(self
                 .origins
                 .iter()
@@ -747,6 +754,7 @@ mod tests {
             &self,
             capability: &str,
         ) -> Result<Vec<String>, PackageQueryError> {
+            self.calls.set(self.calls.get() + 1);
             Ok(self
                 .provides
                 .iter()
@@ -758,6 +766,7 @@ mod tests {
             &self,
             capability: &str,
         ) -> Result<Vec<String>, PackageQueryError> {
+            self.calls.set(self.calls.get() + 1);
             Ok(self
                 .available_provides
                 .iter()
@@ -769,6 +778,7 @@ mod tests {
             &self,
             package: &str,
         ) -> Result<Vec<String>, PackageQueryError> {
+            self.calls.set(self.calls.get() + 1);
             Ok(self
                 .package_provides
                 .iter()
@@ -851,15 +861,15 @@ mod tests {
     }
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
-        CliContext {
+        crate::test_support::context_for_root(
+            &prefix,
             install_mode,
-            prefix: Some(prefix),
-            json: false,
-            dry_run,
-            verbose: false,
-            quiet: true,
-            no_color: true,
-        }
+            Some(prefix.clone()),
+            crate::test_support::TestContextOptions {
+                dry_run,
+                ..Default::default()
+            },
+        )
     }
 
     /// A tracked component object with the given provenance, as legacy v4
@@ -1242,13 +1252,20 @@ mod tests {
     fn adopt_refuses_in_user_mode() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::User, false);
-        let err = adopt_with_query("copilot-shell", None, &c, &FakeQuery::default())
+        let query = FakeQuery::default();
+        let err = adopt_with_query("copilot-shell", None, &c, &query)
             .expect_err("user mode must be refused");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
             err.reason().contains("system"),
             "user-mode refusal mentions system scope: {}",
             err.reason()
+        );
+        assert_eq!(query.calls.get(), 0, "user refusal must not query rpmdb");
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).expect("sandbox root").count(),
+            0,
+            "user refusal must not create filesystem state"
         );
     }
 

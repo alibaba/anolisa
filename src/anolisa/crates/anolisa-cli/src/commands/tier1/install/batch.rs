@@ -118,11 +118,9 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
     // Each handle_one call runs in quiet mode so it doesn't print individual
     // JSON envelopes or human-mode messages — only the batch summary at the
     // end goes to stdout.
-    let suppressed_ctx = CliContext {
-        json: false,
-        quiet: true,
-        ..ctx.clone()
-    };
+    let mut suppressed_ctx = ctx.clone();
+    suppressed_ctx.json = false;
+    suppressed_ctx.quiet = true;
 
     // Peek phase: plan every component read-only and classify. Fresh
     // delegated installs merge into one native transaction; everything else
@@ -406,11 +404,9 @@ fn execute_merged_group(
     ctx: &CliContext,
 ) -> Vec<AllSummaryItem> {
     let per_args = per_component_args(&group[0].name, args);
-    let suppressed_ctx = CliContext {
-        json: false,
-        quiet: true,
-        ..ctx.clone()
-    };
+    let mut suppressed_ctx = ctx.clone();
+    suppressed_ctx.json = false;
+    suppressed_ctx.quiet = true;
     let (query, txn) = match host_backends(&group[0].name, &per_args, &suppressed_ctx) {
         Ok(backends) => backends,
         Err(err) => {
@@ -638,9 +634,12 @@ fn execute_merged_group_with_deps(
                             finished_at: Some(now_iso8601()),
                             parent_operation_id: Some(batch_operation_id.clone()),
                         });
-                        for warning in
-                            super::io_util::snapshot_datadir_contract(&layout, &target, COMMAND)
-                        {
+                        for warning in super::io_util::snapshot_datadir_contract(
+                            &layout,
+                            &target,
+                            COMMAND,
+                            ctx.packaged_data_probe(),
+                        ) {
                             eprintln!("warning: {warning}");
                         }
                         items.push(AllSummaryItem {

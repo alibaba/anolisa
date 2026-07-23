@@ -29,13 +29,7 @@ const INSTALLED_COMPONENT_MANIFEST_FILE: &str = "component.toml";
 /// Build the layout for the active install mode, honoring `--prefix`
 /// (system-mode) and the current process user's home (user-mode).
 pub fn resolve_layout(ctx: &CliContext) -> FsLayout {
-    match ctx.install_mode {
-        InstallMode::System => FsLayout::system(ctx.prefix.clone()),
-        InstallMode::User => {
-            let home = anolisa_env::EnvService::detect().home;
-            FsLayout::user(home)
-        }
-    }
+    ctx.layout().clone()
 }
 
 /// Build a consistent package-transaction permission error.
@@ -174,10 +168,13 @@ pub(crate) fn load_repo_config(
     command: &str,
     persist_policy: RepoPersistPolicy,
 ) -> Result<RepoConfig, CliError> {
-    let repo_load = RepoConfig::load(layout, ctx.dry_run).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: err.to_string(),
-    })?;
+    let repo_load =
+        RepoConfig::load(layout, ctx.dry_run, ctx.packaged_data_probe()).map_err(|err| {
+            CliError::Runtime {
+                command: command.to_string(),
+                reason: err.to_string(),
+            }
+        })?;
     enforce_repo_persist_policy(&repo_load.provisioning, persist_policy, command)?;
     render_repo_config_provisioning(ctx, &repo_load.provisioning);
     Ok(repo_load.config)
@@ -467,9 +464,12 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
     let (mut manager, layout) = new_adapter_manager(ctx);
 
     match StateView::load(ctx, "adapter", StateVisibility::UserPlusSystem) {
-        Ok(view) => configure_adapter_manager(&mut manager, &view),
+        Ok(view) => configure_adapter_manager(&mut manager, &view, ctx.packaged_data_probe()),
         Err(_) => {
-            manager.set_visible_roots(vec![visible_root_for_adapter(&layout)]);
+            manager.set_visible_roots(vec![visible_root_for_adapter(
+                &layout,
+                ctx.packaged_data_probe(),
+            )]);
         }
     }
 
@@ -483,7 +483,7 @@ pub(crate) fn build_adapter_manager_from_view(
     view: &StateView,
 ) -> AdapterManager {
     let (mut manager, _) = new_adapter_manager(ctx);
-    configure_adapter_manager(&mut manager, view);
+    configure_adapter_manager(&mut manager, view, ctx.packaged_data_probe());
     manager
 }
 
@@ -496,11 +496,15 @@ fn new_adapter_manager(ctx: &CliContext) -> (AdapterManager, FsLayout) {
     )
 }
 
-fn configure_adapter_manager(manager: &mut AdapterManager, view: &StateView) {
+fn configure_adapter_manager(
+    manager: &mut AdapterManager,
+    view: &StateView,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) {
     let roots = view
         .visible_roots
         .iter()
-        .map(|root| visible_root_for_adapter(&root.layout))
+        .map(|root| visible_root_for_adapter(&root.layout, packaged_data_probe))
         .collect();
     manager.set_visible_roots(roots);
     for warning in &view.warnings {
@@ -508,14 +512,20 @@ fn configure_adapter_manager(manager: &mut AdapterManager, view: &StateView) {
     }
 }
 
-fn visible_root_for_adapter(layout: &FsLayout) -> VisibleRoot {
+fn visible_root_for_adapter(
+    layout: &FsLayout,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) -> VisibleRoot {
     VisibleRoot {
         state_dir: layout.state_dir.clone(),
-        contract_datadir_roots: adapter_contract_datadir_roots(layout),
+        contract_datadir_roots: adapter_contract_datadir_roots(layout, packaged_data_probe),
     }
 }
 
-fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
+fn adapter_contract_datadir_roots(
+    layout: &FsLayout,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) -> Vec<PathBuf> {
     // Two independent datadir-discovery mechanisms are layered here:
     //
     //   packaged_datadir_root()  — runtime probe: env override → exe-sibling
@@ -532,7 +542,7 @@ fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
     // exe-sibling probe handles relocated installs; the FHS constant handles
     // cross-install-method discovery (raw binary + RPM components).
     let mut roots = vec![layout.datadir.clone()];
-    if let Some(packaged) = packaged::packaged_datadir_root(layout)
+    if let Some(packaged) = packaged::packaged_datadir_root(layout, packaged_data_probe)
         && !roots.contains(&packaged)
     {
         roots.push(packaged);

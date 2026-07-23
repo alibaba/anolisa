@@ -229,7 +229,8 @@ fn repair_attempt(
             .map(|r| &r.binding),
         Some(ProviderBinding::Delegated { .. })
     ) && {
-        let inspection = inspect_datadir_contract_drift(&layout, target, &command);
+        let inspection =
+            inspect_datadir_contract_drift(&layout, target, &command, ctx.packaged_data_probe());
         if !ctx.quiet {
             for warning in &inspection.warnings {
                 eprintln!("warning: {warning}");
@@ -588,7 +589,8 @@ fn repair_delegated(
 
     let mut completion_failure = None;
     if manifest_drifted {
-        let refresh = refresh_datadir_contract_snapshot(layout, target, command);
+        let refresh =
+            refresh_datadir_contract_snapshot(layout, target, command, ctx.packaged_data_probe());
         if !ctx.quiet {
             for warning in &refresh.warnings {
                 eprintln!("warning: {warning}");
@@ -1662,6 +1664,7 @@ fn recover_legacy_rpm_install(
                 layout,
                 &pending.component,
                 command,
+                ctx.packaged_data_probe(),
             ));
             render_warnings(&warnings, &Palette::new(ctx.no_color));
             append_repair_log(
@@ -2452,15 +2455,15 @@ mod tests {
     }
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
-        CliContext {
+        crate::test_support::context_for_root(
+            &prefix,
             install_mode,
-            prefix: Some(prefix),
-            json: false,
-            dry_run,
-            verbose: false,
-            quiet: true,
-            no_color: true,
-        }
+            Some(prefix.clone()),
+            crate::test_support::TestContextOptions {
+                dry_run,
+                ..Default::default()
+            },
+        )
     }
 
     /// Legacy (v4) RPM-backed component object; the store migrates it on
@@ -2722,7 +2725,6 @@ mod tests {
 
     #[test]
     fn healthy_record_with_stale_manifest_snapshot_reconciles_it() {
-        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
         use anolisa_core::adapter::contract::read_snapshot_provenance;
 
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -2770,7 +2772,6 @@ mod tests {
 
     #[test]
     fn manifest_refresh_failure_keeps_the_operation_partial() {
-        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let component = "manifest-write-failure";
@@ -2824,7 +2825,6 @@ mod tests {
 
     #[test]
     fn dry_run_previews_manifest_reconciliation_without_writes() {
-        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
         let component = "manifest-dry-run";
@@ -2865,7 +2865,6 @@ mod tests {
 
     #[test]
     fn manifest_drift_is_judged_against_the_package_datadir_only() {
-        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
         use anolisa_core::adapter::contract::{
             ContractProvenance, ContractSourceKind, write_snapshot_provenance,
         };
@@ -2930,7 +2929,6 @@ mod tests {
 
     #[test]
     fn local_manifest_is_ignored_when_the_package_contract_is_missing() {
-        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let component = "manifest-missing-package-contract";

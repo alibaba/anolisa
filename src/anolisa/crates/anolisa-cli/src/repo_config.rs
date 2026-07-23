@@ -302,9 +302,14 @@ impl RepoConfig {
     pub(crate) fn load(
         layout: &FsLayout,
         dry_run: bool,
+        packaged_data_probe: &packaged::PackagedDataProbe,
     ) -> Result<RepoConfigLoadResult, RepoConfigProvisionError> {
         let url = repo_config_url();
-        Self::load_with_sources(RepoConfigSources::for_layout(layout), dry_run, &url)
+        Self::load_with_sources(
+            RepoConfigSources::for_layout(layout, packaged_data_probe),
+            dry_run,
+            &url,
+        )
     }
 
     fn load_with_sources(
@@ -755,9 +760,9 @@ pub(crate) struct RepoConfigSources {
 }
 
 impl RepoConfigSources {
-    fn for_layout(layout: &FsLayout) -> Self {
-        let packaged_root =
-            packaged::packaged_datadir_root(layout).unwrap_or_else(|| layout.datadir.clone());
+    fn for_layout(layout: &FsLayout, packaged_data_probe: &packaged::PackagedDataProbe) -> Self {
+        let packaged_root = packaged::packaged_datadir_root(layout, packaged_data_probe)
+            .unwrap_or_else(|| layout.datadir.clone());
         Self {
             etc: Some(layout.etc_dir.join(REPO_FILE)),
             packaged: Some(packaged_root.join(REPO_SUBDIR).join(REPO_FILE)),

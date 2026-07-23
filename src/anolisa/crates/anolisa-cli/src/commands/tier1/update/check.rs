@@ -318,7 +318,7 @@ pub(crate) fn compute_update_check_report(
     ctx: &CliContext,
     layout: &FsLayout,
 ) -> Result<UpdateCheckReport, CliError> {
-    let repo_config = load_repo_config_read_only(layout)?;
+    let repo_config = load_repo_config_read_only(ctx, layout)?;
     let env = anolisa_env::EnvService::detect();
     let repo = super::rpm_repo_source_for_update(&repo_config, &env, CHECK_COMMAND)?.ok_or_else(
         || CliError::InvalidArgument {
@@ -346,7 +346,8 @@ pub(crate) fn compute_update_check_report(
 
     // An omitted `--target` resolves to the release default profile, so the
     // report always carries a target and can surface missing defaults.
-    let (target_name, target_profile) = load_effective_target_profile(layout, target)?;
+    let (target_name, target_profile) =
+        load_effective_target_profile(layout, target, ctx.packaged_data_probe())?;
 
     // Best-effort component identity index so a profile default already present
     // on the host (but not adopted into ANOLISA state) is checked against rpmdb
@@ -375,8 +376,8 @@ pub(crate) fn compute_update_check_report(
 /// the check needs even on a host that has not provisioned repo config yet. The
 /// no-write behaviour of the dry-run path is covered by
 /// `repo_config::tests::load_dry_run_fetches_without_writing`.
-fn load_repo_config_read_only(layout: &FsLayout) -> Result<RepoConfig, CliError> {
-    RepoConfig::load(layout, true)
+fn load_repo_config_read_only(ctx: &CliContext, layout: &FsLayout) -> Result<RepoConfig, CliError> {
+    RepoConfig::load(layout, true, ctx.packaged_data_probe())
         .map(|loaded| loaded.config)
         .map_err(|err| CliError::Runtime {
             command: CHECK_COMMAND.to_string(),
@@ -1124,9 +1125,13 @@ fn effective_target_name(target: Option<&str>) -> &str {
 fn load_effective_target_profile(
     layout: &FsLayout,
     target: Option<&str>,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> Result<(String, TargetProfile), CliError> {
     let name = effective_target_name(target);
-    Ok((name.to_string(), load_target_profile_by_name(layout, name)?))
+    Ok((
+        name.to_string(),
+        load_target_profile_by_name(layout, name, packaged_data_probe)?,
+    ))
 }
 
 /// Resolve and read a named target profile. The name is validated as a single
@@ -1137,7 +1142,11 @@ fn load_effective_target_profile(
 /// default name — the built-in profile compiled into the binary. A missing
 /// non-default profile is a hard [`CliError::InvalidArgument`] listing the
 /// searched paths.
-fn load_target_profile_by_name(layout: &FsLayout, name: &str) -> Result<TargetProfile, CliError> {
+fn load_target_profile_by_name(
+    layout: &FsLayout,
+    name: &str,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
+) -> Result<TargetProfile, CliError> {
     validate_target_name(name)?;
 
     let mut searched = Vec::new();
@@ -1151,8 +1160,8 @@ fn load_target_profile_by_name(layout: &FsLayout, name: &str) -> Result<TargetPr
     }
     searched.push(etc_path);
 
-    let packaged_root =
-        crate::packaged::packaged_datadir_root(layout).unwrap_or_else(|| layout.datadir.clone());
+    let packaged_root = crate::packaged::packaged_datadir_root(layout, packaged_data_probe)
+        .unwrap_or_else(|| layout.datadir.clone());
     let packaged_path = packaged_root
         .join(PROFILES_SUBDIR)
         .join(format!("{name}.toml"));

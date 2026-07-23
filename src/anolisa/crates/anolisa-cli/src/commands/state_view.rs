@@ -82,7 +82,7 @@ impl StateView {
 
         if ctx.install_mode == InstallMode::User && visibility == StateVisibility::UserPlusSystem {
             roots.push((
-                FsLayout::system(ctx.prefix.clone()),
+                ctx.visible_system_layout().clone(),
                 RootSpec {
                     scope: StateScope::System,
                     writable: false,
@@ -115,7 +115,7 @@ impl StateView {
         let mut warnings = Vec::new();
 
         if ctx.install_mode == InstallMode::User && visibility == StateVisibility::UserPlusSystem {
-            let system_layout = FsLayout::system(ctx.prefix.clone());
+            let system_layout = ctx.visible_system_layout().clone();
             let system_state_path = system_layout.state_dir.join(INSTALLED_STATE_FILE);
             match load_root_state(command, &system_layout, &system_state_path, false) {
                 Ok(state) => visible_roots.push(ScopedStateRoot {

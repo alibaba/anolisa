@@ -963,7 +963,12 @@ fn install_delegated(
     // Best-effort: snapshot the datadir component contract so adapter
     // commands can discover declared adapters. Missing or unwritable
     // contracts produce warnings, never failures.
-    for warning in super::io_util::snapshot_datadir_contract(layout, target, command) {
+    for warning in super::io_util::snapshot_datadir_contract(
+        layout,
+        target,
+        command,
+        ctx.packaged_data_probe(),
+    ) {
         eprintln!("warning: {warning}");
     }
 

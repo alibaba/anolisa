@@ -418,27 +418,21 @@ fn observed_evr<'a>(store: &'a StateStore, name: &str) -> Option<&'a str> {
 }
 
 fn system_ctx(prefix: PathBuf) -> CliContext {
-    CliContext {
-        install_mode: InstallMode::System,
-        prefix: Some(prefix),
-        json: false,
-        dry_run: false,
-        verbose: false,
-        quiet: true,
-        no_color: true,
-    }
+    crate::test_support::context_for_root(
+        &prefix,
+        InstallMode::System,
+        Some(prefix.clone()),
+        Default::default(),
+    )
 }
 
 fn user_ctx() -> CliContext {
-    CliContext {
-        install_mode: InstallMode::User,
-        prefix: None,
-        json: false,
-        dry_run: false,
-        verbose: false,
-        quiet: true,
-        no_color: true,
-    }
+    crate::test_support::context_for_root(
+        std::path::Path::new("/tmp/anolisa-upgrade-validation"),
+        InstallMode::User,
+        None,
+        Default::default(),
+    )
 }
 
 // ── argument parsing ─────────────────────────────────────────────────────────

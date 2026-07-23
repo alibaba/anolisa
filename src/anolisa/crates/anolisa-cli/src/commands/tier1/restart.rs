@@ -553,15 +553,15 @@ mod tests {
     use tempfile::tempdir;
 
     fn ctx_with_prefix(install_mode: InstallMode, prefix: Option<PathBuf>) -> CliContext {
-        CliContext {
+        let root = prefix
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("/tmp/anolisa-restart-validation"));
+        crate::test_support::context_for_root(
+            root,
             install_mode,
-            prefix,
-            json: false,
-            dry_run: false,
-            verbose: false,
-            quiet: true,
-            no_color: true,
-        }
+            prefix.clone(),
+            Default::default(),
+        )
     }
 
     /// Fake `CommandRunner` returning a canned `rpm -ql` listing (or a spawn
