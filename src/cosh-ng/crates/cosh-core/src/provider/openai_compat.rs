@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -133,14 +134,39 @@ impl ContentGenerator for OpenAICompatProvider {
         let byte_stream = response.bytes_stream();
         let buffer = String::new();
         let event_queue: Vec<GenerateEvent> = Vec::new();
+        let stream_state = OpenAICompatStreamState::default();
 
         let event_stream = futures::stream::unfold(
-            (byte_stream, buffer, cancelled, event_queue, thinking_field),
-            move |(mut stream, mut buf, cancelled, mut pending, thinking_field)| async move {
+            (
+                byte_stream,
+                buffer,
+                cancelled,
+                event_queue,
+                thinking_field,
+                stream_state,
+            ),
+            move |(
+                mut stream,
+                mut buf,
+                cancelled,
+                mut pending,
+                thinking_field,
+                mut stream_state,
+            )| async move {
                 let tf = thinking_field.as_deref();
                 loop {
                     if let Some(event) = pending.pop() {
-                        return Some((event, (stream, buf, cancelled, pending, thinking_field)));
+                        return Some((
+                            event,
+                            (
+                                stream,
+                                buf,
+                                cancelled,
+                                pending,
+                                thinking_field,
+                                stream_state,
+                            ),
+                        ));
                     }
 
                     if cancelled.load(Ordering::SeqCst) {
@@ -159,20 +185,37 @@ impl ContentGenerator for OpenAICompatProvider {
                             if data.trim() == "[DONE]" {
                                 return Some((
                                     GenerateEvent::MessageEnd,
-                                    (stream, buf, cancelled, pending, thinking_field),
+                                    (
+                                        stream,
+                                        buf,
+                                        cancelled,
+                                        pending,
+                                        thinking_field,
+                                        stream_state,
+                                    ),
                                 ));
                             }
                             if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                if let Some(mut events) =
-                                    parse_sse_chunk(&chunk, tf, defer_message_end)
-                                {
+                                if let Some(mut events) = parse_sse_chunk_with_state(
+                                    &chunk,
+                                    tf,
+                                    defer_message_end,
+                                    &mut stream_state,
+                                ) {
                                     if !events.is_empty() {
                                         let first = events.remove(0);
                                         events.reverse();
                                         pending = events;
                                         return Some((
                                             first,
-                                            (stream, buf, cancelled, pending, thinking_field),
+                                            (
+                                                stream,
+                                                buf,
+                                                cancelled,
+                                                pending,
+                                                thinking_field,
+                                                stream_state,
+                                            ),
                                         ));
                                     }
                                 }
@@ -188,7 +231,14 @@ impl ContentGenerator for OpenAICompatProvider {
                         Some(Err(e)) => {
                             return Some((
                                 GenerateEvent::Error(format!("stream error: {e}")),
-                                (stream, buf, cancelled, pending, thinking_field),
+                                (
+                                    stream,
+                                    buf,
+                                    cancelled,
+                                    pending,
+                                    thinking_field,
+                                    stream_state,
+                                ),
                             ));
                         }
                         None => {
@@ -198,9 +248,12 @@ impl ContentGenerator for OpenAICompatProvider {
                                 if let Some(data) = line.strip_prefix("data: ") {
                                     if data.trim() != "[DONE]" {
                                         if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                            if let Some(mut events) =
-                                                parse_sse_chunk(&chunk, tf, defer_message_end)
-                                            {
+                                            if let Some(mut events) = parse_sse_chunk_with_state(
+                                                &chunk,
+                                                tf,
+                                                defer_message_end,
+                                                &mut stream_state,
+                                            ) {
                                                 if !events.is_empty() {
                                                     let first = events.remove(0);
                                                     events.reverse();
@@ -213,6 +266,7 @@ impl ContentGenerator for OpenAICompatProvider {
                                                             cancelled,
                                                             pending,
                                                             thinking_field,
+                                                            stream_state,
                                                         ),
                                                     ));
                                                 }
@@ -223,7 +277,14 @@ impl ContentGenerator for OpenAICompatProvider {
                             }
                             return Some((
                                 GenerateEvent::MessageEnd,
-                                (stream, buf, cancelled, pending, thinking_field),
+                                (
+                                    stream,
+                                    buf,
+                                    cancelled,
+                                    pending,
+                                    thinking_field,
+                                    stream_state,
+                                ),
                             ));
                         }
                     }
@@ -239,10 +300,30 @@ impl ContentGenerator for OpenAICompatProvider {
     }
 }
 
+#[derive(Default)]
+struct OpenAICompatStreamState {
+    argument_deltas_seen: HashSet<u32>,
+}
+
+#[cfg(test)]
 fn parse_sse_chunk(
     chunk: &Value,
     thinking_field: Option<&str>,
     defer_message_end: bool,
+) -> Option<Vec<GenerateEvent>> {
+    parse_sse_chunk_with_state(
+        chunk,
+        thinking_field,
+        defer_message_end,
+        &mut OpenAICompatStreamState::default(),
+    )
+}
+
+fn parse_sse_chunk_with_state(
+    chunk: &Value,
+    thinking_field: Option<&str>,
+    defer_message_end: bool,
+    stream_state: &mut OpenAICompatStreamState,
 ) -> Option<Vec<GenerateEvent>> {
     let mut events = Vec::new();
 
@@ -317,16 +398,22 @@ fn parse_sse_chunk(
                         });
                     }
 
-                    if let Some(args) = delta_function
+                    let delta_arguments = delta_function
                         .and_then(|function| function.get("arguments"))
-                        .and_then(|arguments| arguments.as_str())
-                        .or_else(|| {
-                            final_function
-                                .and_then(|function| function.get("arguments"))
-                                .and_then(|arguments| arguments.as_str())
-                        })
-                    {
-                        if !args.is_empty() {
+                        .and_then(|arguments| arguments.as_str());
+                    if let Some(args) = delta_arguments.filter(|args| !args.is_empty()) {
+                        stream_state.argument_deltas_seen.insert(index);
+                        events.push(GenerateEvent::ToolCallDelta {
+                            index,
+                            arguments_delta: args.to_string(),
+                        });
+                    } else if !stream_state.argument_deltas_seen.contains(&index) {
+                        if let Some(args) = final_function
+                            .and_then(|function| function.get("arguments"))
+                            .and_then(|arguments| arguments.as_str())
+                            .filter(|args| !args.is_empty())
+                        {
+                            stream_state.argument_deltas_seen.insert(index);
                             events.push(GenerateEvent::ToolCallDelta {
                                 index,
                                 arguments_delta: args.to_string(),
@@ -361,10 +448,13 @@ fn parse_sse_chunk(
                         id,
                         name: name.to_string(),
                     });
-                    if let Some(arguments) =
-                        function.get("arguments").and_then(|args| args.as_str())
-                    {
-                        if !arguments.is_empty() {
+                    if !stream_state.argument_deltas_seen.contains(&index) {
+                        if let Some(arguments) = function
+                            .get("arguments")
+                            .and_then(|args| args.as_str())
+                            .filter(|arguments| !arguments.is_empty())
+                        {
+                            stream_state.argument_deltas_seen.insert(index);
                             events.push(GenerateEvent::ToolCallDelta {
                                 index,
                                 arguments_delta: arguments.to_string(),
@@ -538,6 +628,118 @@ mod tests {
             GenerateEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta == "{\"command\":\"pwd\"}"
         ));
         assert!(matches!(&events[2], GenerateEvent::MessageEnd));
+    }
+
+    #[test]
+    fn final_tool_call_snapshot_does_not_repeat_streamed_arguments() {
+        let first_chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"pwd\"}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+        let final_chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{"index": 0, "function": {}}]},
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"pwd\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let mut state = OpenAICompatStreamState::default();
+
+        let first = parse_sse_chunk_with_state(&first_chunk, None, false, &mut state)
+            .expect("first streamed tool-call chunk");
+        assert!(matches!(
+            &first[..],
+            [GenerateEvent::ToolCallStart { .. }, GenerateEvent::ToolCallDelta { arguments_delta, .. }]
+                if arguments_delta == "{\"command\":\"pwd\"}"
+        ));
+
+        let final_events = parse_sse_chunk_with_state(&final_chunk, None, false, &mut state)
+            .expect("final tool-call snapshot");
+        assert!(
+            !final_events
+                .iter()
+                .any(|event| matches!(event, GenerateEvent::ToolCallDelta { .. })),
+            "final tool-call snapshots must not repeat streamed arguments"
+        );
+        assert!(matches!(
+            final_events.last(),
+            Some(GenerateEvent::MessageEnd)
+        ));
+    }
+
+    #[test]
+    fn final_message_only_tool_call_does_not_repeat_streamed_arguments() {
+        let first_chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"pwd\"}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+        let final_chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"pwd\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let mut state = OpenAICompatStreamState::default();
+
+        let _ = parse_sse_chunk_with_state(&first_chunk, None, false, &mut state)
+            .expect("first streamed tool-call chunk");
+        let final_events = parse_sse_chunk_with_state(&final_chunk, None, false, &mut state)
+            .expect("final message-only tool-call snapshot");
+
+        assert!(
+            !final_events
+                .iter()
+                .any(|event| matches!(event, GenerateEvent::ToolCallDelta { .. })),
+            "message-only snapshots must not repeat streamed arguments"
+        );
+        assert!(matches!(
+            final_events.last(),
+            Some(GenerateEvent::MessageEnd)
+        ));
     }
 
     #[test]

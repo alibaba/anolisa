@@ -581,6 +581,15 @@ impl CoshCore {
                 return Ok(());
             }
 
+            if tool_calls
+                .iter()
+                .any(|tc| tc.name.is_empty() && !tc.arguments.is_empty())
+            {
+                return Err(
+                    "Provider emitted an incomplete tool call without a function name".to_string(),
+                );
+            }
+
             let tc_infos: Vec<crate::provider::ToolCallInfo> = tool_calls
                 .iter()
                 .filter(|tc| !tc.name.is_empty())
@@ -1610,6 +1619,40 @@ mod tests {
             "Provider emitted an incomplete tool call without a function name"
         );
         assert_eq!(core.messages.len(), 1, "must not append an empty turn");
+    }
+
+    #[tokio::test]
+    async fn mixed_tool_calls_stop_when_any_call_is_incomplete() {
+        let provider = MockProvider::new(vec![vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-valid".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"pwd"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 1,
+                arguments_delta: r#"{"command":"id"}"#.to_string(),
+            },
+            GenerateEvent::MessageEnd,
+        ]]);
+        let mut core = make_core(provider);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        let error = core
+            .handle_user_message("inspect this project", &mut reader, &mut output)
+            .await
+            .expect_err("any unnamed tool call with arguments must fail the turn");
+
+        assert_eq!(
+            error,
+            "Provider emitted an incomplete tool call without a function name"
+        );
+        assert_eq!(core.messages.len(), 1, "must not execute the named tool");
     }
 
     #[tokio::test]
