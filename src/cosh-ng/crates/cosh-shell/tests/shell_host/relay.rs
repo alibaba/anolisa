@@ -169,6 +169,66 @@ fn raw_relay_bash_intercepts_fragmented_slash_while_typing() {
 }
 
 #[test]
+fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-recalled-slash-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         export HISTCONTROL=ignoredups\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+    std::fs::write(home.join(".bash_history"), "/skills detail xlsx\n").expect("history");
+
+    let config = ShellHostConfig::new("bash-recalled-slash-test", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("recalled slash relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    let intercept_count = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("/skills detail xlsx")
+                && event.component.as_deref() == Some("slash")
+        })
+        .count();
+    assert_eq!(intercept_count, 2, "{rendered_text}");
+    assert!(
+        !rendered_text.contains("bash: /skills: No such file or directory"),
+        "{rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn raw_relay_zsh_preserves_session_history() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;

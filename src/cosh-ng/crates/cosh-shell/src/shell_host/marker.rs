@@ -51,8 +51,6 @@ fi
 _cosh_load_native_bash_history_if_empty
 
 _COSH_AT_PROMPT=0
-_COSH_LAST_HISTORY_NO=0
-_COSH_LAST_HISTORY_COMMAND=
 _COSH_IN_PROMPT_COMMAND=0
 _COSH_LAST_NATIVE_HISTORY_FILE=
 
@@ -399,9 +397,7 @@ _cosh_preexec_marker() {
       eval "$active_debug_trap" 2>/dev/null || true
       return 0
     fi
-    if [[ -n "$history_no" && -n "$command" && ( "$history_no" != "${_COSH_LAST_HISTORY_NO:-0}" || "$command" != "${_COSH_LAST_HISTORY_COMMAND:-}" ) ]]; then
-      _COSH_LAST_HISTORY_NO="$history_no"
-      _COSH_LAST_HISTORY_COMMAND="$command"
+    if [[ -n "$history_no" && -n "$command" ]]; then
       local display_command="$command"
       if _cosh_is_handoff_wrapper "$command"; then
         display_command="$(_cosh_unwrap_handoff_command "$command")"
@@ -435,7 +431,6 @@ _cosh_preexec_marker() {
           builtin history -d "$history_no" 2>/dev/null || true
         fi
         display_command="<redacted sensitive command>"
-        _COSH_LAST_HISTORY_COMMAND="$display_command"
       fi
       if [[ -n "${_COSH_HANDOFF_HISTORY_NO:-}" ]]; then
         _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
