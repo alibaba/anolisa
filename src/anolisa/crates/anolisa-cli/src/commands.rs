@@ -14,6 +14,7 @@ pub mod adapter;
 pub mod osbase;
 pub mod register;
 pub mod system;
+pub mod telemetry;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -127,6 +128,8 @@ pub enum ManagementCommands {
     Osbase(osbase::OsbaseArgs),
     /// System helper daemon management
     System(system::SystemArgs),
+    /// Manage telemetry collection and reporting
+    Telemetry(telemetry::TelemetryArgs),
 }
 
 /// Build the top-level [`clap::Command`] with grouped help rendering.
@@ -223,6 +226,7 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ManagementCommands::Bug(args) => tier1::bug::handle(args, ctx),
             ManagementCommands::Osbase(args) => osbase::handle(args, ctx),
             ManagementCommands::System(args) => system::handle(args, ctx),
+            ManagementCommands::Telemetry(args) => telemetry::handle(args, ctx),
         },
     }
 }
@@ -427,6 +431,25 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ManagementCommands::System(args) => {
                 CommandPolicy::new("system", system_command_scope(args))
             }
+            ManagementCommands::Telemetry(args) => {
+                CommandPolicy::new("telemetry", telemetry_command_scope(args))
+            }
+        },
+    }
+}
+
+fn telemetry_command_scope(args: &telemetry::TelemetryArgs) -> CommandScope {
+    match &args.command {
+        telemetry::TelemetryCommands::Status { .. } => CommandScope::ReadOnly,
+        // enable / disable / link / unlink / upload / init mutate system state
+        // and need root; an explicit dry-run may preview without root.
+        telemetry::TelemetryCommands::Enable
+        | telemetry::TelemetryCommands::Disable
+        | telemetry::TelemetryCommands::Link
+        | telemetry::TelemetryCommands::Unlink
+        | telemetry::TelemetryCommands::Upload { .. }
+        | telemetry::TelemetryCommands::Init => CommandScope::ModeScopedMutation {
+            dry_run_without_root: true,
         },
     }
 }

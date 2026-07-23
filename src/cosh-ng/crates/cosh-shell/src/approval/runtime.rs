@@ -64,6 +64,7 @@ pub(crate) fn render_approval_actions<W: Write>(
                                 state.agent_run.needs_prompt_after_run = event.cwd.is_none();
                                 start_agent_run(
                                     &request,
+                                    AgentStartIntent::UserInitiated,
                                     adapter,
                                     state,
                                     output,
@@ -121,6 +122,21 @@ pub(crate) fn render_approval_actions<W: Write>(
         };
 
         if state.approvals.requests[request_index].status != ApprovalRequestStatus::Pending {
+            continue;
+        }
+
+        // Reserve a control-queue slot BEFORE `apply_approval_decision`
+        // consumes durable approval state (status, journal, trust) — but only
+        // when resolving would actually enqueue a fallback Agent
+        // continuation. Direct delivery to the owning provider run, foreground
+        // shell handoffs, and paths that stop the run first consume no queue
+        // slot and must never be blocked: the provider is waiting for exactly
+        // this resolution, and rejecting it would deadlock until it times out.
+        if approval_resolution_needs_queue_slot(state, &state.approvals.requests[request_index])
+            && !control_queue_has_capacity(state)
+        {
+            crate::slash::session::render_control_queue_full_notice(state, output)?;
+            output.flush()?;
             continue;
         }
 
@@ -202,7 +218,10 @@ pub(crate) fn render_approval_actions<W: Write>(
                 } else if should_send_approval_resolution_to_agent(state, &decision.request) {
                     stop_active_agent_run_without_rendering(state, output)?;
                     let request = approval_resolution_agent_request(&decision.request);
-                    start_agent_run_with_origin(
+                    // The approval was already resolved (state, journal, and
+                    // possibly trust updated); this continuation must not be
+                    // rejected by a full queue, so it is guaranteed a slot.
+                    start_agent_run_control_response(
                         &request,
                         decision.request.origin,
                         adapter,
@@ -273,6 +292,36 @@ fn active_run_owns_provider_approval(
     })
 }
 
+/// Whether resolving this approval would consume a control-queue slot.
+///
+/// Mirrors the delivery plan in [`render_approval_actions`]:
+/// - a pending or running compaction holds every continuation in the queue;
+/// - with no active run the recovery continuation starts immediately;
+/// - a control request owned by the active run is delivered directly (a
+///   runtime delivery failure stops that run first, so its recovery also
+///   starts immediately);
+/// - approvals without a control request id stop the run before any
+///   continuation;
+/// - only a non-owner active run is kept alive by the `OwnerUnavailable`
+///   recovery and forces the continuation into the queue. (This is slightly
+///   conservative for handoff outcomes that never enqueue, which is safe:
+///   the card stays pending and retryable.)
+fn approval_resolution_needs_queue_slot(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> bool {
+    if crate::slash::session::compaction_pending_or_active(state) {
+        return true;
+    }
+    let Some(active_run) = state.agent_run.active.as_ref() else {
+        return false;
+    };
+    if request.request_id.is_none() {
+        return false;
+    }
+    !active_run_owns_provider_approval(active_run, request)
+}
+
 fn recover_undelivered_provider_approval<W: Write>(
     delivery: ProviderApprovalDelivery,
     request: &RuntimeApprovalRequest,
@@ -285,7 +334,10 @@ fn recover_undelivered_provider_approval<W: Write>(
         stop_active_agent_run_without_rendering(state, output)?;
     }
     let continuation = approval_resolution_agent_request(request);
-    start_agent_run_with_origin(
+    // Recovery of an undelivered approval resolution: the approval is already
+    // resolved, so this control-protocol continuation is guaranteed a queue
+    // slot rather than risking a queue-full rejection it cannot retry.
+    start_agent_run_control_response(
         &continuation,
         request.origin,
         adapter,
@@ -293,6 +345,7 @@ fn recover_undelivered_provider_approval<W: Write>(
         output,
         Some(event_index),
     )
+    .map(|_disposition| ())
 }
 
 pub(crate) fn render_approval_resolution<W: Write>(

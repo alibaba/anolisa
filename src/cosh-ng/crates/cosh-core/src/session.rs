@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::compaction::CompactionState;
 use crate::provider::Message;
 
 mod io;
@@ -98,6 +99,12 @@ pub struct PersistedSession {
     pub generation: u64,
     /// Model-visible conversation history.
     pub messages: Vec<Message>,
+    /// Optional compaction projection over the transcript prefix.
+    ///
+    /// Absent for pre-compaction envelopes; ignoring it always yields the
+    /// complete transcript, so older readers remain correct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionState>,
 }
 
 impl PersistedSession {
@@ -118,6 +125,7 @@ impl PersistedSession {
             model,
             generation: 0,
             messages,
+            compaction: None,
         }
     }
 }

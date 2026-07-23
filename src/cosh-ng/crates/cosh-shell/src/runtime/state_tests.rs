@@ -230,6 +230,8 @@ fn pending_agent_request(id: &str, before_held_text: bool) -> PendingAgentReques
     PendingAgentRequest {
         request: agent_request(id),
         origin: AgentRunOrigin::Standard,
+        intent: crate::agent::run::AgentStartIntent::UserInitiated,
+        class: crate::agent::run::PendingRequestClass::Normal,
         selectable_after_event_index: None,
         before_held_text,
     }

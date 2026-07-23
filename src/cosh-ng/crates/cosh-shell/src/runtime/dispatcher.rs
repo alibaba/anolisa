@@ -9,7 +9,9 @@ use crate::agent::failed_command::{
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
-use crate::agent::run::{start_agent_run_with_origin, stop_active_agent_run_without_rendering};
+use crate::agent::run::{
+    start_agent_run_with_origin, stop_active_agent_run_without_rendering, AgentStartIntent,
+};
 use crate::approval::runtime::render_approval_actions;
 use crate::insight::model::InterventionDecision;
 use crate::insight::policy::InterventionGates;
@@ -34,6 +36,7 @@ use crate::runtime::prelude::{
 };
 use crate::runtime::state::InlineState;
 use crate::slash::runtime::render_slash_actions;
+use crate::slash::session::poll_background_compaction;
 
 use super::controller::{pending_card_capture, shell_has_active_foreground_command};
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
@@ -171,6 +174,9 @@ fn render_inline_guidance_from_batch<W: Write>(
             event_index_base,
         )?;
         poll_active_agent_run_deferred(state, output, adapter)?;
+        // Foreground output is active: harvest compactor results but defer
+        // completion rendering to the next safe prompt boundary.
+        poll_background_compaction(state, output, adapter, true)?;
         return Ok(());
     }
 
@@ -316,6 +322,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         poll_active_agent_run(state, output, adapter)?;
     }
     flush_held_agent_events(state, output)?;
+    poll_background_compaction(state, output, adapter, false)?;
     render_owned_shell_prompt(state, output)?;
 
     Ok(())
@@ -443,7 +450,17 @@ impl ActivityConsumer {
         render_activity_rows(state, &handoff_activity_ids, output)?;
         if !card_capture_pending && state.agent_run.active.is_none() {
             for (request, origin) in shell_handoff_continuation_requests(state) {
-                start_agent_run_with_origin(&request, origin, adapter, state, output, None)?;
+                // Shell-handoff continuations are automatic conversation
+                // resumptions, not fresh user requests.
+                start_agent_run_with_origin(
+                    &request,
+                    origin,
+                    AgentStartIntent::InternalBestEffort,
+                    adapter,
+                    state,
+                    output,
+                    None,
+                )?;
             }
         }
         Ok(Vec::new())

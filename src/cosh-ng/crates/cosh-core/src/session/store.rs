@@ -430,6 +430,7 @@ impl SessionStore {
                 model: String::new(),
                 generation: 0,
                 messages,
+                compaction: None,
             });
         }
 
@@ -472,6 +473,12 @@ impl SessionStore {
         // cannot replay an oversized string into init payloads or provider
         // state that the 256-byte summary bound already refuses to carry.
         session.model = bounded_summary_text(&session.model, MAX_SUMMARY_MODEL_BYTES);
+        // A damaged or out-of-contract projection degrades to the complete
+        // transcript instead of failing the load; the transcript is always a
+        // safe effective context.
+        if let Some(state) = session.compaction.take() {
+            session.compaction = crate::compaction::sanitize_loaded_state(state, &session.messages);
+        }
         Ok(session)
     }
 

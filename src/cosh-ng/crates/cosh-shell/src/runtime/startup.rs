@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use crate::diagnostics::health::{record_startup_health_recommendations, HealthScanReport};
@@ -180,7 +181,7 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
         let status = Command::new(command)
             .args(&args[3..])
             .status()
-            .map(|s| s.code().unwrap_or(1))
+            .map(passthrough_exit_code)
             .unwrap_or_else(|err| {
                 let command = crate::evidence::redact_sensitive_text(command).0;
                 let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
@@ -196,7 +197,7 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
         let status = Command::new(&shell)
             .args(&pass_args)
             .status()
-            .map(|s| s.code().unwrap_or(1))
+            .map(passthrough_exit_code)
             .unwrap_or_else(|err| {
                 eprintln!("cosh-shell: exec {shell} failed: {err}");
                 126
@@ -211,7 +212,7 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
             .args(&pass_args)
             .stdin(Stdio::inherit())
             .status()
-            .map(|s| s.code().unwrap_or(1))
+            .map(passthrough_exit_code)
             .unwrap_or_else(|err| {
                 eprintln!("cosh-shell: exec {shell} failed: {err}");
                 126
@@ -220,6 +221,13 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
     }
 
     None
+}
+
+fn passthrough_exit_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 pub(crate) fn passthrough_raw_non_interactive(args: &[String]) -> Option<i32> {

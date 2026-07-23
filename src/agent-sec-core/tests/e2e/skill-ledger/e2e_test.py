@@ -129,7 +129,12 @@ class Workspace:
     """Shared test workspace: isolated XDG dirs, skills dir."""
 
     def __init__(self):
-        self.root = Path(tempfile.mkdtemp(prefix="e2e_rpm_skill_ledger_"))
+        # Resolve the temp root immediately so that macOS /var/folders/...
+        # (a symlink to /private/var/folders/...) is expanded before certify
+        # records the canonical path. The cosh hook script also calls
+        # Path.resolve(), so both sides agree on the same real path and
+        # drifted skills are not misreported as unmanaged.
+        self.root = Path(tempfile.mkdtemp(prefix="e2e_rpm_skill_ledger_")).resolve()
         self.xdg_data = self.root / "xdg_data"
         self.xdg_config = self.root / "xdg_config"
         self.xdg_data.mkdir()

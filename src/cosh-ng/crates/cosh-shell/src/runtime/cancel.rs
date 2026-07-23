@@ -168,6 +168,10 @@ fn clear_active_run_request_buffers(active_run: &mut crate::agent::run::ActiveAg
 }
 
 fn suppress_pending_work_after_agent_cancel(state: &mut InlineState) {
+    // Explicit user cancellation authorizes discarding the ENTIRE pending
+    // queue — including control responses. This is a deliberate, user-driven
+    // reset of the conversation, not an accidental loss: the user asked to
+    // stop everything the Agent had in flight.
     state.agent_run.queued_requests.clear();
     state.hooks.pending_consultation = None;
     state.hooks.pending_consultation_queue.clear();
@@ -232,6 +236,8 @@ mod tests {
             .push_back(PendingAgentRequest {
                 request: agent_request("queued"),
                 origin: AgentRunOrigin::Standard,
+                intent: crate::agent::run::AgentStartIntent::UserInitiated,
+                class: crate::agent::run::PendingRequestClass::Normal,
                 selectable_after_event_index: None,
                 before_held_text: false,
             });

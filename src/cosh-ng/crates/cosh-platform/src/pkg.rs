@@ -81,7 +81,12 @@ pub fn pkg_install(
     }
 }
 
-/// Execute a package search operation.
+/// Execute a package search operation using the selected backend's pattern semantics.
+///
+/// The query is passed as one argument without shell expansion. CLI callers use
+/// [`crate::validate::validate_pkg_search_query`] to enforce a portable pattern
+/// subset; direct callers are responsible for choosing their validation policy.
+/// DNF glob matching and apt-cache regular-expression matching are not equivalent.
 pub fn pkg_search(distro: &Distro, query: &str) -> Result<PkgSearchResult, CoshError> {
     let mgr = distro.pkg_manager();
     let (cmd, args) = match mgr {
@@ -99,6 +104,12 @@ pub fn pkg_search(distro: &Distro, query: &str) -> Result<PkgSearchResult, CoshE
     };
 
     let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
+    check_search_status(
+        cmd,
+        output.status.success(),
+        output.status.code(),
+        &output.stderr,
+    )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut packages = parse_search_output(&stdout, mgr);
@@ -114,6 +125,33 @@ pub fn pkg_search(distro: &Distro, query: &str) -> Result<PkgSearchResult, CoshE
 
     let total = packages.len();
     Ok(PkgSearchResult { packages, total })
+}
+
+fn check_search_status(
+    cmd: &str,
+    success: bool,
+    status_code: Option<i32>,
+    stderr: &[u8],
+) -> Result<(), CoshError> {
+    if success {
+        return Ok(());
+    }
+
+    let status = status_code.map_or_else(
+        || "terminated without an exit code".to_string(),
+        |code| format!("exit code {code}"),
+    );
+    let stderr = String::from_utf8_lossy(stderr);
+    let detail = stderr.trim();
+    let message = if detail.is_empty() {
+        format!("{cmd} failed to process the search query ({status})")
+    } else {
+        format!("{cmd} failed to process the search query ({status}): {detail}")
+    };
+
+    Err(CoshError::new(ErrorCode::PkgBackendError, message, "pkg")
+        .recoverable(true)
+        .with_hint("Review the search query for the selected package manager's pattern syntax"))
 }
 
 /// List installed packages on the detected distro.
@@ -707,6 +745,33 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code, ErrorCode::UnsupportedDistro);
+    }
+
+    #[test]
+    fn test_pkg_search_backend_failure_is_propagated() {
+        let err = check_search_status(
+            "apt-cache",
+            false,
+            Some(100),
+            b"Regex compilation error - Invalid regular expression",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::PkgBackendError);
+        assert!(err.recoverable);
+        assert!(err.message.contains("apt-cache"));
+        assert!(err.message.contains("search query"));
+        assert!(err.message.contains("exit code 100"));
+        assert!(err.message.contains("Regex compilation error"));
+        assert!(err
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("search query")));
+    }
+
+    #[test]
+    fn test_pkg_search_backend_success_ignores_stderr() {
+        assert!(check_search_status("dnf", true, Some(0), b"warning").is_ok());
     }
 
     // --- pkg_remove with unsupported distro ---

@@ -77,6 +77,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentQueuedFooter => {
             "This failure will be analyzed after the current Agent run finishes."
         }
+        MessageId::AgentQueueFullTitle => "Agent queue full",
+        MessageId::AgentControlQueueFullBody => {
+            "Too many queued requests to accept this response right now. \
+             The card is still pending — answer it again in a moment."
+        }
         _ => return None,
     })
 }

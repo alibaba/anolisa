@@ -87,8 +87,9 @@ pub(crate) use crate::activity::runtime::{
 };
 pub(crate) use crate::agent::events::flush_held_agent_events;
 pub(crate) use crate::agent::run::{
-    start_agent_run, start_agent_run_with_origin, stop_active_agent_run_without_rendering,
-    AgentRunOrigin,
+    control_queue_has_capacity, start_agent_run, start_agent_run_control_response,
+    start_agent_run_with_origin_disposition, stop_active_agent_run_without_rendering,
+    AgentRunOrigin, AgentStartDisposition, AgentStartIntent,
 };
 pub(crate) use crate::approval::approved_tool::{
     request_is_executable_bash_tool, request_is_readonly_builtin_tool,

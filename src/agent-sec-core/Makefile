@@ -111,6 +111,16 @@ test: test-python test-rust test-openclaw-plugin ## Run all tests
 # Build output directory — all artifacts are collected here after build.
 # Override from outside: make build-all BUILD_DIR=/path/to/output
 BUILD_DIR ?= target
+CLI_WHEEL_BUILD_DIR ?= agent-sec-cli/target/wheels
+CLI_WHEEL_PATTERN := agent_sec_cli-*.whl
+
+define require_single_cli_wheel
+set -- "$(1)"/$(CLI_WHEEL_PATTERN); \
+if [ "$$#" -ne 1 ] || [ ! -f "$$1" ]; then \
+	echo "ERROR: expected exactly one agent-sec-cli wheel in $(1)" >&2; \
+	exit 1; \
+fi;
+endef
 
 .PHONY: build-sandbox
 build-sandbox: ## Build linux-sandbox binary
@@ -120,10 +130,13 @@ build-sandbox: ## Build linux-sandbox binary
 
 .PHONY: build-cli
 build-cli: ## Build agent-sec-cli wheel with maturin (Rust + Python)
+	rm -f $(CLI_WHEEL_BUILD_DIR)/$(CLI_WHEEL_PATTERN)
+	install -d -m 0755 $(BUILD_DIR)/wheels
+	rm -f $(BUILD_DIR)/wheels/$(CLI_WHEEL_PATTERN)
 	cd agent-sec-cli && uv sync --only-group dev --no-install-project && \
 		uv run --no-sync maturin build --release -i python3.11 --manylinux off
-	install -d -m 0755 $(BUILD_DIR)/wheels
-	cp -p agent-sec-cli/target/wheels/*.whl $(BUILD_DIR)/wheels/
+	@$(call require_single_cli_wheel,$(CLI_WHEEL_BUILD_DIR)) \
+		cp -p "$$1" $(BUILD_DIR)/wheels/
 
 .PHONY: setup
 setup: ## Install all dependencies (including dev), create .venv
@@ -272,7 +285,8 @@ install: install-all ## Install all components (alias for install-all)
 
 .PHONY: install-cli
 install-cli: ## Install agent-sec-cli wheel (for dev/debug)
-	pip3 install $(BUILD_DIR)/wheels/agent_sec_cli-*.whl
+	@$(call require_single_cli_wheel,$(BUILD_DIR)/wheels) \
+		pip3 install "$$1"
 
 .PHONY: install-cli-site
 install-cli-site: ## RPM: Copy staged site-packages to private dir + wrappers
@@ -300,8 +314,8 @@ endif
 	@echo "Installing dependencies from uv.lock ..."
 	cd agent-sec-cli && UV_PROJECT_ENVIRONMENT=$(VENV_DIR) uv sync --frozen --no-dev --no-install-project
 	@echo "Installing agent-sec-cli wheel ..."
-	uv pip install --python $(VENV_DIR)/bin/python --no-deps \
-		$(BUILD_DIR)/wheels/agent_sec_cli-*.whl
+	@$(call require_single_cli_wheel,$(BUILD_DIR)/wheels) \
+		uv pip install --python $(VENV_DIR)/bin/python --no-deps "$$1"
 	@echo "Creating symlink ..."
 	install -d -m 0755 $(BINDIR)
 	ln -sf $(VENV_DIR)/bin/agent-sec-cli $(BINDIR)/agent-sec-cli

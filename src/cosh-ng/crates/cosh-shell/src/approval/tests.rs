@@ -662,6 +662,126 @@ fn shell_handoff_validation_message_uses_active_language() {
     assert_eq!(unknown, "custom validation");
 }
 
+#[test]
+fn full_control_queue_keeps_approval_pending_and_journal_untouched() {
+    use crate::agent::queue::MAX_TOTAL_QUEUED_AGENT_REQUESTS;
+    use crate::agent::run::{AgentStartIntent, PendingAgentRequest, PendingRequestClass};
+
+    let mut state = InlineState::default();
+    state.approvals.requests.push(provider_tool_request(
+        "run_shell_command",
+        Some(serde_json::json!({ "command": "echo reserved" })),
+    ));
+    let approval_id = state.approvals.requests[0].id.clone();
+
+    // Force queueing (compaction recommended) and exhaust the hard cap.
+    crate::slash::session::note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:0:200000:100000",
+    );
+    for index in 0..MAX_TOTAL_QUEUED_AGENT_REQUESTS {
+        let mut filler_event =
+            ShellEvent::user_input_intercepted("session-1", format!("filler {index}"));
+        filler_event.cwd = Some("/repo".to_string());
+        let request = agent_request_from_intercepted_input(&filler_event, index + 10, true)
+            .expect("filler request");
+        state
+            .agent_run
+            .queued_requests
+            .push_back(PendingAgentRequest {
+                request,
+                origin: AgentRunOrigin::Standard,
+                intent: AgentStartIntent::UserInitiated,
+                class: PendingRequestClass::ControlResponse,
+                selectable_after_event_index: None,
+                before_held_text: false,
+            });
+    }
+
+    let mut approve = ShellEvent::user_input_intercepted("session-1", &approval_id);
+    approve.component = Some("card".to_string());
+    approve.message = Some("approve".to_string());
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_approval_actions(&[approve], &[], &adapter, &mut state, &mut output, 200)
+        .expect("approval action");
+
+    // Nothing was half-consumed: the approval stays pending and retryable,
+    // the journal recorded nothing, and the queue did not grow.
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert!(state.approvals.journal.is_empty());
+    assert_eq!(
+        state.agent_run.queued_requests.len(),
+        MAX_TOTAL_QUEUED_AGENT_REQUESTS
+    );
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(rendered.contains("still pending"), "{rendered}");
+}
+
+#[test]
+fn full_queue_does_not_block_direct_owner_approval_resolution() {
+    use crate::agent::queue::MAX_TOTAL_QUEUED_AGENT_REQUESTS;
+    use crate::agent::run::{AgentStartIntent, PendingAgentRequest, PendingRequestClass};
+
+    // The active provider run owns this control request: the resolution is
+    // delivered directly through its handle and consumes no queue slot, so a
+    // full queue must never reject it — the provider is blocked on exactly
+    // this response and the queue cannot drain while it waits.
+    let mut state = InlineState::default();
+    let (dir, mut active_run) = active_run_for_approval_test();
+    active_run
+        .governed_events
+        .push(governed_provider_tool_permission("ctrl-1", "toolu-1"));
+    state.agent_run.active = Some(active_run);
+    state.approvals.requests.push(provider_tool_request(
+        "Read",
+        Some(serde_json::json!({ "file_path": "Cargo.toml" })),
+    ));
+    for index in 0..MAX_TOTAL_QUEUED_AGENT_REQUESTS {
+        let mut filler_event =
+            ShellEvent::user_input_intercepted("session-1", format!("filler {index}"));
+        filler_event.cwd = Some("/repo".to_string());
+        let request = agent_request_from_intercepted_input(&filler_event, index + 500, true)
+            .expect("filler request");
+        state
+            .agent_run
+            .queued_requests
+            .push_back(PendingAgentRequest {
+                request,
+                origin: AgentRunOrigin::Standard,
+                intent: AgentStartIntent::UserInitiated,
+                class: PendingRequestClass::ControlResponse,
+                selectable_after_event_index: None,
+                before_held_text: false,
+            });
+    }
+
+    let mut approve = ShellEvent::user_input_intercepted("session-1", "req-1");
+    approve.component = Some("card".to_string());
+    approve.message = Some("approve".to_string());
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_approval_actions(&[approve], &[], &adapter, &mut state, &mut output, 300)
+        .expect("approval action");
+
+    // The approval resolved (delivered to the owner), the queue did not grow,
+    // and no queue-full rejection was shown.
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved
+    );
+    assert_eq!(
+        state.agent_run.queued_requests.len(),
+        MAX_TOTAL_QUEUED_AGENT_REQUESTS
+    );
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(!rendered.contains("still pending"), "{rendered}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn provider_tool_request(
     tool_name: &str,
     tool_input: Option<serde_json::Value>,

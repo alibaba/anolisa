@@ -30,10 +30,26 @@ Pipeline: Env Attribution -> Layered dispatch -> Compression -> TOON Encoding
 
 Hook point: **PostToolUse**
 
+Output contract per agent:
+  - cosh-ng: the compressed payload replaces the original llmContent via
+    ``hookSpecificOutput.replacement`` (introduced by issue #1614).
+    ``additionalContext`` carries environment attribution.
+  - claude-code (>= 2.1.121): the compressed payload *replaces* the
+    model-visible tool result via ``hookSpecificOutput.updatedToolOutput``.
+    ``additionalContext`` is additive in Claude Code (appended alongside
+    the original tool result), so it only carries genuinely additive
+    diagnostics (environment attribution). Older Claude Code versions fail
+    open: compression is disabled instead of injecting a duplicate payload
+    (issue #1645).
+  - other agents: the compressed payload is injected via
+    ``additionalContext`` per each runtime's hook contract.
+
 The agent ID is read from the TOKENLESS_AGENT_ID environment variable
 (set by the install action script).  Fallback paths follow the ANOLISA
 FHS spec: /usr/bin/tokenless.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -54,8 +70,10 @@ from hook_utils import (
     get_thresholds,
     is_cosh_ng_runtime,
     is_skill_file,
+    parse_version,
     resolve_binary,
     resolve_tool_call_id,
+    secure_write_text,
     skip,
     try_parse_json,
     unwrap_string_json,
@@ -68,6 +86,19 @@ _FALLBACK_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
 # Cosh-NG gets a distinct agent ID for stats attribution.
 _COSH_NG_AGENT_ID = "cosh-ng"
 _MIN_RESPONSE_CHARS = 200
+
+# Claude Code added hookSpecificOutput.updatedToolOutput (normal-path tool
+# output replacement for all tools) in v2.1.121. Older versions only support
+# the additive additionalContext, which would duplicate the payload.
+_CLAUDE_AGENT_ID = "claude-code"
+_CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
+
+# Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
+# invalidate it. Hooks run as a fresh process per tool call and spawning the
+# node CLI every time would add noticeable latency.
+_CLAUDE_VERSION_CACHE = os.path.join(
+    os.path.expanduser("~"), ".tokenless", ".claude-version"
+)
 
 
 # -- helpers -------------------------------------------------------------------
@@ -89,6 +120,110 @@ def _build_additional_context(
         parts.append(env_attribution)
     parts.append(content)
     return "\n".join(parts)
+
+
+def _emit(output: dict) -> None:
+    print(json.dumps(output, ensure_ascii=False))
+
+
+def _emit_attribution_or_skip(
+    env_attribution: str,
+    cosh_ng: bool = False,
+) -> None:
+    """Pass the original result through, keeping only additive diagnostics.
+
+    Emits an attribution-only output when present (it is genuinely
+    additive and safe on every agent), otherwise a plain skip.
+    For Cosh-NG, uses the replacement-aware output format.
+    Never returns.
+    """
+    if env_attribution:
+        if cosh_ng:
+            _emit(build_cosh_ng_post_tool_output(
+                replacement=None,
+                additional_context=env_attribution,
+            ))
+        else:
+            _emit({
+                "suppressOutput": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": env_attribution,
+                },
+            })
+        sys.exit(0)
+    skip()
+
+
+def _cached_claude_version(claude_bin: str) -> tuple | None:
+    """Return the Claude Code version tuple, caching `claude --version`."""
+    try:
+        st = os.stat(claude_bin)
+        cache_key = f"{claude_bin}:{int(st.st_mtime)}:{st.st_size}"
+    except OSError:
+        cache_key = claude_bin
+
+    try:
+        with open(_CLAUDE_VERSION_CACHE) as f:
+            key, _, ver_str = f.read().strip().partition("\n")
+        if key == cache_key:
+            return parse_version(ver_str)
+    except OSError:
+        pass
+
+    try:
+        proc = subprocess.run(
+            [claude_bin, "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception as e:
+        warn(f"claude --version failed: {e}")
+        return None
+    if proc.returncode != 0:
+        return None
+    ver = parse_version(proc.stdout)
+    if ver:
+        try:
+            # Same hardened write as other ~/.tokenless state files (0o600,
+            # symlink-safe) so the cache stays private on shared HOMEs.
+            secure_write_text(
+                _CLAUDE_VERSION_CACHE, f"{cache_key}\n{proc.stdout.strip()}"
+            )
+        except OSError:
+            pass
+    return ver
+
+
+def _claude_supports_replacement() -> bool:
+    """Whether the running Claude Code supports updatedToolOutput (>= 2.1.121).
+
+    Returns False when the version cannot be determined; the caller then
+    fails open by disabling compression, so unknown versions never receive a
+    duplicate compressed payload through additionalContext.
+    """
+    claude_bin = resolve_binary("claude")
+    if not claude_bin:
+        return False
+    ver = _cached_claude_version(claude_bin)
+    return ver is not None and ver >= _CLAUDE_MIN_REPLACE_VERSION
+
+
+def _restore_dropped_schema_fields(original: dict, compressed: dict) -> dict:
+    """Restore top-level keys dropped by compression when originally empty.
+
+    compress-response drops nulls, empty values ("" / {} / []) and configured
+    debug fields. Built-in Claude Code tools expect a stable output schema
+    (e.g. Bash: stdout/stderr/interrupted/isImage), so cheap empty fields are
+    restored for updatedToolOutput; intentionally dropped non-empty debug
+    payloads stay dropped.
+    """
+    restored = dict(compressed)
+    for key, value in original.items():
+        if key in restored:
+            continue
+        if value is None or value == "" or value == {} or value == []:
+            restored[key] = value
+    return restored
 
 
 def _warn_subprocess(label: str, proc: subprocess.CompletedProcess) -> None:
@@ -160,28 +295,18 @@ def main() -> None:
                 {"stdout": tool_response_str}, separators=(",", ":"),
                 ensure_ascii=False,
             )
-            parsed = try_parse_json(tool_response)
         else:
             tool_response = tool_response_str
     else:
-        # Copilot-Shell path: tool_response is a plain string.
-        if isinstance(tool_response_raw, str):
-            # Skip skill files (YAML frontmatter)
-            if is_skill_file(tool_response_raw):
-                skip()
-            unwrapped = unwrap_string_json(tool_response_raw)
-            if not unwrapped:
-                skip()  # Plain text, not JSON
-            tool_response = unwrapped
-        elif isinstance(tool_response_raw, (dict, list)):
-            tool_response = json.dumps(tool_response_raw, separators=(",", ":"))
-        else:
-            skip()
-
-        # Validate it's JSON
-        parsed = try_parse_json(tool_response)
+        # Copilot-Shell and other runtimes: tool_response is a string.
+        if not isinstance(tool_response_raw, str):
+            tool_response_raw = json.dumps(tool_response_raw, ensure_ascii=False)
+        tool_response_str = tool_response_raw
+        parsed = try_parse_json(tool_response_str)
         if parsed is None:
-            skip()
+            tool_response = tool_response_str
+        else:
+            tool_response = tool_response_str
 
     # 7. Extract caller context
     session_id = input_data.get("session_id", "")
@@ -198,44 +323,12 @@ def main() -> None:
 
     # 9. Content retrieval -- skip entirely (preserve integrity)
     if tool_name in SKIP_TOOLS:
-        if env_attribution:
-            if cosh_ng:
-                output = build_cosh_ng_post_tool_output(
-                    replacement=None,
-                    additional_context=env_attribution,
-                )
-            else:
-                output = {
-                    "suppressOutput": True,
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "additionalContext": env_attribution,
-                    },
-                }
-            print(json.dumps(output, ensure_ascii=False))
-            return
-        skip()
+        _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
 
     # 10. All other tools -- skip small responses, but still inject
     # env attribution for error cases.
     if len(tool_response) < _MIN_RESPONSE_CHARS:
-        if env_attribution:
-            if cosh_ng:
-                output = build_cosh_ng_post_tool_output(
-                    replacement=None,
-                    additional_context=env_attribution,
-                )
-            else:
-                output = {
-                    "suppressOutput": True,
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "additionalContext": env_attribution,
-                    },
-                }
-            print(json.dumps(output, ensure_ascii=False))
-            return
-        skip()
+        _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
 
     # 11. Step 1: Response compression with 3-layer thresholds
     compressed = tool_response
@@ -300,28 +393,12 @@ def main() -> None:
     # Determine final output
     final_output = toon_output if toon_output else compressed
 
-    # 13. Compression skip check: if no savings achieved, don't emit replacement.
+    # Nothing shrank -- pass the original through untouched instead of
+    # emitting a same-size duplicate of the response.
     if not used_resp_compression and not toon_output:
-        # No compression savings -- only emit if there's env attribution.
-        if env_attribution:
-            if cosh_ng:
-                output = build_cosh_ng_post_tool_output(
-                    replacement=None,
-                    additional_context=env_attribution,
-                )
-            else:
-                output = {
-                    "suppressOutput": True,
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "additionalContext": env_attribution,
-                    },
-                }
-            print(json.dumps(output, ensure_ascii=False))
-            return
-        skip()
+        _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
 
-    # 14. Build response -- Cosh-NG vs Copilot-Shell paths diverge here.
+    # 13. Build response -- runtime-specific output format.
     if cosh_ng:
         # Cosh-NG: emit replacement (model-visible compressed content) +
         # additionalContext (environment attribution).
@@ -332,22 +409,73 @@ def main() -> None:
             replacement=final_output,
             additional_context=additional_ctx,
         )
-    else:
-        # Copilot-Shell: emit suppressOutput + additionalContext with
-        # both the compressed content and environment attribution.
-        context = _build_additional_context(
-            final_output,
-            env_attribution=env_attribution,
-        )
-        output = {
-            "suppressOutput": True,
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": context,
-            },
-        }
+        _emit(output)
+        return
 
-    print(json.dumps(output, ensure_ascii=False))
+    # Claude Code: additionalContext is *additive* -- the model would see both
+    # the original tool result and the compressed copy, inflating the context
+    # instead of shrinking it (issue #1645). Replace the tool result via
+    # updatedToolOutput (>= 2.1.121) and keep additionalContext for additive
+    # diagnostics only. Unsupported versions fail open via pass-through.
+    if agent_id == _CLAUDE_AGENT_ID:
+        if not _claude_supports_replacement():
+            warn(
+                "Claude Code < 2.1.121 (or version unknown): "
+                "updatedToolOutput unsupported, response compression disabled."
+            )
+            _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
+
+        if isinstance(tool_response_raw, (dict, list)):
+            # Structured original: the replacement must preserve the built-in
+            # tool output schema, so TOON (a text encoding) is not applicable
+            # and only a genuine compress-response win qualifies.
+            if not used_resp_compression:
+                _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
+            compressed_parsed = try_parse_json(compressed)
+            if isinstance(tool_response_raw, dict) and isinstance(
+                compressed_parsed, dict
+            ):
+                updated_output = _restore_dropped_schema_fields(
+                    tool_response_raw, compressed_parsed
+                )
+            elif compressed_parsed is not None:
+                updated_output = compressed_parsed
+            else:
+                _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
+            # Restoring empty schema fields can cancel out a marginal win;
+            # only replace when the result is strictly smaller than the
+            # original serialized response.
+            if len(json.dumps(updated_output, separators=(",", ":"))) >= len(
+                tool_response
+            ):
+                _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
+        else:
+            # String original (JSON-in-string): replace with the smallest
+            # text form (TOON when it won, compressed JSON otherwise).
+            updated_output = final_output
+
+        hook_output = {
+            "hookEventName": "PostToolUse",
+            "updatedToolOutput": updated_output,
+        }
+        if env_attribution:
+            hook_output["additionalContext"] = env_attribution
+        _emit({"suppressOutput": True, "hookSpecificOutput": hook_output})
+        return
+
+    # Other agents: inject via additionalContext per their hook contracts.
+    context = _build_additional_context(
+        final_output,
+        env_attribution=env_attribution,
+    )
+
+    _emit({
+        "suppressOutput": True,
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": context,
+        },
+    })
 
 
 if __name__ == "__main__":

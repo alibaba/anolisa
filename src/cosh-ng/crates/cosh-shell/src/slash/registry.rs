@@ -66,7 +66,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/session",
-            usage: "/session [status|list|resume <id>|clear <id>...|clear --all]",
+            usage: "/session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
             summary_id: MessageId::HelpSummarySession,
             group: Some("Sessions"),
             scope: "session",

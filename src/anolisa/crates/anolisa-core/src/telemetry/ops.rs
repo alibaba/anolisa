@@ -1,18 +1,19 @@
-//! Ops telemetry environment setup.
+//! Ops channel on-disk layout.
 //!
-//! Responsibilities:
+//! Owns the filesystem side of the ops telemetry channel:
 //! - Create `/var/log/anolisa/sls/ops/` directory
 //! - Pre-create component `.jsonl` files
-//! - Configure logrotate for ops `.jsonl` files
-//! - Enable / remove agentsight SLS log marker
-//! - Write `instance.jsonl` snapshot
+//! - Configure / remove logrotate for the ops `.jsonl` files
+//!
+//! Deliberately pure filesystem: instance-snapshot writing lives in
+//! [`crate::telemetry::instance`] and region probing in
+//! [`crate::telemetry::common`], so this module has no metadata dependencies.
 
-use crate::instance::{InstanceInfo, InstanceProber, InstanceSnapshot};
-use crate::metadata::MetadataClient;
-use crate::telemetry::{TelemetryConfig, TelemetryError};
 use std::fs;
 
-/// Component .jsonl files to pre-create in the ops directory
+use crate::telemetry::{TelemetryConfig, TelemetryError};
+
+/// Component `.jsonl` files to pre-create in the ops directory.
 const OPS_LOG_FILES: &[&str] = &[
     "instance",
     "agentsight",
@@ -23,45 +24,46 @@ const OPS_LOG_FILES: &[&str] = &[
     "skillfs",
 ];
 
-/// Ops telemetry setup: directory, .jsonl files, instance snapshot, SLS marker.
-pub struct OpsTelemetrySetup<'a> {
+/// Provisions the ops directory layout: the directory itself, the pre-created
+/// component `.jsonl` files, and the logrotate policy.
+pub struct OpsLayout<'a> {
     config: &'a TelemetryConfig,
 }
 
-impl<'a> OpsTelemetrySetup<'a> {
+impl<'a> OpsLayout<'a> {
     pub fn new(config: &'a TelemetryConfig) -> Self {
         Self { config }
     }
 
-    /// Create `/var/log/anolisa/sls/ops/` with mode 755
+    /// Create `/var/log/anolisa/sls/ops/` with mode 755.
     pub fn create_ops_dir(&self) -> Result<(), TelemetryError> {
         let ops_dir = &self.config.ops_dir;
         if !ops_dir.exists() {
             fs::create_dir_all(ops_dir)?;
-        }
 
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(ops_dir, fs::Permissions::from_mode(0o755))?;
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(ops_dir, fs::Permissions::from_mode(0o755))?;
+            }
         }
 
         Ok(())
     }
 
-    /// Pre-create empty .jsonl files with mode 666 in ops directory
+    /// Pre-create empty `.jsonl` files with mode 666 in the ops directory.
     pub fn create_ops_jsonl_files(&self) -> Result<(), TelemetryError> {
         let ops_dir = &self.config.ops_dir;
         for name in OPS_LOG_FILES {
             let file_path = ops_dir.join(format!("{name}.jsonl"));
             if !file_path.exists() {
                 fs::write(&file_path, "")?;
-            }
 
-            #[cfg(target_os = "linux")]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&file_path, fs::Permissions::from_mode(0o666))?;
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&file_path, fs::Permissions::from_mode(0o666))?;
+                }
             }
         }
         Ok(())
@@ -70,7 +72,8 @@ impl<'a> OpsTelemetrySetup<'a> {
     /// Write logrotate config for ops `.jsonl` files.
     ///
     /// Creates `/etc/logrotate.d/anolisa` with a `size 30M / rotate 1` policy
-    /// using rename-mode rotation so ilogtail inode offsets are preserved.
+    /// using rename-mode rotation so the uploader's inode offsets stay valid
+    /// across a rotation (see [`crate::telemetry::uploader`]).
     pub fn setup_logrotate(&self) -> Result<(), TelemetryError> {
         let config_path = &self.config.logrotate_config_path;
         if let Some(parent) = config_path.parent() {
@@ -101,54 +104,6 @@ impl<'a> OpsTelemetrySetup<'a> {
         }
         Ok(())
     }
-
-    /// Enable agentsight SLS log marker file
-    pub fn enable_sls_log_marker(&self) -> Result<(), TelemetryError> {
-        let marker = &self.config.sls_log_marker;
-        if let Some(parent) = marker.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(marker, "")?;
-        Ok(())
-    }
-
-    /// Remove agentsight SLS log marker file
-    pub fn remove_sls_log_marker(&self) -> Result<(), TelemetryError> {
-        let marker = &self.config.sls_log_marker;
-        if marker.exists() {
-            fs::remove_file(marker)?;
-        }
-        Ok(())
-    }
-
-    /// Write instance.jsonl snapshot via InstanceProber.
-    ///
-    /// Returns the probed [`InstanceInfo`] so callers can reuse the instance-id
-    /// for other telemetry configuration (e.g. `user_defined_id`).
-    pub fn write_instance_snapshot(&self, region: &str) -> Result<InstanceInfo, TelemetryError> {
-        // `metadata_url` points at the region-id endpoint; `from_key_url`
-        // strips the trailing key to obtain the `/latest/meta-data` base.
-        let client = MetadataClient::from_key_url(&self.config.metadata_url);
-
-        let prober = InstanceProber::with_client(
-            client,
-            self.config.machine_id_path.clone(),
-            self.config.release_path.clone(),
-            self.config.os_release_path.clone(),
-            self.config.instance_id_cache_path.clone(),
-            self.config.cpu_present_path.clone(),
-            self.config.image_id_path.clone(),
-        );
-
-        let instance_info = prober.probe(region);
-
-        let snapshot = InstanceSnapshot::from_instance_info(&instance_info);
-
-        let instance_jsonl = self.config.ops_dir.join("instance.jsonl");
-        snapshot.write_to(&instance_jsonl)?;
-
-        Ok(instance_info)
-    }
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────
@@ -163,7 +118,7 @@ mod tests {
     fn test_create_ops_dir() {
         let dir = TempDir::new().unwrap();
         let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
+        let ops = OpsLayout::new(&cfg);
         ops.create_ops_dir().unwrap();
 
         let ops_dir = dir.path().join("ops");
@@ -175,7 +130,7 @@ mod tests {
     fn test_create_ops_jsonl_files() {
         let dir = TempDir::new().unwrap();
         let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
+        let ops = OpsLayout::new(&cfg);
         ops.create_ops_dir().unwrap();
         ops.create_ops_jsonl_files().unwrap();
 
@@ -190,7 +145,7 @@ mod tests {
     fn test_ops_jsonl_files_idempotent() {
         let dir = TempDir::new().unwrap();
         let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
+        let ops = OpsLayout::new(&cfg);
         ops.create_ops_dir().unwrap();
         ops.create_ops_jsonl_files().unwrap();
         ops.create_ops_jsonl_files().unwrap(); // second call should not fail
@@ -204,7 +159,7 @@ mod tests {
     fn test_setup_logrotate_creates_config() {
         let dir = TempDir::new().unwrap();
         let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
+        let ops = OpsLayout::new(&cfg);
         ops.setup_logrotate().unwrap();
 
         let content = fs::read_to_string(&cfg.logrotate_config_path).unwrap();
@@ -218,7 +173,7 @@ mod tests {
     fn test_setup_logrotate_idempotent() {
         let dir = TempDir::new().unwrap();
         let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
+        let ops = OpsLayout::new(&cfg);
         ops.setup_logrotate().unwrap();
         ops.setup_logrotate().unwrap();
 
@@ -230,7 +185,7 @@ mod tests {
     fn test_remove_logrotate_noop_when_absent() {
         let dir = TempDir::new().unwrap();
         let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
+        let ops = OpsLayout::new(&cfg);
         assert!(ops.remove_logrotate().is_ok());
     }
 
@@ -238,32 +193,11 @@ mod tests {
     fn test_remove_logrotate_deletes_config() {
         let dir = TempDir::new().unwrap();
         let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
+        let ops = OpsLayout::new(&cfg);
         ops.setup_logrotate().unwrap();
         assert!(cfg.logrotate_config_path.exists());
 
         ops.remove_logrotate().unwrap();
         assert!(!cfg.logrotate_config_path.exists());
-    }
-
-    #[test]
-    fn test_enable_and_remove_sls_log_marker() {
-        let dir = TempDir::new().unwrap();
-        let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
-
-        ops.enable_sls_log_marker().unwrap();
-        assert!(cfg.sls_log_marker.exists());
-
-        ops.remove_sls_log_marker().unwrap();
-        assert!(!cfg.sls_log_marker.exists());
-    }
-
-    #[test]
-    fn test_remove_sls_log_marker_noop_when_absent() {
-        let dir = TempDir::new().unwrap();
-        let cfg = test_config(&dir);
-        let ops = OpsTelemetrySetup::new(&cfg);
-        assert!(ops.remove_sls_log_marker().is_ok());
     }
 }
