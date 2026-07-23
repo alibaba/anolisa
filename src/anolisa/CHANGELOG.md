@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-07-23
+
+### Added
+
+- `anolisa telemetry` now lets administrators enable or disable data collection.
+- `anolisa telemetry` now lets administrators link or unlink named reporting.
+- `anolisa telemetry status` now reports collection and named-reporting states in text or JSON.
+- Adapter enable and disable commands now display component-provided follow-up notices.
+- Adapter JSON output now includes structured component-provided notices.
+- `anolisa install --version` JSON output now includes requested and resolved versions, source repository, and exact RPM.
+
+### Changed
+
+- Fresh ANOLISA RPM installations now enable anonymous telemetry by default.
+- RPM installation output now explains how to disable telemetry.
+- Enabled telemetry now resumes automatically after restarts on supported hosts.
+- `anolisa register` now warns that the command is deprecated.
+- `anolisa register` now enables telemetry without prompting.
+- `anolisa register status` now directs users to `anolisa telemetry status`.
+- `anolisa unregister` now disables telemetry while preserving local logs.
+- `anolisa install --version` now selects the exact host-compatible RPM matching the requested version.
+- `anolisa install --dry-run --version` now validates availability and displays the resolved RPM details.
+- Adapter dry-runs now preview component-provided notices without changing the host.
+- Adapter quiet output now suppresses component-provided notices.
+
+### Fixed
+
+- `anolisa register` now prevents duplicate uploads from earlier telemetry configurations.
+- `anolisa unregister` no longer leaves earlier telemetry configurations reporting.
+- `anolisa install --version` no longer changes the host when the requested RPM is unavailable or incompatible.
+- `anolisa install --version` no longer records success when a different RPM version is installed.
+- `anolisa repair` now rejects interrupted RPM installs whose installed version differs from the original request.
+- `anolisa repair` now reports when an interrupted RPM install's architecture cannot be verified.
+- `anolisa adapter disable` now shows saved follow-up notices even when component files are unavailable.
+- Adapter notices can no longer inject terminal formatting into human-readable output.
+
 ## [0.2.9] - 2026-07-22
 
 ### Added
@@ -609,6 +645,42 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.10] - 2026-07-23
+
+### 新增
+
+- `anolisa telemetry` 现可启用或停用数据收集。
+- `anolisa telemetry` 现可关联或取消具名上报。
+- `anolisa telemetry status` 现以文本或 JSON 显示收集和具名上报状态。
+- adapter 启用和停用命令现显示组件提供的后续提示。
+- adapter JSON 输出现包含结构化组件提示。
+- `anolisa install --version` JSON 输出现包含请求版本、解析版本、来源及精确 RPM。
+
+### 变更
+
+- 全新 ANOLISA RPM 安装现默认启用匿名遥测。
+- RPM 安装输出现说明如何停用遥测。
+- 已启用的遥测现会在支持的主机重启后自动恢复。
+- `anolisa register` 现提示该命令已弃用。
+- `anolisa register` 现无需确认即可启用遥测。
+- `anolisa register status` 现引导使用 `anolisa telemetry status`。
+- `anolisa unregister` 现停用遥测并保留本地日志。
+- `anolisa install --version` 现精确选择与请求版本匹配且兼容本机的 RPM。
+- `anolisa install --dry-run --version` 现验证可用性并显示解析后的 RPM 详情。
+- adapter dry-run 现预览组件提示且不更改主机。
+- adapter quiet 输出现隐藏组件提示。
+
+### 修复
+
+- `anolisa register` 现避免旧遥测配置重复上传。
+- `anolisa unregister` 不再让旧遥测配置继续上报。
+- `anolisa install --version` 在请求版本不可用或不兼容本机时不再更改主机。
+- `anolisa install --version` 安装到其他 RPM 版本时不再记录成功。
+- `anolisa repair` 现拒绝已装版本偏离原请求的中断 RPM 安装。
+- `anolisa repair` 现报告中断 RPM 安装的架构无法验证。
+- `anolisa adapter disable` 现可在组件文件不可用时显示已保存提示。
+- adapter 提示不再能向可读输出注入终端格式。
 
 ## [0.2.9] - 2026-07-22
 

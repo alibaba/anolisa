@@ -143,7 +143,34 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Jul 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Jul 23 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa telemetry` now lets administrators enable or disable data collection.
+- `anolisa telemetry` now lets administrators link or unlink named reporting.
+- `anolisa telemetry status` now reports collection and named-reporting states in text or JSON.
+- Adapter enable and disable commands now display component-provided follow-up notices.
+- Adapter JSON output now includes structured component-provided notices.
+- `anolisa install --version` JSON output now includes requested and resolved versions, source repository, and exact RPM.
+- Fresh ANOLISA RPM installations now enable anonymous telemetry by default.
+- RPM installation output now explains how to disable telemetry.
+- Enabled telemetry now resumes automatically after restarts on supported hosts.
+- `anolisa register` now warns that the command is deprecated.
+- `anolisa register` now enables telemetry without prompting.
+- `anolisa register status` now directs users to `anolisa telemetry status`.
+- `anolisa unregister` now disables telemetry while preserving local logs.
+- `anolisa install --version` now selects the exact host-compatible RPM matching the requested version.
+- `anolisa install --dry-run --version` now validates availability and displays the resolved RPM details.
+- Adapter dry-runs now preview component-provided notices without changing the host.
+- Adapter quiet output now suppresses component-provided notices.
+- `anolisa register` now prevents duplicate uploads from earlier telemetry configurations.
+- `anolisa unregister` no longer leaves earlier telemetry configurations reporting.
+- `anolisa install --version` no longer changes the host when the requested RPM is unavailable or incompatible.
+- `anolisa install --version` no longer records success when a different RPM version is installed.
+- `anolisa repair` now rejects interrupted RPM installs whose installed version differs from the original request.
+- `anolisa repair` now reports when an interrupted RPM install's architecture cannot be verified.
+- `anolisa adapter disable` now shows saved follow-up notices even when component files are unavailable.
+- Adapter notices can no longer inject terminal formatting into human-readable output.
+
+* Wed Jul 22 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.9-1
 - `anolisa update all` now updates every tracked raw and RPM component while leaving the CLI unchanged.
 - `anolisa repair` now restores damaged raw installations from their recorded versions.
 - `anolisa repair` now supports user-scope installations without root privileges.
