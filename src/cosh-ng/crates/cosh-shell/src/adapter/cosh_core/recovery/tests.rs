@@ -173,6 +173,55 @@ fn successful_selected_restore_commits_atomically_and_clears_selection() {
 }
 
 #[test]
+fn context_limit_failure_retains_the_persisted_session_for_compaction() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "context_limit: effective context exceeds the emergency threshold".to_string(),
+    }];
+
+    assert!(retain_context_session(&events, None));
+}
+
+#[test]
+fn ordinary_failure_does_not_retain_a_provider_session() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "API error 500".to_string(),
+    }];
+
+    assert!(!retain_context_session(&events, None));
+}
+
+#[test]
+fn persist_failure_does_not_retain_a_context_limited_session() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "context_limit: effective context exceeds the emergency threshold".to_string(),
+    }];
+    let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
+    let attempt = begin_session_attempt(&state, None, SCOPE);
+    let retain = retain_context_session(&events, Some("persist"));
+
+    assert!(!retain);
+    assert_eq!(
+        commit_pending_session_for_scope(
+            retain,
+            !retain,
+            &state,
+            &Arc::new(Mutex::new(Some(NEW_ID.to_string()))),
+            SCOPE,
+            Some(true),
+            &attempt,
+        ),
+        SessionCommitOutcome::Continue
+    );
+    assert_eq!(
+        state.lock().expect("session state").active_session_id(),
+        None
+    );
+}
+
+#[test]
 fn fresh_non_resumable_turn_preserves_unattempted_active_and_selection() {
     let state = selected_state();
     let attempt = begin_session_attempt(&state, None, SCOPE);

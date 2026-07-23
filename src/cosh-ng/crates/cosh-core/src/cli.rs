@@ -1,4 +1,55 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Manage configured MCP servers.
+    Mcp(McpArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub command: McpCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpCommand {
+    /// List configured MCP servers without exposing credentials.
+    List,
+    /// Connect to a configured MCP server and display its discovered tools.
+    Connect {
+        /// Configured MCP server name.
+        server: String,
+    },
+    /// Display a configured MCP server and its currently discovered tools.
+    Inspect {
+        /// Configured MCP server name.
+        server: String,
+    },
+    /// Reconnect to an enabled MCP server and rediscover its tools.
+    Refresh {
+        /// Configured MCP server name.
+        server: String,
+    },
+    /// Disable a configured MCP server until it is connected again.
+    Disconnect {
+        /// Configured MCP server name.
+        server: String,
+    },
+    /// Authorize an MCP server in a browser.
+    Login {
+        /// Configured MCP server name.
+        server: String,
+        /// Print the authorization URL and accept a pasted callback URL.
+        #[arg(long)]
+        manual: bool,
+    },
+    /// Remove saved OAuth credentials for an MCP server.
+    Logout {
+        /// Configured MCP server name.
+        server: String,
+    },
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -6,6 +57,8 @@ use clap::Parser;
     about = "cosh core — agent core + interactive terminal"
 )]
 pub struct CliArgs {
+    #[command(subcommand)]
+    pub command: Option<Command>,
     /// Force headless JSONL mode (otherwise auto-detected via TTY)
     #[arg(long)]
     pub headless: bool,
@@ -209,5 +262,38 @@ mod tests {
 
         assert_eq!(default_args.tools.as_deref(), Some("default"));
         assert_eq!(empty_args.tools.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn parses_mcp_login_command() {
+        let args =
+            CliArgs::try_parse_from(["cosh-core", "mcp", "login", "remote", "--manual"]).unwrap();
+        let Some(Command::Mcp(McpArgs {
+            command: McpCommand::Login { server, manual },
+        })) = args.command
+        else {
+            panic!("expected mcp login command");
+        };
+        assert_eq!(server, "remote");
+        assert!(manual);
+    }
+
+    #[test]
+    fn parses_mcp_lifecycle_command() {
+        let args = CliArgs::try_parse_from(["cosh-core", "mcp", "refresh", "remote"]).unwrap();
+        let Some(Command::Mcp(McpArgs {
+            command: McpCommand::Refresh { server },
+        })) = args.command
+        else {
+            panic!("expected MCP refresh command");
+        };
+        assert_eq!(server, "remote");
+    }
+
+    #[test]
+    fn preserves_single_shot_prompt() {
+        let args = CliArgs::try_parse_from(["cosh-core", "summarize this"]).unwrap();
+        assert_eq!(args.prompt.as_deref(), Some("summarize this"));
+        assert!(args.command.is_none());
     }
 }

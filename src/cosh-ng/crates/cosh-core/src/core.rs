@@ -156,10 +156,20 @@ impl CoshCore {
             None => return Outcome::Deny,
         };
 
+        if self.config.agent.allowed_tools.contains(tool_name) {
+            return Outcome::Allow;
+        }
+
         let kind = tool.kind();
 
         if kind == ToolKind::ReadOnly {
             return Outcome::Allow;
+        }
+
+        // MCP servers are external programs. Do not infer their side effects
+        // from a server-provided description or schema.
+        if kind == ToolKind::Mcp {
+            return Outcome::RequireApproval;
         }
 
         if mode == "suggest" {
@@ -581,6 +591,15 @@ impl CoshCore {
                 return Ok(());
             }
 
+            if tool_calls
+                .iter()
+                .any(|tc| tc.name.is_empty() && !tc.arguments.is_empty())
+            {
+                return Err(
+                    "Provider emitted an incomplete tool call without a function name".to_string(),
+                );
+            }
+
             let tc_infos: Vec<crate::provider::ToolCallInfo> = tool_calls
                 .iter()
                 .filter(|tc| !tc.name.is_empty())
@@ -593,6 +612,16 @@ impl CoshCore {
                     },
                 })
                 .collect();
+
+            // An arguments-only streamed tool-call fragment cannot be executed or
+            // represented in the next provider request. Continuing would append an
+            // empty assistant message and ask the model again, eventually consuming
+            // the entire turn budget without making progress.
+            if tc_infos.is_empty() {
+                return Err(
+                    "Provider emitted an incomplete tool call without a function name".to_string(),
+                );
+            }
             self.messages
                 .push(Message::assistant_with_tool_calls(&text_buf, tc_infos));
 
@@ -820,11 +849,25 @@ impl CoshCore {
                     .await;
                 self.emit_hook_notifications(writer, &post_hook.notifications, Some(&tc.id));
 
+                // Precedence: block/deny > updated response > original,
+                // then append additional context.
                 let mut result = if let HookDecision::Block(reason) = &post_hook.decision {
                     ToolResult::error(format!("Post-tool hook denied: {reason}"))
-                } else if let Some(ref extra) = post_hook.additional_context {
+                } else if post_hook.updated_tool_response.is_some()
+                    || post_hook.additional_context.is_some()
+                {
+                    let base = post_hook
+                        .updated_tool_response
+                        .as_deref()
+                        .unwrap_or(&result.output);
+                    let output = if let Some(ref extra) = post_hook.additional_context {
+                        format!("{base}\n[Hook context] {extra}")
+                    } else {
+                        base.to_string()
+                    };
                     ToolResult {
-                        output: format!("{}\n[Hook context] {extra}", result.output),
+                        output,
+                        // Preserve the original is_error flag on normal replacement.
                         is_error: result.is_error,
                     }
                 } else {
@@ -1445,6 +1488,58 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[test]
+    fn allowlisted_tools_bypass_strict_approval() {
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "strict".to_string();
+        config.agent.allowed_tools.insert("shell".to_string());
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(CountingShellTool {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+
+        assert_eq!(
+            core.classify_tool("shell", &serde_json::json!({})),
+            Outcome::Allow
+        );
+    }
+
+    #[test]
+    fn mcp_tools_require_approval_outside_trust_mode() {
+        for mode in ["auto", "balanced", "suggest", "strict"] {
+            let mut config = CoreConfig::default();
+            config.agent.approval_mode = mode.to_string();
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(TestMcpTool));
+            let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+
+            assert_eq!(
+                core.classify_tool("mcp__remote__search", &serde_json::json!({})),
+                Outcome::RequireApproval,
+                "MCP tool should require approval in {mode} mode"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_mcp_allowlist_entry_bypasses_approval() {
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "strict".to_string();
+        config
+            .agent
+            .allowed_tools
+            .insert("mcp__remote__search".to_string());
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestMcpTool));
+        let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+
+        assert_eq!(
+            core.classify_tool("mcp__remote__search", &serde_json::json!({})),
+            Outcome::Allow
+        );
+    }
+
     #[async_trait]
     impl Tool for CountingShellTool {
         fn name(&self) -> &str {
@@ -1476,6 +1571,117 @@ mod tests {
         ) -> Result<ToolResult, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ToolResult::success("provider-native shell executed"))
+        }
+    }
+
+    struct TestMcpTool;
+
+    #[async_trait]
+    impl Tool for TestMcpTool {
+        fn name(&self) -> &str {
+            "mcp__remote__search"
+        }
+
+        fn description(&self) -> &str {
+            "test MCP tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn kind(&self) -> ToolKind {
+            ToolKind::Mcp
+        }
+
+        async fn invoke(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, String> {
+            Ok(ToolResult::success("called"))
+        }
+    }
+
+    struct CountingMcpTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingMcpTool {
+        fn name(&self) -> &str {
+            "mcp__remote__search"
+        }
+
+        fn description(&self) -> &str {
+            "counting MCP tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn kind(&self) -> ToolKind {
+            ToolKind::Mcp
+        }
+
+        async fn invoke(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::success("called"))
+        }
+    }
+
+    fn mcp_tool_provider() -> MockProvider {
+        MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".to_string(),
+                    name: "mcp__remote__search".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: "{}".to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("Done.".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ])
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_do_not_execute_before_approval() {
+        for mode in ["auto", "balanced", "suggest", "strict"] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut config = CoreConfig::default();
+            config.agent.approval_mode = mode.to_string();
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(CountingMcpTool {
+                calls: Arc::clone(&calls),
+            }));
+            let mut core = CoshCore::new(config, Box::new(mcp_tool_provider()), tools);
+            let deny = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"deny"}}}"#;
+            let mut reader = BufReader::new(deny.as_bytes()).lines();
+            let mut output = Vec::new();
+
+            core.handle_user_message("search", &mut reader, &mut output)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "MCP tool ran in {mode} mode"
+            );
+            assert!(String::from_utf8(output).unwrap().contains("can_use_tool"));
         }
     }
 
@@ -1575,6 +1781,65 @@ mod tests {
             "{output_str}"
         );
         assert!(core.messages.len() >= 4);
+    }
+
+    #[tokio::test]
+    async fn incomplete_tool_call_stops_without_consuming_turn_budget() {
+        let provider = MockProvider::new(vec![vec![
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"pwd"}"#.to_string(),
+            },
+            GenerateEvent::MessageEnd,
+        ]]);
+        let mut core = make_core(provider);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        let error = core
+            .handle_user_message("inspect this project", &mut reader, &mut output)
+            .await
+            .expect_err("an unnamed tool call must fail immediately");
+
+        assert_eq!(
+            error,
+            "Provider emitted an incomplete tool call without a function name"
+        );
+        assert_eq!(core.messages.len(), 1, "must not append an empty turn");
+    }
+
+    #[tokio::test]
+    async fn mixed_tool_calls_stop_when_any_call_is_incomplete() {
+        let provider = MockProvider::new(vec![vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-valid".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"pwd"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 1,
+                arguments_delta: r#"{"command":"id"}"#.to_string(),
+            },
+            GenerateEvent::MessageEnd,
+        ]]);
+        let mut core = make_core(provider);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        let error = core
+            .handle_user_message("inspect this project", &mut reader, &mut output)
+            .await
+            .expect_err("any unnamed tool call with arguments must fail the turn");
+
+        assert_eq!(
+            error,
+            "Provider emitted an incomplete tool call without a function name"
+        );
+        assert_eq!(core.messages.len(), 1, "must not execute the named tool");
     }
 
     #[tokio::test]

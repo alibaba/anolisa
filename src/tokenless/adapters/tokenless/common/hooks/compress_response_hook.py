@@ -285,6 +285,9 @@ def main() -> None:
         llm_content = extract_llm_content(input_data)
         if llm_content is None:
             skip()
+        # Skip skill files (YAML frontmatter) -- must not be compressed.
+        if is_skill_file(llm_content):
+            skip()
         # For Cosh-NG, the response to compress is the llmContent string.
         tool_response_str = llm_content
         # Check if it's JSON for the compression pipeline
@@ -302,6 +305,9 @@ def main() -> None:
         if not isinstance(tool_response_raw, str):
             tool_response_raw = json.dumps(tool_response_raw, ensure_ascii=False)
         tool_response_str = tool_response_raw
+        # Skip skill files (YAML frontmatter) -- must not be compressed.
+        if isinstance(tool_response_str, str) and is_skill_file(tool_response_str):
+            skip()
         parsed = try_parse_json(tool_response_str)
         if parsed is None:
             tool_response = tool_response_str

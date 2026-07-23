@@ -720,6 +720,7 @@ fn run_upgrade_with_deps(
             &preview_store,
             query,
             command,
+            ctx.packaged_data_probe(),
         ));
     }
 
@@ -1403,6 +1404,9 @@ fn installed_origin_or_warn(
 
 /// Inspect existing RPM-backed component rows against rpmdb without mutating
 /// state. Callers decide whether to preview or apply the returned changes.
+// Keep every read-only evidence source explicit so preview and apply share the
+// same reconciliation path without hiding mutable dependencies in a bundle.
+#[allow(clippy::too_many_arguments)]
 fn inspect_rpm_reconciliations(
     layout: &FsLayout,
     store: &StateStore,
@@ -1411,6 +1415,7 @@ fn inspect_rpm_reconciliations(
     legacy_reconciliations: &[PlannedLegacyReconciliation],
     warnings: &mut Vec<String>,
     command: &str,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> ReconciliationInspection {
     let mut inspection = ReconciliationInspection::default();
 
@@ -1487,7 +1492,12 @@ fn inspect_rpm_reconciliations(
         // A same-version external RPM upgrade can still replace the packaged
         // component contract; compare it with the state snapshot so the drift
         // is reconciled even when the observation cache is current.
-        let manifest = inspect_datadir_contract_drift(layout, &installation.name, command);
+        let manifest = inspect_datadir_contract_drift(
+            layout,
+            &installation.name,
+            command,
+            packaged_data_probe,
+        );
         warnings.extend(manifest.warnings);
         let reason = match (!observation_current, manifest.drifted) {
             (true, true) => "RPM state and component manifest drift",
@@ -1572,6 +1582,7 @@ fn render_plan_preview(
     store: &StateStore,
     query: &dyn PackageQuery,
     command: &str,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> UpgradeResult {
     let mut updated: Vec<UpdatedItem> = Vec::new();
     if let Some(cli) = &plan.cli {
@@ -1632,6 +1643,7 @@ fn render_plan_preview(
         &plan.legacy_reconciliations,
         &mut warnings,
         command,
+        packaged_data_probe,
     );
     let reconciled = inspection
         .pending
@@ -1902,6 +1914,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         legacy_reconciliations,
         warnings,
         command,
+        ctx.packaged_data_probe(),
     );
     // Apply errors do not exclude a component from the sweep: a transient
     // post-transaction query may recover here and still reconcile state. If
@@ -2027,7 +2040,12 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
                 .map(|item| (item.name.as_str(), item.package.as_str())),
         )
     {
-        let refresh = refresh_datadir_contract_snapshot(layout, component, command);
+        let refresh = refresh_datadir_contract_snapshot(
+            layout,
+            component,
+            command,
+            ctx.packaged_data_probe(),
+        );
         let failure_detail = refresh.error_detail();
         warnings.extend(refresh.warnings);
         if let Some(detail) = failure_detail {
@@ -2046,7 +2064,12 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
             reconciled.push(item);
             continue;
         }
-        let refresh = refresh_datadir_contract_snapshot(layout, &item.name, command);
+        let refresh = refresh_datadir_contract_snapshot(
+            layout,
+            &item.name,
+            command,
+            ctx.packaged_data_probe(),
+        );
         let failure_detail = refresh.failure_detail();
         warnings.extend(refresh.warnings);
         if let Some(detail) = failure_detail {

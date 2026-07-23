@@ -8,6 +8,7 @@ mod api;
 mod cli;
 mod daemon;
 mod error;
+mod file_provider;
 mod metrics;
 mod spawner;
 mod state;

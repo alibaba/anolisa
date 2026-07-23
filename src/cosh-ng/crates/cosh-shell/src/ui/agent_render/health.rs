@@ -12,9 +12,10 @@ use ratatui::{
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
 
+use super::health_labels::collector_label;
 use crate::diagnostics::health::{
-    sorted_findings, sorted_try_items, HealthCollector, HealthFact, HealthFactValue, HealthFinding,
-    HealthMessageId, HealthScanReport, HealthSeverity, HealthUnavailableReason,
+    sorted_findings, sorted_try_items, HealthFact, HealthFactValue, HealthFinding, HealthMessageId,
+    HealthScanReport, HealthSeverity, HealthUnavailableReason,
 };
 
 use super::{
@@ -30,6 +31,12 @@ const HEALTH_MAX_VISIBLE_PROMPTS: usize = 3;
 #[derive(Debug, Clone, Copy)]
 pub struct HealthBannerModel<'a> {
     pub report: &'a HealthScanReport,
+}
+
+impl<'a> HealthBannerModel<'a> {
+    pub fn new(report: &'a HealthScanReport) -> Self {
+        Self { report }
+    }
 }
 
 impl RatatuiInlineRenderer {
@@ -1473,17 +1480,6 @@ fn severity_color(severity: HealthSeverity) -> Color {
 
 fn is_zh(i18n: crate::I18n) -> bool {
     i18n.language() == crate::Language::ZhCn
-}
-
-fn collector_label(collector: HealthCollector, i18n: crate::I18n) -> &'static str {
-    match collector {
-        HealthCollector::Host => i18n.t(crate::MessageId::HealthMetricHost),
-        HealthCollector::Cpu => i18n.t(crate::MessageId::HealthMetricCpu),
-        HealthCollector::Memory => i18n.t(crate::MessageId::HealthMetricMemory),
-        HealthCollector::Disk => i18n.t(crate::MessageId::HealthMetricDisk),
-        HealthCollector::KernelSignal => i18n.t(crate::MessageId::HealthMetricSignal),
-        HealthCollector::ConfiguredService => i18n.t(crate::MessageId::HealthMetricService),
-    }
 }
 
 fn unavailable_reason_label(reason: HealthUnavailableReason, i18n: crate::I18n) -> &'static str {

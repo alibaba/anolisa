@@ -6,12 +6,60 @@
 //! - Help text availability
 //! - Error handling when daemon is unavailable
 
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Get the path to the compiled cosh-cli binary.
 fn cosh_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cosh-cli"))
+}
+
+fn spawn_checkpoint_skipped_daemon(
+    reason: &str,
+) -> (tempfile::TempDir, String, thread::JoinHandle<()>) {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("ws-ckpt.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let reason = reason.to_string();
+    let handle = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for cosh-cli to connect to fake ws-ckpt daemon"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("fake ws-ckpt daemon failed to accept connection: {error}"),
+            }
+        };
+        let mut len_buf = [0_u8; 4];
+        stream.read_exact(&mut len_buf).unwrap();
+        let request_len = u32::from_le_bytes(len_buf) as usize;
+        let mut request = vec![0_u8; request_len];
+        stream.read_exact(&mut request).unwrap();
+
+        let mut payload = Vec::new();
+        // Zero-based wire index 11 is WsCkptResponse::CheckpointSkipped.
+        payload.extend_from_slice(&11_u32.to_le_bytes());
+        payload.extend_from_slice(&(reason.len() as u64).to_le_bytes());
+        payload.extend_from_slice(reason.as_bytes());
+        stream
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        stream.write_all(&payload).unwrap();
+    });
+
+    let socket_path = socket_path.to_string_lossy().into_owned();
+    (dir, socket_path, handle)
 }
 
 fn systemctl_query_available() -> bool {
@@ -22,9 +70,42 @@ fn systemctl_query_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Spawn `cosh-cli` with audit state pinned to a sandbox: redirect the log,
-/// isolate user policy discovery, and clear any explicit policy override.
-/// Use this for audit tests so they neither read nor write the user's state.
+/// Check whether the system package manager binary is available.
+/// Returns `(binary_name, true)` if available, or `("unknown", false)` if none works.
+///
+/// Note: this only checks that the binary exists and responds to `--version`.
+/// It does NOT verify that the package repositories are accessible. In sandboxed
+/// or container environments the binary may exist but repo queries may fail —
+/// tests that depend on actual repo access should check the command exit status
+/// and skip gracefully rather than asserting success unconditionally.
+fn pkg_manager_available() -> (&'static str, bool) {
+    for (name, args) in [
+        ("dnf", vec!["--version"]),
+        ("apt-get", vec!["--version"]),
+        ("zypper", vec!["--version"]),
+        ("brew", vec!["--version"]),
+    ] {
+        if Command::new(name)
+            .args(&args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            return (
+                match name {
+                    "apt-get" => "apt",
+                    other => other,
+                },
+                true,
+            );
+        }
+    }
+    ("unknown", false)
+}
+
+/// Spawn `cosh-cli` with audit env vars pinned to a sandbox: log redirected to
+/// `audit_log` and any external `COSH_AUDIT_POLICY` cleared so the built-in
+/// `balanced` preset is used. Use this for any test that exercises the
+/// audit subsystem so it doesn't pollute the user's real audit log.
 fn cosh_bin_with_audit_sandbox(audit_log: &Path) -> Command {
     let mut cmd = cosh_bin();
     cmd.env("COSH_AUDIT_LOG", audit_log);
@@ -715,6 +796,38 @@ fn test_redacted_password_does_not_appear_in_log() {
 // --- Checkpoint: daemon unavailable graceful error ---
 
 #[test]
+fn test_checkpoint_create_skipped_is_success() {
+    let reason = "workspace has no changes";
+    let (_dir, socket_path, daemon) = spawn_checkpoint_skipped_daemon(reason);
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "create",
+            "--workspace",
+            "/tmp/test-ws",
+            "--id",
+            "snap-001",
+            "--socket",
+            &socket_path,
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert!(json["error"].is_null());
+    assert_eq!(json["data"]["snapshot_id"], serde_json::Value::Null);
+    assert_eq!(json["data"]["workspace"], "/tmp/test-ws");
+    assert_eq!(json["data"]["skipped"], true);
+    assert_eq!(json["data"]["reason"], reason);
+    assert_eq!(json["meta"]["subsystem"], "checkpoint");
+    assert_eq!(json["meta"]["dry_run"], false);
+}
+
+#[test]
 fn test_checkpoint_create_daemon_unavailable() {
     let output = cosh_bin()
         .args([
@@ -982,32 +1095,85 @@ fn test_pkg_list_json_envelope() {
 
 #[test]
 fn test_pkg_install_dry_run_json_envelope() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    // dry-run now validates package existence; use "bash" which is universally available.
     let output = cosh_bin()
-        .args(["pkg", "install", "--dry-run", "nginx"])
+        .args(["pkg", "install", "--dry-run", "bash"])
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "dry-run install of 'bash' should succeed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
     assert_eq!(json["ok"], true);
-    assert_eq!(json["data"]["package"], "nginx");
-    assert_eq!(json["data"]["version"], "(dry-run)");
+    assert_eq!(json["data"]["package"], "bash");
+    assert_eq!(json["meta"]["subsystem"], "pkg");
+    assert_eq!(json["meta"]["dry_run"], true);
+}
+
+#[test]
+fn test_pkg_install_dry_run_nonexistent_fails() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    let output = cosh_bin()
+        .args(["pkg", "install", "--dry-run", "no-such-pkg-xyz-12345"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "dry-run install of a nonexistent package should fail"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not found"),
+        "error message should mention 'not found': {}",
+        json["error"]["message"]
+    );
     assert_eq!(json["meta"]["subsystem"], "pkg");
     assert_eq!(json["meta"]["dry_run"], true);
 }
 
 #[test]
 fn test_pkg_remove_dry_run_json_envelope() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    // dry-run now validates the package is installed; use "bash" which is always installed.
     let output = cosh_bin()
-        .args(["pkg", "remove", "--dry-run", "nginx"])
+        .args(["pkg", "remove", "--dry-run", "bash"])
         .output()
         .unwrap();
 
-    // dry-run remove always succeeds (even if pkg not installed)
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "dry-run remove of 'bash' should succeed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -1015,6 +1181,31 @@ fn test_pkg_remove_dry_run_json_envelope() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["meta"]["dry_run"], true);
     assert_eq!(json["meta"]["subsystem"], "pkg");
+}
+
+#[test]
+fn test_pkg_remove_dry_run_nonexistent_fails() {
+    let (_, available) = pkg_manager_available();
+    if !available {
+        eprintln!("skipping: no working package manager found");
+        return;
+    }
+    let output = cosh_bin()
+        .args(["pkg", "remove", "--dry-run", "no-such-pkg-xyz-12345"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "dry-run remove of a nonexistent package should fail"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["meta"]["subsystem"], "pkg");
+    assert_eq!(json["meta"]["dry_run"], true);
 }
 
 // --- svc: integration tests ---

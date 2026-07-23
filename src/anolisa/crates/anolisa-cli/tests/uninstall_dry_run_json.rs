@@ -7,6 +7,7 @@
 //! under `data`. These tests drive the compiled binary and assert the full
 //! envelope, which in-crate unit tests cannot cover.
 
+use std::path::Path;
 use std::process::Output;
 
 mod common;
@@ -66,12 +67,33 @@ fn absent_uninstall_args<'a>(prefix: &'a str, extra: &[&'a str]) -> Vec<&'a str>
     args
 }
 
+fn seed_local_repo(prefix: &Path) {
+    let repo_v1 = prefix.join("repo/v1");
+    std::fs::create_dir_all(&repo_v1).expect("local repo");
+    std::fs::write(
+        repo_v1.join("components.toml"),
+        "schema_version = 1\ncomponents = []\n",
+    )
+    .expect("component index");
+    let etc = prefix.join("etc/anolisa");
+    std::fs::create_dir_all(&etc).expect("config dir");
+    std::fs::write(
+        etc.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"file://{}\"\n",
+            repo_v1.display()
+        ),
+    )
+    .expect("repo config");
+}
+
 /// A dry-run of an absent component must report the same refusal a real run
 /// would — an error envelope with the actionable "not installed" reason —
 /// never a hollow successful preview.
 #[test]
 fn uninstall_dry_run_json_absent_component_reports_not_installed() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    seed_local_repo(tmp.path());
     let prefix = tmp.path().to_str().expect("utf-8 prefix");
     let value = run_json(&absent_uninstall_args(prefix, &[]), 2);
 
@@ -97,6 +119,7 @@ fn uninstall_dry_run_json_absent_component_reports_not_installed() {
 #[test]
 fn uninstall_purge_dry_run_json_uses_same_contract() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    seed_local_repo(tmp.path());
     let prefix = tmp.path().to_str().expect("utf-8 prefix");
     let value = run_json(&absent_uninstall_args(prefix, &["--purge"]), 0);
 

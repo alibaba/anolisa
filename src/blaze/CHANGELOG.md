@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-22
+
+### Added
+
+- Generic `StorageProvider` trait with pluggable backend architecture.
+- `FileStorageProvider`: default file-based storage backend for development and standard deployments.
+- `[storage]` config section: `provider`, `pool_size`, `prefork`, `flush_interval` fields with backward-compatible defaults.
+- `GET /v1/health` now includes `storage_pool` status (ready/capacity/pending).
+- `BackendSpawner` trait extended with `restore`, `pause`, `resume`, `create_snapshot` methods (default unsupported, enabling future snapshot workflows).
+
 ## [0.2.1] - 2026-07-21
 
 ### Changed

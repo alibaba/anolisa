@@ -7,7 +7,6 @@ use tempfile::tempdir;
 
 #[test]
 fn adopt_snapshots_datadir_contract() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
     let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
@@ -36,7 +35,6 @@ fn adopt_snapshots_datadir_contract() {
 
 #[test]
 fn adopt_without_datadir_contract_succeeds_with_warning() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
     // Deliberately do NOT seed a datadir contract.
@@ -62,7 +60,6 @@ fn adopt_without_datadir_contract_succeeds_with_warning() {
 
 #[test]
 fn delegated_install_snapshots_datadir_contract() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let layout = common::resolve_layout(&ctx);
     let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
@@ -92,7 +89,6 @@ fn delegated_install_snapshots_datadir_contract() {
 
 #[test]
 fn delegated_install_without_datadir_contract_succeeds() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let layout = common::resolve_layout(&ctx);
     // No datadir contract seeded.
@@ -130,8 +126,7 @@ fn adopt_snapshots_packaged_datadir_contract() {
     std::fs::write(contract_dir.join("component.toml"), &contract)
         .expect("write packaged contract");
 
-    // Guard sets ANOLISA_DATA_DIR and restores on drop (panic-safe).
-    let _env_guard = crate::packaged::DataDirEnvGuard::set(&packaged);
+    let ctx = ctx.with_packaged_data_root(packaged);
 
     let q = FakeQuery {
         installed: vec![(
@@ -159,7 +154,6 @@ fn adopt_snapshots_packaged_datadir_contract() {
 
 #[test]
 fn adopt_snapshots_fhs_package_datadir_contract() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let tmp = tempdir().expect("tempdir");
     let prefix = tmp.path().join("sys");
     let ctx = ctx_with_prefix(false, Some(prefix));
@@ -202,13 +196,13 @@ fn adopt_snapshots_fhs_package_datadir_contract() {
 
 #[test]
 fn snapshot_datadir_contract_writes_provenance() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
     let contract = component_manifest_toml("sec-core", "1.0.0", &["system"]);
     seed_datadir_contract(&layout, "sec-core", &contract);
 
-    let warnings = snapshot_datadir_contract(&layout, "sec-core", COMMAND);
+    let warnings =
+        snapshot_datadir_contract(&layout, "sec-core", COMMAND, ctx.packaged_data_probe());
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
     let snapshot = common::installed_component_manifest_path(&layout, "sec-core", COMMAND)

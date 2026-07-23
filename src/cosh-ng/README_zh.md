@@ -125,6 +125,14 @@ Agent 关键字段：`ok`（是否成功？）、`error.recoverable`（值得重
 4. **分类错误** — `recoverable` 告诉 Agent 是否该重试
 5. **预演模式** — 所有写操作支持 `--dry-run`，执行前预览
 
+## MCP 工具
+
+`cosh-core --headless` 可以通过 stdio 或 Streamable HTTP 连接受信任的 MCP Server，在启动时发现其工具，
+并以 `mcp__<server>__<tool>` 暴露给 Agent。MCP Server 仅从用户或系统级配置加载；
+除 `trust` 模式外，其工具调用都需要审批。可使用 `cosh-core mcp list`、`inspect`、`refresh`、
+`connect` 和 `disconnect` 管理已配置的 Server；状态输出不会包含凭据。详见
+[MCP 配置说明](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#mcp-server)。
+
 ## 日志
 
 所有二进制使用 `tracing` 结构化日志。日志写入 `~/.copilot-shell/logs/`，按天轮转。

@@ -98,14 +98,17 @@ impl CkptClient {
         };
         match self.send_request(&req)? {
             WsCkptResponse::CheckpointOk { snapshot_id } => Ok(CkptCreated {
-                snapshot_id,
+                snapshot_id: Some(snapshot_id),
                 workspace: workspace.to_string(),
+                skipped: false,
+                reason: None,
             }),
-            WsCkptResponse::CheckpointSkipped { reason } => Err(CoshError::new(
-                ErrorCode::CheckpointCreateFailed,
-                format!("Checkpoint skipped: {}", reason),
-                "checkpoint",
-            )),
+            WsCkptResponse::CheckpointSkipped { reason } => Ok(CkptCreated {
+                snapshot_id: None,
+                workspace: workspace.to_string(),
+                skipped: true,
+                reason: Some(reason),
+            }),
             WsCkptResponse::Error { code, message } => Err(ws_error_to_cosh(code, message)),
             _ => Err(unexpected_response()),
         }
@@ -434,7 +437,35 @@ fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> Cos
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
     use super::*;
+
+    fn spawn_one_shot_daemon(
+        response: WsCkptResponse,
+    ) -> (tempfile::TempDir, String, thread::JoinHandle<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ws-ckpt.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut len_buf = [0_u8; 4];
+            stream.read_exact(&mut len_buf).unwrap();
+            let request_len = u32::from_le_bytes(len_buf) as usize;
+            let mut request = vec![0_u8; request_len];
+            stream.read_exact(&mut request).unwrap();
+
+            let payload = bincode::serialize(&response).unwrap();
+            stream
+                .write_all(&(payload.len() as u32).to_le_bytes())
+                .unwrap();
+            stream.write_all(&payload).unwrap();
+        });
+
+        let socket_path = socket_path.to_string_lossy().into_owned();
+        (dir, socket_path, handle)
+    }
 
     #[test]
     fn test_default_timeout() {
@@ -462,6 +493,54 @@ mod tests {
             .unwrap()
             .contains("systemctl start ws-ckpt"));
         assert!(err.recoverable);
+    }
+
+    #[test]
+    fn test_create_checkpoint_skipped_is_success() {
+        let reason = "workspace has no changes";
+        let (_dir, socket_path, daemon) =
+            spawn_one_shot_daemon(WsCkptResponse::CheckpointSkipped {
+                reason: reason.into(),
+            });
+        let client = CkptClient::new(&socket_path);
+
+        let result = client
+            .create("/tmp/ws", "snap-1", None, None, false)
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "snapshot_id": null,
+                "workspace": "/tmp/ws",
+                "skipped": true,
+                "reason": reason,
+            })
+        );
+    }
+
+    #[test]
+    fn test_create_checkpoint_ok_preserves_success_contract() {
+        let (_dir, socket_path, daemon) = spawn_one_shot_daemon(WsCkptResponse::CheckpointOk {
+            snapshot_id: "snap-1".into(),
+        });
+        let client = CkptClient::new(&socket_path);
+
+        let result = client
+            .create("/tmp/ws", "snap-1", None, None, false)
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "snapshot_id": "snap-1",
+                "workspace": "/tmp/ws",
+                "skipped": false,
+                "reason": null,
+            })
+        );
     }
 
     #[test]

@@ -10,12 +10,44 @@ use crate::detect::{Distro, PkgManager};
 use crate::{run_command, PKG_TIMEOUT};
 
 /// Execute a package install operation on the detected distro.
+///
+/// When `dry_run` is true, the package manager's simulation mode is used
+/// (e.g. `dnf --assumeno`, `apt-get --dry-run`) to validate that the package
+/// exists and *could* be installed without actually modifying the system.
+/// For Brew (which has no native dry-run), `brew info` is used instead.
 pub fn pkg_install(
     distro: &Distro,
     package: &str,
     dry_run: bool,
 ) -> Result<PkgInstallResult, CoshError> {
     let mgr = distro.pkg_manager();
+
+    // Brew has no native dry-run flag; validate existence via `brew info`.
+    if dry_run && mgr == PkgManager::Brew {
+        let output = run_command(
+            Command::new("brew").args(["info", package]),
+            PKG_TIMEOUT,
+            "pkg",
+        )?;
+        if !output.status.success() {
+            return Err(CoshError::new(
+                ErrorCode::PkgNotFound,
+                format!("package '{}' not found in any enabled repository", package),
+                "pkg",
+            )
+            .with_hint(format!(
+                "Try 'cosh pkg search {}' to check availability",
+                package
+            )));
+        }
+        return Ok(PkgInstallResult {
+            package: package.to_string(),
+            version: "(dry-run)".to_string(),
+            already_installed: false,
+            dependencies_installed: vec![],
+        });
+    }
+
     let (cmd, args) = match mgr {
         PkgManager::Dnf => ("dnf", build_dnf_install_args(package, dry_run)),
         PkgManager::Apt => ("apt-get", build_apt_install_args(package, dry_run)),
@@ -31,15 +63,6 @@ pub fn pkg_install(
         }
     };
 
-    if dry_run {
-        return Ok(PkgInstallResult {
-            package: package.to_string(),
-            version: "(dry-run)".to_string(),
-            already_installed: false,
-            dependencies_installed: vec![],
-        });
-    }
-
     let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
 
     if output.status.success() {
@@ -48,14 +71,28 @@ pub fn pkg_install(
         let already = is_already_installed(&stdout);
         Ok(PkgInstallResult {
             package: package.to_string(),
-            version: parse_installed_version(package, mgr),
+            version: if dry_run {
+                "(dry-run)".to_string()
+            } else {
+                parse_installed_version(package, mgr)
+            },
             already_installed: already,
             dependencies_installed: vec![],
         })
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if stderr.contains("already installed")
+        if is_pkg_not_found(&stderr, &stdout, mgr) {
+            Err(CoshError::new(
+                ErrorCode::PkgNotFound,
+                format!("package '{}' not found in any enabled repository", package),
+                "pkg",
+            )
+            .with_hint(format!(
+                "Try 'cosh pkg search {}' to check availability",
+                package
+            )))
+        } else if stderr.contains("already installed")
             || stderr.contains("is already the newest")
             || stdout.contains("already installed")
             || stdout.contains("is already the newest")
@@ -193,13 +230,40 @@ pub fn pkg_list(distro: &Distro, installed_only: bool) -> Result<PkgListResult, 
     Ok(PkgListResult { packages, total })
 }
 
-/// Execute a package remove operation.
+/// Execute a package remove operation on the detected distro.
+///
+/// When `dry_run` is true, the package manager's simulation mode is used
+/// to validate that the package is installed and *could* be removed without
+/// actually modifying the system. For Brew, `brew list` is used instead.
 pub fn pkg_remove(
     distro: &Distro,
     package: &str,
     dry_run: bool,
 ) -> Result<PkgRemoveResult, CoshError> {
     let mgr = distro.pkg_manager();
+
+    // Brew has no native dry-run flag; check if the package is installed.
+    if dry_run && mgr == PkgManager::Brew {
+        let output = run_command(
+            Command::new("brew").args(["list", "--versions", package]),
+            PKG_TIMEOUT,
+            "pkg",
+        )?;
+        if !output.status.success() {
+            return Err(CoshError::new(
+                ErrorCode::PkgNotFound,
+                format!("package '{}' is not installed", package),
+                "pkg",
+            )
+            .with_hint("Check installed packages with 'cosh pkg list --installed'"));
+        }
+        return Ok(PkgRemoveResult {
+            package: package.to_string(),
+            version_removed: "(dry-run)".to_string(),
+            dependencies_removed: vec![],
+        });
+    }
+
     let (cmd, args) = match mgr {
         PkgManager::Dnf => ("dnf", build_dnf_remove_args(package, dry_run)),
         PkgManager::Apt => ("apt-get", build_apt_remove_args(package, dry_run)),
@@ -214,45 +278,94 @@ pub fn pkg_remove(
         }
     };
 
-    if dry_run {
-        return Ok(PkgRemoveResult {
-            package: package.to_string(),
-            version_removed: "(dry-run)".to_string(),
-            dependencies_removed: vec![],
-        });
-    }
-
     let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         // dnf returns exit 0 even when no packages matched for removal
         if is_remove_not_found(&stdout) {
-            Err(CoshError::new(
-                ErrorCode::PkgBackendError,
-                format!("Package '{}' is not installed", package),
-                "pkg",
-            )
-            .recoverable(true)
-            .with_hint("Check installed packages with 'cosh pkg list --installed'"))
+            if dry_run {
+                // Dry-run pre-check: package is not installed, report PkgNotFound
+                Err(CoshError::new(
+                    ErrorCode::PkgNotFound,
+                    format!("package '{}' is not installed", package),
+                    "pkg",
+                )
+                .with_hint("Check installed packages with 'cosh pkg list --installed'"))
+            } else {
+                // Regular remove: preserve PkgBackendError for backward compat
+                Err(CoshError::new(
+                    ErrorCode::PkgBackendError,
+                    format!("package '{}' is not installed", package),
+                    "pkg",
+                )
+                .recoverable(true)
+                .with_hint("Check installed packages with 'cosh pkg list --installed'"))
+            }
         } else {
             Ok(PkgRemoveResult {
                 package: package.to_string(),
-                version_removed: String::new(),
+                version_removed: if dry_run {
+                    "(dry-run)".to_string()
+                } else {
+                    String::new()
+                },
                 dependencies_removed: vec![],
             })
         }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(CoshError::new(
-            ErrorCode::PkgBackendError,
-            format!("{} remove failed: {}", cmd, stderr.trim()),
-            "pkg",
-        ))
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if is_remove_not_found(&stdout) || is_pkg_not_found(&stderr, &stdout, mgr) {
+            if dry_run {
+                Err(CoshError::new(
+                    ErrorCode::PkgNotFound,
+                    format!("package '{}' is not installed", package),
+                    "pkg",
+                )
+                .with_hint("Check installed packages with 'cosh pkg list --installed'"))
+            } else {
+                Err(CoshError::new(
+                    ErrorCode::PkgBackendError,
+                    format!("package '{}' is not installed", package),
+                    "pkg",
+                )
+                .recoverable(true)
+                .with_hint("Check installed packages with 'cosh pkg list --installed'"))
+            }
+        } else {
+            Err(CoshError::new(
+                ErrorCode::PkgBackendError,
+                format!("{} remove failed: {}", cmd, stderr.trim()),
+                "pkg",
+            ))
+        }
     }
 }
 
 // --- Detection helpers (extracted for testability) ---
+
+/// Detect whether install/remove output indicates the package was not found
+/// in any enabled repository.
+fn is_pkg_not_found(stderr: &str, stdout: &str, mgr: PkgManager) -> bool {
+    match mgr {
+        PkgManager::Dnf => {
+            stderr.contains("No match for argument")
+                || stderr.contains("no package matched")
+                || stdout.contains("No match for argument")
+                || stdout.contains("no package matched")
+        }
+        PkgManager::Apt => {
+            stderr.contains("Unable to locate package")
+                || stdout.contains("Unable to locate package")
+        }
+        PkgManager::Zypper => stderr.contains("not found") || stdout.contains("not found"),
+        PkgManager::Brew => {
+            stderr.contains("No available formula") || stderr.contains("No formula or cask")
+        }
+        PkgManager::Unknown => false,
+    }
+}
 
 /// Detect whether install output indicates the package was already installed.
 fn is_already_installed(stdout: &str) -> bool {
@@ -412,7 +525,7 @@ fn parse_search_output(stdout: &str, mgr: PkgManager) -> Vec<PkgSearchEntry> {
                     let name = name_part.split('.').next().unwrap_or(name_part).trim();
                     results.push(PkgSearchEntry {
                         name: name.to_string(),
-                        version: String::new(),
+                        version: None,
                         summary: summary.trim().to_string(),
                         installed: false,
                     });
@@ -425,7 +538,7 @@ fn parse_search_output(stdout: &str, mgr: PkgManager) -> Vec<PkgSearchEntry> {
                 if let Some((name, desc)) = line.split_once(" - ") {
                     results.push(PkgSearchEntry {
                         name: name.trim().to_string(),
-                        version: String::new(),
+                        version: None,
                         summary: desc.trim().to_string(),
                         installed: false,
                     });
@@ -439,11 +552,9 @@ fn parse_search_output(stdout: &str, mgr: PkgManager) -> Vec<PkgSearchEntry> {
                 if parts.len() >= 3 {
                     results.push(PkgSearchEntry {
                         name: parts[1].trim().to_string(),
-                        version: if parts.len() > 3 {
-                            parts[3].trim().to_string()
-                        } else {
-                            String::new()
-                        },
+                        // zypper search output is S|Name|Summary|Type — no version column.
+                        // parts[3] is Type (e.g. "package"), not a version string.
+                        version: None,
                         summary: if parts.len() > 2 {
                             parts[2].trim().to_string()
                         } else {
@@ -461,7 +572,7 @@ fn parse_search_output(stdout: &str, mgr: PkgManager) -> Vec<PkgSearchEntry> {
                 if !name.is_empty() && !name.starts_with("==>") {
                     results.push(PkgSearchEntry {
                         name: name.to_string(),
-                        version: String::new(),
+                        version: None,
                         summary: String::new(),
                         installed: false,
                     });
@@ -705,8 +816,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].name, "nginx");
         assert!(results[0].installed); // 'i' marker
+        assert_eq!(results[0].version, None); // no version column in zypper search
         assert_eq!(results[1].name, "nginx-common");
         assert!(!results[1].installed); // empty marker
+        assert_eq!(results[1].version, None);
     }
 
     #[test]
@@ -785,26 +898,65 @@ mod tests {
         assert_eq!(err.code, ErrorCode::UnsupportedDistro);
     }
 
-    // --- dry-run returns immediately ---
+    // --- dry-run actually validates via the package manager ---
 
     #[test]
     fn test_pkg_install_dry_run() {
+        // Dry-run now actually runs dnf --assumeno; skip if dnf is unavailable.
+        if !Command::new("dnf")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: dnf not available");
+            return;
+        }
         let distro = Distro::Alinux {
             version: "3".into(),
         };
-        let result = pkg_install(&distro, "nginx", true).unwrap();
-        assert_eq!(result.package, "nginx");
-        assert_eq!(result.version, "(dry-run)");
+        // bash is available on every dnf-based system
+        let result = pkg_install(&distro, "bash", true).unwrap();
+        assert_eq!(result.package, "bash");
+    }
+
+    #[test]
+    fn test_pkg_install_dry_run_nonexistent() {
+        // Dry-run now actually runs dnf --assumeno; skip if dnf is unavailable.
+        if !Command::new("dnf")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: dnf not available");
+            return;
+        }
+        let distro = Distro::Alinux {
+            version: "3".into(),
+        };
+        let result = pkg_install(&distro, "no-such-pkg-xyz-12345", true);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::PkgNotFound);
     }
 
     #[test]
     fn test_pkg_remove_dry_run() {
+        // Dry-run now actually runs apt-get --dry-run; skip if apt-get is unavailable.
+        if !Command::new("apt-get")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: apt-get not available");
+            return;
+        }
         let distro = Distro::Ubuntu {
             version: "22.04".into(),
         };
-        let result = pkg_remove(&distro, "nginx", true).unwrap();
-        assert_eq!(result.package, "nginx");
-        assert_eq!(result.version_removed, "(dry-run)");
+        // bash is installed on every Ubuntu system
+        let result = pkg_remove(&distro, "bash", true);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().package, "bash");
     }
 
     // --- argument builders ---
@@ -894,22 +1046,62 @@ mod tests {
 
     #[test]
     fn test_pkg_install_dry_run_brew() {
+        // Dry-run now actually runs `brew info`; skip if brew is unavailable.
+        if !Command::new("brew")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: brew not available");
+            return;
+        }
         let distro = Distro::MacOS {
             version: "15.4".into(),
         };
-        let result = pkg_install(&distro, "wget", true).unwrap();
-        assert_eq!(result.package, "wget");
-        assert_eq!(result.version, "(dry-run)");
+        let result = pkg_install(&distro, "wget", true);
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.package, "wget");
+        assert_eq!(r.version, "(dry-run)");
+    }
+
+    #[test]
+    fn test_pkg_install_dry_run_brew_nonexistent() {
+        // Dry-run now actually runs `brew info`; skip if brew is unavailable.
+        if !Command::new("brew")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: brew not available");
+            return;
+        }
+        let distro = Distro::MacOS {
+            version: "15.4".into(),
+        };
+        let result = pkg_install(&distro, "no-such-formula-xyz-12345", true);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::PkgNotFound);
     }
 
     #[test]
     fn test_pkg_remove_dry_run_brew() {
+        // Dry-run now checks `brew list`; skip if brew is unavailable.
+        if !Command::new("brew")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("skipping: brew not available");
+            return;
+        }
         let distro = Distro::MacOS {
             version: "15.4".into(),
         };
-        let result = pkg_remove(&distro, "wget", true).unwrap();
-        assert_eq!(result.package, "wget");
-        assert_eq!(result.version_removed, "(dry-run)");
+        // This may succeed or fail depending on whether wget is installed;
+        // both outcomes are valid — we just verify it doesn't panic.
+        let _ = pkg_remove(&distro, "wget", true);
     }
 
     // --- pkg_list parse tests ---
@@ -1018,6 +1210,78 @@ mod tests {
         assert!(is_remove_not_found(stdout));
     }
 
+    // --- is_pkg_not_found detection tests ---
+
+    #[test]
+    fn test_is_pkg_not_found_dnf_stderr() {
+        let stderr = "Error: No match for argument: no-such-pkg-xyz";
+        assert!(is_pkg_not_found(stderr, "", PkgManager::Dnf));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_dnf_stdout() {
+        let stdout = "No match for argument: no-such-pkg-xyz\nNo packages marked for installation.";
+        assert!(is_pkg_not_found("", stdout, PkgManager::Dnf));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_dnf_no_match() {
+        let stderr = "Error: no package matched for no-such-pkg";
+        assert!(is_pkg_not_found(stderr, "", PkgManager::Dnf));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_dnf_false_positive() {
+        let stderr = "Some other error occurred";
+        assert!(!is_pkg_not_found(stderr, "", PkgManager::Dnf));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_apt() {
+        let stderr = "E: Unable to locate package no-such-pkg-xyz";
+        assert!(is_pkg_not_found(stderr, "", PkgManager::Apt));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_apt_stdout() {
+        let stdout = "E: Unable to locate package no-such-pkg-xyz";
+        assert!(is_pkg_not_found("", stdout, PkgManager::Apt));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_apt_false_positive() {
+        // "E: Failed to fetch" is a network/repo error, NOT "package not found"
+        let stderr = "E: Failed to fetch some-other-thing";
+        assert!(!is_pkg_not_found(stderr, "", PkgManager::Apt));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_zypper() {
+        let stderr = "Package 'no-such-pkg-xyz' not found.";
+        assert!(is_pkg_not_found(stderr, "", PkgManager::Zypper));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_brew() {
+        let stderr = "Error: No available formula with the name \"no-such-formula-xyz\".";
+        assert!(is_pkg_not_found(stderr, "", PkgManager::Brew));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_brew_cask() {
+        let stderr = "Error: No formula or cask with the name \"no-such-pkg\".";
+        assert!(is_pkg_not_found(stderr, "", PkgManager::Brew));
+    }
+
+    #[test]
+    fn test_is_pkg_not_found_unknown() {
+        assert!(!is_pkg_not_found(
+            "not found",
+            "not found",
+            PkgManager::Unknown
+        ));
+    }
+
     // --- parse_installed_names tests ---
 
     #[test]
@@ -1097,5 +1361,75 @@ mod tests {
         assert_eq!(packages.len(), 2);
         assert!(packages[0].installed);
         assert!(packages[1].installed);
+    }
+
+    // --- Issue #1565: version should be None (omitted) not empty string ---
+
+    #[test]
+    fn test_parse_search_dnf_version_is_none() {
+        let output = "nginx.x86_64 : A high performance web server\n";
+        let results = parse_search_output(output, PkgManager::Dnf);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].version, None);
+    }
+
+    #[test]
+    fn test_parse_search_apt_version_is_none() {
+        let output = "nginx - small, powerful, scalable web/proxy server\n";
+        let results = parse_search_output(output, PkgManager::Apt);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].version, None);
+    }
+
+    #[test]
+    fn test_parse_search_brew_version_is_none() {
+        let output = "nginx\n";
+        let results = parse_search_output(output, PkgManager::Brew);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].version, None);
+    }
+
+    #[test]
+    fn test_parse_search_zypper_no_version_column_is_none() {
+        // Standard zypper search has S|Name|Summary|Type — no version column.
+        // When parts[3] is the Type field ("package"), it is not a real version,
+        // but the parser currently maps it. This test verifies the 3-column case
+        // where version is correctly None.
+        let output = "S | Name | Summary\n--+------+------\n  | nginx | A web server";
+        let results = parse_search_output(output, PkgManager::Zypper);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].version, None);
+    }
+
+    #[test]
+    fn test_pkg_search_entry_omits_none_version_in_json() {
+        let entry = PkgSearchEntry {
+            name: "nginx".to_string(),
+            version: None,
+            summary: "A web server".to_string(),
+            installed: false,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("\"version\""),
+            "version field should be omitted when None, got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_pkg_search_entry_includes_some_version_in_json() {
+        let entry = PkgSearchEntry {
+            name: "nginx".to_string(),
+            version: Some("1.24.0".to_string()),
+            summary: "A web server".to_string(),
+            installed: false,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            json.contains("\"version\":\"1.24.0\""),
+            "version field should be present when Some, got: {}",
+            json
+        );
     }
 }

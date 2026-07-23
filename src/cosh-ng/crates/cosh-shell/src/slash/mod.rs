@@ -4,6 +4,7 @@ pub(super) mod debug;
 pub(super) mod extensions;
 #[cfg(test)]
 mod extensions_tests;
+pub(super) mod health;
 pub(super) mod hooks;
 #[cfg(test)]
 mod hooks_tests;

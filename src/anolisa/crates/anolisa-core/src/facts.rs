@@ -751,6 +751,7 @@ mod tests {
             pm: NativePm::Rpm,
             package: Some("copilot-shell".to_string()),
             record_action: DelegatedRecordAction::WriteManaged,
+            pinned: None,
         });
         assert!(!is_legacy_rpm_install_journal(&delegated));
 

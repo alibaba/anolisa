@@ -94,6 +94,12 @@ pub struct PreToolUseResult {
 pub struct PostToolUseResult {
     pub decision: HookDecision,
     pub additional_context: Option<String>,
+    /// Replacement for the original tool response, emitted by transformation
+    /// hooks (e.g. tokenless response compression).  When present and the
+    /// decision is not Block, the runtime uses this text as the model-visible
+    /// tool result instead of the original output.  `additional_context` is
+    /// still appended after the replacement.
+    pub updated_tool_response: Option<String>,
     pub notifications: Vec<HookNotification>,
 }
 
@@ -333,6 +339,19 @@ impl HookSystem {
             .or_else(|| specific.get("additionalContext").and_then(|v| v.as_str()))
     }
 
+    /// Read `updated_tool_response` / `updatedToolResponse` from hook output.
+    /// Accepts both snake_case (cosh-ng convention) and camelCase
+    /// (copilot-shell convention).  Returns `None` when the field is absent,
+    /// not a string, or empty — callers treat all three cases as "no
+    /// replacement requested".
+    fn pick_updated_tool_response(specific: &Value) -> Option<&str> {
+        specific
+            .get("updated_tool_response")
+            .and_then(|v| v.as_str())
+            .or_else(|| specific.get("updatedToolResponse").and_then(|v| v.as_str()))
+            .filter(|s| !s.is_empty())
+    }
+
     /// 把 tool 输出文本包装为 copilot-shell 协议要求的 JSON 对象。
     /// 对齐 copilot-shell 行为：始终将原始文本作为 llmContent/returnDisplay
     /// 传递，即使文本本身是合法 JSON。copilot-shell 的 coreToolScheduler
@@ -433,6 +452,7 @@ impl HookSystem {
             return PostToolUseResult {
                 decision: HookDecision::Passthrough,
                 additional_context: None,
+                updated_tool_response: None,
                 notifications: vec![],
             };
         }
@@ -447,6 +467,7 @@ impl HookSystem {
             return PostToolUseResult {
                 decision: HookDecision::Passthrough,
                 additional_context: None,
+                updated_tool_response: None,
                 notifications: vec![],
             };
         }
@@ -922,6 +943,7 @@ impl HookSystem {
     ) -> PostToolUseResult {
         let mut decision = HookDecision::Passthrough;
         let mut additional_context: Option<String> = None;
+        let mut updated_tool_response: Option<String> = None;
         let mut notifications = Vec::new();
 
         for (i, out) in outputs {
@@ -930,11 +952,19 @@ impl HookSystem {
 
             decision = fold_decision(decision, out.decision.as_deref(), out.reason.clone());
             fold_additional_context(&mut additional_context, &out.hook_specific_output);
+
+            // Last valid replacement wins (configuration order).
+            if let Some(ref specific) = out.hook_specific_output {
+                if let Some(replacement) = Self::pick_updated_tool_response(specific) {
+                    updated_tool_response = Some(replacement.to_string());
+                }
+            }
         }
 
         PostToolUseResult {
             decision,
             additional_context,
+            updated_tool_response,
             notifications,
         }
     }
@@ -1536,5 +1566,195 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "stdin write must be bounded by the hook deadline"
         );
+    }
+
+    // ─── #1614: updated_tool_response tests ──────────────────────────
+
+    #[test]
+    fn pick_updated_tool_response_snake_case() {
+        let specific = serde_json::json!({
+            "updated_tool_response": "compressed content"
+        });
+        assert_eq!(
+            HookSystem::pick_updated_tool_response(&specific),
+            Some("compressed content")
+        );
+    }
+
+    #[test]
+    fn pick_updated_tool_response_camel_case() {
+        let specific = serde_json::json!({
+            "updatedToolResponse": "compressed content"
+        });
+        assert_eq!(
+            HookSystem::pick_updated_tool_response(&specific),
+            Some("compressed content")
+        );
+    }
+
+    #[test]
+    fn pick_updated_tool_response_absent() {
+        let specific = serde_json::json!({
+            "additionalContext": "some context"
+        });
+        assert_eq!(HookSystem::pick_updated_tool_response(&specific), None);
+    }
+
+    #[test]
+    fn pick_updated_tool_response_empty_string() {
+        let specific = serde_json::json!({
+            "updatedToolResponse": ""
+        });
+        assert_eq!(HookSystem::pick_updated_tool_response(&specific), None);
+    }
+
+    #[test]
+    fn pick_updated_tool_response_non_string() {
+        let specific = serde_json::json!({
+            "updatedToolResponse": 42
+        });
+        assert_eq!(HookSystem::pick_updated_tool_response(&specific), None);
+    }
+
+    #[test]
+    fn pick_updated_tool_response_snake_case_priority() {
+        // When both are present, snake_case wins (cosh-ng convention).
+        let specific = serde_json::json!({
+            "updated_tool_response": "snake value",
+            "updatedToolResponse": "camel value"
+        });
+        assert_eq!(
+            HookSystem::pick_updated_tool_response(&specific),
+            Some("snake value")
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_hook_emits_updated_tool_response() {
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "compressed!", "additionalContext": "env-hint"}}))'"#.to_string(),
+                name: Some("compressor".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original output here",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.updated_tool_response.as_deref(),
+            Some("compressed!"),
+            "Hook should emit updatedToolResponse"
+        );
+        assert_eq!(
+            result.additional_context.as_deref(),
+            Some("env-hint"),
+            "Hook should still emit additionalContext for attribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_last_replacement_wins() {
+        // Two hooks both emit updatedToolResponse; last one in config order wins.
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![
+                HookDefinition {
+                    command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "first"}}))'"#.to_string(),
+                    name: Some("first-hook".to_string()),
+                    matcher: None,
+                    timeout: Some(5000),
+                    sequential: None,
+                },
+                HookDefinition {
+                    command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "second"}}))'"#.to_string(),
+                    name: Some("second-hook".to_string()),
+                    matcher: None,
+                    timeout: Some(5000),
+                    sequential: None,
+                },
+            ],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.updated_tool_response.as_deref(),
+            Some("second"),
+            "Last valid replacement should win in configuration order"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_no_replacement_when_absent() {
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"additionalContext": "just context"}}))'"#.to_string(),
+                name: Some("context-only".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original output",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.updated_tool_response, None,
+            "No replacement when hook doesn't emit updatedToolResponse"
+        );
+        assert_eq!(result.additional_context.as_deref(), Some("just context"),);
     }
 }

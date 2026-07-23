@@ -6,6 +6,7 @@ macro_rules! help_core_ids {
             HelpTitle,
             HelpFooter,
             HelpGroupConfig,
+            HelpGroupHealth,
             HelpGroupModes,
             HelpGroupHooks,
             HelpSummaryHelp,
@@ -20,6 +21,7 @@ macro_rules! help_core_ids {
             HelpSummaryDetails,
             HelpSummaryAudit,
             HelpSummaryHooks,
+            HelpSummaryHealth,
             HelpSummarySelect,
             HelpSummaryCopy,
             HelpSummaryDebug,
@@ -77,6 +79,17 @@ macro_rules! help_registry_ids {
             SlashHooksAgentUnavailable,
             SlashExtensionsEmptyBody,
             SlashSkillsEmptyBody,
+        );
+    };
+}
+
+macro_rules! slash_parse_error_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            SlashInvalidArgumentsTitle,
+            SlashQuotedArgumentsUnsupported,
         );
     };
 }

@@ -842,6 +842,9 @@ pub struct AgentsightConfig {
     pub https_rules: Vec<HttpsRule>,
     /// User-defined HTTP targets (IP/port endpoints + domains for tcpsniff)
     pub http_targets: Vec<HttpTarget>,
+    /// Whether FFI mode emits raw HTTPS fallback events.
+    /// This is configured only through the C API and is not part of agentsight.json.
+    pub ffi_enable_raw_https: bool,
 
     // --- Config File Path ---
     /// Path to JSON configuration file
@@ -929,6 +932,7 @@ impl Default for AgentsightConfig {
             cmdline_rules: Vec::new(),
             https_rules: Vec::new(),
             http_targets: Vec::new(),
+            ffi_enable_raw_https: false,
 
             // Config file path default
             config_path: None,

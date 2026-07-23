@@ -399,6 +399,39 @@ def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.Comple
         return None
 
 
+def detect_cosh_ng_runtime() -> tuple | None:
+    """Detect if we are running under Cosh-NG and return its version.
+
+    Returns:
+        A (major, minor, patch) version tuple if Cosh-NG is detected,
+        or (0, 0, 0) if Cosh-NG is detected but version is unknown
+        (unsupported), or None if not running under Cosh-NG.
+
+    Detection checks (in order):
+      1. ``COSH_NG_VERSION`` environment variable — set by Cosh-NG when
+         launching hook processes.
+      2. ``COSH_RUNTIME`` environment variable set to ``cosh-ng``.
+
+    The ``(0, 0, 0)`` sentinel means "Cosh-NG detected but version unknown" —
+    callers should treat this as "unsupported version" and fail open (disable
+    compression) rather than falling back to duplicate injection.
+    """
+    version_str = os.environ.get("COSH_NG_VERSION", "")
+    if version_str:
+        ver = parse_version(version_str)
+        if ver:
+            return ver
+        # Detected Cosh-NG but can't parse version — unsupported
+        return (0, 0, 0)
+
+    runtime = os.environ.get("COSH_RUNTIME", "")
+    if runtime == "cosh-ng":
+        # Cosh-NG detected via runtime env var but no version available
+        return (0, 0, 0)
+
+    return None
+
+
 def parse_version(version_str: str) -> tuple | None:
     """Parse a version string like '0.35.0' into a (major, minor, patch) tuple."""
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)

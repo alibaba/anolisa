@@ -78,6 +78,23 @@ vcpus = 4        # overrides [vm].vcpus for Firecracker only
 memory = "1Gi"   # overrides [vm].memory for Firecracker only
 ```
 
+### Storage Configuration
+
+The `[storage]` section controls the sandbox storage backend:
+
+```toml
+[storage]
+provider = "file"       # Storage provider selection. Currently supported: "file", "auto".
+                        # "auto" probes available providers in priority order (currently equivalent to "file").
+                        # Other values will log a warning and fall back to file.
+images_dir = "/var/lib/blaze/images"
+# pool_size = 0           # [Reserved] Warm pool slots (not yet active)
+# prefork = false         # [Reserved] Pre-start VMs in pool (not yet active)
+# flush_interval = "30s"  # [Reserved] Dirty data flush period (not yet active)
+```
+
+The `file` provider uses standard filesystem operations for sandbox storage. The `auto` provider probes available backends in priority order (currently equivalent to `file`). Unrecognized values will log a warning and fall back to `file`.
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -100,6 +117,18 @@ memory = "1Gi"   # overrides [vm].memory for Firecracker only
 | GET | `/v1/hooks` | List kernel hooks |
 | GET | `/v1/metrics` | Prometheus metrics |
 | POST | `/v1/admin/reload` | Hot-reload policies |
+
+#### Health Check
+
+`GET /v1/health` returns daemon status including storage pool readiness:
+
+```json
+{
+  "status": "ok",
+  "version": "0.3.0",
+  "storage_pool": { "ready": 0, "capacity": 0, "pending": 0 }
+}
+```
 
 ## Project Layout
 

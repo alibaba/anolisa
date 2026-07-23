@@ -536,27 +536,29 @@ mod tests {
     use super::*;
 
     fn ctx_with_prefix(prefix: PathBuf) -> CliContext {
-        CliContext {
-            install_mode: InstallMode::System,
-            prefix: Some(prefix),
-            json: false,
-            dry_run: false,
-            verbose: false,
-            quiet: false,
-            no_color: false,
-        }
+        crate::test_support::context_for_root(
+            Path::new("/tmp/anolisa-commands-validation"),
+            InstallMode::System,
+            Some(prefix),
+            crate::test_support::TestContextOptions {
+                quiet: false,
+                no_color: false,
+                ..Default::default()
+            },
+        )
     }
 
     fn user_ctx() -> CliContext {
-        CliContext {
-            install_mode: InstallMode::User,
-            prefix: None,
-            json: false,
-            dry_run: false,
-            verbose: false,
-            quiet: false,
-            no_color: false,
-        }
+        crate::test_support::context_for_root(
+            Path::new("/tmp/anolisa-commands-validation"),
+            InstallMode::User,
+            None,
+            crate::test_support::TestContextOptions {
+                quiet: false,
+                no_color: false,
+                ..Default::default()
+            },
+        )
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     if args.enable_shell_evidence_tool {
         tools = tools.with_shell_evidence();
     }
+    crate::tool::mcp::register_configured_tools(&mut tools, &config.mcp.servers).await;
     if let Some(selection) = args.tools.as_deref() {
         tools.retain_selected_tools(selection)?;
     }
@@ -567,6 +568,14 @@ fn apply_cli_overrides(args: &CliArgs, config: &mut CoreConfig) {
     }
     if let Some(ref mode) = args.approval_mode {
         config.agent.approval_mode = mode.clone();
+    }
+    if let Some(ref tools) = args.allowed_tools {
+        config.agent.allowed_tools = tools
+            .split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(ToString::to_string)
+            .collect();
     }
 }
 

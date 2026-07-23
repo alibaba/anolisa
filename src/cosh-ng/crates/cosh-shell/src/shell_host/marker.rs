@@ -54,6 +54,7 @@ _COSH_AT_PROMPT=0
 _COSH_LAST_HISTORY_NO=0
 _COSH_LAST_HISTORY_COMMAND=
 _COSH_IN_PROMPT_COMMAND=0
+_COSH_LAST_NATIVE_HISTORY_FILE=
 
 _cosh_apply_internal_recovery() {
   if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
@@ -75,9 +76,9 @@ _cosh_json_escape() {
   printf '%s' "$value"
 }
 
-_cosh_emit_native_history_file_marker() {
+_cosh_native_history_file_path() {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" || -z "${HISTFILE:-}" ]]; then
-    return 0
+    return 1
   fi
 
   local history_file="$HISTFILE"
@@ -88,11 +89,17 @@ _cosh_emit_native_history_file_marker() {
     *) history_file="$PWD/$history_file" ;;
   esac
   if [[ "$history_file" != /* ]]; then
-    return 0
+    return 1
   fi
   if printf '%s' "$history_file" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-    return 0
+    return 1
   fi
+
+  printf '%s' "$history_file"
+}
+
+_cosh_emit_native_history_file_marker() {
+  local history_file="$1"
 
   printf '\033]1337;COSH;{"event":"history_file","token":"%s","session_id":"%s","history_file":"%s"}\a' \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
@@ -100,7 +107,18 @@ _cosh_emit_native_history_file_marker() {
     "$(_cosh_json_escape "$history_file")"
 }
 
-_cosh_emit_native_history_file_marker
+_cosh_maybe_emit_native_history_file_marker() {
+  local history_file
+  history_file="$(_cosh_native_history_file_path)" || return 0
+  if [[ "$history_file" == "${_COSH_LAST_NATIVE_HISTORY_FILE:-}" ]]; then
+    return 0
+  fi
+  if _cosh_emit_native_history_file_marker "$history_file"; then
+    _COSH_LAST_NATIVE_HISTORY_FILE="$history_file"
+  fi
+}
+
+_cosh_maybe_emit_native_history_file_marker
 
 _cosh_now_ms() {
   date +%s000
@@ -221,7 +239,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
       printf '%s' "slash"
       return 0
       ;;
@@ -258,7 +276,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
       return 0
       ;;
   esac
@@ -461,8 +479,11 @@ _cosh_run_user_prompt_command() {
 _cosh_prompt_command() {
   local status=$?
   _COSH_IN_PROMPT_COMMAND=1
+  _cosh_maybe_emit_native_history_file_marker
   _cosh_precmd_marker "$status"
   _cosh_run_user_prompt_command "$status"
+  # User prompt hooks may switch HISTFILE after the pre-prompt snapshot.
+  _cosh_maybe_emit_native_history_file_marker
   if [[ -n "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     local trap_snapshot_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.debug-trap"
     _COSH_SNAPSHOT_DEBUG_TRAP=1
@@ -651,7 +672,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
       printf '%s' "slash"
       return 0
       ;;
@@ -688,7 +709,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
       return 0
       ;;
   esac
@@ -862,7 +883,7 @@ _cosh_precmd_marker() {
 # Slash command function stubs — prevent "zsh: no such file or directory" for
 # commands starting with / that zsh would try to exec as an absolute path.
 # The actual interception and marker emission happens in _cosh_preexec_marker.
-for _cosh_sc in agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions help hooks mode recommendations select send-to-shell shell skills; do
+for _cosh_sc in agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions health help hooks mode recommendations select send-to-shell shell skills; do
   functions[/$_cosh_sc]=':'
 done
 unset _cosh_sc

@@ -26,6 +26,8 @@ mod config;
 mod cosh_core;
 #[path = "raw_cli/diagnostics.rs"]
 mod diagnostics;
+#[path = "raw_cli/doctor.rs"]
+mod doctor;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
 #[path = "raw_cli/external_hook.rs"]

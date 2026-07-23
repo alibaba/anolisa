@@ -22,6 +22,7 @@ pub mod kernel;
 pub mod lifecycle;
 pub mod policy;
 pub mod pool;
+pub mod storage;
 pub mod template;
 
 pub use error::{BlazeError, Result};

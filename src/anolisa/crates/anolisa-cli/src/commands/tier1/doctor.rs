@@ -2998,6 +2998,7 @@ mod tests {
                     target: ProviderTarget::Delegated {
                         pm: NativePm::Rpm,
                         package: "copilot-shell".to_string(),
+                        artifact: None,
                     },
                     requested_version: None,
                 }),
@@ -3041,6 +3042,7 @@ mod tests {
                         target: ProviderTarget::Delegated {
                             pm: NativePm::Rpm,
                             package: "copilot-shell".to_string(),
+                            artifact: None,
                         },
                         requested_version: None,
                     }),

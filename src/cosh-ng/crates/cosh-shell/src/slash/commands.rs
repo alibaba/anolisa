@@ -3,6 +3,7 @@ use crate::runtime::prelude::*;
 use crate::slash::config::render_config_command;
 use crate::slash::debug::render_debug_command;
 use crate::slash::extensions::render_extensions_command;
+use crate::slash::health::render_health_command;
 use crate::slash::hooks::render_hooks_command;
 use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
@@ -18,6 +19,7 @@ pub(super) fn render_slash_command<W: Write>(
     blocks: &[CommandBlock],
     adapter: &AdapterInstance,
     state: &mut InlineState,
+    shell_cwd: Option<&str>,
     output: &mut W,
 ) -> std::io::Result<bool> {
     match command {
@@ -71,6 +73,10 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Recommendations(sub, arg, extra) => {
             render_recommendations_command(sub, arg, extra, event, adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Health => {
+            render_health_command(state, shell_cwd, output)?;
             Ok(true)
         }
     }

@@ -42,8 +42,9 @@ Environment:
   AGENT_SEC_DAEMON_BIN          Existing agent-sec-daemon binary.
   AGENT_SEC_CLI_WHEEL           Wheel artifact to install into .venv.
   OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE
-                                minimal (default) installs E2E runtime deps
-                                without ML packages; full installs wheel deps.
+                                minimal (default) installs wheel-declared
+                                runtime deps without ML packages; full installs
+                                all wheel deps.
   EXPECT_UNSAFE_INSTALL_FLAG    Optional true/false assertion for deploy.sh.
   OPENCLAW_E2E_RESULT_ROOT      Result root; defaults to target/openclaw-e2e/results.
   OPENCLAW_E2E_SKIP_NPM_CI      Set to 1 to skip npm ci.
@@ -114,14 +115,10 @@ tools_root="${OPENCLAW_E2E_TOOLS_ROOT:-$repo_root/target/openclaw-e2e/tools}"
 npm_cache="${NPM_CONFIG_CACHE:-$result_dir/npm-cache}"
 export NPM_CONFIG_CACHE="$npm_cache"
 export npm_config_cache="$npm_cache"
-agent_sec_cli_e2e_runtime_deps=(
-    "cryptography>=42.0"
-    "pydantic>=2.0"
-    "pyyaml>=6.0"
-    "sqlalchemy>=2.0"
-    "textual>=0.80"
-    "typer>=0.9.0"
-    "regex>=2026.4.4"
+agent_sec_cli_e2e_excluded_deps=(
+    "modelscope"
+    "torch"
+    "transformers"
 )
 
 sync_pilot_workdir() {
@@ -193,12 +190,86 @@ resolve_wheel_spec() {
     die "agent-sec-cli wheel not found from spec: $spec"
 }
 
+resolve_wheel_runtime_deps() {
+    local python_bin="$1"
+    local wheel="$2"
+    shift 2
+
+    "$python_bin" - "$wheel" "$@" <<'PY'
+import re
+import sys
+import zipfile
+from email import policy
+from email.parser import BytesParser
+from pathlib import Path
+
+requirement_name = re.compile(
+    r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)"
+)
+extra_marker = re.compile(r"\bextra\b", re.IGNORECASE)
+
+
+def canonicalize_package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+wheel_path = Path(sys.argv[1])
+excluded = {canonicalize_package_name(name) for name in sys.argv[2:]}
+
+try:
+    if not wheel_path.is_file():
+        raise ValueError(f"wheel does not exist: {wheel_path}")
+    with zipfile.ZipFile(wheel_path) as archive:
+        metadata_paths = [
+            name
+            for name in archive.namelist()
+            if name.endswith(".dist-info/METADATA")
+        ]
+        if len(metadata_paths) != 1:
+            raise ValueError(
+                f"expected one .dist-info/METADATA entry, found {len(metadata_paths)}"
+            )
+        metadata_content = archive.read(metadata_paths[0])
+
+    metadata = BytesParser(policy=policy.default).parsebytes(metadata_content)
+    for requirement_header in metadata.get_all("Requires-Dist", []):
+        requirement = str(requirement_header)
+        match = requirement_name.match(requirement)
+        if match is None:
+            raise ValueError(f"invalid Requires-Dist entry: {requirement!r}")
+
+        _, marker_separator, marker = requirement.partition(";")
+        if marker_separator and extra_marker.search(marker):
+            continue
+        if canonicalize_package_name(match.group(1)) in excluded:
+            continue
+        print(requirement)
+except (OSError, KeyError, ValueError, zipfile.BadZipFile) as exc:
+    print(f"ERROR: cannot resolve wheel runtime dependencies: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 install_agent_sec_cli_wheel() {
     local wheel="$1"
+    local dependency_output
+    local runtime_deps=()
 
     case "$OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE" in
         minimal)
-            run uv pip install --python "$venv_dir/bin/python" "${agent_sec_cli_e2e_runtime_deps[@]}"
+            if ! dependency_output="$(
+                resolve_wheel_runtime_deps \
+                    "$venv_dir/bin/python" \
+                    "$wheel" \
+                    "${agent_sec_cli_e2e_excluded_deps[@]}"
+            )"; then
+                die "failed to resolve runtime dependencies from wheel: $wheel"
+            fi
+            if [[ -n "$dependency_output" ]]; then
+                mapfile -t runtime_deps <<<"$dependency_output"
+                log "minimal runtime deps from wheel: ${runtime_deps[*]}"
+                run uv pip install --python "$venv_dir/bin/python" "${runtime_deps[@]}"
+            fi
             run uv pip install --python "$venv_dir/bin/python" --no-deps "$wheel"
             ;;
         full)

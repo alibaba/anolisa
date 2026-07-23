@@ -98,7 +98,15 @@ fn main() {
 
     let has_subcommand = matches!(
         args.get(1).map(String::as_str),
-        Some("demo" | "host-demo" | "raw" | "interactive" | "interactive-demo" | "adapter-demo")
+        Some(
+            "demo"
+                | "doctor"
+                | "host-demo"
+                | "raw"
+                | "interactive"
+                | "interactive-demo"
+                | "adapter-demo"
+        )
     );
     if let Some(status) = passthrough_raw_non_interactive(&args) {
         std::process::exit(status);
@@ -116,6 +124,7 @@ fn main() {
 
     let status = match args.get(1).map(String::as_str) {
         Some("demo") => runtime::controller::run_demo(),
+        Some("doctor") => runtime::doctor::run_doctor(),
         Some("host-demo") => runtime::controller::run_host_demo(),
         Some("raw") => {
             let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[2..]);

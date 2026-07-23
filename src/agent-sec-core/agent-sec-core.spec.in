@@ -99,7 +99,7 @@ Built with maturin as a Rust native Python extension.
 %systemd_user_preun agent-sec-core.service
 
 %postun -n agent-sec-cli
-%systemd_user_postun agent-sec-core.service
+%systemd_user_postun_with_restart agent-sec-core.service
 
 # =============================================================================
 # Subpackage 2: agent-sec-cosh-hook

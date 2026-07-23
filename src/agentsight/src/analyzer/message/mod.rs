@@ -115,16 +115,39 @@ impl MessageParser {
         }
 
         // Try Aliyun SysOM (AK/SK auth mode)
-        if SysomParser::matches_path(path) {
-            let request = request_body.and_then(SysomParser::parse_request);
-            let response = response_body.and_then(SysomParser::parse_response);
-
-            if request.is_some() || response.is_some() {
-                return Some(ParsedApiMessage::SysomMessage { request, response });
-            }
+        if let Some(parsed) = self.parse_by_path_sysom_only(path, request_body, response_body) {
+            return Some(parsed);
         }
 
         log::warn!("Path '{path}' does not match any known LLM API endpoint");
+        None
+    }
+
+    /// Parse request/response bodies against the SysOM parser only.
+    ///
+    /// SysOM's Copilot API is deliberately kept as the *only* deep-parsing
+    /// target for SSE-shaped responses: its body is a non-standard envelope
+    /// (`llmParamString`-encoded request, cumulative SSE chunks, `tool_use`
+    /// array) that the generic HttpRecord/genai-builder SSE fallback cannot
+    /// reconstruct. OpenAI/Anthropic SSE responses are intentionally left
+    /// unparsed here because `genai::builder::extract_parts_from_sse_body`
+    /// already rebuilds their semantic content from the raw HttpRecord —
+    /// parsing them again here would just duplicate that work.
+    pub fn parse_by_path_sysom_only(
+        &self,
+        path: &str,
+        request_body: Option<&serde_json::Value>,
+        response_body: Option<&serde_json::Value>,
+    ) -> Option<ParsedApiMessage> {
+        if !SysomParser::matches_path(path) {
+            return None;
+        }
+        let request = request_body.and_then(SysomParser::parse_request);
+        let response = response_body.and_then(SysomParser::parse_response);
+
+        if request.is_some() || response.is_some() {
+            return Some(ParsedApiMessage::SysomMessage { request, response });
+        }
         None
     }
 
@@ -133,6 +156,11 @@ impl MessageParser {
     /// This method handles streaming responses where the response is delivered
     /// via Server-Sent Events (SSE) instead of a single JSON body.
     /// SSE events are converted to a JSON array and passed to parse_response.
+    ///
+    /// Only the SysOM path is deep-parsed here (see
+    /// [`Self::parse_by_path_sysom_only`] for why) — OpenAI/Anthropic SSE
+    /// responses rely on the HttpRecord-based genai-builder fallback instead,
+    /// avoiding duplicate provider/model/message extraction.
     ///
     /// # Arguments
     /// * `path` - The HTTP request path (e.g., "/v1/chat/completions")
@@ -163,8 +191,7 @@ impl MessageParser {
             Some(serde_json::Value::Array(chunks))
         };
 
-        // Use parse_by_path with the converted response body
-        self.parse_by_path(path, request_body, response_body.as_ref())
+        self.parse_by_path_sysom_only(path, request_body, response_body.as_ref())
     }
 
     /// Detect provider from path without parsing
@@ -410,5 +437,124 @@ mod tests {
         assert!(MessageParser::is_llm_api_path(
             "https://api.anthropic.com/v1/messages"
         ));
+    }
+
+    // -- parse_by_path_sysom_only / parse_by_path_with_sse scoping tests --
+    //
+    // These cover the branch-A/branch-B dedup fix: SSE responses for
+    // OpenAI/Anthropic must no longer be deep-parsed here (that semantic
+    // reconstruction now lives solely in genai::extract_parts_from_sse_body
+    // against the raw HttpRecord), while SysOM must still be deep-parsed
+    // because its llmParamString/tool_use envelope has no HttpRecord fallback.
+
+    #[test]
+    fn test_parse_by_path_sysom_only_rejects_openai_and_anthropic() {
+        let parser = MessageParser::new();
+        let openai_request = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let anthropic_request = serde_json::json!({
+            "model": "claude-3-opus-20240229",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        assert!(
+            parser
+                .parse_by_path_sysom_only("/v1/chat/completions", Some(&openai_request), None)
+                .is_none()
+        );
+        assert!(
+            parser
+                .parse_by_path_sysom_only("/v1/messages", Some(&anthropic_request), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_parse_by_path_sysom_only_accepts_sysom() {
+        let parser = MessageParser::new();
+        let params = serde_json::json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let request = serde_json::json!({"llmParamString": params.to_string()});
+
+        let result = parser.parse_by_path_sysom_only(
+            "/api/v1/copilot/generate_copilot",
+            Some(&request),
+            None,
+        );
+        match result {
+            Some(ParsedApiMessage::SysomMessage {
+                request: Some(req), ..
+            }) => {
+                assert_eq!(req.params.model, "qwen3-coder-plus");
+            }
+            other => panic!("expected SysomMessage with request, got {other:?}"),
+        }
+    }
+
+    /// Build a `ParsedSseEvent` carrying the given raw SSE `data:` payload (no
+    /// framing needed — `parse_by_path_with_sse` reads the event body as JSON).
+    fn make_sse_event(data: &str) -> ParsedSseEvent {
+        use crate::probes::sslsniff::SslEvent;
+        use std::rc::Rc;
+
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 0,
+            delta_ns: 0,
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            len: data.len() as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: data.as_bytes().to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0,
+        });
+        ParsedSseEvent::new(None, None, None, 0, data.len(), ssl_event)
+    }
+
+    #[test]
+    fn test_parse_by_path_with_sse_skips_openai() {
+        let parser = MessageParser::new();
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]
+        });
+        let events = vec![make_sse_event(&chunk.to_string())];
+
+        // Previously this returned Some(OpenAICompletion { .. }); now branch A
+        // leaves OpenAI/Anthropic SSE responses unparsed since the genai
+        // builder's SSE fallback already reconstructs the same semantics from
+        // the raw HttpRecord.
+        let result = parser.parse_by_path_with_sse("/v1/chat/completions", None, &events);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_by_path_with_sse_still_parses_sysom() {
+        let parser = MessageParser::new();
+        let chunk = serde_json::json!({
+            "choices": [{"message": {"content": "hi", "tool_use": null}}]
+        });
+        let events = vec![make_sse_event(&chunk.to_string())];
+
+        let result =
+            parser.parse_by_path_with_sse("/api/v1/copilot/generate_copilot", None, &events);
+        match result {
+            Some(ParsedApiMessage::SysomMessage {
+                response: Some(resp),
+                ..
+            }) => {
+                assert_eq!(resp.choices[0].message.content, "hi");
+            }
+            other => panic!("expected SysomMessage with response, got {other:?}"),
+        }
     }
 }

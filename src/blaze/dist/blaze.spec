@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           blaze
-Version:        0.2.1
+Version:        0.3.0
 Release:        %{anolis_release}%{?dist}
 Summary:        Per-host sandbox orchestrator daemon for AI Agent workloads
 

@@ -216,6 +216,46 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
 }
 
 #[test]
+fn raw_cli_startup_health_degraded_fixture_is_read_only() {
+    let cwd = temp_shell_home("startup-health-degraded-read-only");
+    let suppression_store = cwd.join("health-suppression");
+    let suppression_store = suppression_store.to_string_lossy().into_owned();
+    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-degraded"),
+            (
+                "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+                suppression_store.as_str(),
+            ),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+        &cwd,
+        vec![
+            (b"\t\n".to_vec(), Duration::from_millis(1400)),
+            (b"exit\n".to_vec(), Duration::from_millis(700)),
+        ],
+    );
+
+    assert!(output.contains("Health check"), "{output}");
+    assert!(output.contains("degraded"), "{output}");
+    assert!(output.contains("Suggested prompts"), "{output}");
+    assert!(output.contains("[Health]"), "{output}");
+    assert!(!output.contains("[Personal]"), "{output}");
+    assert!(!output.contains("Tab insert"), "{output}");
+    assert!(!output.contains("Enter ask"), "{output}");
+    assert!(!output.contains("Shift+Tab cycle"), "{output}");
+    assert!(
+        !output.contains("Received shell prompt request:"),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_startup_health_healthy_fixture_keeps_only_default_startup_card() {
     let cwd = temp_shell_home("startup-health-healthy-fixture");
     let suppression_store = cwd.join("health-suppression");

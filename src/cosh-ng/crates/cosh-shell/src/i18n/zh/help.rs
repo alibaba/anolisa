@@ -5,6 +5,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpTitle => "Slash 命令",
         MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
         MessageId::HelpGroupConfig => "配置",
+        MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
         MessageId::HelpGroupHooks => "Hooks",
         MessageId::HelpSummaryHelp => "显示命令参考",
@@ -21,6 +22,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryDetails => "查看审批或活动详情",
         MessageId::HelpSummaryAudit => "显示审计入口",
         MessageId::HelpSummaryHooks => "显示 Hook 状态",
+        MessageId::HelpSummaryHealth => "按需运行健康检查",
         MessageId::HelpSummarySelect => "展示一条推荐",
         MessageId::HelpSummaryCopy => "复制一条推荐",
         MessageId::HelpSummaryDebug => "显示会话调试详情",
@@ -35,6 +37,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashUnknownBody => "未知 slash 命令: {command}",
         MessageId::SlashUnknownSuggestionBody => "你是不是想用 {command}？",
         MessageId::SlashUnknownFooter => "使用 /help 查看可用命令。",
+        MessageId::SlashInvalidArgumentsTitle => "Slash 参数错误",
+        MessageId::SlashQuotedArgumentsUnsupported => {
+            "不支持带引号的参数。本例请改用 /mode approval trust confirm。"
+        }
         MessageId::SlashInfoAuditTitle => "审计",
         MessageId::SlashInfoAuditApprovalsBody => "审批决策可通过 Details 操作查看。",
         MessageId::SlashInfoAuditActivityBody => "活动 output ref 可通过 Details 操作查看。",

@@ -263,15 +263,12 @@ fn run_with_index_and_backend(
 }
 
 fn system_ctx() -> CliContext {
-    CliContext {
-        install_mode: crate::context::InstallMode::System,
-        prefix: None,
-        json: false,
-        dry_run: false,
-        verbose: false,
-        quiet: true,
-        no_color: true,
-    }
+    crate::test_support::context_for_root(
+        std::path::Path::new("/tmp/anolisa-update-check-validation"),
+        crate::context::InstallMode::System,
+        None,
+        Default::default(),
+    )
 }
 
 // ── CLI parse surface ───────────────────────────────────────────────
@@ -1074,6 +1071,10 @@ fn update_check_cache_usable_requires_matching_target() {
 
 // ── repo config read-only + target profile ──────────────────────────
 
+fn isolated_packaged_data_probe() -> crate::packaged::PackagedDataProbe {
+    crate::packaged::PackagedDataProbe::from_inputs(None, None)
+}
+
 /// `--check` must load repo config without writing it. Here the config already
 /// exists locally, so the read-only load returns it and touches nothing else;
 /// the missing-config no-write guarantee is covered by
@@ -1082,6 +1083,12 @@ fn update_check_cache_usable_requires_matching_target() {
 fn update_check_read_only_load_uses_existing_config_without_writing() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let ctx = crate::test_support::context_for_root(
+        tmp.path(),
+        crate::context::InstallMode::System,
+        Some(tmp.path().to_path_buf()),
+        Default::default(),
+    );
     std::fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
     let repo_toml = layout.etc_dir.join("repo.toml");
     std::fs::write(
@@ -1090,7 +1097,7 @@ fn update_check_read_only_load_uses_existing_config_without_writing() {
     )
     .expect("write repo.toml");
 
-    let cfg = load_repo_config_read_only(&layout).expect("read-only load");
+    let cfg = load_repo_config_read_only(&ctx, &layout).expect("read-only load");
     assert_eq!(cfg.default_backend, "rpm");
     // No scratch file was left behind by the read-only path.
     assert!(!repo_toml.with_extension("toml.tmp").exists());
@@ -1108,7 +1115,9 @@ fn update_check_target_profile_parses_default_components() {
     )
     .expect("write profile");
 
-    let profile = load_target_profile_by_name(&layout, "image-v1.0").expect("profile loads");
+    let probe = isolated_packaged_data_probe();
+    let profile =
+        load_target_profile_by_name(&layout, "image-v1.0", &probe).expect("profile loads");
     assert_eq!(profile.default_components, vec!["cosh", "sec-core"]);
 }
 
@@ -1116,22 +1125,21 @@ fn update_check_target_profile_parses_default_components() {
 fn update_check_target_profile_rejects_traversal() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let err = load_target_profile_by_name(&layout, "../escape").expect_err("must reject traversal");
+    let probe = isolated_packaged_data_probe();
+    let err = load_target_profile_by_name(&layout, "../escape", &probe)
+        .expect_err("must reject traversal");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
 }
 
 // ── default target profile + user-mode gating ───────────────────────
 
 fn user_ctx() -> CliContext {
-    CliContext {
-        install_mode: crate::context::InstallMode::User,
-        prefix: None,
-        json: false,
-        dry_run: false,
-        verbose: false,
-        quiet: true,
-        no_color: true,
-    }
+    crate::test_support::context_for_root(
+        std::path::Path::new("/tmp/anolisa-update-check-validation"),
+        crate::context::InstallMode::User,
+        None,
+        Default::default(),
+    )
 }
 
 /// A non-system install mode is out of scope for the RPM upgrade check and must
@@ -1190,8 +1198,9 @@ fn update_check_builtin_default_profile_parses() {
 fn update_check_omitted_target_uses_builtin_default() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let probe = isolated_packaged_data_probe();
     let (name, profile) =
-        load_effective_target_profile(&layout, None).expect("default target resolves");
+        load_effective_target_profile(&layout, None, &probe).expect("default target resolves");
     assert_eq!(name, DEFAULT_TARGET_PROFILE_NAME);
     assert!(!profile.default_components.is_empty());
 }
@@ -1212,8 +1221,9 @@ fn update_check_omitted_target_uses_disk_default_profile() {
     )
     .expect("write default profile");
 
+    let probe = isolated_packaged_data_probe();
     let (name, profile) =
-        load_effective_target_profile(&layout, None).expect("default target resolves");
+        load_effective_target_profile(&layout, None, &probe).expect("default target resolves");
     assert_eq!(name, DEFAULT_TARGET_PROFILE_NAME);
     assert_eq!(profile.default_components, vec!["disk-only"]);
 }
@@ -1222,10 +1232,10 @@ fn update_check_omitted_target_uses_disk_default_profile() {
 /// the compiled-in default rather than erroring.
 #[test]
 fn update_check_explicit_default_target_falls_back_to_builtin() {
-    let _guard = crate::packaged::DataDirEnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let profile = load_target_profile_by_name(&layout, DEFAULT_TARGET_PROFILE_NAME)
+    let probe = isolated_packaged_data_probe();
+    let profile = load_target_profile_by_name(&layout, DEFAULT_TARGET_PROFILE_NAME, &probe)
         .expect("explicit default falls back to builtin");
     assert!(!profile.default_components.is_empty());
 }
@@ -1234,10 +1244,10 @@ fn update_check_explicit_default_target_falls_back_to_builtin() {
 /// message names the profile.
 #[test]
 fn update_check_explicit_custom_target_missing_is_invalid_argument() {
-    let _guard = crate::packaged::DataDirEnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let err = load_target_profile_by_name(&layout, "no-such-profile")
+    let probe = isolated_packaged_data_probe();
+    let err = load_target_profile_by_name(&layout, "no-such-profile", &probe)
         .expect_err("missing custom target must error");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(err.reason().contains("no-such-profile"));

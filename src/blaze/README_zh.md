@@ -77,6 +77,23 @@ vcpus = 4        # 仅对 Firecracker 覆盖 [vm].vcpus
 memory = "1Gi"   # 仅对 Firecracker 覆盖 [vm].memory
 ```
 
+### 存储配置
+
+`[storage]` 部分控制 sandbox 存储后端：
+
+```toml
+[storage]
+provider = "file"       # 存储 provider 选择。当前支持："file"、"auto"。
+                        # "auto" 按优先级探测可用 provider（当前等同于 "file"）。
+                        # 其他值将记录告警并回退到 file。
+images_dir = "/var/lib/blaze/images"
+# pool_size = 0           # [Reserved] 预热存储槽位数（尚未启用）
+# prefork = false         # [Reserved] 是否在槽位中预启动 VM（尚未启用）
+# flush_interval = "30s"  # [Reserved] 脏数据刷盘周期（尚未启用）
+```
+
+`file` provider 使用标准文件系统操作管理 sandbox 存储。`auto` 按优先级探测可用 provider（当前等同于 `file`）。无法识别的值将记录告警并回退到 `file`。
+
 ## API 端点
 
 | 方法 | 路径 | 说明 |
@@ -99,6 +116,18 @@ memory = "1Gi"   # 仅对 Firecracker 覆盖 [vm].memory
 | GET | `/v1/hooks` | 列出内核 hook |
 | GET | `/v1/metrics` | Prometheus 指标 |
 | POST | `/v1/admin/reload` | 热加载策略 |
+
+#### 健康检查
+
+`GET /v1/health` 返回 daemon 状态，包含存储池就绪信息：
+
+```json
+{
+  "status": "ok",
+  "version": "0.3.0",
+  "storage_pool": { "ready": 0, "capacity": 0, "pending": 0 }
+}
+```
 
 ## 项目结构
 

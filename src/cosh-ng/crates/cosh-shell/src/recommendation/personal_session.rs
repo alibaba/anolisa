@@ -47,14 +47,7 @@ pub(crate) fn poll_personal_session(
 }
 
 fn sync_history_once(state: &mut InlineState) {
-    if state.personalization.history_synced
-        || state.personalization.history_sync_pending.is_some()
-        || !state.personalization.bash_history
-        || state
-            .personalization
-            .history_retry_after
-            .is_some_and(|retry_at| Instant::now() < retry_at)
-    {
+    if !state.personalization.bash_history {
         return;
     }
     let (Some(path), Some(writer)) = (
@@ -63,6 +56,16 @@ fn sync_history_once(state: &mut InlineState) {
     ) else {
         return;
     };
+    if state.personalization.history_sync_pending.is_some()
+        || state.personalization.history_synced_path.as_ref() == Some(&path)
+        || state
+            .personalization
+            .history_retry_after
+            .as_ref()
+            .is_some_and(|(retry_path, retry_at)| retry_path == &path && Instant::now() < *retry_at)
+    {
+        return;
+    }
     let live_commands = state
         .session_blocks
         .iter()
@@ -83,31 +86,31 @@ fn sync_history_once(state: &mut InlineState) {
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_default();
     if let Ok(receiver) = writer.try_sync_native_bash_history(
-        NativeBashHistoryMarker::new(path),
+        NativeBashHistoryMarker::new(path.clone()),
         unsafe { nix::libc::geteuid() },
         now_unix_secs(),
         host_identity,
         live_commands,
     ) {
-        state.personalization.history_sync_pending = Some(receiver);
+        state.personalization.history_sync_pending = Some((path, receiver));
     }
 }
 
 fn poll_history_sync(state: &mut InlineState) {
-    let Some(receiver) = state.personalization.history_sync_pending.take() else {
+    let Some((path, receiver)) = state.personalization.history_sync_pending.take() else {
         return;
     };
     match receiver.try_recv() {
         Ok(Ok(())) => {
-            state.personalization.history_synced = true;
+            state.personalization.history_synced_path = Some(path);
             state.personalization.history_retry_after = None;
         }
         Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
             state.personalization.history_retry_after =
-                Some(Instant::now() + Duration::from_secs(300));
+                Some((path, Instant::now() + Duration::from_secs(300)));
         }
         Err(std::sync::mpsc::TryRecvError::Empty) => {
-            state.personalization.history_sync_pending = Some(receiver);
+            state.personalization.history_sync_pending = Some((path, receiver));
         }
     }
 }
@@ -422,11 +425,13 @@ mod tests {
 
     #[test]
     fn history_sync_requires_a_successful_background_commit() {
+        let history_file = std::path::PathBuf::from("/tmp/history");
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         sender.send(Err("disk busy".to_string())).unwrap();
         let mut state = InlineState {
             personalization: crate::recommendation::personal_state::PersonalizationState {
-                history_sync_pending: Some(receiver),
+                history_file: Some(history_file.clone()),
+                history_sync_pending: Some((history_file.clone(), receiver)),
                 ..Default::default()
             },
             ..InlineState::default()
@@ -434,15 +439,58 @@ mod tests {
 
         poll_history_sync(&mut state);
 
-        assert!(!state.personalization.history_synced);
+        assert!(state.personalization.history_synced_path.is_none());
         assert!(state.personalization.history_retry_after.is_some());
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         sender.send(Ok(())).unwrap();
-        state.personalization.history_sync_pending = Some(receiver);
+        state.personalization.history_sync_pending = Some((history_file.clone(), receiver));
         poll_history_sync(&mut state);
-        assert!(state.personalization.history_synced);
+        assert_eq!(
+            state.personalization.history_synced_path,
+            Some(history_file)
+        );
         assert!(state.personalization.history_retry_after.is_none());
+    }
+
+    #[test]
+    fn history_sync_serializes_path_switches_until_pending_commit() {
+        let first_path = std::path::PathBuf::from("/tmp/first-history");
+        let pending_path = std::path::PathBuf::from("/tmp/pending-history");
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut state = InlineState {
+            personalization: crate::recommendation::personal_state::PersonalizationState {
+                history_file: Some(first_path.clone()),
+                history_synced_path: Some(first_path.clone()),
+                history_sync_pending: Some((pending_path.clone(), receiver)),
+                ..Default::default()
+            },
+            ..InlineState::default()
+        };
+
+        poll_history_sync(&mut state);
+
+        assert_eq!(
+            state
+                .personalization
+                .history_sync_pending
+                .as_ref()
+                .map(|(path, _)| path),
+            Some(&pending_path)
+        );
+
+        sender.send(Ok(())).unwrap();
+        poll_history_sync(&mut state);
+
+        assert_eq!(
+            state.personalization.history_synced_path,
+            Some(pending_path)
+        );
+        assert_ne!(
+            state.personalization.history_synced_path,
+            state.personalization.history_file
+        );
+        assert!(state.personalization.history_sync_pending.is_none());
     }
 
     fn feedback(action: FeedbackAction) -> ActivityPayload {

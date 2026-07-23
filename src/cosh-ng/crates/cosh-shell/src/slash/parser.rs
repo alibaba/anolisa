@@ -21,6 +21,7 @@ pub(super) enum SlashCommand<'a> {
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
     Info(SlashInfoCommand),
+    Health,
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
@@ -30,11 +31,23 @@ pub(super) enum SlashCommand<'a> {
     Recommendations(Option<&'a str>, Option<&'a str>, Option<&'a str>),
 }
 
+/// Explains why a parser-owned slash command could not be decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SlashParseError {
+    /// Single- and double-quoted arguments are intentionally unsupported.
+    QuotedArgumentsUnsupported,
+}
+
 impl<'a> SlashCommand<'a> {
-    pub(super) fn parse(input: &'a str) -> Option<Self> {
+    pub(super) fn parse(input: &'a str) -> Result<Option<Self>, SlashParseError> {
         let mut parts = input.split_whitespace();
-        let token = parts.next()?;
-        match token {
+        let Some(token) = parts.next() else {
+            return Ok(None);
+        };
+        if parser_owned_command(token) && input.contains(['\'', '"']) {
+            return Err(SlashParseError::QuotedArgumentsUnsupported);
+        }
+        Ok(match token {
             "/help" => Some(Self::Help),
             "/auth" => Some(Self::Auth),
             "/hooks" => {
@@ -61,6 +74,7 @@ impl<'a> SlashCommand<'a> {
                 Some(Self::Config(sub, value))
             }
             "/debug" => Some(Self::Debug(parts.next())),
+            "/health" => Some(Self::Health),
             "/extensions" => {
                 let sub = parts.next();
                 let arg = parts.next();
@@ -93,8 +107,33 @@ impl<'a> SlashCommand<'a> {
                 }
             }
             _ => None,
-        }
+        })
     }
+}
+
+fn parser_owned_command(token: &str) -> bool {
+    matches!(
+        token,
+        "/help"
+            | "/auth"
+            | "/hooks"
+            | "/mode"
+            | "/approval-mode"
+            | "/allow"
+            | "/approve"
+            | "/deny"
+            | "/answer"
+            | "/audit"
+            | "/config"
+            | "/debug"
+            | "/health"
+            | "/extensions"
+            | "/skills"
+            | "/session"
+            | "/resume"
+            | "/recommendations"
+            | "/"
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,13 +156,13 @@ pub(super) fn slash_command_hints(prefix: &str) -> Vec<&'static SlashCommandSpec
 
 #[cfg(test)]
 mod tests {
-    use super::{RemovedCommand, SlashCommand, SlashCommandSpec};
+    use super::{RemovedCommand, SlashCommand, SlashCommandSpec, SlashParseError};
 
     #[test]
     fn removed_decision_commands_parse_as_removed_not_unknown() {
         for command in ["/allow 1", "/approve 1", "/deny 1"] {
             match SlashCommand::parse(command) {
-                Some(SlashCommand::Removed(RemovedCommand::ApprovalDecision(token))) => {
+                Ok(Some(SlashCommand::Removed(RemovedCommand::ApprovalDecision(token)))) => {
                     assert_eq!(token, command.split_whitespace().next().unwrap());
                 }
                 _ => panic!("{command} did not parse as removed approval decision"),
@@ -131,7 +170,7 @@ mod tests {
         }
 
         match SlashCommand::parse("/answer yes") {
-            Some(SlashCommand::Removed(RemovedCommand::QuestionAnswer)) => {}
+            Ok(Some(SlashCommand::Removed(RemovedCommand::QuestionAnswer))) => {}
             _ => panic!("/answer did not parse as removed question answer"),
         }
     }
@@ -139,11 +178,11 @@ mod tests {
     #[test]
     fn session_commands_and_resume_alias_share_parser_path() {
         match SlashCommand::parse("/session resume abc") {
-            Some(SlashCommand::Session(arguments)) => assert_eq!(arguments, "resume abc"),
+            Ok(Some(SlashCommand::Session(arguments))) => assert_eq!(arguments, "resume abc"),
             _ => panic!("/session did not parse as a session command"),
         }
         match SlashCommand::parse("/resume abc") {
-            Some(SlashCommand::Session(arguments)) => assert_eq!(arguments, "abc"),
+            Ok(Some(SlashCommand::Session(arguments))) => assert_eq!(arguments, "abc"),
             _ => panic!("/resume did not parse as a session command"),
         }
     }
@@ -151,13 +190,48 @@ mod tests {
     #[test]
     fn recommendations_preserves_subcommand_and_rejectable_extra_arguments() {
         match SlashCommand::parse("/recommendations on unexpected extra") {
-            Some(SlashCommand::Recommendations(sub, arg, extra)) => {
+            Ok(Some(SlashCommand::Recommendations(sub, arg, extra))) => {
                 assert_eq!(sub, Some("on"));
                 assert_eq!(arg, Some("unexpected"));
                 assert_eq!(extra, Some("extra"));
             }
             _ => panic!("recommendations command did not parse"),
         }
+    }
+
+    #[test]
+    fn quoted_arguments_are_rejected_for_parser_owned_commands() {
+        for command in [
+            "/mode approval \"trust confirm\"",
+            "/mode approval 'trust confirm'",
+            "/config language \"en US\"",
+            "/health \"quick\"",
+            "/recommendations \"on\"",
+        ] {
+            assert!(
+                matches!(
+                    SlashCommand::parse(command),
+                    Err(SlashParseError::QuotedArgumentsUnsupported)
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn unquoted_arguments_keep_the_existing_token_contract() {
+        match SlashCommand::parse("/mode approval trust confirm") {
+            Ok(Some(SlashCommand::Mode(Some("approval"), Some("trust"), Some("confirm")))) => {}
+            _ => panic!("unquoted trust confirmation did not parse"),
+        }
+    }
+
+    #[test]
+    fn shell_commands_with_quotes_are_not_slash_parse_errors() {
+        assert!(matches!(
+            SlashCommand::parse("printf '\"hello world\"\\n'"),
+            Ok(None)
+        ));
     }
 
     #[test]

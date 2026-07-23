@@ -438,6 +438,7 @@ mod tests {
                     pm: NativePm::Rpm,
                     package: Some("copilot-shell".to_string()),
                     record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: None,
                 },
                 [
                     TransactionStep::planned(INSTALL_PHASE, "copilot-shell", INSTALL_ACTION, None),
