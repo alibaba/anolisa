@@ -12,8 +12,8 @@ use super::claude::{
 };
 use super::cosh_core::{
     commit_pending_session_for_scope, invalidate_resume_on_session_failure, mark_recovery_failure,
-    retain_session_after_context_limit_failure, terminal_events_for_session_commit,
-    SessionResumeAttempt, SessionRuntimeState,
+    retain_context_session, terminal_events_for_session_commit, SessionResumeAttempt,
+    SessionRuntimeState,
 };
 use super::{
     agent_event_is_provider_progress, control_protocol, record_cancellation_pending_session,
@@ -143,7 +143,7 @@ pub(super) fn run_sync_cosh_core_process(
             &terminal_events,
             session_state,
         );
-        let retain_session = retain_session_after_context_limit_failure(&terminal_events);
+        let retain_session = retain_context_session(&terminal_events, parser.session_error_phase());
         let commit_outcome = commit_pending_session_for_scope(
             completed || retain_session,
             failed && !retain_session,
@@ -564,7 +564,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
             &terminal_events,
             &session_state,
         );
-        let retain_session = retain_session_after_context_limit_failure(&terminal_events);
+        let retain_session = retain_context_session(&terminal_events, parser.session_error_phase());
         let commit_outcome = commit_pending_session_for_scope(
             completed || retain_session,
             failed && !retain_session,

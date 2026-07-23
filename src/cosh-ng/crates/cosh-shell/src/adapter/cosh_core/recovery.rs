@@ -366,15 +366,17 @@ pub(in crate::adapter) fn commit_pending_session_for_scope(
 
 /// Returns whether a failed turn still leaves a safely persisted session that
 /// must remain selectable for manual compaction.
-pub(in crate::adapter) fn retain_session_after_context_limit_failure(
+pub(in crate::adapter) fn retain_context_session(
     terminal_events: &[AgentEvent],
+    session_error_phase: Option<&str>,
 ) -> bool {
-    terminal_events.iter().any(|event| {
-        matches!(
-            event,
-            AgentEvent::AgentFailed { error, .. } if error.starts_with("context_limit:")
-        )
-    })
+    session_error_phase != Some("persist")
+        && terminal_events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::AgentFailed { error, .. } if error.starts_with("context_limit:")
+            )
+        })
 }
 
 pub(in crate::adapter) fn invalidate_resume_on_session_failure(

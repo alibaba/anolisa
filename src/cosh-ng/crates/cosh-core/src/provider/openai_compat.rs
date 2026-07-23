@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -303,6 +303,8 @@ impl ContentGenerator for OpenAICompatProvider {
 #[derive(Default)]
 struct OpenAICompatStreamState {
     argument_deltas_seen: HashSet<u32>,
+    started_tool_calls: HashSet<u32>,
+    emitted_text: HashMap<u32, String>,
 }
 
 #[cfg(test)]
@@ -329,6 +331,7 @@ fn parse_sse_chunk_with_state(
 
     if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
+            let choice_index = choice.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
             let empty_delta = Value::Null;
             let delta = choice.get("delta").unwrap_or(&empty_delta);
             if let Some(field) = thinking_field {
@@ -343,15 +346,27 @@ fn parse_sse_chunk_with_state(
                 .get("content")
                 .and_then(|c| c.as_str())
                 .filter(|content| !content.is_empty())
-                .or_else(|| {
-                    choice
-                        .get("message")
-                        .and_then(|message| message.get("content"))
-                        .and_then(|content| content.as_str())
-                        .filter(|content| !content.is_empty())
-                })
             {
+                stream_state
+                    .emitted_text
+                    .entry(choice_index)
+                    .or_default()
+                    .push_str(content);
                 events.push(GenerateEvent::TextDelta(content.to_string()));
+            } else if let Some(snapshot) = choice
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(|content| content.as_str())
+                .filter(|content| !content.is_empty())
+            {
+                let emitted = stream_state.emitted_text.entry(choice_index).or_default();
+                let suffix = snapshot
+                    .strip_prefix(emitted.as_str())
+                    .or_else(|| emitted.is_empty().then_some(snapshot));
+                if let Some(suffix) = suffix.filter(|suffix| !suffix.is_empty()) {
+                    emitted.push_str(suffix);
+                    events.push(GenerateEvent::TextDelta(suffix.to_string()));
+                }
             }
 
             if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
@@ -391,11 +406,13 @@ fn parse_sse_chunk_with_state(
                             })
                             .unwrap_or("")
                             .to_string();
-                        events.push(GenerateEvent::ToolCallStart {
-                            index,
-                            id,
-                            name: name.to_string(),
-                        });
+                        if stream_state.started_tool_calls.insert(index) {
+                            events.push(GenerateEvent::ToolCallStart {
+                                index,
+                                id,
+                                name: name.to_string(),
+                            });
+                        }
                     }
 
                     let delta_arguments = delta_function
@@ -431,23 +448,24 @@ fn parse_sse_chunk_with_state(
                     let Some(function) = tc.get("function") else {
                         continue;
                     };
-                    let Some(name) = function
+                    let name = function
                         .get("name")
                         .and_then(|name| name.as_str())
-                        .filter(|name| !name.is_empty())
-                    else {
-                        continue;
-                    };
-                    let id = tc
-                        .get("id")
-                        .and_then(|id| id.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    events.push(GenerateEvent::ToolCallStart {
-                        index,
-                        id,
-                        name: name.to_string(),
-                    });
+                        .filter(|name| !name.is_empty());
+                    if let Some(name) = name {
+                        let id = tc
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if stream_state.started_tool_calls.insert(index) {
+                            events.push(GenerateEvent::ToolCallStart {
+                                index,
+                                id,
+                                name: name.to_string(),
+                            });
+                        }
+                    }
                     if !stream_state.argument_deltas_seen.contains(&index) {
                         if let Some(arguments) = function
                             .get("arguments")
@@ -683,6 +701,12 @@ mod tests {
                 .any(|event| matches!(event, GenerateEvent::ToolCallDelta { .. })),
             "final tool-call snapshots must not repeat streamed arguments"
         );
+        assert!(
+            !final_events
+                .iter()
+                .any(|event| matches!(event, GenerateEvent::ToolCallStart { .. })),
+            "final tool-call snapshots must not reopen an existing tool block"
+        );
         assert!(matches!(
             final_events.last(),
             Some(GenerateEvent::MessageEnd)
@@ -736,6 +760,12 @@ mod tests {
                 .any(|event| matches!(event, GenerateEvent::ToolCallDelta { .. })),
             "message-only snapshots must not repeat streamed arguments"
         );
+        assert!(
+            !final_events
+                .iter()
+                .any(|event| matches!(event, GenerateEvent::ToolCallStart { .. })),
+            "message-only snapshots must not reopen an existing tool block"
+        );
         assert!(matches!(
             final_events.last(),
             Some(GenerateEvent::MessageEnd)
@@ -771,6 +801,63 @@ mod tests {
             GenerateEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta == "{\"command\":\"pwd\"}"
         ));
         assert!(matches!(&events[2], GenerateEvent::MessageEnd));
+    }
+
+    #[test]
+    fn final_message_text_snapshot_only_emits_the_unseen_suffix() {
+        let first_chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Do"},
+                "finish_reason": null
+            }]
+        });
+        let final_chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {"content": "Done"},
+                "finish_reason": "stop"
+            }]
+        });
+        let mut state = OpenAICompatStreamState::default();
+
+        let first = parse_sse_chunk_with_state(&first_chunk, None, false, &mut state)
+            .expect("first text chunk");
+        assert!(matches!(
+            &first[..],
+            [GenerateEvent::TextDelta(text)] if text == "Do"
+        ));
+
+        let final_events = parse_sse_chunk_with_state(&final_chunk, None, false, &mut state)
+            .expect("final text snapshot");
+        assert!(matches!(
+            &final_events[..],
+            [GenerateEvent::TextDelta(text), GenerateEvent::MessageEnd] if text == "ne"
+        ));
+    }
+
+    #[test]
+    fn message_only_unnamed_tool_call_forwards_arguments_for_rejection() {
+        let chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {"arguments": "{\"command\":\"pwd\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let events = parse_sse_chunk(&chunk, None, false).expect("tool call events");
+        assert!(matches!(
+            &events[..],
+            [GenerateEvent::ToolCallDelta { arguments_delta, .. }, GenerateEvent::MessageEnd]
+                if arguments_delta == "{\"command\":\"pwd\"}"
+        ));
     }
 
     #[test]

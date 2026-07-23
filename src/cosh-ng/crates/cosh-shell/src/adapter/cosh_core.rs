@@ -28,7 +28,7 @@ mod session;
 
 pub(super) use recovery::{
     begin_session_attempt, commit_pending_session_for_scope, invalidate_resume_on_session_failure,
-    mark_recovery_failure, retain_session_after_context_limit_failure, session_scope_from_request,
+    mark_recovery_failure, retain_context_session, session_scope_from_request,
     terminal_events_for_session_commit, SessionResumeAttempt,
 };
 pub use recovery::{SessionRecovery, SessionRecoveryState, SessionRuntimeState};
@@ -611,7 +611,7 @@ fn start_cancellable_cosh_core_process(
             &terminal_events,
             &session_state,
         );
-        let retain_session = retain_session_after_context_limit_failure(&terminal_events);
+        let retain_session = retain_context_session(&terminal_events, parser.session_error_phase());
         let commit_outcome = commit_pending_session_for_scope(
             completed || retain_session,
             failed && !retain_session,
