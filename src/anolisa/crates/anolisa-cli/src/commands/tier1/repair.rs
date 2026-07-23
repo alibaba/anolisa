@@ -1074,11 +1074,18 @@ fn recover_journal(
                     .unwrap_or_else(|| observation.version.clone());
                 let arch_ok = observation.arch.as_deref() == Some(pin.arch.as_str());
                 if observed_evr != pin.evr || !arch_ok {
-                    let observed_arch = observation.arch.as_deref().unwrap_or("unknown-arch");
+                    let observed_build = match observation
+                        .arch
+                        .as_deref()
+                        .filter(|arch| !arch.trim().is_empty())
+                    {
+                        Some(arch) => format!("{observed_evr} ({arch})"),
+                        None => format!("{observed_evr} (architecture unavailable from rpmdb)"),
+                    };
                     return Err(CliError::Runtime {
                         command: command.to_string(),
                         reason: format!(
-                            "the interrupted {} of '{target}' pinned '{}', but package '{package}' is installed as {observed_evr} ({observed_arch}); refusing to record a different version — reconcile manually (e.g. `dnf install {}`) then re-run `anolisa repair {target}`",
+                            "the interrupted {} of '{target}' pinned '{}', but package '{package}' is installed as {observed_build}; refusing to record a different version — reconcile manually (e.g. `dnf install {}`) then re-run `anolisa repair {target}`",
                             journal.operation, pin.artifact, pin.artifact
                         ),
                     });
@@ -3877,6 +3884,48 @@ mod tests {
                 .expect("reload journal")
                 .is_pending(),
             "a refused recovery must leave the journal pending"
+        );
+    }
+
+    #[test]
+    fn pinned_install_journal_reports_when_rpmdb_arch_is_unavailable() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_pinned_install_journal(
+            &layout,
+            "cosh",
+            "copilot-shell",
+            "copilot-shell-2.6.0-1.al4.x86_64",
+            "2.6.0-1.al4",
+            "x86_64",
+        );
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.6.0", Some("1.al4"), "")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("a missing rpmdb architecture must not satisfy the pin");
+        assert!(
+            err.reason().contains("architecture unavailable from rpmdb"),
+            "got: {}",
+            err.reason()
+        );
+        assert!(
+            !err.reason().contains("unknown-arch"),
+            "a sentinel must not look like an rpm architecture: {}",
+            err.reason()
+        );
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+        assert!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .is_pending()
         );
     }
 

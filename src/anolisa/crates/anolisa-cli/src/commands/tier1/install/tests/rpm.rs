@@ -1035,6 +1035,11 @@ fn pinned_install_wrong_arch_fails_before_mutation() {
         "message must name the host architecture: {}",
         err.reason()
     );
+    assert!(
+        err.reason().contains("s390x"),
+        "message must name the architectures offered by the repository: {}",
+        err.reason()
+    );
     assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
     assert!(
         load_store(&ctx)

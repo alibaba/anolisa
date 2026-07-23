@@ -41,17 +41,9 @@ pub fn select_pinned_candidate(
     requested_version: &str,
     host_arch: &str,
 ) -> PinnedSelection {
-    let version_matches: Vec<&PackageInfo> = candidates
+    let best = candidates
         .iter()
         .filter(|c| c.version.version == requested_version)
-        .collect();
-    if version_matches.is_empty() {
-        return PinnedSelection::VersionAbsent;
-    }
-
-    let best = version_matches
-        .iter()
-        .copied()
         .filter(|c| c.arch == host_arch || c.arch == "noarch")
         .max_by(|a, b| {
             rpm_evr_cmp(&a.version, &b.version)
@@ -64,7 +56,14 @@ pub fn select_pinned_candidate(
     match best {
         Some(info) => PinnedSelection::Selected(info.clone()),
         None => {
-            let mut offered: Vec<String> = version_matches.iter().map(|c| c.arch.clone()).collect();
+            let mut offered: Vec<String> = candidates
+                .iter()
+                .filter(|c| c.version.version == requested_version)
+                .map(|c| c.arch.clone())
+                .collect();
+            if offered.is_empty() {
+                return PinnedSelection::VersionAbsent;
+            }
             offered.sort();
             offered.dedup();
             PinnedSelection::ArchUnsupported { offered }
