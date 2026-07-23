@@ -2,6 +2,14 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.4.2
+
+### Features
+- Added an telemetry gate to ops log writes (#1509)
+
+### Bug Fixes
+- Fixed auto-recover orphan `.pre-init-bak` from interrupted init (#1601)
+
 ## 0.4.1
 
 ### Features
