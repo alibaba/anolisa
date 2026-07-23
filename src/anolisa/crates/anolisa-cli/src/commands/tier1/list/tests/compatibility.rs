@@ -11,7 +11,11 @@ use super::support::{
 #[test]
 fn index_builds_rows() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let rows = build_rows(&index, &args, &state, None);
     assert_eq!(rows.len(), 2);
@@ -31,7 +35,11 @@ fn index_builds_rows() {
 #[test]
 fn empty_state_all_not_installed() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let rows = build_rows(&index, &args, &state, None);
     for row in &rows {
@@ -43,7 +51,11 @@ fn empty_state_all_not_installed() {
 #[test]
 fn installed_component_shows_installed() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = state_with_owned_object(
         ObjectKind::Component,
         "tokenless",
@@ -61,7 +73,11 @@ fn installed_component_shows_installed() {
 #[test]
 fn adopted_rpm_component_shows_adopted() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = state_with_adopted_object(ObjectKind::Component, "agentsight");
     let rows = build_rows(&index, &args, &state, None);
 
@@ -72,7 +88,11 @@ fn adopted_rpm_component_shows_adopted() {
 #[test]
 fn compatibility_status_labels_are_preserved_before_local_projection() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = state_with_adopted_object(ObjectKind::Component, "agentsight");
 
     let rows = build_rows(&index, &args, &state, None);
@@ -86,7 +106,11 @@ fn compatibility_status_labels_are_preserved_before_local_projection() {
 #[test]
 fn adapter_object_does_not_mark_component_installed() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state =
         state_with_owned_object(ObjectKind::Adapter, "tokenless", LifecycleStatus::Installed);
     let rows = build_rows(&index, &args, &state, None);
@@ -97,7 +121,11 @@ fn adapter_object_does_not_mark_component_installed() {
 #[test]
 fn failed_component_shows_failed() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state =
         state_with_owned_object(ObjectKind::Component, "tokenless", LifecycleStatus::Failed);
     let rows = build_rows(&index, &args, &state, None);
@@ -108,7 +136,11 @@ fn failed_component_shows_failed() {
 #[test]
 fn disabled_component_shows_disabled() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = state_with_owned_object(
         ObjectKind::Component,
         "tokenless",
@@ -122,7 +154,11 @@ fn disabled_component_shows_disabled() {
 #[test]
 fn installed_filter_returns_only_installed() {
     let index = sample_index();
-    let args = ListArgs { installed: true };
+    let args = ListArgs {
+        component: None,
+        installed: true,
+        versions: false,
+    };
     let state = state_with_owned_object(
         ObjectKind::Component,
         "tokenless",
@@ -137,7 +173,11 @@ fn installed_filter_returns_only_installed() {
 #[test]
 fn installed_filter_includes_adopted_rpm_components() {
     let index = sample_index();
-    let args = ListArgs { installed: true };
+    let args = ListArgs {
+        component: None,
+        installed: true,
+        versions: false,
+    };
     let state = state_with_adopted_object(ObjectKind::Component, "agentsight");
     let rows = build_rows(&index, &args, &state, None);
     assert_eq!(rows.len(), 1);
@@ -148,7 +188,11 @@ fn installed_filter_includes_adopted_rpm_components() {
 #[test]
 fn installed_filter_with_empty_state_returns_empty() {
     let index = sample_index();
-    let args = ListArgs { installed: true };
+    let args = ListArgs {
+        component: None,
+        installed: true,
+        versions: false,
+    };
     let state = empty_state();
     let rows = build_rows(&index, &args, &state, None);
     assert!(rows.is_empty());
@@ -157,7 +201,11 @@ fn installed_filter_with_empty_state_returns_empty() {
 #[test]
 fn json_payload_uses_components_key() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let rows = build_rows(&index, &args, &state, None);
     let payload = ListPayload {
@@ -172,7 +220,11 @@ fn json_payload_uses_components_key() {
 #[test]
 fn json_payload_status_reflects_install_state() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = state_with_owned_object(
         ObjectKind::Component,
         "agentsight",
@@ -212,7 +264,11 @@ fn missing_optional_fields_use_defaults() {
             aliases: Vec::new(),
         }],
     };
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let rows = build_rows(&index, &args, &state, None);
     assert_eq!(rows.len(), 1);
@@ -243,7 +299,11 @@ fn unknown_backend_kind_preserved() {
             aliases: Vec::new(),
         }],
     };
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let rows = build_rows(&index, &args, &state, None);
     assert_eq!(rows[0].backends, vec!["custom-repo"]);

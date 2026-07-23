@@ -10,7 +10,11 @@ use super::support::{
 #[test]
 fn rows_use_local_projection_for_untracked_observed_rpm() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let query = FakeRpmQuery {
         installed: vec![(
@@ -35,20 +39,42 @@ fn rows_without_rpm_query_do_not_surface_observed_system_rpms() {
     let index = sample_index();
     let state = empty_state();
 
-    let all_rows = build_rows(&index, &ListArgs { installed: false }, &state, None);
+    let all_rows = build_rows(
+        &index,
+        &ListArgs {
+            component: None,
+            installed: false,
+            versions: false,
+        },
+        &state,
+        None,
+    );
     let sight = all_rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.local_state, "not_installed");
     assert_eq!(sight.ownership, "none");
     assert_eq!(sight.rpm_package, None);
 
-    let installed_rows = build_rows(&index, &ListArgs { installed: true }, &state, None);
+    let installed_rows = build_rows(
+        &index,
+        &ListArgs {
+            component: None,
+            installed: true,
+            versions: false,
+        },
+        &state,
+        None,
+    );
     assert!(installed_rows.is_empty());
 }
 
 #[test]
 fn rows_ignore_rpm_query_failures() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let query = FakeRpmQuery {
         installed: Vec::new(),
@@ -65,7 +91,11 @@ fn rows_ignore_rpm_query_failures() {
 #[test]
 fn rows_use_status_action_for_tracked_rpm_observed_state() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = state_with_component_object(rpm_component_object(
         "agentsight",
         LifecycleStatus::Installed,
@@ -94,7 +124,11 @@ fn rows_use_status_action_for_tracked_rpm_observed_state() {
 #[test]
 fn rows_project_raw_and_rpm_managed_state_as_installed() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let query = FakeRpmQuery {
         installed: vec![(
             "agentsight".to_string(),
@@ -127,7 +161,11 @@ fn rows_project_raw_and_rpm_managed_state_as_installed() {
 #[test]
 fn rows_surface_rpm_drift_and_missing() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = state_with_component_object(rpm_component_object(
         "agentsight",
         LifecycleStatus::Installed,
@@ -166,7 +204,11 @@ fn rows_surface_rpm_drift_and_missing() {
 #[test]
 fn installed_filter_keeps_only_currently_installed_local_states() {
     let index = sample_index();
-    let args = ListArgs { installed: true };
+    let args = ListArgs {
+        component: None,
+        installed: true,
+        versions: false,
+    };
 
     let observed_rows = build_rows(
         &index,

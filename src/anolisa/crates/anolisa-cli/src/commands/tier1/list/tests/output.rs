@@ -6,7 +6,11 @@ use super::support::{FakeRpmQuery, empty_state, pkg_info, sample_index};
 #[test]
 fn row_json_retains_status_and_adds_local_fields() {
     let index = sample_index();
-    let args = ListArgs { installed: false };
+    let args = ListArgs {
+        component: None,
+        installed: false,
+        versions: false,
+    };
     let state = empty_state();
     let query = FakeRpmQuery {
         installed: vec![(

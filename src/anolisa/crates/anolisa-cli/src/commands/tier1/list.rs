@@ -6,6 +6,7 @@
 
 mod render;
 mod state_view;
+mod versions;
 
 #[cfg(test)]
 mod tests;
@@ -29,11 +30,17 @@ use self::state_view::{LocalProjection, project_component};
 
 const COMMAND: &str = "list";
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 pub struct ListArgs {
+    /// Component whose published versions to show (requires --versions)
+    #[arg(value_name = "COMPONENT", requires = "versions")]
+    pub component: Option<String>,
     /// Show only currently installed components
-    #[arg(long, alias = "enabled")]
+    #[arg(long, alias = "enabled", conflicts_with = "versions")]
     pub installed: bool,
+    /// List versions published for COMPONENT, per configured backend
+    #[arg(long, requires = "component")]
+    pub versions: bool,
 }
 
 // ── Wire / JSON output types ───────────────────────────────────────
@@ -87,6 +94,24 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
         })?;
 
     let view = StateView::load(ctx, COMMAND, StateVisibility::UserPlusSystem)?;
+
+    if args.versions {
+        // clap's `requires` pairing guarantees the component is present.
+        let component = args
+            .component
+            .as_deref()
+            .expect("clap requires COMPONENT together with --versions");
+        return versions::handle_versions(
+            component,
+            ctx,
+            &layout,
+            &env,
+            &repo_config,
+            &index,
+            &view,
+        );
+    }
+
     let rpm_query = match ctx.install_mode {
         InstallMode::System => Some(RpmPackageQuery::system()),
         InstallMode::User => None,

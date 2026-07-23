@@ -14,7 +14,11 @@ use super::support::{
 #[test]
 fn user_view_installed_filter_keeps_system_provided_component() {
     let index = sample_index();
-    let args = ListArgs { installed: true };
+    let args = ListArgs {
+        component: None,
+        installed: true,
+        versions: false,
+    };
     let view = user_plus_system_view(
         StateStore::empty(),
         state_with_component_object(owned_component("agentsight", LifecycleStatus::Installed)),
@@ -37,7 +41,11 @@ fn user_view_installed_filter_keeps_system_provided_component() {
 #[test]
 fn user_record_shadows_system_record_in_list_rows() {
     let index = sample_index();
-    let args = ListArgs { installed: true };
+    let args = ListArgs {
+        component: None,
+        installed: true,
+        versions: false,
+    };
     let view = user_plus_system_view(
         state_with_component_object(owned_component("agentsight", LifecycleStatus::Installed)),
         state_with_component_object(delegated_component(
