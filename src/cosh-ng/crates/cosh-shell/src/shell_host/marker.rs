@@ -482,6 +482,8 @@ _cosh_prompt_command() {
   _cosh_maybe_emit_native_history_file_marker
   _cosh_precmd_marker "$status"
   _cosh_run_user_prompt_command "$status"
+  # User prompt hooks may switch HISTFILE after the pre-prompt snapshot.
+  _cosh_maybe_emit_native_history_file_marker
   if [[ -n "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     local trap_snapshot_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.debug-trap"
     _COSH_SNAPSHOT_DEBUG_TRAP=1

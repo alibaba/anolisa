@@ -230,6 +230,68 @@ fn shell_host_bash_tracks_native_history_file_changes() {
 }
 
 #[test]
+fn shell_host_bash_tracks_history_file_changed_by_prompt_command() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-history-file-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+
+    let initial_history = home_dir.join("initial-history");
+    let prompt_history = home_dir.join("prompt-history");
+    let observed_history_files = work_dir.join("observed-history-files");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!(
+            "export HISTFILE={}\n\
+             export COSH_PROMPT_HISTORY_FILE={}\n\
+             PROMPT_COMMAND='if [[ \"${{COSH_SWITCH_HISTORY:-}}\" == 1 ]]; then \
+             HISTFILE=\"$COSH_PROMPT_HISTORY_FILE\"; unset COSH_SWITCH_HISTORY; fi'\n",
+            shell_arg(&initial_history),
+            shell_arg(&prompt_history)
+        ),
+    )
+    .expect("bashrc");
+
+    let install_marker_sink = format!(
+        "_COSH_LAST_NATIVE_HISTORY_FILE=; \
+         _cosh_emit_native_history_file_marker() {{ \
+         printf '%s\\n' \"$1\" >> {}; \
+         }}",
+        shell_arg(&observed_history_files)
+    );
+    let config = ShellHostConfig::new("prompt-history-file-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(install_marker_sink),
+            ScriptedInput::user_line("export COSH_SWITCH_HISTORY=1"),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let observed = std::fs::read_to_string(&observed_history_files)
+        .expect("observed history files")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            initial_history.display().to_string(),
+            prompt_history.display().to_string(),
+        ]
+    );
+}
+
+#[test]
 fn shell_host_bash_isolated_mode_omits_history_file_markers() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
