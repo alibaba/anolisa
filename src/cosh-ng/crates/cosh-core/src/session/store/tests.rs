@@ -7,7 +7,7 @@ use super::super::summary::{
 };
 use super::*;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -128,7 +128,9 @@ fn loading_legacy_sessions_redacts_before_replay() {
     assert!(loaded.messages[0].content.as_text().contains("<redacted>"));
 }
 
-#[cfg(unix)]
+// Linux-only: macOS APFS rejects invalid UTF-8 filenames with EILSEQ before
+// the scope-hashing rejection path can be exercised.
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_workspace_paths_are_rejected_before_scope_hashing() {
     let temp = tempfile::tempdir().unwrap();
@@ -408,7 +410,9 @@ fn legacy_array_loads_and_upgrades_on_write() {
     assert!(!legacy_file.exists());
 }
 
-#[cfg(unix)]
+// Linux-only: on macOS unlinking from a mode-0o500 directory still succeeds,
+// so the simulated legacy-removal failure never triggers.
+#[cfg(target_os = "linux")]
 #[test]
 fn legacy_cleanup_failure_is_reported_and_retried_after_migration() {
     let temp = tempfile::tempdir().unwrap();
@@ -449,7 +453,8 @@ fn legacy_cleanup_failure_is_reported_and_retried_after_migration() {
     assert_eq!(store.load(&id).unwrap().messages.len(), 2);
 }
 
-#[cfg(unix)]
+// Linux-only: same macOS permission semantics as the cleanup-failure test above.
+#[cfg(target_os = "linux")]
 #[test]
 fn clear_keeps_scoped_history_when_legacy_removal_fails() {
     let temp = tempfile::tempdir().unwrap();
@@ -792,7 +797,10 @@ fn default_legacy_source_is_only_the_workspace_sessions_directory() {
     let store = SessionStore::for_workspace(DEFAULT_SESSION_PERSIST_DIR, &workspace).unwrap();
 
     assert_eq!(store.legacy_dirs.len(), 1);
-    assert_eq!(store.legacy_dirs[0].path, workspace.join("sessions"));
+    assert_eq!(
+        store.legacy_dirs[0].path,
+        fs::canonicalize(workspace.join("sessions")).unwrap()
+    );
 }
 
 #[test]

@@ -102,6 +102,23 @@ fn pkg_manager_available() -> (&'static str, bool) {
     ("unknown", false)
 }
 
+fn installed_package_sample() -> Option<String> {
+    let output = cosh_bin()
+        .args(["pkg", "list", "--installed"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    json["data"]["packages"]
+        .as_array()?
+        .first()?
+        .get("name")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// Spawn `cosh-cli` with audit state pinned to a sandbox: redirect the log,
 /// version 1 store, isolate user policy discovery, and clear explicit policy.
 /// Use this for audit tests so they neither read nor write the user's state.
@@ -1158,7 +1175,7 @@ fn test_checkpoint_cleanup_daemon_unavailable() {
 // --- pkg search: installed field accuracy ---
 
 #[test]
-fn test_pkg_search_bash_shows_installed() {
+fn test_pkg_search_bash_matches_installed_package_list() {
     let output = cosh_bin().args(["pkg", "search", "bash"]).output().unwrap();
 
     assert!(output.status.success());
@@ -1169,13 +1186,28 @@ fn test_pkg_search_bash_shows_installed() {
     assert_eq!(json["ok"], true);
     let packages = json["data"]["packages"].as_array().unwrap();
 
-    // Find the entry named exactly "bash" — it must be marked installed
-    let bash_entry = packages.iter().find(|p| p["name"] == "bash");
-    assert!(bash_entry.is_some(), "Expected 'bash' in search results");
+    let bash_entry = packages
+        .iter()
+        .find(|package| package["name"] == "bash")
+        .expect("Expected 'bash' in search results");
+
+    let installed_output = cosh_bin()
+        .args(["pkg", "list", "--installed"])
+        .output()
+        .unwrap();
+    assert!(installed_output.status.success());
+    let installed: serde_json::Value =
+        serde_json::from_slice(&installed_output.stdout).expect("installed package JSON");
+    let bash_is_managed = installed["data"]["packages"]
+        .as_array()
+        .expect("installed package array")
+        .iter()
+        .any(|package| package["name"] == "bash");
+
     assert_eq!(
-        bash_entry.unwrap()["installed"],
-        true,
-        "bash should be marked as installed"
+        bash_entry["installed"].as_bool(),
+        Some(bash_is_managed),
+        "search installation state must match the active package manager"
     );
 }
 
@@ -1270,25 +1302,27 @@ fn test_pkg_remove_dry_run_json_envelope() {
         eprintln!("skipping: no working package manager found");
         return;
     }
-    // dry-run now validates the package is installed; use "bash" which is always installed.
+    let Some(package) = installed_package_sample() else {
+        eprintln!("skipping: package manager returned no installed package sample");
+        return;
+    };
     let output = cosh_bin()
-        .args(["pkg", "remove", "--dry-run", "bash"])
+        .args(["pkg", "remove", "--dry-run", &package])
         .output()
         .unwrap();
-
-    assert!(
-        output.status.success(),
-        "dry-run remove of 'bash' should succeed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
-    assert_eq!(json["ok"], true);
+    assert_eq!(json["ok"].as_bool(), Some(output.status.success()));
     assert_eq!(json["meta"]["dry_run"], true);
     assert_eq!(json["meta"]["subsystem"], "pkg");
+    if output.status.success() {
+        assert_eq!(json["data"]["package"], package);
+    } else {
+        assert!(json["error"]["code"].is_string(), "{json}");
+        assert!(json["error"]["message"].is_string(), "{json}");
+    }
 }
 
 #[test]

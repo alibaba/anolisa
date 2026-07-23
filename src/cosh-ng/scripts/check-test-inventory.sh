@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+failures=0
+
+fail() {
+  echo "violation: $*" >&2
+  failures=$((failures + 1))
+}
+
+source_count() {
+  rg -n '^[[:space:]]*#\[(tokio::)?test[\](]' "$1" -g '*.rs' | wc -l | tr -d ' '
+}
+
+test_list() {
+  cargo test --locked -p "$1" "${@:2}" -- --list 2>/dev/null |
+    sed -n 's/: test$//p' |
+    sort
+}
+
+check_source_floor() {
+  local crate="$1"
+  local expected="$2"
+  local actual
+  actual="$(source_count "crates/$crate")"
+  echo "$crate source tests: $actual"
+  if [[ "$actual" -ne "$expected" ]]; then
+    fail "$crate source inventory changed from $expected to $actual; update the necessity audit"
+  fi
+}
+
+check_overlap_ceiling() {
+  local package="$1"
+  local binary="$2"
+  local ceiling="$3"
+  local actual
+  actual="$(
+    comm -12 \
+      <(test_list "$package" --lib) \
+      <(test_list "$package" --bin "$binary") |
+      wc -l |
+      tr -d ' '
+  )"
+  echo "$package exact lib/bin overlap: $actual (ceiling $ceiling)"
+  if [[ "$actual" -gt "$ceiling" ]]; then
+    fail "$package exact lib/bin overlap increased"
+  fi
+}
+
+check_source_floor cosh-types 24
+check_source_floor cosh-platform 279
+check_source_floor cosh-cli 71
+check_source_floor cosh-core 626
+check_source_floor cosh-shell 2371
+
+ignored_count="$(rg -n '^[[:space:]]*#\[ignore' crates -g '*.rs' | wc -l | tr -d ' ')"
+echo "ignored tests: $ignored_count"
+if [[ "$ignored_count" -ne 3 ]]; then
+  fail "ignored inventory changed from 3 to $ignored_count"
+fi
+
+check_overlap_ceiling cosh-core cosh-core 4
+check_overlap_ceiling cosh-shell cosh-shell 613
+
+if [[ "$failures" -ne 0 ]]; then
+  echo "test inventory audit failed with $failures violation(s)" >&2
+  exit 1
+fi
+
+echo "test inventory audit passed"
+"$repo_root/scripts/check-test-necessity.sh"

@@ -981,7 +981,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
 
       - name: Check formatting
         run: |
@@ -993,10 +993,32 @@ jobs:
           cd src/cosh-ng
           cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run tests
+      - name: Check test layout and inventory
         run: |
           cd src/cosh-ng
-          cargo test --workspace
+          crates/cosh-shell/scripts/check-layout.sh
+          scripts/check-test-inventory.sh
+
+      - name: Validate stage E2E contract
+        run: |
+          cd src/cosh-ng
+          python3 -m unittest discover -s e2e/tests -v
+          python3 e2e/run.py --plan --profile local
+
+      - name: Run fast regression tests
+        run: |
+          cd src/cosh-ng
+          scripts/run-test-gates.sh fast
+
+      - name: Run process and PTY integration tests
+        run: |
+          cd src/cosh-ng
+          scripts/run-test-gates.sh integration
+
+      - name: Build release workspace
+        run: |
+          cd src/cosh-ng
+          cargo build --workspace --release --locked
 
   # =========================================================================
   # Step 12: Test ktuner (deterministic kernel-tuning engine)

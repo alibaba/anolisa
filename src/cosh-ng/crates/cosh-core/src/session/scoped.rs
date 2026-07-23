@@ -67,7 +67,7 @@ impl ScopedStorage {
         if pinned
             .directory
             .as_ref()
-            .is_some_and(|directory| directory.metadata().map_or(true, |meta| meta.nlink() == 0))
+            .is_some_and(|directory| !directory_matches_path(directory, &self.path))
         {
             pinned.directory = None;
         }
@@ -304,6 +304,16 @@ impl ScopedStorage {
         let _ = unlinkat(directory, lock_filename.as_str(), AtFlags::empty());
         Ok(())
     }
+}
+
+fn directory_matches_path(directory: &File, path: &Path) -> bool {
+    let Ok(pinned) = directory.metadata() else {
+        return false;
+    };
+    let Ok(current) = std::fs::metadata(path) else {
+        return false;
+    };
+    pinned.nlink() != 0 && pinned.dev() == current.dev() && pinned.ino() == current.ino()
 }
 
 fn session_filename(session_id: &ProviderSessionId) -> String {

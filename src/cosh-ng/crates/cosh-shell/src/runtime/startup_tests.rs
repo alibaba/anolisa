@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use super::{
     extract_bootstrap_path, merge_path_lists, plan_startup_for_render, raw_passthrough_args,
@@ -36,6 +37,7 @@ fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
         .unwrap()
         .spawn_writer()
         .unwrap();
+    wait_for_writer(|| writer.poll_snapshot());
     let mut state = InlineState {
         personalization: crate::recommendation::personal_state::PersonalizationState {
             writer: Some(writer),
@@ -57,16 +59,16 @@ fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
     }
     assert!(state.personalization.notice_shown);
     assert!(state.trigger_pty_prompt);
-    assert_eq!(
+    let persisted = wait_for_writer(|| {
         state
             .personalization
             .writer
             .as_ref()
-            .unwrap()
-            .poll_snapshot()
-            .unwrap()
-            .preferences
-            .notice_version_seen,
+            .and_then(|writer| writer.poll_snapshot())
+            .filter(|snapshot| snapshot.preferences.notice_version_seen == DISCLOSURE_VERSION)
+    });
+    assert_eq!(
+        persisted.preferences.notice_version_seen,
         crate::recommendation::personal_model::DISCLOSURE_VERSION
     );
 
@@ -76,9 +78,7 @@ fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
     assert!(second.is_empty());
 
     let mut writer = state.personalization.writer.take().unwrap();
-    writer
-        .shutdown(1, std::time::Duration::from_secs(1))
-        .unwrap();
+    writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -114,9 +114,7 @@ fn recommendation_notice_waits_until_smart_or_auto_ai_mode() {
     assert!(output.is_empty());
 
     let mut writer = state.personalization.writer.take().unwrap();
-    writer
-        .shutdown(1, std::time::Duration::from_secs(1))
-        .unwrap();
+    writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -158,9 +156,7 @@ fn repeated_candidate_impressions_use_distinct_activity_identities() {
     }
 
     let mut writer = state.personalization.writer.take().unwrap();
-    writer
-        .shutdown(1, std::time::Duration::from_secs(1))
-        .unwrap();
+    writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let snapshot = writer.poll_snapshot().unwrap();
     let impressions = snapshot
         .journal
@@ -178,6 +174,20 @@ fn repeated_candidate_impressions_use_distinct_activity_identities() {
         .count();
     assert_eq!(impressions, 2);
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn wait_for_writer<T>(mut poll: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(value) = poll() {
+            return value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recommendation writer did not become observable before the fixture deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn health_try(id: &str, score: i32) -> HealthTryItem {

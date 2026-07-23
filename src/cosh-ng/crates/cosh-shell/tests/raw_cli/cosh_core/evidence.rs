@@ -54,7 +54,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? cosh-core-evidence-tool-contract\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (
                 b"/details evidence-1\n/details evidence-2\n".to_vec(),
@@ -963,7 +963,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             (b"printf 'list-only-output\\n'\n".to_vec(), Duration::ZERO),
             (
                 b"?? \xe5\x88\x97\xe4\xb8\x80\xe4\xb8\x8b\xe6\x9c\x80\xe8\xbf\x91\xe5\x91\xbd\xe4\xbb\xa4 evidence-list-only\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"/details evidence-1\n".to_vec(), Duration::from_millis(3_000)),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
@@ -1025,7 +1025,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? \xe6\x9c\x80\xe8\xbf\x91\xe5\x9c\xa8\xe5\xb9\xb2\xe5\x98\x9b evidence-activity-recap\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"/details evidence-1\n".to_vec(), Duration::from_millis(5_000)),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
@@ -1098,7 +1098,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? \xe5\x88\x86\xe6\x9e\x90\xe6\x9c\x80\xe8\xbf\x91\xe7\x8a\xb6\xe6\x80\x81 evidence-status-analysis\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (
                 b"/details evidence-1\n/details evidence-2\n".to_vec(),

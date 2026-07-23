@@ -596,7 +596,7 @@ fn active_and_selected_sessions_are_protected_only_while_selection_is_live() {
         session.recovery.state = SessionRecoveryState::Selected;
         session.recovery.selected_session_id =
             Some("11111111-1111-4111-8111-111111111111".to_string());
-        session.recovery.selected_workspace_scope = Some("/tmp".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
     }
 
     assert_eq!(
@@ -633,7 +633,7 @@ printf '%s\n' '{"ok":false,"error":{"code":"not_found","message":"session disapp
         session.recovery.state = SessionRecoveryState::Selected;
         session.recovery.selected_session_id =
             Some("00000000-0000-4000-8000-000000000000".to_string());
-        session.recovery.selected_workspace_scope = Some("/tmp".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
     }
 
     let result = adapter.select_session("/tmp", "11111111-1111-4111-8111-111111111111");

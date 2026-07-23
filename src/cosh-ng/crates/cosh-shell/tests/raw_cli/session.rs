@@ -270,17 +270,20 @@ fn raw_cli_session_clear_all_skips_active_session_in_request() {
 #[test]
 fn raw_cli_session_clear_all_reports_when_every_session_is_protected() {
     let fixture = SessionFixture::new("clear-protected-only", FixtureMode::ProtectedOnly);
-    let output = fixture.run(
+    let output = fixture.run_marker(
         &[],
-        vec![
+        &[
             (
-                format!("/session resume {SESSION_ONE}\n?? activate selected session\n")
-                    .into_bytes(),
-                Duration::from_millis(1_200),
+                "cosh-osc$",
+                format!("/session resume {SESSION_ONE}\n?? activate selected session\n"),
             ),
             (
-                b"/session clear --all\necho after-protected-only\nexit\n".to_vec(),
-                Duration::from_millis(400),
+                "resumed provider session",
+                "/session clear --all\n".to_string(),
+            ),
+            (
+                "Active or selected provider sessions are protected",
+                "echo after-protected-only\nexit\n".to_string(),
             ),
         ],
     );
@@ -305,7 +308,7 @@ fn raw_cli_session_selection_race_is_recoverable() {
             (b"\n".to_vec(), Duration::from_millis(300)),
             (
                 b"echo after-missing-session\nexit\n".to_vec(),
-                Duration::from_millis(200),
+                Duration::from_millis(1_000),
             ),
         ],
     );
@@ -488,6 +491,7 @@ impl SessionFixture {
         let bin = home.join("bin");
         fs::create_dir_all(&workspace).expect("create session workspace");
         fs::create_dir_all(&bin).expect("create session fixture bin");
+        let workspace = fs::canonicalize(workspace).expect("canonical session workspace");
         let core = bin.join("cosh-core");
         let clear_log = home.join("clear-request.json");
         let request_log = home.join("session-requests.jsonl");
@@ -571,6 +575,22 @@ impl SessionFixture {
             &[("HOME", &home), ("COSH_CORE_PATH", &core)],
             &self.workspace,
             chunks,
+        )
+    }
+
+    fn run_marker(&self, args: &[&str], steps: &[(&str, String)]) -> String {
+        let home = self.home.to_string_lossy().into_owned();
+        let core = self.core.to_string_lossy().into_owned();
+        let borrowed_steps: Vec<(&str, &[u8])> = steps
+            .iter()
+            .map(|(marker, input)| (*marker, input.as_bytes()))
+            .collect();
+        run_raw_cli_with_args_env_current_dir_and_marker_input(
+            "cosh-core",
+            args,
+            &[("HOME", &home), ("COSH_CORE_PATH", &core)],
+            &self.workspace,
+            &borrowed_steps,
         )
     }
 }

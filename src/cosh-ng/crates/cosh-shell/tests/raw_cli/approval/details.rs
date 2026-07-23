@@ -38,15 +38,18 @@ fn raw_cli_details_approvals_renders_decision_journal_panel() {
 
 #[test]
 fn raw_cli_details_approvals_records_denied_not_executed() {
-    let output = run_raw_cli_ask_with_delayed_input(vec![
-        (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
-        (b"\x1b[C\x1b[C\n".to_vec(), Duration::from_millis(800)),
-        (
-            b"/details approvals\n".to_vec(),
-            Duration::from_millis(1_000),
-        ),
-        (b"exit\n".to_vec(), Duration::from_millis(500)),
-    ]);
+    let output = run_raw_cli_ask_with_args_and_marker_input(
+        &[],
+        &[
+            ("cosh-osc$", b"?? stream tool approval\n"),
+            ("Approval req-1", b"\x1b[C\x1b[C\n"),
+            (
+                "Command was not executed for req-1",
+                b"/details approvals\n",
+            ),
+            ("Approval journal", b"exit\n"),
+        ],
+    );
 
     assert!(output.contains("Denied req-1"), "{output}");
     assert!(output.contains("Approval journal"), "{output}");

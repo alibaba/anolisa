@@ -6,16 +6,16 @@ fn raw_cli_zsh_approval_card_capture_does_not_leak_to_shell() {
         return;
     }
 
-    let output = run_raw_cli_ask_with_args_and_delayed_input(
+    let output = run_raw_cli_ask_with_args_and_marker_input(
         &["--shell", "zsh"],
-        vec![
-            (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\x1b[C\n".to_vec(), Duration::from_millis(400)),
+        &[
+            ("cosh-osc$", b"?? stream tool approval\n"),
+            ("Approval req-1", b"\x1b[C\x1b[C\n"),
             (
-                b"echo after-zsh-approval\n".to_vec(),
-                Duration::from_millis(400),
+                "Command was not executed for req-1",
+                b"echo after-zsh-approval\n",
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+            ("after-zsh-approval", b"exit\n"),
         ],
     );
 

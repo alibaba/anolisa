@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -77,35 +78,40 @@ impl CoshCoreAdapter {
         let request_json = serde_json::to_string(&request)
             .map_err(|error| RegistryQueryError::Transport(format!("serialize error: {error}")))?;
 
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .arg("--registry")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                RegistryQueryError::Transport(format!(
-                    "failed to spawn cosh-core --registry: {error}"
-                ))
-            })?;
+            .process_group(0);
+        let mut child = command.spawn().map_err(|error| {
+            RegistryQueryError::Transport(format!("failed to spawn cosh-core --registry: {error}"))
+        })?;
 
         // Write request to stdin
-        {
-            let stdin = child
-                .stdin
-                .as_mut()
-                .ok_or_else(|| RegistryQueryError::Transport("failed to open stdin".to_string()))?;
-            writeln!(stdin, "{request_json}")
-                .map_err(|error| RegistryQueryError::Transport(format!("write error: {error}")))?;
-            // Drop stdin to signal EOF
+        let write_result = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| RegistryQueryError::Transport("failed to open stdin".to_string()))
+            .and_then(|stdin| {
+                writeln!(stdin, "{request_json}")
+                    .map_err(|error| RegistryQueryError::Transport(format!("write error: {error}")))
+            });
+        if let Err(error) = write_result {
+            super::terminate_and_reap_process(&mut child);
+            return Err(error);
         }
+        // Drop stdin to signal EOF.
         drop(child.stdin.take());
 
         // Read response from stdout with timeout
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| RegistryQueryError::Transport("failed to open stdout".to_string()))?;
+        let Some(stdout) = child.stdout.take() else {
+            super::terminate_and_reap_process(&mut child);
+            return Err(RegistryQueryError::Transport(
+                "failed to open stdout".to_string(),
+            ));
+        };
 
         let (tx, rx) = std::sync::mpsc::channel();
         let reader_handle = std::thread::spawn(move || {
@@ -129,11 +135,13 @@ impl CoshCoreAdapter {
         let response_line = match rx.recv_timeout(registry_timeout(domain, action)) {
             Ok(Ok(line)) => line,
             Ok(Err(e)) => {
-                let _ = child.kill();
+                super::terminate_and_reap_process(&mut child);
+                let _ = reader_handle.join();
                 return Err(RegistryQueryError::Transport(e));
             }
             Err(_) => {
-                let _ = child.kill();
+                super::terminate_and_reap_process(&mut child);
+                let _ = reader_handle.join();
                 return Err(RegistryQueryError::Transport(
                     "registry query timed out".to_string(),
                 ));

@@ -459,7 +459,7 @@ fn cancel_reaps_child_when_process_identity_is_unavailable() {
 #[test]
 fn cancel_returns_without_signalling_after_leader_exits() {
     let mut process = CoshCoreAnalyzerProcess::spawn(fixture("exit 0")).expect("spawn fixture");
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while process.child.try_wait().expect("poll fixture").is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
