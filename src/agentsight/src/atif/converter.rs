@@ -496,6 +496,12 @@ fn build_agent_step(
     // Timestamp: prefer end_timestamp (when response arrived)
     let timestamp_ns = event.end_timestamp_ns.unwrap_or(event.start_timestamp_ns);
 
+    // Request start time lets ATIF consumers derive per-step model inference
+    // time (end − start) and tool windows (next start − prev end).
+    let extra = Some(serde_json::json!({
+        "start_timestamp": ns_to_iso8601(event.start_timestamp_ns as u64),
+    }));
+
     AtifStep {
         step_id,
         timestamp: Some(ns_to_iso8601(timestamp_ns as u64)),
@@ -518,7 +524,7 @@ fn build_agent_step(
         },
         observation,
         metrics,
-        extra: None,
+        extra,
     }
 }
 

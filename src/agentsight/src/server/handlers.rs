@@ -1071,6 +1071,7 @@ mod tests {
             evaluation_store: Arc::clone(&evaluation_store),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         });
         let app = awtest::init_service(App::new().app_data(data).service(latest_grader)).await;
 
@@ -1275,6 +1276,7 @@ mod tests {
             interruption_store: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1402,6 +1404,7 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
+            optimize: None,
         })
     }
 
@@ -1499,6 +1502,7 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1635,6 +1639,7 @@ mod tests {
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1656,6 +1661,7 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1840,6 +1846,7 @@ mod tests {
                         timeout_ms: 0,
                     },
                     auth,
+                    optimize: None,
                 }))
                 .service(metrics),
         )
@@ -2269,6 +2276,7 @@ mod tests {
                         timeout_ms: 0,
                     },
                     auth,
+                    optimize: None,
                 }))
                 .service(list_sessions)
                 .service(list_agent_names)

@@ -5,6 +5,7 @@
 
 pub mod auth;
 mod handlers;
+pub mod optimize;
 mod token_savings;
 
 use std::path::PathBuf;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub security_observability: SecurityObservabilityConfig,
     /// Dashboard authentication state
     pub auth: Arc<DashboardAuth>,
+    /// Optimization analysis state (LLM config + result store)
+    pub optimize: Option<Arc<optimize::OptimizeState>>,
 }
 
 // ─── Static file handler ─────────────────────────────────────────────────────
@@ -189,6 +192,11 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::skill_metrics_usage_ratio)
                 .service(handlers::skill_metrics_distribution)
                 .service(handlers::skill_metrics_hotness)
+                // Optimization analysis API routes
+                .service(optimize::run_optimization)
+                .service(optimize::get_optimization_results)
+                .service(optimize::get_optimize_config)
+                .service(optimize::update_optimize_config)
                 .default_service(web::route().to(api_not_found)),
         )
         // Health scope with not-found fallback
@@ -283,6 +291,8 @@ pub async fn run_server(
     }
     checker.start();
 
+    let optimize_state = optimize::OptimizeState::init(storage_base);
+
     let data = web::Data::new(AppState {
         storage_path,
         start_time: Instant::now(),
@@ -291,6 +301,7 @@ pub async fn run_server(
         evaluation_store,
         security_observability,
         auth: dashboard_auth.clone(),
+        optimize: Some(optimize_state),
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
@@ -411,6 +422,7 @@ mod tests {
             ),
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
+            optimize: None,
         })
     }
 }

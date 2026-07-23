@@ -96,6 +96,8 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Container** | `src/container.rs` | 容器 ID 提取（/proc/pid/cgroup） | `extract_container_id`, `parse_container_id_from_cgroup` |
 | **Config** | `src/config.rs` | 统一配置 | `AgentsightConfig` |
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
+| **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
+| **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
 
 ## 5. Critical Code Paths
 
@@ -225,6 +227,9 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/auth/login` | POST | Dashboard 登录（Body: `{"token":"..."}` ），成功设置 httpOnly cookie |
 | `/api/auth/status` | GET | 返回 `{"auth_enabled": bool}`（免认证，供前端判断是否需登录）|
 | `/api/auth/verify` | GET | 校验当前 session cookie/token 是否有效，返回 `{"authenticated": bool}` |
+| `/api/optimize/sessions/{id}/{dim}` | POST | 运行单维度优化分析，`dim` ∈ `perf` / `perf-issues` / `cost` / `cost-waste` / `accuracy`（后三者需 LLM 配置，10–60s） |
+| `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
+| `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
 
 ## 9. Frontend
 
