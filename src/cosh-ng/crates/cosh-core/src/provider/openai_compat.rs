@@ -248,55 +248,135 @@ fn parse_sse_chunk(
 
     if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
-            if let Some(delta) = choice.get("delta") {
-                if let Some(field) = thinking_field {
-                    if let Some(text) = delta.get(field).and_then(|v| v.as_str()) {
-                        if !text.is_empty() {
-                            events.push(GenerateEvent::ThinkingDelta(text.to_string()));
+            let empty_delta = Value::Null;
+            let delta = choice.get("delta").unwrap_or(&empty_delta);
+            if let Some(field) = thinking_field {
+                if let Some(text) = delta.get(field).and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        events.push(GenerateEvent::ThinkingDelta(text.to_string()));
+                    }
+                }
+            }
+
+            if let Some(content) = delta
+                .get("content")
+                .and_then(|c| c.as_str())
+                .filter(|content| !content.is_empty())
+                .or_else(|| {
+                    choice
+                        .get("message")
+                        .and_then(|message| message.get("content"))
+                        .and_then(|content| content.as_str())
+                        .filter(|content| !content.is_empty())
+                })
+            {
+                events.push(GenerateEvent::TextDelta(content.to_string()));
+            }
+
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                let final_tool_calls = choice
+                    .get("message")
+                    .and_then(|message| message.get("tool_calls"))
+                    .and_then(|calls| calls.as_array());
+                for tc in tool_calls {
+                    let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                    let final_call = final_tool_calls.and_then(|calls| {
+                        calls.iter().find(|call| {
+                            call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                == u64::from(index)
+                        })
+                    });
+
+                    let delta_function = tc.get("function");
+                    let final_function = final_call.and_then(|call| call.get("function"));
+                    if let Some(name) = delta_function
+                        .and_then(|function| function.get("name"))
+                        .and_then(|name| name.as_str())
+                        .filter(|name| !name.is_empty())
+                        .or_else(|| {
+                            final_function
+                                .and_then(|function| function.get("name"))
+                                .and_then(|name| name.as_str())
+                                .filter(|name| !name.is_empty())
+                        })
+                    {
+                        let id = tc
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .or_else(|| {
+                                final_call
+                                    .and_then(|call| call.get("id"))
+                                    .and_then(|id| id.as_str())
+                            })
+                            .unwrap_or("")
+                            .to_string();
+                        events.push(GenerateEvent::ToolCallStart {
+                            index,
+                            id,
+                            name: name.to_string(),
+                        });
+                    }
+
+                    if let Some(args) = delta_function
+                        .and_then(|function| function.get("arguments"))
+                        .and_then(|arguments| arguments.as_str())
+                        .or_else(|| {
+                            final_function
+                                .and_then(|function| function.get("arguments"))
+                                .and_then(|arguments| arguments.as_str())
+                        })
+                    {
+                        if !args.is_empty() {
+                            events.push(GenerateEvent::ToolCallDelta {
+                                index,
+                                arguments_delta: args.to_string(),
+                            });
                         }
                     }
                 }
-
-                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                    if !content.is_empty() {
-                        events.push(GenerateEvent::TextDelta(content.to_string()));
-                    }
-                }
-
-                if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                    for tc in tool_calls {
-                        let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
-
-                        if let Some(function) = tc.get("function") {
-                            if let Some(name) = function.get("name").and_then(|n| n.as_str()) {
-                                let id = tc
-                                    .get("id")
-                                    .and_then(|i| i.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                events.push(GenerateEvent::ToolCallStart {
-                                    index,
-                                    id,
-                                    name: name.to_string(),
-                                });
-                            }
-
-                            if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
-                                if !args.is_empty() {
-                                    events.push(GenerateEvent::ToolCallDelta {
-                                        index,
-                                        arguments_delta: args.to_string(),
-                                    });
-                                }
-                            }
+            } else if let Some(tool_calls) = choice
+                .get("message")
+                .and_then(|message| message.get("tool_calls"))
+                .and_then(|calls| calls.as_array())
+            {
+                for tc in tool_calls {
+                    let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                    let Some(function) = tc.get("function") else {
+                        continue;
+                    };
+                    let Some(name) = function
+                        .get("name")
+                        .and_then(|name| name.as_str())
+                        .filter(|name| !name.is_empty())
+                    else {
+                        continue;
+                    };
+                    let id = tc
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    events.push(GenerateEvent::ToolCallStart {
+                        index,
+                        id,
+                        name: name.to_string(),
+                    });
+                    if let Some(arguments) =
+                        function.get("arguments").and_then(|args| args.as_str())
+                    {
+                        if !arguments.is_empty() {
+                            events.push(GenerateEvent::ToolCallDelta {
+                                index,
+                                arguments_delta: arguments.to_string(),
+                            });
                         }
                     }
                 }
+            }
 
-                if let Some(finish) = choice.get("finish_reason").and_then(|f| f.as_str()) {
-                    if (finish == "stop" || finish == "tool_calls") && !defer_message_end {
-                        events.push(GenerateEvent::MessageEnd);
-                    }
+            if let Some(finish) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                if (finish == "stop" || finish == "tool_calls") && !defer_message_end {
+                    events.push(GenerateEvent::MessageEnd);
                 }
             }
         }
@@ -357,6 +437,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_final_message_text_without_delta() {
+        let chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "message": {"content": "Repository analysis complete."},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
+        assert!(matches!(
+            &events[..],
+            [GenerateEvent::TextDelta(text), GenerateEvent::MessageEnd]
+                if text == "Repository analysis complete."
+        ));
+    }
+
+    #[test]
     fn parse_tool_call_chunk() {
         let chunk = serde_json::json!({
             "choices": [{
@@ -402,6 +501,74 @@ mod tests {
         assert!(
             matches!(&events[0], GenerateEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta == "{\"command\":")
         );
+    }
+
+    #[test]
+    fn parse_final_message_tool_call_when_delta_has_only_arguments() {
+        let chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": "{\"command\":\"pwd\"}"}
+                    }]
+                },
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"pwd\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let events = parse_sse_chunk(&chunk, None, false).expect("tool call events");
+        assert!(matches!(
+            &events[0],
+            GenerateEvent::ToolCallStart { id, name, .. } if id == "call_1" && name == "shell"
+        ));
+        assert!(matches!(
+            &events[1],
+            GenerateEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta == "{\"command\":\"pwd\"}"
+        ));
+        assert!(matches!(&events[2], GenerateEvent::MessageEnd));
+    }
+
+    #[test]
+    fn parse_tool_call_from_final_message_without_delta() {
+        let chunk = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"pwd\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let events = parse_sse_chunk(&chunk, None, false).expect("tool call events");
+        assert!(matches!(
+            &events[0],
+            GenerateEvent::ToolCallStart { id, name, .. } if id == "call_1" && name == "shell"
+        ));
+        assert!(matches!(
+            &events[1],
+            GenerateEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta == "{\"command\":\"pwd\"}"
+        ));
+        assert!(matches!(&events[2], GenerateEvent::MessageEnd));
     }
 
     #[test]

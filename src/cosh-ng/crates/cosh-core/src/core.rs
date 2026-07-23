@@ -593,6 +593,16 @@ impl CoshCore {
                     },
                 })
                 .collect();
+
+            // An arguments-only streamed tool-call fragment cannot be executed or
+            // represented in the next provider request. Continuing would append an
+            // empty assistant message and ask the model again, eventually consuming
+            // the entire turn budget without making progress.
+            if tc_infos.is_empty() {
+                return Err(
+                    "Provider emitted an incomplete tool call without a function name".to_string(),
+                );
+            }
             self.messages
                 .push(Message::assistant_with_tool_calls(&text_buf, tc_infos));
 
@@ -1575,6 +1585,31 @@ mod tests {
             "{output_str}"
         );
         assert!(core.messages.len() >= 4);
+    }
+
+    #[tokio::test]
+    async fn incomplete_tool_call_stops_without_consuming_turn_budget() {
+        let provider = MockProvider::new(vec![vec![
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"pwd"}"#.to_string(),
+            },
+            GenerateEvent::MessageEnd,
+        ]]);
+        let mut core = make_core(provider);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        let error = core
+            .handle_user_message("inspect this project", &mut reader, &mut output)
+            .await
+            .expect_err("an unnamed tool call must fail immediately");
+
+        assert_eq!(
+            error,
+            "Provider emitted an incomplete tool call without a function name"
+        );
+        assert_eq!(core.messages.len(), 1, "must not append an empty turn");
     }
 
     #[tokio::test]
