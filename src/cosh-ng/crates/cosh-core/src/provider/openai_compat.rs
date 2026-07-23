@@ -172,7 +172,14 @@ impl ContentGenerator for OpenAICompatProvider {
                     if cancelled.load(Ordering::SeqCst) {
                         return Some((
                             GenerateEvent::Cancelled,
-                            (stream, buf, cancelled, pending, thinking_field),
+                            (
+                                stream,
+                                buf,
+                                cancelled,
+                                pending,
+                                thinking_field,
+                                stream_state,
+                            ),
                         ));
                     }
 
