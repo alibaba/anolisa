@@ -3,6 +3,10 @@ name = "agentsight-opt"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "analyze"
+path = "src/bin/analyze.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -11,5 +15,5 @@ futures = { workspace = true }
 rig-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread"] }
 tracing = { workspace = true }
