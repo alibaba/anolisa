@@ -37,6 +37,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashUnknownBody => "未知 slash 命令: {command}",
         MessageId::SlashUnknownSuggestionBody => "你是不是想用 {command}？",
         MessageId::SlashUnknownFooter => "使用 /help 查看可用命令。",
+        MessageId::SlashInvalidArgumentsTitle => "Slash 参数错误",
         MessageId::SlashQuotedArgumentsUnsupported => {
             "不支持带引号的参数。本例请改用 /mode approval trust confirm。"
         }

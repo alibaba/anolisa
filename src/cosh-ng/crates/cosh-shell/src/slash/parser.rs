@@ -126,6 +126,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/audit"
             | "/config"
             | "/debug"
+            | "/health"
             | "/extensions"
             | "/skills"
             | "/session"
@@ -204,6 +205,7 @@ mod tests {
             "/mode approval \"trust confirm\"",
             "/mode approval 'trust confirm'",
             "/config language \"en US\"",
+            "/health \"quick\"",
             "/recommendations \"on\"",
         ] {
             assert!(

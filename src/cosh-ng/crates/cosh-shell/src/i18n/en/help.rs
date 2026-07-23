@@ -41,6 +41,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashUnknownBody => "Unknown slash command: {command}",
         MessageId::SlashUnknownSuggestionBody => "Did you mean {command}?",
         MessageId::SlashUnknownFooter => "Use /help to see available commands.",
+        MessageId::SlashInvalidArgumentsTitle => "Invalid slash arguments",
         MessageId::SlashQuotedArgumentsUnsupported => {
             "Quoted arguments are not supported. Use /mode approval trust confirm instead."
         }

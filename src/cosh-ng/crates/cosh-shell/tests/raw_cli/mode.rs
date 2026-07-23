@@ -121,14 +121,15 @@ fn raw_cli_mode_rejects_quoted_arguments_without_changing_mode() {
         "/mode approval \"trust confirm\"\n\
          /mode approval 'trust confirm'\n\
          /config language \"en US\"\n\
-         printf '\"hello world\"\\n'\n\
+         /health \"quick\"\n\
+         printf 'quoted-shell-output:%s\\n' '\"hello world\"'\n\
          /help\n\
          exit\n",
     );
 
     assert_eq!(
         count_occurrences(&output, "Quoted arguments are not supported."),
-        3,
+        4,
         "{output}"
     );
     assert!(
@@ -139,7 +140,10 @@ fn raw_cli_mode_rejects_quoted_arguments_without_changing_mode() {
     assert!(!output.contains("Invalid language"), "{output}");
     assert!(!output.contains("Mode set to trust."), "{output}");
     assert!(output.contains("Mode: auto. Strategy: smart."), "{output}");
-    assert!(output.contains("\r\n\"hello world\"\r\n"), "{output}");
+    assert!(
+        output.contains("quoted-shell-output:\"hello world\""),
+        "{output}"
+    );
 }
 
 #[test]

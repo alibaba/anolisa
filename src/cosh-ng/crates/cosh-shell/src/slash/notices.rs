@@ -13,7 +13,7 @@ pub(super) fn render_slash_parse_error<W: Write>(
     match error {
         SlashParseError::QuotedArgumentsUnsupported => render_notice_panel(
             output,
-            i18n.t(MessageId::SlashUnknownTitle),
+            i18n.t(MessageId::SlashInvalidArgumentsTitle),
             vec![i18n
                 .t(MessageId::SlashQuotedArgumentsUnsupported)
                 .to_string()],

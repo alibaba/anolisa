@@ -109,6 +109,9 @@ mod tests {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);
         }
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 750);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 751);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 752);
     }
 
     #[test]
@@ -155,11 +158,19 @@ mod tests {
     fn quoted_argument_error_is_localized() {
         let en = I18n::new(Language::EnUs);
         assert_eq!(
+            en.t(MessageId::SlashInvalidArgumentsTitle),
+            "Invalid slash arguments"
+        );
+        assert_eq!(
             en.t(MessageId::SlashQuotedArgumentsUnsupported),
             "Quoted arguments are not supported. Use /mode approval trust confirm instead."
         );
 
         let zh = I18n::new(Language::ZhCn);
+        assert_eq!(
+            zh.t(MessageId::SlashInvalidArgumentsTitle),
+            "Slash 参数错误"
+        );
         assert_eq!(
             zh.t(MessageId::SlashQuotedArgumentsUnsupported),
             "不支持带引号的参数。本例请改用 /mode approval trust confirm。"
