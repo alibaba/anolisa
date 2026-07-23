@@ -554,20 +554,28 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {perf.top_slow.slice(0, 5).map((call, i) => (
-                <tr key={i}>
-                  <td className="py-2 pr-3 whitespace-nowrap text-gray-800">{call.name}</td>
-                  <td className={`py-2 pr-3 whitespace-nowrap ${call.err ? 'text-red-500' : 'text-gray-600'}`}>
-                    {formatSecs(call.dur)}{call.err ? ' ✗' : ''}
-                  </td>
-                  <td
-                    title={call.cmd}
-                    className="py-2 text-[11px] font-mono text-gray-500 overflow-hidden text-ellipsis whitespace-nowrap"
-                  >
-                    {call.cmd}
+              {perf.top_slow.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="py-6 text-center text-gray-400 text-xs">
+                    该会话没有工具调用，耗时全部来自模型推理
                   </td>
                 </tr>
-              ))}
+              ) : (
+                perf.top_slow.slice(0, 5).map((call, i) => (
+                  <tr key={i}>
+                    <td className="py-2 pr-3 whitespace-nowrap text-gray-800">{call.name}</td>
+                    <td className={`py-2 pr-3 whitespace-nowrap ${call.err ? 'text-red-500' : 'text-gray-600'}`}>
+                      {formatSecs(call.dur)}{call.err ? ' ✗' : ''}
+                    </td>
+                    <td
+                      title={call.cmd}
+                      className="py-2 text-[11px] font-mono text-gray-500 overflow-hidden text-ellipsis whitespace-nowrap"
+                    >
+                      {call.cmd}
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
