@@ -79,6 +79,44 @@ pub trait BackendSpawner: Send + Sync {
 
     /// Probe whether the backend binary at `binary_path` is usable.
     async fn probe(&self, binary_path: &Path) -> Result<bool, BlazeError>;
+
+    /// Restore a sandbox from a snapshot + memory file.
+    async fn restore(
+        &self,
+        _snapshot_path: &Path,
+        _mem_path: &Path,
+        _work_dir: &Path,
+    ) -> Result<SpawnHandle, BlazeError> {
+        Err(BlazeError::BackendError {
+            msg: "restore not supported by this backend".to_string(),
+        })
+    }
+
+    /// Pause a running sandbox (freeze all processes).
+    async fn pause(&self, _handle: &SpawnHandle) -> Result<(), BlazeError> {
+        Err(BlazeError::BackendError {
+            msg: "pause not supported by this backend".to_string(),
+        })
+    }
+
+    /// Resume a paused sandbox.
+    async fn resume(&self, _handle: &SpawnHandle) -> Result<(), BlazeError> {
+        Err(BlazeError::BackendError {
+            msg: "resume not supported by this backend".to_string(),
+        })
+    }
+
+    /// Create a snapshot of a running or paused sandbox.
+    async fn create_snapshot(
+        &self,
+        _handle: &SpawnHandle,
+        _output_path: &Path,
+        _mem_output_path: &Path,
+    ) -> Result<(), BlazeError> {
+        Err(BlazeError::BackendError {
+            msg: "create_snapshot not supported by this backend".to_string(),
+        })
+    }
 }
 
 /// Convenience alias used by `ServerState`.
