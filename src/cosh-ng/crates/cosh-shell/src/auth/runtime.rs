@@ -1,71 +1,30 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
-use crate::adapter::{AdapterInstance, CoshCoreAdapter};
+use crate::adapter::AdapterInstance;
+use crate::auth::capture::{auth_capture_id, matches_auth_capture};
 use crate::auth::completion::finish_auth_configuration;
+use crate::auth::delete_confirm::{
+    begin_delete_confirmation, focus_delete_confirmation, render_delete_confirmation,
+    render_delete_outcome, submit_delete_confirmation,
+};
 use crate::auth::provider_display::auth_required_providers_for_display;
+use crate::auth::provider_management::{
+    core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
+    provider_action_options, ExistingProvider, ProviderAction,
+};
+use crate::auth::retry::restore_after_failed_submission;
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
     AgentEvent, AuthFieldInfo, AuthProviderInfo, AuthResponse, GovernedEvent, NoticePanelModel,
     QuestionInputFeedback, QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer,
-    RawInputCapture, ShellEvent, ShellEventKind,
+    ShellEvent, ShellEventKind,
 };
 use crate::runtime::state::InlineState;
 
-/// An existing provider loaded from config.toml for the ManagingProviders phase.
-#[derive(Debug, Clone)]
-pub(crate) struct ExistingProvider {
-    pub(crate) name: String,          // section name (e.g. "default")
-    pub(crate) provider_type: String, // type field value
-    pub(crate) label: String,         // display name based on type
-    pub(crate) model: String,         // current model
-    pub(crate) is_active: bool,       // whether this is the active_provider
-    pub(crate) editable: bool,
-    pub(crate) source: String,
-    pub(crate) base_url: Option<String>,
-    pub(crate) api_key_mask: Option<String>,
-    pub(crate) access_key_id_mask: Option<String>,
-    pub(crate) access_key_secret_mask: Option<String>,
-    pub(crate) security_token_mask: Option<String>,
-    pub(crate) auth_source: Option<String>,
-}
-
-fn secret_mask(len: usize) -> String {
-    "•".repeat(len)
-}
-
-fn label_for_provider_type(provider_type: &str) -> &'static str {
-    match provider_type {
-        "dashscope" => "DashScope (\u{767e}\u{70bc})",
-        "aliyun" => "Aliyun Authentication",
-        _ => "OpenAI Compatible",
-    }
-}
-
-fn provider_action_options(is_active: bool, editable: bool) -> Vec<String> {
-    match (is_active, editable) {
-        (true, true) => vec!["Edit configuration".to_string(), "Cancel".to_string()],
-        (true, false) => vec!["Cancel".to_string()],
-        (false, true) => vec![
-            "Set as active provider".to_string(),
-            "Edit configuration".to_string(),
-            "Cancel".to_string(),
-        ],
-        (false, false) => vec!["Set as active provider".to_string(), "Cancel".to_string()],
-    }
-}
-
-fn provider_action_choice(is_active: bool, editable: bool, selected: usize) -> &'static str {
-    match (is_active, editable, selected) {
-        (true, true, 0) => "edit",
-        (true, _, _) => "cancel",
-        (false, _, 0) => "activate",
-        (false, true, 1) => "edit",
-        _ => "cancel",
-    }
-}
+pub(crate) use crate::auth::capture::pending_auth_capture;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeAuthState {
@@ -97,6 +56,10 @@ pub(crate) enum AuthPhase {
     ManagingProviders,
     /// Action menu after selecting an existing provider
     ProviderAction {
+        provider_idx: usize,
+    },
+    /// Require explicit confirmation before removing a user-owned provider.
+    ConfirmDelete {
         provider_idx: usize,
     },
     SelectingProvider,
@@ -184,62 +147,6 @@ pub(crate) fn render_auth_panel<W: std::io::Write>(
     Ok(())
 }
 
-pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCapture> {
-    let auth = state.auth.state.as_ref()?;
-    match &auth.phase {
-        AuthPhase::ManagingProviders => Some(RawInputCapture::Question {
-            id: auth.id.clone(),
-            option_count: auth.existing_providers.len() + 1,
-            allow_free_text: false,
-            multiple: false,
-            secret: false,
-        }),
-        AuthPhase::ProviderAction { provider_idx } => {
-            let existing = auth.existing_providers.get(*provider_idx);
-            let option_count = provider_action_options(
-                existing.is_some_and(|provider| provider.is_active),
-                existing.map(|provider| provider.editable).unwrap_or(true),
-            )
-            .len();
-            Some(RawInputCapture::Question {
-                id: auth.id.clone(),
-                option_count,
-                allow_free_text: false,
-                multiple: false,
-                secret: false,
-            })
-        }
-        AuthPhase::SelectingProvider => Some(RawInputCapture::Question {
-            id: auth.id.clone(),
-            option_count: auth.providers.len(),
-            allow_free_text: false,
-            multiple: false,
-            secret: false,
-        }),
-        AuthPhase::FillingField => {
-            let secret = auth
-                .providers
-                .get(auth.selected_provider)
-                .and_then(|provider| provider.fields.get(auth.current_field))
-                .is_some_and(|field| field.secret);
-            Some(RawInputCapture::Question {
-                id: auth.id.clone(),
-                option_count: 0,
-                allow_free_text: true,
-                multiple: false,
-                secret,
-            })
-        }
-        AuthPhase::AliyunEcsChallenge { .. } => Some(RawInputCapture::Question {
-            id: auth.id.clone(),
-            option_count: 1,
-            allow_free_text: false,
-            multiple: false,
-            secret: false,
-        }),
-    }
-}
-
 pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
     state.auth.state.is_some()
 }
@@ -299,12 +206,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     );
     let id = format!("auth-{request_id}");
 
-    let mut existing_providers: Vec<ExistingProvider> = core_state
-        .saved_providers
-        .into_iter()
-        .map(ExistingProvider::from)
-        .collect();
-    existing_providers.sort_by(|a, b| b.is_active.cmp(&a.is_active).then(a.name.cmp(&b.name)));
+    let existing_providers = core_state.existing_providers;
 
     // If there are existing providers, start in ManagingProviders phase
     let phase = if existing_providers.is_empty() {
@@ -329,74 +231,6 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
 
     render_current_auth_panel(state, output)?;
     Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct CoreAuthState {
-    templates: Vec<AuthProviderInfo>,
-    #[serde(default)]
-    saved_providers: Vec<CoreSavedProvider>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CoreSavedProvider {
-    provider_id: String,
-    provider_type: Option<String>,
-    model: Option<String>,
-    base_url: Option<String>,
-    auth_source: Option<String>,
-    active: bool,
-    #[serde(default = "default_provider_source")]
-    source: String,
-    #[serde(default = "default_provider_editable")]
-    editable: bool,
-    #[serde(default)]
-    api_key_len: usize,
-    #[serde(default)]
-    access_key_id_len: usize,
-    #[serde(default)]
-    access_key_secret_len: usize,
-    #[serde(default)]
-    security_token_len: usize,
-}
-
-fn default_provider_source() -> String {
-    "user".to_string()
-}
-
-fn default_provider_editable() -> bool {
-    true
-}
-
-fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAuthState, String> {
-    let value = cosh_core.registry_query("auth", "state", Value::Null)?;
-    serde_json::from_value(value).map_err(|e| format!("invalid auth state: {e}"))
-}
-
-fn core_auth_activate(adapter: &AdapterInstance, provider_id: &str) -> Result<(), String> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
-    cosh_core
-        .registry_query("auth", "activate", json!({ "provider_id": provider_id }))
-        .map(|_| ())
-}
-
-fn core_auth_configure(adapter: &AdapterInstance, response: &AuthResponse) -> Result<(), String> {
-    let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
-    };
-    cosh_core
-        .registry_query(
-            "auth",
-            "configure",
-            json!({
-                "provider_id": response.provider_id,
-                "provider_type": response.provider_type,
-                "values": response.values,
-            }),
-        )
-        .map(|_| ())
 }
 
 #[derive(Debug, Deserialize)]
@@ -442,33 +276,6 @@ fn core_auth_prepare(
     serde_json::from_value(value).map_err(|e| format!("invalid auth prepare response: {e}"))
 }
 
-impl From<CoreSavedProvider> for ExistingProvider {
-    fn from(provider: CoreSavedProvider) -> Self {
-        let provider_type = provider
-            .provider_type
-            .unwrap_or_else(|| "openai_compat".to_string());
-        let model = provider.model.unwrap_or_default();
-        ExistingProvider {
-            name: provider.provider_id,
-            label: label_for_provider_type(&provider_type).to_string(),
-            provider_type,
-            model,
-            is_active: provider.active,
-            editable: provider.editable,
-            source: provider.source,
-            base_url: provider.base_url,
-            api_key_mask: (provider.api_key_len > 0).then(|| secret_mask(provider.api_key_len)),
-            access_key_id_mask: (provider.access_key_id_len > 0)
-                .then(|| secret_mask(provider.access_key_id_len)),
-            access_key_secret_mask: (provider.access_key_secret_len > 0)
-                .then(|| secret_mask(provider.access_key_secret_len)),
-            security_token_mask: (provider.security_token_len > 0)
-                .then(|| secret_mask(provider.security_token_len)),
-            auth_source: provider.auth_source,
-        }
-    }
-}
-
 fn providers_with_provider_id_field(providers: Vec<AuthProviderInfo>) -> Vec<AuthProviderInfo> {
     providers
         .into_iter()
@@ -498,7 +305,7 @@ fn handle_auth_focus<W: std::io::Write>(
     let Some(auth) = state.auth.state.as_mut() else {
         return Ok(false);
     };
-    if auth.id != id {
+    if !matches_auth_capture(auth, id) {
         return Ok(false);
     }
     match auth.phase {
@@ -510,6 +317,11 @@ fn handle_auth_focus<W: std::io::Write>(
         }
         AuthPhase::ProviderAction { .. } => {
             auth.selected_provider = selected;
+            clear_active_auth_panel(state, output)?;
+            render_current_auth_panel(state, output)?;
+        }
+        AuthPhase::ConfirmDelete { .. } => {
+            focus_delete_confirmation(auth, selected);
             clear_active_auth_panel(state, output)?;
             render_current_auth_panel(state, output)?;
         }
@@ -532,7 +344,7 @@ fn handle_auth_input<W: std::io::Write>(
     let Some(auth) = state.auth.state.as_mut() else {
         return Ok(false);
     };
-    if auth.id != id {
+    if !matches_auth_capture(auth, id) {
         return Ok(false);
     }
     if auth.phase == AuthPhase::FillingField {
@@ -553,7 +365,7 @@ fn handle_auth_answer<W: std::io::Write>(
     let Some(auth) = state.auth.state.as_mut() else {
         return Ok(false);
     };
-    if auth.id != id {
+    if !matches_auth_capture(auth, id) {
         return Ok(false);
     }
 
@@ -583,11 +395,13 @@ fn handle_auth_answer<W: std::io::Write>(
             let existing = auth.existing_providers[provider_idx].clone();
             let is_active = existing.is_active;
             let editable = existing.editable;
+            let deletable = existing.deletable();
 
-            let action = provider_action_choice(is_active, editable, auth.selected_provider);
+            let action =
+                provider_action_choice(is_active, editable, deletable, auth.selected_provider);
 
             match action {
-                "activate" => {
+                ProviderAction::Activate => {
                     core_auth_activate(adapter, &existing.name).map_err(std::io::Error::other)?;
                     // Clear and show confirmation
                     state.auth.state.take();
@@ -613,7 +427,7 @@ fn handle_auth_answer<W: std::io::Write>(
                     }
                     output.flush()?;
                 }
-                "edit" => {
+                ProviderAction::Edit => {
                     // Enter edit mode for this provider
                     let provider_type = existing.provider_type.as_str();
                     let template_idx = auth
@@ -678,7 +492,12 @@ fn handle_auth_answer<W: std::io::Write>(
                     clear_active_auth_panel(state, output)?;
                     render_current_auth_panel(state, output)?;
                 }
-                _ => {
+                ProviderAction::Delete => {
+                    begin_delete_confirmation(auth, provider_idx);
+                    clear_active_auth_panel(state, output)?;
+                    render_current_auth_panel(state, output)?;
+                }
+                ProviderAction::Cancel => {
                     // Cancel -> back to ManagingProviders
                     auth.phase = AuthPhase::ManagingProviders;
                     auth.selected_provider = provider_idx;
@@ -686,6 +505,15 @@ fn handle_auth_answer<W: std::io::Write>(
                     render_current_auth_panel(state, output)?;
                 }
             }
+            Ok(true)
+        }
+        AuthPhase::ConfirmDelete { provider_idx } => {
+            let outcome = submit_delete_confirmation(adapter, auth, provider_idx)
+                .map_err(std::io::Error::other)?;
+            clear_active_auth_panel(state, output)?;
+            let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+            render_delete_outcome(&outcome, &renderer, output)?;
+            render_current_auth_panel(state, output)?;
             Ok(true)
         }
         AuthPhase::SelectingProvider => {
@@ -834,9 +662,9 @@ fn send_auth_response<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    let auth = state.auth.state.take().expect("auth state present");
-    state.auth.completed_ids.insert(auth.id.clone());
+    let mut auth = state.auth.state.take().expect("auth state present");
     let provider = &auth.providers[auth.selected_provider];
+    let provider_label = provider.label.clone();
     let provider_id = auth
         .editing_provider_name
         .clone()
@@ -846,7 +674,7 @@ fn send_auth_response<W: std::io::Write>(
         request_id: auth.request_id.clone(),
         provider_id: provider_id.clone(),
         provider_type: Some(provider.id.clone()),
-        values: auth.collected_values,
+        values: auth.collected_values.clone(),
         persist: true,
     };
 
@@ -864,6 +692,7 @@ fn send_auth_response<W: std::io::Write>(
                     footer: None,
                 },
             )?;
+            state.auth.completed_ids.insert(auth.id);
             output.flush()?;
             return Ok(());
         }
@@ -873,13 +702,29 @@ fn send_auth_response<W: std::io::Write>(
                 let adapter = adapter.ok_or_else(|| {
                     std::io::Error::other("missing adapter for cosh-core auth registry")
                 })?;
-                core_auth_configure(adapter, &response).map_err(std::io::Error::other)?;
+                if let Err(error) = core_auth_configure(adapter, &response) {
+                    restore_after_failed_submission(&mut auth);
+                    state.auth.state = Some(auth);
+                    let renderer =
+                        RatatuiInlineRenderer::for_terminal().with_language(state.language);
+                    renderer.write_notice_panel(
+                        output,
+                        NoticePanelModel {
+                            title: "Credentials were not saved",
+                            body: vec![error, "Review the values and try again.".to_string()],
+                            footer: None,
+                        },
+                    )?;
+                    render_current_auth_panel(state, output)?;
+                    return Ok(());
+                }
             }
             AuthBackend::ActiveRun => {}
         }
     }
 
-    finish_auth_configuration(state, output, &provider.label)
+    state.auth.completed_ids.insert(auth.id);
+    finish_auth_configuration(state, output, &provider_label)
 }
 
 fn render_current_auth_panel<W: std::io::Write>(
@@ -890,6 +735,7 @@ fn render_current_auth_panel<W: std::io::Write>(
         return Ok(());
     };
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    let panel_id = auth_capture_id(auth);
 
     match auth.phase {
         AuthPhase::ManagingProviders => {
@@ -917,7 +763,7 @@ fn render_current_auth_panel<W: std::io::Write>(
             options.push("  + Add new provider".to_string());
 
             let model = QuestionPanelModel {
-                id: &auth.id,
+                id: &panel_id,
                 question: "\u{1f511} Provider Management \u{2014} Select your AI provider:",
                 options: &options,
                 selected_option: auth.selected_provider,
@@ -929,14 +775,14 @@ fn render_current_auth_panel<W: std::io::Write>(
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(auth.id.clone());
+            state.questions.active_panel_id = Some(panel_id.clone());
         }
         AuthPhase::ProviderAction { provider_idx } => {
             let ep = &auth.existing_providers[provider_idx];
             let title = format!("\u{1f511} {} \u{2014} \"{}\":", ep.label, ep.name);
-            let options = provider_action_options(ep.is_active, ep.editable);
+            let options = provider_action_options(ep.is_active, ep.editable, ep.deletable());
             let model = QuestionPanelModel {
-                id: &auth.id,
+                id: &panel_id,
                 question: &title,
                 options: &options,
                 selected_option: auth.selected_provider,
@@ -948,12 +794,18 @@ fn render_current_auth_panel<W: std::io::Write>(
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(auth.id.clone());
+            state.questions.active_panel_id = Some(panel_id.clone());
+        }
+        AuthPhase::ConfirmDelete { provider_idx } => {
+            let height =
+                render_delete_confirmation(auth, provider_idx, &panel_id, &renderer, output)?;
+            state.questions.active_panel_height = height;
+            state.questions.active_panel_id = Some(panel_id.clone());
         }
         AuthPhase::SelectingProvider => {
             let options: Vec<String> = auth.providers.iter().map(|p| p.label.clone()).collect();
             let model = QuestionPanelModel {
-                id: &auth.id,
+                id: &panel_id,
                 question: "\u{1f511} Authentication Required \u{2014} Select your AI provider:",
                 options: &options,
                 selected_option: auth.selected_provider,
@@ -965,7 +817,7 @@ fn render_current_auth_panel<W: std::io::Write>(
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(auth.id.clone());
+            state.questions.active_panel_id = Some(panel_id.clone());
         }
         AuthPhase::FillingField => {
             let field = auth.current_field_info();
@@ -996,7 +848,7 @@ fn render_current_auth_panel<W: std::io::Write>(
                 question.push_str("\n  > ");
             }
             let model = QuestionPanelModel {
-                id: &auth.id,
+                id: &panel_id,
                 question: &question,
                 options: &[],
                 selected_option: 0,
@@ -1008,7 +860,7 @@ fn render_current_auth_panel<W: std::io::Write>(
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(auth.id.clone());
+            state.questions.active_panel_id = Some(panel_id.clone());
         }
         AuthPhase::AliyunEcsChallenge {
             ref instance_id,
@@ -1023,7 +875,7 @@ fn render_current_auth_panel<W: std::io::Write>(
             }
             let options = vec!["I have authorized this ECS instance".to_string()];
             let model = QuestionPanelModel {
-                id: &auth.id,
+                id: &panel_id,
                 question: &question,
                 options: &options,
                 selected_option: 0,
@@ -1035,7 +887,7 @@ fn render_current_auth_panel<W: std::io::Write>(
             };
             let height = renderer.write_question_panel(output, model)?;
             state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(auth.id.clone());
+            state.questions.active_panel_id = Some(panel_id);
         }
     }
     output.flush()?;
@@ -1146,8 +998,12 @@ pub(crate) fn render_auth_card_actions<W: std::io::Write>(
             }
             Some("cancel") | Some("question_cancel") => {
                 if let Some(cancel_id) = event.input.as_deref() {
-                    let auth_id = state.auth.state.as_ref().map(|a| a.id.clone());
-                    if auth_id.as_deref() == Some(cancel_id.trim()) {
+                    let matches_pending = state
+                        .auth
+                        .state
+                        .as_ref()
+                        .is_some_and(|auth| matches_auth_capture(auth, cancel_id.trim()));
+                    if matches_pending {
                         cancel_auth_panel(state, output)?;
                     }
                 }
@@ -1226,39 +1082,11 @@ fn generate_qr_text(data: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_ecs_auth_source_for_manual_aliyun_edit, provider_action_choice,
-        provider_action_options, should_apply_aliyun_prepare_after_field,
+        clear_ecs_auth_source_for_manual_aliyun_edit, should_apply_aliyun_prepare_after_field,
         should_apply_aliyun_prepare_for_edit, should_apply_aliyun_prepare_on_provider_selection,
         AuthBackend, ExistingProvider,
     };
     use std::collections::HashMap;
-
-    #[test]
-    fn provider_action_options_hide_edit_for_non_editable_providers() {
-        assert_eq!(
-            provider_action_options(true, true),
-            vec!["Edit configuration", "Cancel"]
-        );
-        assert_eq!(provider_action_options(true, false), vec!["Cancel"]);
-        assert_eq!(
-            provider_action_options(false, true),
-            vec!["Set as active provider", "Edit configuration", "Cancel"]
-        );
-        assert_eq!(
-            provider_action_options(false, false),
-            vec!["Set as active provider", "Cancel"]
-        );
-    }
-
-    #[test]
-    fn provider_action_choice_never_edits_non_editable_providers() {
-        assert_eq!(provider_action_choice(true, true, 0), "edit");
-        assert_eq!(provider_action_choice(true, false, 0), "cancel");
-        assert_eq!(provider_action_choice(false, true, 0), "activate");
-        assert_eq!(provider_action_choice(false, true, 1), "edit");
-        assert_eq!(provider_action_choice(false, false, 0), "activate");
-        assert_eq!(provider_action_choice(false, false, 1), "cancel");
-    }
 
     #[test]
     fn core_registry_aliyun_add_waits_for_provider_id_before_prepare() {

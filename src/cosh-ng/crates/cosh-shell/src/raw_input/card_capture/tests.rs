@@ -52,6 +52,33 @@ fn question_capture_preserves_answer_for_delivery_retry() {
 }
 
 #[test]
+fn question_capture_emits_one_submission_per_input_batch() {
+    let capture = RawInputCapture::Question {
+        id: "q-burst".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let events = state.consume(&capture, b"main\n\n");
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, RawInputEvent::CardAnswer(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        state.consume(&capture, b"\n"),
+        vec![RawInputEvent::CardAnswer("main".to_string())]
+    );
+}
+
+#[test]
 fn question_capture_custom_option_empty_submit_emits_attempt() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),

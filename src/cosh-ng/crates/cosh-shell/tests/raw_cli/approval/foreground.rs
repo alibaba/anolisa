@@ -45,7 +45,7 @@ fn raw_cli_approved_bash_tool_prints_native_command_and_stdout() {
     let output = run_raw_cli_ask_with_delayed_input(vec![
         (b"?? stream pwd tool approval\n".to_vec(), Duration::ZERO),
         (b"\n".to_vec(), Duration::from_millis(1_200)),
-        (b"exit\n".to_vec(), Duration::from_millis(300)),
+        (b"exit\n".to_vec(), Duration::from_millis(1_000)),
     ]);
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 

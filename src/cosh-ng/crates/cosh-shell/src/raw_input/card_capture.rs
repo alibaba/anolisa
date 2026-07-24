@@ -185,6 +185,7 @@ impl CardInputState {
                 }
                 b'\r' | b'\n' => {
                     let event = self.submit(capture);
+                    let submitted = event.is_some();
                     let preserve_for_retry = matches!(
                         (&event, capture),
                         (
@@ -199,6 +200,11 @@ impl CardInputState {
                         self.free_text.clear();
                     }
                     idx += 1;
+                    if submitted {
+                        // State transitions are applied by the main loop; suppress a burst of
+                        // duplicate submits against the capture snapshot used for this batch.
+                        break;
+                    }
                 }
                 0x7f | 0x08 => {
                     if self.free_text.pop().is_some() {
