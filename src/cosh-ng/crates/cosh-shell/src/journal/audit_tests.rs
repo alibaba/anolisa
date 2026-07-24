@@ -11,7 +11,7 @@ fn private_root() -> PathBuf {
     std::fs::create_dir(&root).unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    root
+    root.canonicalize().unwrap()
 }
 
 #[test]
