@@ -4,7 +4,7 @@ use crate::tool::{Tool, ToolResult};
 use async_trait::async_trait;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use tokio::io::BufReader;
 
@@ -24,6 +24,28 @@ struct CountingShellTool {
 }
 
 struct ExternalTool;
+
+struct RecordingProvider {
+    messages: Arc<Mutex<Vec<crate::provider::Message>>>,
+}
+
+#[async_trait]
+impl crate::provider::ContentGenerator for RecordingProvider {
+    async fn generate(
+        &self,
+        messages: &[crate::provider::Message],
+        _tools: &[crate::provider::ToolDeclaration],
+        _config: &crate::provider::GenerateConfig,
+    ) -> Result<crate::provider::GenerateStream, String> {
+        *self.messages.lock().unwrap() = messages.to_vec();
+        Ok(Box::pin(futures::stream::iter([
+            crate::provider::GenerateEvent::TextDelta("done".to_string()),
+            crate::provider::GenerateEvent::MessageEnd,
+        ])))
+    }
+
+    fn cancel(&self) {}
+}
 
 #[async_trait]
 impl Tool for ExternalTool {
@@ -148,6 +170,63 @@ fn safe_reload_rebinds_the_complete_snapshot_before_the_next_run() {
     assert_eq!(core.bound_extension_generation, previous + 1);
     assert!(core.tools.get("example.ops/mcp/server/tool").is_some());
     assert_eq!(core.extension_generation.take_retired().len(), 1);
+}
+
+#[test]
+fn web_fetch_requires_approval_outside_trust_mode() {
+    for (mode, expected) in [
+        ("trust", Outcome::Allow),
+        ("auto", Outcome::RequireApproval),
+        ("balanced", Outcome::RequireApproval),
+        ("suggest", Outcome::RequireApproval),
+        ("strict", Outcome::RequireApproval),
+    ] {
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = mode.to_string();
+        let tools = ToolRegistry::with_defaults_for_test();
+        let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+
+        assert_eq!(
+            core.classify_tool("web_fetch", &serde_json::json!({})),
+            expected,
+            "unexpected web_fetch policy in {mode} mode"
+        );
+    }
+}
+
+#[tokio::test]
+async fn project_context_reaches_the_provider_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let context_dir = dir.path().join(".copilot-shell");
+    std::fs::create_dir(&context_dir).unwrap();
+    std::fs::write(context_dir.join("CONTEXT.md"), "provider-visible marker").unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    core.shell_context = Some(ShellContext {
+        cwd: dir.path().to_path_buf(),
+        env: std::collections::HashMap::new(),
+        last_exit_code: 0,
+    });
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("hello", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let messages = captured.lock().unwrap();
+    let system = messages.first().expect("provider system message");
+    assert_eq!(system.role, "system");
+    assert!(system.content.as_text().contains("# Context"));
+    assert!(system
+        .content
+        .as_text()
+        .contains("## Project Context\nprovider-visible marker"));
 }
 
 #[async_trait]

@@ -144,6 +144,10 @@ impl CoshCore {
             return Outcome::Allow;
         }
 
+        if kind == ToolKind::Network {
+            return Outcome::RequireApproval;
+        }
+
         // MCP servers are external programs. Do not infer their side effects
         // from a server-provided description or schema.
         if kind == ToolKind::Mcp {

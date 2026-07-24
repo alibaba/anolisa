@@ -1,11 +1,17 @@
 pub mod edit;
+mod file_patterns;
+mod glob;
 pub mod grep;
+mod list_directory;
 pub mod mcp;
 pub mod read_file;
+mod read_many_files;
+mod save_memory;
 pub mod shell;
 pub mod shell_evidence;
 pub mod skill;
 pub mod todo;
+mod web_fetch;
 pub mod write_file;
 
 use std::collections::HashMap;
@@ -21,6 +27,8 @@ use crate::skill::{SkillConfig, SkillManager};
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolKind {
     ReadOnly,
+    /// A network request that can reach services outside the local process.
+    Network,
     FileEdit,
     ShellExec,
     ShellEvidence,
@@ -146,7 +154,12 @@ impl ToolRegistry {
         registry.register(Box::new(write_file::WriteFileTool));
         registry.register(Box::new(edit::EditTool));
         registry.register(Box::new(grep::GrepTool));
+        registry.register(Box::new(glob::GlobTool));
+        registry.register(Box::new(list_directory::ListDirectoryTool));
+        registry.register(Box::new(read_many_files::ReadManyFilesTool));
+        registry.register(Box::new(save_memory::SaveMemoryTool));
         registry.register(Box::new(todo::TodoTool::new()));
+        registry.register(Box::new(web_fetch::WebFetchTool::new()));
         registry.register(Box::new(skill::SkillTool::new(Arc::clone(&skill_manager))));
         registry.skill_manager = Some(skill_manager);
         registry
@@ -348,6 +361,21 @@ mod tests {
             .expect("default selection");
 
         assert_eq!(registry.names(), before);
+    }
+
+    #[test]
+    fn defaults_include_restored_core_tools() {
+        let registry = ToolRegistry::with_defaults_for_test();
+
+        for name in [
+            "glob",
+            "list_directory",
+            "read_many_files",
+            "save_memory",
+            "web_fetch",
+        ] {
+            assert!(registry.contains(name), "missing default tool: {name}");
+        }
     }
 
     #[test]
