@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier},
     text::{Line, Span, Text},
-    widgets::{block::Padding, Block, BorderType, Paragraph, Widget, Wrap},
+    widgets::{block::Padding, Block, BorderType, Paragraph, Widget},
 };
 
 use crate::types::{AgentEvent, GovernedEvent};
@@ -20,6 +20,7 @@ mod card;
 mod consultation;
 mod health;
 mod health_labels;
+mod help;
 mod markdown;
 mod notice;
 mod question;
@@ -45,6 +46,7 @@ pub use approval_receipt::ApprovalReceiptPanelModel;
 pub use consultation::ConsultationCardModel;
 pub use health::HealthBannerModel;
 pub(crate) use health::{health_uses_startup_row, primary_health_prompt_suggestion};
+pub use help::{HelpPanelEntry, HelpPanelGroup, HelpPanelModel};
 use markdown::MarkdownRenderModel;
 pub use notice::NoticePanelModel;
 pub use question::{
@@ -315,11 +317,15 @@ impl RatatuiInlineRenderer {
     fn rich_block_lines(&self, title: &str, body: Vec<String>) -> Vec<String> {
         let width = self.panel_standard_width();
         let inner_width = width.saturating_sub(4).max(1) as usize;
-        let content_height = body
+        // Pre-wrap with wrap_plain_line so leading indentation survives and
+        // continuation lines keep a hanging indent. Paragraph must not re-wrap:
+        // ratatui's `Wrap { trim: true }` strips leading whitespace, which
+        // flattens intentional hierarchy (e.g. /help group headers vs entries).
+        let wrapped = body
             .iter()
-            .map(|line| wrap_plain_line(line, inner_width).len().max(1))
-            .sum::<usize>()
-            .max(1);
+            .flat_map(|line| wrap_plain_line(line, inner_width))
+            .collect::<Vec<_>>();
+        let content_height = wrapped.len().max(1);
         let height = content_height.saturating_add(2).min(200) as u16;
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -333,14 +339,12 @@ impl RatatuiInlineRenderer {
         let inner = block.inner(area);
         block.render(area, &mut buffer);
 
-        let text = if body.is_empty() {
+        let text = if wrapped.is_empty() {
             Text::from(Line::from(""))
         } else {
-            Text::from(body.into_iter().map(Line::from).collect::<Vec<_>>())
+            Text::from(wrapped.into_iter().map(Line::from).collect::<Vec<_>>())
         };
-        Paragraph::new(text)
-            .wrap(Wrap { trim: true })
-            .render(inner, &mut buffer);
+        Paragraph::new(text).render(inner, &mut buffer);
 
         if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
@@ -376,9 +380,10 @@ impl RatatuiInlineRenderer {
         } else {
             Text::from(body)
         };
-        Paragraph::new(text)
-            .wrap(Wrap { trim: true })
-            .render(inner, &mut buffer);
+        // Callers must pre-wrap styled lines to the inner width. Paragraph must
+        // not re-wrap: ratatui's `Wrap { trim: true }` strips leading
+        // whitespace, which destroys intentional indentation hierarchy.
+        Paragraph::new(text).render(inner, &mut buffer);
 
         buffer_to_styled_lines(&buffer, area)
     }

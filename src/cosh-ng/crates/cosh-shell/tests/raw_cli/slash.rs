@@ -3,31 +3,45 @@ use super::*;
 #[test]
 fn raw_cli_help_renders_slash_command_reference() {
     let output = run_raw_cli_with_input("fake", "/help\necho after-help\nexit\n");
+    let normalized = strip_ansi_escape(&output);
 
-    assert!(output.contains("Slash commands"), "{output}");
-    assert!(output.contains("Config"), "{output}");
-    assert!(output.contains("Modes"), "{output}");
-    assert!(output.contains("Hooks"), "{output}");
-    assert!(output.contains("Registry"), "{output}");
-    assert!(!output.contains("Inspect"), "{output}");
-    assert!(!output.contains("Recommendations"), "{output}");
+    assert!(normalized.contains("Slash commands"), "{output}");
+    // Group headers sit at column zero inside the panel.
+    assert!(normalized.contains("│ Config"), "{output}");
+    assert!(normalized.contains("│ Modes"), "{output}");
+    assert!(normalized.contains("│ Hooks"), "{output}");
+    assert!(normalized.contains("│ Registry"), "{output}");
+    // Entries keep a two-space indent below their group header.
+    assert!(normalized.contains("│   /config language"), "{output}");
+    // Scope tags are right-aligned against the panel border.
+    assert!(normalized.contains("[config] │"), "{output}");
+    // Summaries sit on their own indented line.
     assert!(
-        output.contains("/config language [auto|en-US|zh-CN]"),
+        normalized.contains("│       configure UI language"),
+        "{output}"
+    );
+    assert!(!normalized.contains("Inspect"), "{output}");
+    assert!(!normalized.contains("Recommendations"), "{output}");
+    assert!(
+        normalized.contains("/config language [auto|en-US|zh-CN]"),
         "{output}"
     );
     assert!(
-        output.contains("/mode approval [recommend|auto|trust]"),
+        normalized.contains("/mode approval [recommend|auto|trust]"),
         "{output}"
     );
     assert!(
-        output.contains("/mode analysis [smart|auto|manual]"),
+        normalized.contains("/mode analysis [smart|auto|manual]"),
         "{output}"
     );
     assert!(
-        output.contains("/extensions [list|detail] [name]"),
+        normalized.contains("/extensions [list|detail] [name]"),
         "{output}"
     );
-    assert!(output.contains("/skills [list|detail] [name]"), "{output}");
+    assert!(
+        normalized.contains("/skills [list|detail] [name]"),
+        "{output}"
+    );
     assert!(!output.contains("/agent"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(!output.contains("/cancel"), "{output}");
@@ -171,11 +185,12 @@ fn raw_cli_slash_cards_wrap_long_text_and_restore_prompt() {
     );
 
     assert!(output.contains("Slash commands"), "{output}");
+    let normalized = strip_ansi_escape(&output);
     assert!(
-        output.contains("/mode approval [recommend|auto|trust]"),
+        normalized.contains("/mode approval [recommend|auto|trust]"),
         "{output}"
     );
-    assert!(output.contains("change approval mode"), "{output}");
+    assert!(normalized.contains("change approval mode"), "{output}");
     assert!(output.contains("after-long-slash"), "{output}");
     assert_agent_block_width(&output, 72);
     assert!(!output.contains("[ask|auto]alias"), "{output}");
@@ -206,7 +221,7 @@ fn raw_cli_zsh_shell_arg_intercepts_fragmented_slash() {
 
     assert!(output.contains("Slash commands"), "{output}");
     assert!(
-        output.contains("/mode approval [recommend|auto|trust]"),
+        strip_ansi_escape(&output).contains("/mode approval [recommend|auto|trust]"),
         "{output}"
     );
     assert!(output.contains("after-zsh-slash"), "{output}");
