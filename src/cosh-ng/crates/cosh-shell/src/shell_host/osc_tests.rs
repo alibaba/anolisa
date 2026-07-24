@@ -113,6 +113,42 @@ fn bash_history_file_marker_is_native_only() {
 }
 
 #[test]
+fn bash_extdebug_does_not_leak_via_exported_bashopts() {
+    let script = bash_marker_script();
+
+    // extdebug lands in BASHOPTS; when BASHOPTS arrived exported from the
+    // environment it stays exported (readonly keeps -x), leaking extdebug to
+    // every child bash which then fails to load bashdb on hosts without it.
+    let shopt = script
+        .find("shopt -s extdebug")
+        .expect("extdebug setup should exist");
+    let unexport = script
+        .find("export -n BASHOPTS 2>/dev/null || true")
+        .expect("BASHOPTS export attribute must be dropped after enabling extdebug");
+    assert!(
+        unexport > shopt,
+        "export -n BASHOPTS must follow shopt -s extdebug"
+    );
+
+    // The unexport must land in the same hook-setup block, before the DEBUG
+    // trap is (re-)installed there, so no child spawned afterwards sees the
+    // leak. Anchor on the trap occurrence after the shopt line: earlier
+    // occurrences live inside recovery helper functions.
+    let debug_trap = script[shopt..]
+        .find("trap '_cosh_preexec_marker' DEBUG")
+        .map(|offset| shopt + offset)
+        .expect("hook-setup DEBUG trap installation should exist");
+    assert!(
+        unexport < debug_trap,
+        "export -n BASHOPTS must precede the DEBUG trap installation"
+    );
+
+    // BASHOPTS/extdebug are bash-only mechanisms; the zsh marker must not
+    // grow references to them.
+    assert!(!zsh_marker_script().contains("BASHOPTS"));
+}
+
+#[test]
 fn bash_preexec_marker_skips_completion_with_comp_type_guard() {
     let script = bash_marker_script();
 

@@ -548,6 +548,12 @@ _cosh_prompt_command() {
   return "$status"
 }
 shopt -s extdebug 2>/dev/null || true
+# If BASHOPTS arrived exported from the login environment it stays exported
+# (readonly keeps the -x attribute), so the extdebug enabled above would leak
+# into every child bash and force debugger startup (bashdb) there. Drop the
+# export attribute only; imported options stay effective in this shell and
+# the guard makes a refusing bash fall back to current behavior (fail-safe).
+export -n BASHOPTS 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 _COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
 trap '_cosh_preexec_marker' DEBUG
