@@ -426,3 +426,70 @@ impl LlmClient {
         (preamble, history, prompt)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig_core::message::UserContent;
+
+    #[test]
+    fn extracts_json_from_wrapped_text() {
+        assert_eq!(
+            LlmClient::extract_json("```json\n{\"a\":1}\n```"),
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            LlmClient::extract_json("prefix {\"a\":1} suffix"),
+            "{\"a\":1}"
+        );
+        assert_eq!(LlmClient::extract_json("text [1,2] tail"), "[1,2]");
+        assert_eq!(LlmClient::extract_json(" no json "), "no json");
+    }
+
+    #[test]
+    fn splits_system_history_and_prompt() {
+        let messages = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            Message::User {
+                content: rig_core::OneOrMany::one(UserContent::text("u1")),
+            },
+            Message::Assistant {
+                id: None,
+                content: rig_core::OneOrMany::one(AssistantContent::text("a1")),
+            },
+            Message::User {
+                content: rig_core::OneOrMany::one(UserContent::text("u2")),
+            },
+        ];
+
+        let (preamble, history, prompt) = LlmClient::split_messages(&messages);
+        assert_eq!(preamble.as_deref(), Some("system"));
+        assert_eq!(history.len(), 2);
+        assert!(matches!(prompt, Message::User { .. }));
+    }
+
+    #[test]
+    fn split_messages_defaults_to_empty_user_prompt() {
+        let (preamble, history, prompt) = LlmClient::split_messages(&[]);
+        assert!(preamble.is_none());
+        assert!(history.is_empty());
+        assert!(matches!(prompt, Message::User { .. }));
+    }
+
+    #[test]
+    fn mutates_model_and_attaches_recorder() {
+        let mut client = LlmClient::with_config("http://localhost/v1/", "key", "old-model");
+        client.set_model("new-model");
+        client.set_base_url("http://localhost:8080/v1/");
+        client.set_api_key("new-key");
+        client.set_temperature(0.0);
+        client.set_concurrency(1);
+        assert_eq!(client.model(), "new-model");
+
+        let recorder = Arc::new(TrajectoryRecorder::new("new-model", "session-1"));
+        client.set_recorder(Arc::clone(&recorder));
+        assert!(client.recorder().is_some());
+    }
+}

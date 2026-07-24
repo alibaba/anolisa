@@ -155,3 +155,91 @@ fn build_data_section(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CacheTurn, ToolAggStats, ToolCallRecord};
+
+    fn trajectory() -> AtifTrajectory {
+        AtifTrajectory::from_json(
+            r#"{
+              "schema_version": "ATIF-v1.6",
+              "session_id": "s1",
+              "agent": {"name": "test", "model_name": "m"},
+              "steps": [
+                {"step_id": 1, "source": "agent", "message": "done", "timestamp": "2026-01-01T00:00:00Z"}
+              ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn renders_prefix_cache_hit_rates() {
+        let candidates = PerfCandidateSet {
+            cache_turns: vec![
+                CacheTurn {
+                    prompt_tokens: 100,
+                    cached_tokens: 80,
+                },
+                CacheTurn {
+                    prompt_tokens: 100,
+                    cached_tokens: 0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let section = build_data_section(&candidates, "prefix_cache", &trajectory());
+        assert!(section.contains("Cache 命中率：总体 40%"));
+        assert!(section.contains("每轮命中率：[80%, 0%]"));
+    }
+
+    #[test]
+    fn renders_fast_tool_aggregation_and_details() {
+        let candidates = PerfCandidateSet {
+            wall_secs: 10.0,
+            tool_secs: 6.0,
+            tool_count: 2,
+            top_tools: vec![ToolCallRecord {
+                name: "Bash".into(),
+                call_id: "call-1".into(),
+                start: 1.0,
+                dur: 5.0,
+                cmd: "rg foo".into(),
+                err: false,
+                result_tokens: None,
+            }],
+            tool_agg: vec![ToolAggStats {
+                name: "Bash".into(),
+                count: 2,
+                total_secs: 6.0,
+                avg_secs: 3.0,
+                max_secs: 5.0,
+            }],
+            ..Default::default()
+        };
+
+        let section = build_data_section(&candidates, "fast_tool", &trajectory());
+        assert!(section.contains("Bash：2次，均3.0s，总6.0s，最慢5.0s"));
+        assert!(section.contains("\"name\": \"Bash\""));
+    }
+
+    #[test]
+    fn builds_prompt_and_fallback_summary() {
+        let candidates = PerfCandidateSet {
+            wall_secs: 12.0,
+            tool_count: 1,
+            ..Default::default()
+        };
+        let messages = build_strategy_prompt(&candidates, &STRATEGIES[0], &trajectory());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[1].content.contains("prefix_cache"));
+
+        let fallback = build_data_section(&candidates, "unknown", &trajectory());
+        assert!(fallback.contains("轨迹总耗时 ≈ 12s"));
+        assert!(fallback.contains("\"tool_count\": 1"));
+    }
+}

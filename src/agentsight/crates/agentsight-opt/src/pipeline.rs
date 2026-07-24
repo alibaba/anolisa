@@ -67,3 +67,41 @@ impl<'a> AnalyzePipeline<'a> {
         accuracy::analyze(self.client, trajectory, repo_root).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_trajectory() -> AtifTrajectory {
+        AtifTrajectory::from_json(
+            r#"{
+              "schema_version": "ATIF-v1.6",
+              "session_id": "empty",
+              "agent": {"name": "test", "model_name": "test-model"},
+              "steps": []
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn run_pure_dimensions_on_empty_trajectory() {
+        let trajectory = empty_trajectory();
+
+        let perf = AnalyzePipeline::run_perf(&trajectory).unwrap();
+        assert_eq!(perf.tool_count, 0);
+        assert_eq!(perf.wall_secs, 0.0);
+        assert_eq!(perf.tool_secs, 0.0);
+
+        let cost = AnalyzePipeline::run_cost(&trajectory).unwrap();
+        assert_eq!(cost.total_events, 0);
+        assert!(cost.breakdown.is_empty());
+        assert!(cost.calls.is_empty());
+    }
+
+    #[test]
+    fn constructs_pipeline_with_client() {
+        let client = LlmClient::with_config("http://localhost/v1", "test-key", "test-model");
+        let _pipeline = AnalyzePipeline::new(&client);
+    }
+}

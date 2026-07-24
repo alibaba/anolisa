@@ -551,13 +551,10 @@ impl GenAIBuilder {
                                 crate::analyzer::message::AnthropicContentBlock::Thinking {
                                     thinking,
                                     ..
-                                } => {
-                                    // Anthropic thinking: convert to MessagePart::Reasoning
-                                    if !thinking.is_empty() {
-                                        parts.push(MessagePart::Reasoning {
-                                            content: thinking.clone(),
-                                        });
-                                    }
+                                } if !thinking.is_empty() => {
+                                    parts.push(MessagePart::Reasoning {
+                                        content: thinking.clone(),
+                                    });
                                 }
                                 _ => {}
                             }

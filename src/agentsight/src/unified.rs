@@ -789,7 +789,7 @@ impl AgentSight {
                 self.ffi_sender.is_some() && events_are_empty_llm(&output.events);
 
             if !output.events.is_empty() && !ffi_https_fallback {
-                if output.pending_response_id.is_some() {
+                if let Some(response_id) = output.pending_response_id {
                     // Session_id not yet resolved — queue for deferred resolution.
                     // Write a pending row NOW so crash detection can see this call
                     // during the deferral window (up to PENDING_SESSION_TIMEOUT).
@@ -806,12 +806,12 @@ impl AgentSight {
                     } else {
                         log::warn!(
                             "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
-                            output.pending_response_id.as_deref().unwrap_or("unknown")
+                            response_id
                         );
                     }
                     self.pending_genai.push(PendingGenAI {
                         events: output.events,
-                        response_id: output.pending_response_id.unwrap(),
+                        response_id,
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });

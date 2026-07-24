@@ -221,6 +221,33 @@ mod tests {
     }
 
     #[test]
+    fn save_all_dimensions_populates_all_columns() {
+        let (store, _path) = temp_store();
+        store
+            .save_dimension("s1", Dimension::Perf, "perf-json")
+            .unwrap();
+        store
+            .save_dimension("s1", Dimension::PerfIssues, "perf-issues-json")
+            .unwrap();
+        store
+            .save_dimension("s1", Dimension::Cost, "cost-json")
+            .unwrap();
+        store
+            .save_dimension("s1", Dimension::CostWaste, "cost-waste-json")
+            .unwrap();
+        store
+            .save_dimension("s1", Dimension::Accuracy, "accuracy-json")
+            .unwrap();
+
+        let rec = store.get("s1").unwrap().unwrap();
+        assert_eq!(rec.perf.as_deref(), Some("perf-json"));
+        assert_eq!(rec.perf_issues.as_deref(), Some("perf-issues-json"));
+        assert_eq!(rec.cost.as_deref(), Some("cost-json"));
+        assert_eq!(rec.cost_waste.as_deref(), Some("cost-waste-json"));
+        assert_eq!(rec.accuracy.as_deref(), Some("accuracy-json"));
+    }
+
+    #[test]
     fn upsert_overwrites_dimension() {
         let (store, _path) = temp_store();
         store.save_dimension("s1", Dimension::Cost, "1").unwrap();

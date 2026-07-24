@@ -138,3 +138,76 @@ pub fn build_strategy_prompt(
         )),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate() -> WasteCandidate {
+        WasteCandidate {
+            id: "tool_output".into(),
+            category: "上下文臃肿".into(),
+            subtype: "工具输出多".into(),
+            optimization: "工具输出截断".into(),
+            potential_save_tokens: 1200,
+            discount: false,
+            save_share: 0.123,
+            savings_kind: "可省".into(),
+            steps: vec![3],
+            facts: "tool output 1200 tok".into(),
+            snippet: "large output".into(),
+        }
+    }
+
+    #[test]
+    fn finds_strategy_by_candidate_id() {
+        let strategy = strategy_for("tool_output").unwrap();
+        assert_eq!(strategy.id, "tool_output");
+        assert!(strategy.name.contains("工具输出截断"));
+        assert!(strategy_for("missing").is_none());
+    }
+
+    #[test]
+    fn builds_prompt_with_metric_values_and_candidate_json() {
+        let set = WasteCandidateSet {
+            model: "test-model".into(),
+            total_steps: 4,
+            total_input_tokens: 1000,
+            total_output_tokens: 200,
+            metrics: CostRatioMetrics {
+                m1_prefix_share: 0.25,
+                m3_cache_hit_rate: Some(0.75),
+                m7_history_peak_share: 0.40,
+                m14_thinking_ratio: 0.0,
+                m15_tool_step_share: 0.60,
+                m16_churn_share: 0.125,
+            },
+            candidates: vec![candidate()],
+        };
+        let messages = build_strategy_prompt(
+            &set,
+            &set.candidates[0],
+            strategy_for("tool_output").unwrap(),
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        let body = &messages[1].content;
+        assert!(body.contains("tool_output"));
+        assert!(body.contains("工具输出截断"));
+        assert!(body.contains("M1 前缀账单占比: 25%"));
+        assert!(body.contains("M3 缓存命中率: 75%（真实账单口径）"));
+        assert!(body.contains("M16 空转账单占比: 12.5%"));
+        assert!(body.contains("本候选预计节省账单占比: 12.3%"));
+        assert!(body.contains("\"id\": \"tool_output\""));
+    }
+
+    #[test]
+    fn renders_missing_usage_metric() {
+        let metrics = CostRatioMetrics {
+            m3_cache_hit_rate: None,
+            ..Default::default()
+        };
+        assert!(render_metrics(&metrics).contains("M3 缓存命中率: 无 usage 数据"));
+    }
+}

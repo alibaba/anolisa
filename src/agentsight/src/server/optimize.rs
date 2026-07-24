@@ -445,3 +445,47 @@ pub async fn update_optimize_config(
         "configured": updated.effective_api_key().is_some(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_prefers_explicit_values_and_masks_key() {
+        let config = OptLlmConfig {
+            api_key: Some("sk-1234567890abcd".into()),
+            base_url: Some("http://localhost/v1".into()),
+            model: Some("test-model".into()),
+        };
+
+        assert_eq!(
+            config.effective_api_key().as_deref(),
+            Some("sk-1234567890abcd")
+        );
+        assert_eq!(config.effective_base_url(), "http://localhost/v1");
+        assert_eq!(config.effective_model(), "test-model");
+        assert_eq!(config.masked_api_key().as_deref(), Some("sk-123••••abcd"));
+    }
+
+    #[test]
+    fn config_ignores_empty_values_and_masks_short_key() {
+        let config = OptLlmConfig {
+            api_key: Some("short".into()),
+            base_url: Some(String::new()),
+            model: Some(String::new()),
+        };
+
+        assert_eq!(config.effective_api_key().as_deref(), Some("short"));
+        assert_eq!(config.masked_api_key().as_deref(), Some("••••••"));
+    }
+
+    #[test]
+    fn parses_known_optimization_dimensions() {
+        assert_eq!(parse_dimension("perf"), Some(Dimension::Perf));
+        assert_eq!(parse_dimension("perf-issues"), Some(Dimension::PerfIssues));
+        assert_eq!(parse_dimension("cost"), Some(Dimension::Cost));
+        assert_eq!(parse_dimension("cost-waste"), Some(Dimension::CostWaste));
+        assert_eq!(parse_dimension("accuracy"), Some(Dimension::Accuracy));
+        assert_eq!(parse_dimension("unknown"), None);
+    }
+}

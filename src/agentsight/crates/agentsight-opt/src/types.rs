@@ -1141,3 +1141,57 @@ pub struct IntentGraph {
     pub mainlines: Vec<Mainline>,
     pub meta: IntentGraphMeta,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_loose_defect_types() {
+        assert_eq!(DefectType::from_loose("tool_use"), DefectType::ToolUse);
+        assert_eq!(DefectType::from_loose("tool"), DefectType::ToolUse);
+        assert_eq!(DefectType::from_loose("reasoning"), DefectType::Reasoning);
+        assert_eq!(DefectType::from_loose("unknown"), DefectType::Unclassified);
+        assert_eq!(DefectType::ToolUse.to_string(), "Tool-use");
+        assert_eq!(
+            serde_json::to_string(&DefectType::ToolUse).unwrap(),
+            "\"Tool-use\""
+        );
+    }
+
+    #[test]
+    fn parses_loose_root_objects_and_fix_locus() {
+        assert_eq!(RootObject::from_loose("environment"), RootObject::Env);
+        assert_eq!(
+            RootObject::from_loose("orchestrator"),
+            RootObject::Orchestration
+        );
+        assert_eq!(RootObject::from_loose("missing"), RootObject::Unclassified);
+
+        assert_eq!(FixLocus::from_primary(&RootObject::Skill), FixLocus::Skill);
+        assert_eq!(
+            FixLocus::from_primary(&RootObject::Context),
+            FixLocus::ContextPolicy
+        );
+        assert_eq!(
+            FixLocus::from_primary(&RootObject::Model),
+            FixLocus::ModelRouting
+        );
+        assert_eq!(FixLocus::from_primary(&RootObject::Tool), FixLocus::Tool);
+        assert_eq!(FixLocus::from_primary(&RootObject::Input), FixLocus::None);
+        assert_eq!(serde_json::to_string(&FixLocus::None).unwrap(), "\"无\"");
+    }
+
+    #[test]
+    fn derives_evidence_confidence_and_patch_gate() {
+        assert_eq!(EvidenceTier::L1.confidence(), "高");
+        assert_eq!(EvidenceTier::L3.confidence(), "中");
+        assert_eq!(EvidenceTier::L4.confidence(), "中");
+        assert_eq!(EvidenceTier::L5.confidence(), "低");
+        assert!(EvidenceTier::L1.allows_auto_patch());
+        assert!(EvidenceTier::L3.allows_auto_patch());
+        assert!(!EvidenceTier::L4.allows_auto_patch());
+        assert!(!EvidenceTier::L5.allows_auto_patch());
+        assert_eq!(EvidenceTier::L2.to_string(), "L2");
+    }
+}

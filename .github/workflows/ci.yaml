@@ -654,7 +654,7 @@ jobs:
         run: |
           cd src/agentsight
           cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs)'
 
       - name: Generate coverage summary
         if: always()

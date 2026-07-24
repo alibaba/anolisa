@@ -307,7 +307,7 @@ fn compute_hotness(data: &ExtractedData, granularity: &HotnessGranularity) -> Sk
         })
         .collect();
 
-    rankings.sort_by(|a, b| b.total_loads.cmp(&a.total_loads));
+    rankings.sort_by_key(|entry| std::cmp::Reverse(entry.total_loads));
     for (i, entry) in rankings.iter_mut().enumerate() {
         entry.total_rank = (i + 1) as u32;
     }

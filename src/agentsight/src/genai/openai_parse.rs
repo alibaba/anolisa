@@ -152,18 +152,14 @@ impl GenAIBuilder {
                 ParsedApiMessage::OpenAICompletion {
                     response: Some(resp),
                     ..
-                } => {
-                    if !resp.id.is_empty() {
-                        return Some(resp.id.clone());
-                    }
+                } if !resp.id.is_empty() => {
+                    return Some(resp.id.clone());
                 }
                 ParsedApiMessage::AnthropicMessage {
                     response: Some(resp),
                     ..
-                } => {
-                    if !resp.id.is_empty() {
-                        return Some(resp.id.clone());
-                    }
+                } if !resp.id.is_empty() => {
+                    return Some(resp.id.clone());
                 }
                 _ => {}
             }
