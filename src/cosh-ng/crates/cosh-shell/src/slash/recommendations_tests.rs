@@ -104,8 +104,9 @@ fn off_panel_points_to_mode_analysis_for_failure_insights() {
         "panel output: {normalized}"
     );
     assert!(
-        normalized
-            .contains("Command failure insights are controlled separately with /mode analysis."),
+        normalized.contains(
+            "Command failure insights are controlled separately with /mode analysis manual."
+        ),
         "panel output: {normalized}"
     );
 
@@ -160,8 +161,9 @@ fn off_panel_hint_stays_accurate_in_manual_mode() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        normalized
-            .contains("Command failure insights are controlled separately with /mode analysis."),
+        normalized.contains(
+            "Command failure insights are controlled separately with /mode analysis manual."
+        ),
         "panel output: {normalized}"
     );
     assert!(

@@ -92,8 +92,8 @@ fn set_enabled<W: Write>(
                     .to_string(),
                     localized(
                         &state.i18n(),
-                        "Command failure insights are controlled separately with /mode analysis.",
-                        "失败命令 Insight 由 /mode analysis 单独控制。",
+                        "Command failure insights are controlled separately with /mode analysis manual.",
+                        "失败命令 Insight 由 /mode analysis manual 单独控制。",
                     )
                     .to_string(),
                 ]
