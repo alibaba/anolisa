@@ -434,6 +434,20 @@ pub enum QuestionSelectionMode {
     Multiple,
 }
 
+/// Outcome of an auth submission, distinguishing "saved to disk" from "applied
+/// to the current run only" so the shell never reports an unpersisted config as
+/// saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthOutcome {
+    /// Credentials were applied and persisted to disk.
+    Saved,
+    /// Credentials were applied to the current run but not persisted.
+    Applied,
+    /// Credentials could not be applied or persisted.
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -510,7 +524,13 @@ pub enum AgentEvent {
         request_id: String,
         reason: String,
         error_message: Option<String>,
+        credentials_unavailable: bool,
         providers: Vec<crate::adapter::AuthProviderInfo>,
+    },
+    AuthResult {
+        run_id: String,
+        request_id: String,
+        outcome: AuthOutcome,
     },
     ShellEvidenceRequest {
         run_id: String,

@@ -382,6 +382,7 @@ pub(super) fn start_control_protocol_qwen_process(
                             request_id,
                             reason,
                             error_message,
+                            credentials_unavailable,
                             providers,
                         } => {
                             send_agent_event(
@@ -391,6 +392,7 @@ pub(super) fn start_control_protocol_qwen_process(
                                     request_id,
                                     reason,
                                     error_message,
+                                    credentials_unavailable,
                                     providers,
                                 },
                             );

@@ -6,17 +6,23 @@ pub(super) fn finish_auth_configuration<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
     provider_label: &str,
+    persisted: bool,
 ) -> std::io::Result<()> {
     request_retry_after_auth(state);
 
+    let detail = if persisted {
+        format!("Provider: {provider_label} \u{2014} credentials saved.")
+    } else {
+        format!(
+            "Provider: {provider_label} \u{2014} credentials applied for this session (not saved)."
+        )
+    };
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     renderer.write_notice_panel(
         output,
         NoticePanelModel {
             title: "Auth configured",
-            body: vec![format!(
-                "Provider: {provider_label} \u{2014} credentials saved."
-            )],
+            body: vec![detail],
             footer: None,
         },
     )?;

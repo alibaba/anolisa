@@ -102,6 +102,7 @@ impl QuestionWriter {
                         response.provider_type.as_deref(),
                         &response.values,
                         response.persist,
+                        response.reset_unavailable_credentials,
                     ),
                     None,
                 ))),

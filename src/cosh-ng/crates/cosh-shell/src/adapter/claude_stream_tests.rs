@@ -92,6 +92,42 @@ fn claude_stream_parser_extracts_system_status() {
 }
 
 #[test]
+fn claude_stream_parser_extracts_auth_result_with_request_id() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"system","subtype":"status","status":"auth_persist_failed","request_id":"auth-1"}"#,
+    );
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::AuthResult { request_id, outcome, .. }]
+            if request_id == "auth-1" && *outcome == crate::types::AuthOutcome::Failed
+    ));
+}
+
+#[test]
+fn claude_stream_parser_distinguishes_applied_from_saved() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let saved = parser.parse_line(
+        r#"{"type":"system","subtype":"status","status":"auth_ok","request_id":"auth-1"}"#,
+    );
+    assert!(matches!(
+        &saved[..],
+        [AgentEvent::AuthResult { outcome, .. }] if *outcome == crate::types::AuthOutcome::Saved
+    ));
+
+    let applied = parser.parse_line(
+        r#"{"type":"system","subtype":"status","status":"auth_applied","request_id":"auth-2"}"#,
+    );
+    assert!(matches!(
+        &applied[..],
+        [AgentEvent::AuthResult { outcome, .. }] if *outcome == crate::types::AuthOutcome::Applied
+    ));
+}
+
+#[test]
 fn claude_stream_parser_does_not_commit_non_resumable_session_ids() {
     let pending = Arc::new(Mutex::new(None));
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), Some(Arc::clone(&pending)));

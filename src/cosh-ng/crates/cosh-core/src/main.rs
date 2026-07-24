@@ -8,6 +8,7 @@ mod compression;
 mod config;
 mod context;
 mod core;
+mod credential;
 mod extension;
 mod headless;
 mod hook;
