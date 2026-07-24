@@ -11,9 +11,13 @@ use super::reference_style::{
 };
 use super::RatatuiInlineRenderer;
 
+#[derive(Debug)]
 pub(crate) struct HookStatusPanelModel<'a> {
     pub(crate) title: &'a str,
     pub(crate) shell_label: &'a str,
+    /// Shell-hook stat lines as logical content without indentation
+    /// prefixes; each backend applies its own indentation (styled indents
+    /// under the section header, plain keeps the legacy flush layout).
     pub(crate) shell_lines: Vec<String>,
     pub(crate) agent_label: &'a str,
     pub(crate) agent: AgentHooksView,
@@ -22,16 +26,19 @@ pub(crate) struct HookStatusPanelModel<'a> {
 
 /// Agent hooks section content: grouped hooks, or a status message
 /// (backend unavailable, registry error, empty registry).
+#[derive(Debug)]
 pub(crate) enum AgentHooksView {
     Groups(Vec<HookEventGroup>),
     Message(String),
 }
 
+#[derive(Debug)]
 pub(crate) struct HookEventGroup {
     pub(crate) event: String,
     pub(crate) hooks: Vec<HookEntryView>,
 }
 
+#[derive(Debug)]
 pub(crate) struct HookEntryView {
     pub(crate) name: String,
     pub(crate) extension: String,
@@ -111,6 +118,8 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>) -> Vec<Line<'stati
             }
         }
     }
+    // Spacer before the footer is owned by the styled layout; the plain
+    // backend delegates footer spacing to write_block instead.
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(model.footer.clone(), body_style)));
     lines

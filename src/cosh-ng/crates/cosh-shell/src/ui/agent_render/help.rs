@@ -11,10 +11,10 @@ use super::RatatuiInlineRenderer;
 
 /// Command reference panel (`/help`) model.
 ///
-/// Layout follows upstream ratatui conventions (see the official `demo2`
-/// example): group headers are bold + underlined, command names are
-/// highlighted, arguments and scope tags are de-emphasized, and summaries sit
-/// on their own indented line.
+/// Layout follows the shared reference-panel convention (`reference_style`):
+/// group headers are bold + underlined, command names are highlighted,
+/// arguments and scope tags are de-emphasized, and summaries sit on their
+/// own indented line.
 pub(crate) struct HelpPanelModel<'a> {
     pub(crate) title: &'a str,
     pub(crate) groups: Vec<HelpPanelGroup<'a>>,

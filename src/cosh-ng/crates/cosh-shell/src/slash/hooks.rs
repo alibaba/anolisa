@@ -679,6 +679,11 @@ fn hook_severity_label(severity: FindingSeverity) -> &'static str {
 
 /// Fixed display order for agent hook events; unknown events keep their
 /// first-seen order after the known ones.
+///
+/// Currently consumed only by `group_agent_hooks`. If another surface ever
+/// needs the same event ordering (e.g. another panel or CLI output),
+/// extract this constant and `agent_hook_event_rank` into a shared hooks
+/// domain module instead of duplicating the order.
 const AGENT_HOOK_EVENT_ORDER: [&str; 12] = [
     "PreToolUse",
     "PostToolUse",

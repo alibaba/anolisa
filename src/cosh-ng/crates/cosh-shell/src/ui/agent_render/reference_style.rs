@@ -1,9 +1,12 @@
 //! Shared style tokens for grouped reference panels (`/help`, `/hooks`, ...).
 //!
-//! Panels that present grouped reference data must share one visual
-//! contract, following upstream ratatui conventions (see the official
-//! `demo2` example): bold+underlined section headers, cyan emphasis for the
-//! primary token, dark-gray de-emphasis for metadata, gray body text.
+//! These tokens are the team's *default* reference-panel visual convention
+//! (originally inspired by upstream ratatui examples, which are not a
+//! stability contract): bold+underlined section headers, cyan emphasis for
+//! the primary token, dark-gray de-emphasis for metadata, gray body text.
+//! Panels adopt them for consistency by default; a panel with genuinely
+//! different semantics may override or refine individual tokens rather
+//! than being constrained by this module.
 
 use ratatui::style::{Color, Modifier, Style};
 
