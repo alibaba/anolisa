@@ -9,10 +9,11 @@ use super::is_sensitive_target;
 use super::readonly_pipeline::validate_readonly_pipeline;
 
 pub use super::command_risk_model::{
-    AssessmentConfidence, AssessmentPolicy, AssessmentSource, AssessmentSummary, AutoAllowEvidence,
-    AutoExecutionPolicy, AutoExecutionRoute, CommandAssessment, CommandShape, ExecutionDecision,
-    InteractionRequirement, OutputExposure, OutputStability, ReadonlyEvidence, RiskImpact,
-    RiskReason, SideEffectClass,
+    is_high_risk_explanation, AssessmentConfidence, AssessmentPolicy, AssessmentSource,
+    AssessmentSummary, AutoAllowEvidence, AutoExecutionPolicy, AutoExecutionRoute,
+    CommandAssessment, CommandShape, ExecutionDecision, InteractionRequirement, OutputExposure,
+    OutputStability, ReadonlyEvidence, RiskImpact, RiskReason, SideEffectClass,
+    HIGH_RISK_EXPLANATION_REASONS,
 };
 
 pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandAssessment {
@@ -83,12 +84,15 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             simple.shape = parsed.shape;
             simple.execution = ExecutionDecision::AskUser;
             simple.confidence = min_confidence(simple.confidence, AssessmentConfidence::Medium);
-            simple.reasons.push(match parsed.shape {
-                CommandShape::AndOrList => "and-or-list-not-auto-executable",
-                CommandShape::Sequence => "sequence-not-auto-executable",
-                CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
-                _ => "complex-shell-not-auto-executable",
-            });
+            insert_structural_reason(
+                &mut simple.reasons,
+                match parsed.shape {
+                    CommandShape::AndOrList => "and-or-list-not-auto-executable",
+                    CommandShape::Sequence => "sequence-not-auto-executable",
+                    CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
+                    _ => "complex-shell-not-auto-executable",
+                },
+            );
             simple
         }
         CommandShape::Complex => {
@@ -99,7 +103,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             if simple.impact < RiskImpact::Medium {
                 simple.impact = RiskImpact::Medium;
             }
-            simple.reasons.push("complex-shell-not-auto-executable");
+            insert_structural_reason(&mut simple.reasons, "complex-shell-not-auto-executable");
             simple
         }
         CommandShape::Empty
@@ -107,6 +111,17 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
         | CommandShape::CommandSubstitution
         | CommandShape::RedirectionWrite => unreachable!("handled above"),
     }
+}
+
+/// Conditional head-insert for structural reasons (ARP SDD design.md §1):
+/// structural verdicts outrank fallback/neutral observations from the first
+/// stage, but must not displace a high-risk explanation as the primary reason.
+fn insert_structural_reason(reasons: &mut Vec<&'static str>, structural: &'static str) {
+    let index = match reasons.first() {
+        Some(first) if is_high_risk_explanation(first) => 1,
+        _ => 0,
+    };
+    reasons.insert(index.min(reasons.len()), structural);
 }
 
 pub fn blocked_shell_binding_assessment(

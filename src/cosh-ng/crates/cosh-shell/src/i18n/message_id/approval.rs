@@ -93,3 +93,33 @@ macro_rules! approval_ids {
         );
     };
 }
+
+macro_rules! approval_reason_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ApprovalRiskDetailLabel,
+            ApprovalRiskLevelHigh,
+            ApprovalRiskLevelMedium,
+            ApprovalRiskLevelLow,
+            ApprovalQueueMetaSuffix,
+            ApprovalRiskPhrasePrivilegeEscalation,
+            ApprovalRiskPhraseCredentialAccess,
+            ApprovalRiskPhraseFilesystemDelete,
+            ApprovalRiskPhraseFilesystemWrite,
+            ApprovalRiskPhrasePermissionChange,
+            ApprovalRiskPhraseProcessControl,
+            ApprovalRiskPhraseServiceControl,
+            ApprovalRiskPhraseServiceOrContainerControl,
+            ApprovalRiskPhrasePackageManagerMutation,
+            ApprovalRiskPhraseInteractiveEditor,
+            ApprovalRiskPhraseRemoteCodeExecution,
+            ApprovalRiskPhraseSensitivePath,
+            ApprovalRiskPhraseSensitiveSearch,
+            ApprovalRiskPhraseCommandSubstitution,
+            ApprovalRiskPhraseRedirectionWrite,
+            ApprovalRiskPhraseAwkShellExecution,
+        );
+    };
+}

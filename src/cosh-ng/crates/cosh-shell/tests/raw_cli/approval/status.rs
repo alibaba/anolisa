@@ -43,10 +43,12 @@ fn raw_cli_approval_cancel_records_receipt_and_advances_queue() {
     ]);
 
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("tool request") && output.contains("medium risk"));
+    // V6a slim card: metadata row replaces kind/risk/queue lines; a single
+    // pending card renders no queue info at all (ARP-R8).
+    assert!(output.contains("Bash · medium risk"), "{output}");
     assert!(output.contains("$ git status"));
     assert!(
-        output.contains("Queue: 1/1 pending") || output.contains("Queue: 1 of 1 pending"),
+        !output.contains("Queue: 1/1 pending") && !output.contains("Queue: 1 of 1 pending"),
         "{output}"
     );
     assert!(!output.contains("req-1 · shell tool · medium risk"));
@@ -99,8 +101,11 @@ fn raw_cli_approval_card_uses_zh_language_env() {
     );
 
     assert_zh_approval_prompt_visible(&output);
-    assert!(output.contains("对象: Bash"), "{output}");
-    assert!(output.contains("Tool 输入:"), "{output}");
+    // V6a slim card: single metadata row, no Subject/Tool-input label lines.
+    assert!(output.contains("Bash · 中风险"), "{output}");
+    assert!(!output.contains("对象: Bash"), "{output}");
+    assert!(!output.contains("Tool 输入:"), "{output}");
+    assert!(!output.contains("风险 medium"), "{output}");
     assert!(output.contains("$ git status --short"), "{output}");
     assert!(output.contains("允许一次"), "{output}");
     assert!(output.contains("始终信任"), "{output}");

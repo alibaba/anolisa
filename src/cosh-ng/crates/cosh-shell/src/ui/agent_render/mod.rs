@@ -15,6 +15,7 @@ mod activity;
 mod approval;
 mod approval_details;
 mod approval_journal;
+mod approval_reason;
 mod approval_receipt;
 mod card;
 mod consultation;
@@ -42,6 +43,7 @@ pub use activity::{
 };
 pub(crate) use approval::hook_warning_icon;
 pub use approval::{ApprovalPanelModel, HookWarningView};
+pub(crate) use approval_reason::card_reason_phrase;
 pub use approval_details::{ApprovalDetailsPanelModel, CommandAssessmentSummaryModel};
 pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel};
 pub use approval_receipt::ApprovalReceiptPanelModel;

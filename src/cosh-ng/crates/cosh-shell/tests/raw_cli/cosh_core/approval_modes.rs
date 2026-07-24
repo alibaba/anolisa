@@ -194,7 +194,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     let _ = fs::remove_dir_all(&home);
 
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Subject: Write"), "{output}");
+    assert!(output.contains("Write · "), "{output}");
     assert!(
         output.contains("/tmp/cosh-core-provider-smoke.txt"),
         "{output}"
@@ -273,7 +273,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     let _ = fs::remove_dir_all(&home);
 
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Subject: Write"), "{output}");
+    assert!(output.contains("Write · "), "{output}");
     assert!(
         output.contains("/tmp/cosh-core-provider-details.txt"),
         "{output}"
@@ -350,7 +350,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-cosh-cor
     let _ = fs::remove_dir_all(&home);
 
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Subject: Write"), "{output}");
+    assert!(output.contains("Write · "), "{output}");
     assert!(output.contains("Denied req-1"), "{output}");
     assert!(
         output.contains("Cosh-core non-shell write permission denied without host execution."),

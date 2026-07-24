@@ -186,7 +186,8 @@ fn raw_cli_details_for_approval_uses_zh_language_env() {
 
     assert_zh_approval_prompt_visible(&output);
     assert!(output.contains("已取消 req-1"), "{output}");
-    assert!(output.contains("风险 medium"), "{output}");
+    assert!(output.contains("Bash · 中风险"), "{output}");
+    assert!(!output.contains("风险 medium"), "{output}");
     assert!(
         output.contains("策略: 可执行 tool 请求必须先经过用户审批。"),
         "{output}"

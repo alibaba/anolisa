@@ -62,6 +62,12 @@ pub(crate) fn render_current_approval_request<W: Write>(
         .copied()
         .unwrap_or(ApprovalPanelAction::Approve);
     let expanded = state.approvals.expanded_cards.contains(&request.id);
+    // Card-facing reason policy (ARP): only High risk with a whitelisted
+    // primary reason yields a natural-language phrase; everything else is
+    // fail-quiet. Raw codes stay in details/journal only.
+    let card_reason = request.assessment.as_ref().and_then(|assessment| {
+        crate::ui::card_reason_phrase(request.risk, assessment.primary_reason, state.i18n())
+    });
     let height = RatatuiInlineRenderer::for_terminal()
         .with_language(state.language)
         .write_approval_panel(
@@ -70,10 +76,7 @@ pub(crate) fn render_current_approval_request<W: Write>(
                 id: &request.id,
                 kind: request.kind.label(),
                 risk: request.risk,
-                reason: request
-                    .assessment
-                    .as_ref()
-                    .map(|assessment| assessment.primary_reason),
+                reason: card_reason.as_deref(),
                 subject: &request.subject,
                 preview_label,
                 preview: &request.preview,

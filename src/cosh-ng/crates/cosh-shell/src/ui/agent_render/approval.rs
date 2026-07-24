@@ -156,20 +156,22 @@ impl RatatuiInlineRenderer {
             return lines;
         }
 
-        let position = model.queue_position.to_string();
-        let total = model.queue_total.to_string();
-        let risk = i18n.format(
-            crate::MessageId::ApprovalRiskSuffix,
-            &[("risk", model.risk)],
-        );
+        // V6a slim generic card (ARP-R8): title, single metadata row
+        // `{subject} · {risk badge}[ · queue N/M]`, optional High-risk
+        // continuation line, preview, optional next, actions; key hints and
+        // policy only when expanded.
         let mut lines = vec![
             i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
-            format!("{} · {} · {}", model.id, model.kind, risk),
-            i18n.format(
-                crate::MessageId::ApprovalQueueFullLine,
-                &[("position", position.as_str()), ("total", total.as_str())],
+            format!(
+                "{} · {}{}",
+                model.subject,
+                risk_level_label(model.risk, i18n),
+                queue_meta_suffix(&model, i18n)
             ),
         ];
+        if let Some(reason) = model.reason {
+            lines.push(approval_reason_line(reason, i18n));
+        }
         for warning in &model.hook_warnings {
             let icon = hook_warning_icon(warning.decision);
             lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
@@ -177,15 +179,7 @@ impl RatatuiInlineRenderer {
                 lines.push(format!("\u{2502}   {msg_line}"));
             }
         }
-        lines.push(format!(
-            "{}{}",
-            i18n.t(crate::MessageId::ApprovalSubjectLabel),
-            model.subject
-        ));
-        lines.push(format!("{}: {}", model.preview_label, model.preview));
-        if let Some(reason) = model.reason {
-            lines.push(approval_reason_line(reason, i18n));
-        }
+        lines.push(model.preview.to_string());
         if let Some(next) = model.next_label {
             lines.push(format!(
                 "{}{next}",
@@ -263,8 +257,10 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
             .len() as u16
         })
         .unwrap_or(0);
-    let policy_rows = if model.expanded { 2 } else { 0 };
-    7 + preview_rows + next_rows + reason_rows + policy_rows + hook_warning_rows
+    // V6a slim generic card: border(2) + metadata(1) + actions(1) + content;
+    // keys(1) + policy(2) only when expanded (ARP-R8).
+    let expanded_rows = if model.expanded { 3 } else { 0 };
+    4 + preview_rows + next_rows + reason_rows + expanded_rows + hook_warning_rows
 }
 
 fn render_approval_panel(
@@ -318,44 +314,49 @@ fn render_approval_panel(
         .iter()
         .map(|w| 1 + w.message.lines().count())
         .sum::<usize>() as u16;
+    // V6a slim generic card: metadata row, optional continuation line,
+    // hook warnings, preview, optional next, actions; keys + policy only
+    // when expanded (ARP-R8).
     let mut constraints = vec![
         Constraint::Length(1),
+        Constraint::Length(reason_height),
         Constraint::Length(hook_warning_height),
-        Constraint::Length(1),
-        Constraint::Length(1),
         Constraint::Length(preview_height),
         Constraint::Length(next_height),
-        Constraint::Length(reason_height),
-        Constraint::Length(1),
         Constraint::Length(1),
     ];
     if model.expanded {
+        constraints.push(Constraint::Length(1));
         constraints.push(Constraint::Length(2));
     }
     let chunks = Layout::vertical(constraints).split(inner);
 
+    // Metadata row: `{subject} · {risk badge}[ · queue N/M]` — the badge is
+    // localized (ARP-R7); High keeps the border color, low/medium are dimmed.
+    let risk_style = if model.risk == "high" {
+        Style::default().fg(border)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     Paragraph::new(Line::from(vec![
-        Span::styled(model.kind, Style::default().fg(Color::Cyan)),
-        Span::raw("  "),
+        Span::styled(model.subject.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+        Span::styled(risk_level_label(model.risk, i18n), risk_style),
         Span::styled(
-            i18n.format(
-                crate::MessageId::ApprovalRiskSuffix,
-                &[("risk", model.risk)],
-            ),
-            Style::default().fg(border),
+            queue_meta_suffix(&model, i18n),
+            Style::default().fg(Color::DarkGray),
         ),
-        Span::raw(format!(
-            "  {}",
-            i18n.format(
-                crate::MessageId::ApprovalQueueCompactLine,
-                &[
-                    ("position", model.queue_position.to_string().as_str()),
-                    ("total", model.queue_total.to_string().as_str()),
-                ],
-            )
-        )),
     ]))
     .render(chunks[0], buffer);
+
+    if !reason_rows.is_empty() {
+        Paragraph::new(Text::from(approval_reason_styled_lines(
+            reason_rows,
+            border,
+            i18n,
+        )))
+        .render(chunks[1], buffer);
+    }
 
     if !model.hook_warnings.is_empty() {
         let mut warning_lines: Vec<Line<'_>> = Vec::new();
@@ -378,31 +379,14 @@ fn render_approval_panel(
                 ]));
             }
         }
-        Paragraph::new(Text::from(warning_lines)).render(chunks[1], buffer);
+        Paragraph::new(Text::from(warning_lines)).render(chunks[2], buffer);
     }
-
-    Paragraph::new(Line::from(vec![
-        Span::styled(
-            i18n.t(crate::MessageId::ApprovalSubjectLabel),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(model.subject),
-    ]))
-    .render(chunks[2], buffer);
-
-    Paragraph::new(Line::from(Span::styled(
-        format!("{}:", model.preview_label),
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .render(chunks[3], buffer);
 
     let preview_lines = preview_rows
         .into_iter()
         .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
         .collect::<Vec<_>>();
-    Paragraph::new(Text::from(preview_lines)).render(chunks[4], buffer);
+    Paragraph::new(Text::from(preview_lines)).render(chunks[3], buffer);
 
     if let Some(next) = model.next_label {
         Paragraph::new(Line::from(vec![
@@ -412,37 +396,26 @@ fn render_approval_panel(
             ),
             Span::raw(next.to_string()),
         ]))
-        .render(chunks[5], buffer);
+        .render(chunks[4], buffer);
     }
 
-    if !reason_rows.is_empty() {
-        Paragraph::new(Text::from(
-            reason_rows
-                .into_iter()
-                .map(|line| Line::from(Span::raw(line)))
-                .collect::<Vec<_>>(),
-        ))
-        .render(chunks[6], buffer);
-    }
-
-    Paragraph::new(approval_action_spans(model.selected_action, i18n)).render(chunks[7], buffer);
-
-    Paragraph::new(Line::from(vec![
-        Span::styled(
-            i18n.t(crate::MessageId::ApprovalKeysPrefix),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
-    ]))
-    .render(chunks[8], buffer);
+    Paragraph::new(approval_action_spans(model.selected_action, i18n)).render(chunks[5], buffer);
 
     if model.expanded {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                i18n.t(crate::MessageId::ApprovalKeysPrefix),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
+        ]))
+        .render(chunks[6], buffer);
         Paragraph::new(Text::from(vec![
             Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)),
             Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicyExtra)),
         ]))
         .wrap(Wrap { trim: true })
-        .render(chunks[9], buffer);
+        .render(chunks[7], buffer);
     }
 }
 
@@ -533,12 +506,11 @@ fn render_command_tool_approval_panel(
     }
 
     if !reason_rows.is_empty() {
-        Paragraph::new(Text::from(
-            reason_rows
-                .into_iter()
-                .map(|line| Line::from(Span::raw(line)))
-                .collect::<Vec<_>>(),
-        ))
+        Paragraph::new(Text::from(approval_reason_styled_lines(
+            reason_rows,
+            border,
+            i18n,
+        )))
         .render(chunks[2], buffer);
     }
 
@@ -741,15 +713,70 @@ fn approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -> Str
         .join("  ")
 }
 
+/// V6a continuation line under the metadata row: `└ 风险: <phrase>`.
+/// `reason` is already the localized natural-language phrase (never a raw
+/// code) — the policy lives in `approval_reason::card_reason_phrase`.
 fn approval_reason_line(reason: &str, i18n: crate::I18n) -> String {
-    i18n.format(
-        crate::MessageId::ApprovalAssessmentReasonLine,
-        &[("reason", reason)],
+    format!(
+        "\u{2514} {}{reason}",
+        i18n.t(crate::MessageId::ApprovalRiskDetailLabel)
     )
 }
 
 fn approval_reason_rows(reason: &str, width: usize, i18n: crate::I18n) -> Vec<String> {
     wrapped_preview_rows(&approval_reason_line(reason, i18n), width, 2)
+}
+
+/// Styled continuation lines: label in the border color, phrase dimmed.
+fn approval_reason_styled_lines(
+    reason_rows: Vec<String>,
+    border: Color,
+    i18n: crate::I18n,
+) -> Vec<Line<'static>> {
+    let label = format!(
+        "\u{2514} {}",
+        i18n.t(crate::MessageId::ApprovalRiskDetailLabel)
+    );
+    reason_rows
+        .into_iter()
+        .map(|row| {
+            if let Some(phrase) = row.strip_prefix(&label) {
+                Line::from(vec![
+                    Span::styled(label.clone(), Style::default().fg(border)),
+                    Span::styled(phrase.to_string(), Style::default().fg(Color::DarkGray)),
+                ])
+            } else {
+                Line::from(Span::styled(row, Style::default().fg(Color::DarkGray)))
+            }
+        })
+        .collect()
+}
+
+/// Localized risk badge value (ARP-R7): high/medium/low map to i18n labels;
+/// unknown values pass through unchanged.
+fn risk_level_label(risk: &str, i18n: crate::I18n) -> String {
+    match risk {
+        "high" => i18n.t(crate::MessageId::ApprovalRiskLevelHigh).to_string(),
+        "medium" => i18n
+            .t(crate::MessageId::ApprovalRiskLevelMedium)
+            .to_string(),
+        "low" => i18n.t(crate::MessageId::ApprovalRiskLevelLow).to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Metadata-row queue suffix, only rendered when more than one card is pending.
+fn queue_meta_suffix(model: &ApprovalPanelModel<'_>, i18n: crate::I18n) -> String {
+    if model.queue_total <= 1 {
+        return String::new();
+    }
+    i18n.format(
+        crate::MessageId::ApprovalQueueMetaSuffix,
+        &[
+            ("position", model.queue_position.to_string().as_str()),
+            ("total", model.queue_total.to_string().as_str()),
+        ],
+    )
 }
 
 fn approval_action_label(action: ApprovalPanelAction, i18n: crate::I18n) -> &'static str {

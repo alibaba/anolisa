@@ -9,7 +9,8 @@ fn approval_panel_renders_active_request_with_queue_summary() {
             id: "req-1",
             kind: "tool request",
             risk: "medium",
-            reason: Some("diagnostic-pipeline-heuristic"),
+            // Card policy (ARP): medium risk never carries a reason phrase.
+            reason: None,
             subject: "tool Bash",
             preview_label: "Tool input",
             preview: "top -l 1 -o mem -n 20 | head -30",
@@ -24,10 +25,8 @@ fn approval_panel_renders_active_request_with_queue_summary() {
 
     assert!(text.contains("Approval req-1"), "{text}");
     assert!(text.contains("Run Bash command?"), "{text}");
-    assert!(
-        text.contains("Reason: diagnostic-pipeline-heuristic"),
-        "{text}"
-    );
+    assert!(!text.contains("Reason:"), "{text}");
+    assert!(!text.contains("\u{2514} Risk:"), "{text}");
     assert!(
         text.contains("$ top -l 1 -o mem -n 20 | head -30"),
         "{text}"
@@ -43,6 +42,43 @@ fn approval_panel_renders_active_request_with_queue_summary() {
     assert!(!text.contains("/approve"), "{text}");
     assert!(!text.contains("Subject: tool Bash"), "{text}");
     assert!(!text.contains("Tool input"), "{text}");
+    assert_rendered_width(&text, 140);
+}
+
+#[test]
+fn approval_panel_high_risk_shows_reason_continuation_line() {
+    let renderer = RatatuiInlineRenderer::with_width(140);
+    let phrase = crate::ui::card_reason_phrase(
+        "high",
+        "privilege-escalation",
+        crate::I18n::new(crate::Language::EnUs),
+    )
+    .expect("whitelisted high-risk phrase");
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-9",
+            kind: "tool request",
+            risk: "high",
+            reason: Some(&phrase),
+            subject: "tool Bash",
+            preview_label: "Tool input",
+            preview: "sudo rm -rf /data/legacy-cache",
+            queue_position: 1,
+            queue_total: 1,
+            next_label: None,
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: false,
+            hook_warnings: Vec::new(),
+        })
+        .join("\n");
+
+    assert!(
+        text.contains("\u{2514} Risk: privilege escalation"),
+        "{text}"
+    );
+    assert!(text.contains("$ sudo rm -rf /data/legacy-cache"), "{text}");
+    assert!(!text.contains("privilege-escalation"), "{text}");
+    assert!(!text.contains("Queue:"), "{text}");
     assert_rendered_width(&text, 140);
 }
 

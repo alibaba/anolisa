@@ -83,4 +83,5 @@ collect_message_ids!([
     question_interaction_ids,
     session_picker_ids,
     session_fresh_ids,
+    approval_reason_ids,
 ],);

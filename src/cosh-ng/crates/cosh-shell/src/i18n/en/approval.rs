@@ -121,6 +121,27 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Provider-native shell tool allowed"
         }
         MessageId::ApprovalHookHeading => "Hook review",
+        MessageId::ApprovalRiskDetailLabel => "Risk: ",
+        MessageId::ApprovalRiskLevelHigh => "high risk",
+        MessageId::ApprovalRiskLevelMedium => "medium risk",
+        MessageId::ApprovalRiskLevelLow => "low risk",
+        MessageId::ApprovalQueueMetaSuffix => " · queue {position}/{total}",
+        MessageId::ApprovalRiskPhrasePrivilegeEscalation => "privilege escalation",
+        MessageId::ApprovalRiskPhraseCredentialAccess => "credential access",
+        MessageId::ApprovalRiskPhraseFilesystemDelete => "file deletion",
+        MessageId::ApprovalRiskPhraseFilesystemWrite => "filesystem write",
+        MessageId::ApprovalRiskPhrasePermissionChange => "permission change",
+        MessageId::ApprovalRiskPhraseProcessControl => "process control",
+        MessageId::ApprovalRiskPhraseServiceControl => "service control",
+        MessageId::ApprovalRiskPhraseServiceOrContainerControl => "service/container control",
+        MessageId::ApprovalRiskPhrasePackageManagerMutation => "package mutation",
+        MessageId::ApprovalRiskPhraseInteractiveEditor => "editor may modify files",
+        MessageId::ApprovalRiskPhraseRemoteCodeExecution => "remote code execution",
+        MessageId::ApprovalRiskPhraseSensitivePath => "sensitive path",
+        MessageId::ApprovalRiskPhraseSensitiveSearch => "sensitive data search",
+        MessageId::ApprovalRiskPhraseCommandSubstitution => "command substitution",
+        MessageId::ApprovalRiskPhraseRedirectionWrite => "write redirection",
+        MessageId::ApprovalRiskPhraseAwkShellExecution => "awk shell execution",
         _ => return None,
     })
 }

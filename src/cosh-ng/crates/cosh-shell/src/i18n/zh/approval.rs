@@ -105,6 +105,27 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "已允许 provider-native shell tool 执行"
         }
         MessageId::ApprovalHookHeading => "Hook 审查",
+        MessageId::ApprovalRiskDetailLabel => "风险: ",
+        MessageId::ApprovalRiskLevelHigh => "高风险",
+        MessageId::ApprovalRiskLevelMedium => "中风险",
+        MessageId::ApprovalRiskLevelLow => "低风险",
+        MessageId::ApprovalQueueMetaSuffix => " · 队列 {position}/{total}",
+        MessageId::ApprovalRiskPhrasePrivilegeEscalation => "提权操作",
+        MessageId::ApprovalRiskPhraseCredentialAccess => "凭证访问",
+        MessageId::ApprovalRiskPhraseFilesystemDelete => "文件删除操作",
+        MessageId::ApprovalRiskPhraseFilesystemWrite => "文件系统写入",
+        MessageId::ApprovalRiskPhrasePermissionChange => "权限变更",
+        MessageId::ApprovalRiskPhraseProcessControl => "进程控制",
+        MessageId::ApprovalRiskPhraseServiceControl => "服务控制",
+        MessageId::ApprovalRiskPhraseServiceOrContainerControl => "服务/容器控制",
+        MessageId::ApprovalRiskPhrasePackageManagerMutation => "软件包变更",
+        MessageId::ApprovalRiskPhraseInteractiveEditor => "交互式编辑器可修改文件",
+        MessageId::ApprovalRiskPhraseRemoteCodeExecution => "远程代码执行风险",
+        MessageId::ApprovalRiskPhraseSensitivePath => "涉及敏感路径",
+        MessageId::ApprovalRiskPhraseSensitiveSearch => "敏感信息搜索",
+        MessageId::ApprovalRiskPhraseCommandSubstitution => "命令替换语法",
+        MessageId::ApprovalRiskPhraseRedirectionWrite => "重定向写文件",
+        MessageId::ApprovalRiskPhraseAwkShellExecution => "awk 执行外部命令",
         _ => return None,
     })
 }
