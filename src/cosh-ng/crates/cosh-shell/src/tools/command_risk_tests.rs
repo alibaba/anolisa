@@ -234,7 +234,11 @@ const SEMANTICS_BASELINE: &[(bool, &str, &str)] = &[
 #[test]
 fn command_risk_semantics_unchanged_from_baseline() {
     for (auto_mode, command, expected) in SEMANTICS_BASELINE {
-        let assessment = if *auto_mode { auto(command) } else { ask(command) };
+        let assessment = if *auto_mode {
+            auto(command)
+        } else {
+            ask(command)
+        };
         assert_eq!(
             &semantics_signature(&assessment),
             expected,
@@ -265,7 +269,10 @@ fn command_risk_primary_reason_prefers_structural_verdict() {
     // R4: complex shells (subshell syntax) get the structural verdict first.
     let complex = ask("(cd /tmp)");
     assert_eq!(complex.shape, CommandShape::Complex);
-    assert_eq!(complex.primary_reason(), "complex-shell-not-auto-executable");
+    assert_eq!(
+        complex.primary_reason(),
+        "complex-shell-not-auto-executable"
+    );
 }
 
 #[test]

@@ -43,9 +43,9 @@ pub use activity::{
 };
 pub(crate) use approval::hook_warning_icon;
 pub use approval::{ApprovalPanelModel, HookWarningView};
-pub(crate) use approval_reason::card_reason_phrase;
 pub use approval_details::{ApprovalDetailsPanelModel, CommandAssessmentSummaryModel};
 pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel};
+pub(crate) use approval_reason::card_reason_phrase;
 pub use approval_receipt::ApprovalReceiptPanelModel;
 pub use consultation::ConsultationCardModel;
 pub use health::HealthBannerModel;

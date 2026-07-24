@@ -83,6 +83,67 @@ fn approval_panel_high_risk_shows_reason_continuation_line() {
 }
 
 #[test]
+fn approval_panel_high_risk_continuation_wraps_within_narrow_width() {
+    // Review follow-up: full-card width contract for the continuation line,
+    // not just the phrase-level budget (validation.md S2).
+    let renderer = RatatuiInlineRenderer::with_width(60);
+    let phrase = crate::ui::card_reason_phrase(
+        "high",
+        "service-or-container-control",
+        crate::I18n::new(crate::Language::EnUs),
+    )
+    .expect("whitelisted high-risk phrase");
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-9",
+            kind: "tool request",
+            risk: "high",
+            reason: Some(&phrase),
+            subject: "tool Bash",
+            preview_label: "Tool input",
+            preview: "kubectl delete pod payments --grace-period=0",
+            queue_position: 1,
+            queue_total: 1,
+            next_label: None,
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: false,
+            hook_warnings: Vec::new(),
+        })
+        .join("\n");
+
+    assert!(text.contains("\u{2514} Risk:"), "{text}");
+    assert_rendered_width(&text, 60);
+}
+
+#[test]
+fn approval_panel_unknown_risk_value_passes_through_without_panic() {
+    // Review follow-up: legacy_risk() is a closed low/medium/high domain; an
+    // unknown value must render verbatim (defensive pass-through contract).
+    let renderer = RatatuiInlineRenderer::with_width(120).with_language(crate::Language::ZhCn);
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-9",
+            kind: "tool request",
+            risk: "critical",
+            reason: None,
+            subject: "Bash",
+            preview_label: "Tool 输入",
+            preview: "echo hi",
+            queue_position: 1,
+            queue_total: 1,
+            next_label: None,
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: false,
+            hook_warnings: Vec::new(),
+        })
+        .join("\n");
+
+    assert!(text.contains("Bash · critical"), "{text}");
+    assert!(!text.contains("风险 critical"), "{text}");
+    assert_rendered_width(&text, 120);
+}
+
+#[test]
 fn approval_panel_uses_zh_labels_without_translating_command() {
     let renderer = RatatuiInlineRenderer::with_width(140).with_language(crate::Language::ZhCn);
     let text = renderer

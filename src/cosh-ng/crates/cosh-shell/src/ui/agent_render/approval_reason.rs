@@ -66,7 +66,10 @@ mod tests {
     #[test]
     fn non_high_risk_never_shows_a_phrase() {
         let i18n = I18n::new(Language::ZhCn);
-        assert_eq!(card_reason_phrase("medium", "privilege-escalation", i18n), None);
+        assert_eq!(
+            card_reason_phrase("medium", "privilege-escalation", i18n),
+            None
+        );
         assert_eq!(card_reason_phrase("low", "bounded-readonly", i18n), None);
     }
 
