@@ -30,6 +30,13 @@ pub(crate) fn render_current_approval_request<W: Write>(
         return Ok(());
     }
 
+    // The agent status spinner repaints in place (`\r\x1b[2K<frame> ...`) and
+    // leaves the cursor mid-line; clear it before drawing the panel so the
+    // card border starts at column 0 instead of wrapping past the row end.
+    if let Some(active_run) = state.agent_run.active.as_mut() {
+        active_run.status_animation.clear(output)?;
+    }
+
     let pending_total = state
         .approvals
         .requests
