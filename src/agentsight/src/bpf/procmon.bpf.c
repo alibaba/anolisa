@@ -12,6 +12,16 @@
 #define NO_CGROUP_FILTER
 #include "common.h"
 
+// Use the kernel's `struct syscall_trace_exit` (what a syscall tracepoint
+// program actually receives), NOT `trace_event_raw_sys_exit`. The latter
+// declares the syscall number as `long id` (8 bytes); on kernels carrying the
+// PREEMPT_LAZY backport (e.g. RHEL/Anolis 9 5.14) `struct trace_entry` grows a
+// `preempt_lazy_count` field, and CO-RE then relocates `ret` past the real
+// tracepoint record, so the kernel rejects the attach with EACCES.
+// `syscall_trace_exit` uses `int nr` (4 bytes), matching the record layout, so
+// `ret` relocates to the correct offset on every kernel. See
+// inspektor-gadget#2444 / BCC#4920.
+
 // Tracepoint for execve exit - captures process execution after it completes
 // NOTE: We use sys_exit_execve instead of sys_enter_execve because:
 // - At sys_enter_execve, the process hasn't completed execve yet
@@ -19,7 +29,7 @@
 // - Reading /proc/[pid]/comm returns old values
 // - At sys_exit_execve, execve has completed and process info is updated
 SEC("tp/syscalls/sys_exit_execve")
-int trace_execve_exit(struct trace_event_raw_sys_exit *ctx)
+int trace_execve_exit(struct syscall_trace_exit *ctx)
 {
     // Check execve return value - skip if failed
     // ret == 0: success, ret < 0: error (e.g., -ENOENT, -EACCES)
