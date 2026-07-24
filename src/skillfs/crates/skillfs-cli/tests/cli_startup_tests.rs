@@ -2013,7 +2013,7 @@ fn control_socket_without_security_fails_startup() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        combined.contains("control socket requires --security"),
+        combined.contains("--control-socket requires --security"),
         "expected requires-security error, got: {combined}"
     );
 }
@@ -2042,7 +2042,7 @@ fn control_socket_without_activation_mode_file_fails_startup() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        combined.contains("control socket requires --activation-mode file"),
+        combined.contains("--control-socket requires --activation-mode file"),
         "expected requires-activation-mode-file error, got: {combined}"
     );
 }
