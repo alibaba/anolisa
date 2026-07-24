@@ -434,9 +434,10 @@ pub enum QuestionSelectionMode {
     Multiple,
 }
 
-/// Outcome of an auth submission, distinguishing "saved to disk" from "applied
-/// to the current run only" so the shell never reports an unpersisted config as
-/// saved.
+/// Internal auth-submission outcome used by `AgentEvent::AuthResult`.
+///
+/// The enclosing `types` module exposes this only within the crate because it
+/// is a cosh-core control-protocol detail, not a supported shell API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthOutcome {

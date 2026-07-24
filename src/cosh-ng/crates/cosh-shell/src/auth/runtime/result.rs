@@ -8,6 +8,17 @@ use crate::runtime::prelude::{
 };
 use crate::runtime::state::InlineState;
 
+/// Applies auth protocol events and renders any resulting auth prompt.
+pub(crate) fn render_auth_events<W: std::io::Write>(
+    state: &mut InlineState,
+    governed_events: &[GovernedEvent],
+    output: &mut W,
+) -> std::io::Result<()> {
+    record_auth_results(state, governed_events, output)?;
+    let auth_ids = super::record_auth_required(state, governed_events);
+    super::render_auth_panel(state, &auth_ids, output)
+}
+
 pub(crate) fn record_auth_results<W: std::io::Write>(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],

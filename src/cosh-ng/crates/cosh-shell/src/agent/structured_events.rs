@@ -73,9 +73,7 @@ pub(crate) fn render_agent_structured_events<W: Write>(
         }
         return Ok(());
     }
-    crate::auth::runtime::record_auth_results(state, governed_events, output)?;
-    let auth_ids = crate::auth::runtime::record_auth_required(state, governed_events);
-    crate::auth::runtime::render_auth_panel(state, &auth_ids, output)?;
+    crate::auth::runtime::render_auth_events(state, governed_events, output)?;
     if render_trusted_tool(state, governed_events, run_request, origin, output, adapter)? {
         return Ok(());
     }

@@ -21,7 +21,9 @@ use self::core_registry::{
     prepare as core_auth_prepare, providers_with_provider_id_field,
     verify_aliyun_ecs as core_auth_verify_aliyun_ecs,
 };
+#[cfg(test)]
 pub(crate) use self::result::record_auth_results;
+pub(crate) use self::result::render_auth_events;
 use self::result::{apply_registry_configure_outcome, close_failed_active_run};
 
 /// An existing provider loaded from config.toml for the ManagingProviders phase.

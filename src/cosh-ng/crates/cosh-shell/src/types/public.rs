@@ -3,8 +3,8 @@
 mod implementation;
 
 pub use implementation::{
-    AgentEvent, AgentMode, AgentRequest, AuditRecord, AuthOutcome, CommandBlock, CommandOrigin,
-    CommandStatus, CoshApprovalMode, Finding, FindingKind, FindingSeverity, GovernanceDecision,
+    AgentEvent, AgentMode, AgentRequest, AuditRecord, CommandBlock, CommandOrigin, CommandStatus,
+    CoshApprovalMode, Finding, FindingKind, FindingSeverity, GovernanceDecision,
     GovernancePolicyDecision, GovernedEvent, HookFinding, Intervention, InterventionDecision,
     OutputRefs, Policy, QuestionSelectionMode, ShellEvent, ShellEventKind, ShellHandoffRequest,
     COMMAND_OUTPUT_REF_MAX_BYTES, SESSION_OUTPUT_REF_MAX_BYTES,
@@ -12,7 +12,7 @@ pub use implementation::{
 
 #[allow(unused_imports)]
 pub(crate) use implementation::{
-    set_request_context_binding, AgentContextBinding, BuiltinFactRecord, BuiltinFindingFacts,
-    EvaluatedHookFinding, HighMemoryProcessFacts, HookProvenance, MemoryPressureFacts,
-    MetricsConfidence, ProcessMemoryFact, ShellEnvironmentSnapshot,
+    set_request_context_binding, AgentContextBinding, AuthOutcome, BuiltinFactRecord,
+    BuiltinFindingFacts, EvaluatedHookFinding, HighMemoryProcessFacts, HookProvenance,
+    MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact, ShellEnvironmentSnapshot,
 };
