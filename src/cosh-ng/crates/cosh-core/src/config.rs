@@ -888,9 +888,18 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
 
 /// Matches only the `[ai]` table header and its dotted children (`[ai.providers.x]`),
 /// not lookalike sections such as `[aider]` or `[ai_drivers]`.
+/// Trailing whitespace or an inline comment after the closing bracket is accepted.
 fn is_ai_section_header(line: &str) -> bool {
     let t = line.trim();
-    t == "[ai]" || t.starts_with("[ai.")
+    let Some(end) = t.find(']') else {
+        return false;
+    };
+    let rest = t[end + 1..].trim_start();
+    if !(rest.is_empty() || rest.starts_with('#')) {
+        return false;
+    }
+    let header = &t[..end + 1];
+    header == "[ai]" || header.starts_with("[ai.")
 }
 
 fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(), String> {
@@ -1701,5 +1710,66 @@ approval_mode = "balanced"
         assert!(content.contains("api_key = \"sk-new\""));
         assert_eq!(content.matches("[ai]").count(), 1);
         assert_eq!(content.matches("[ai.providers.").count(), 1);
+    }
+
+    #[test]
+    fn persist_replaces_ai_headers_with_inline_comments_without_duplication() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"[ai] # valid inline comment
+active_provider = "old"
+
+[ai.providers.old] # legacy provider
+type = "openai_compat"
+api_key = "sk-old"
+
+[aider]
+model = "claude-3-5-sonnet"
+
+[agent]
+approval_mode = "balanced"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        config.user_ai.active_provider = Some("new-provider".to_string());
+        config.user_ai.providers.clear();
+        let provider = ProviderConfig {
+            provider_type: Some("openai_compat".to_string()),
+            api_key: Some("sk-new".to_string()),
+            ..Default::default()
+        };
+        config
+            .user_ai
+            .providers
+            .insert("new-provider".to_string(), provider);
+
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+
+        // No duplicate [ai] table; old content fully replaced.
+        assert_eq!(content.matches("[ai]").count(), 1);
+        assert!(!content.contains("sk-old"));
+        assert!(!content.contains("[ai.providers.old]"));
+        assert!(content.contains("active_provider = \"new-provider\""));
+        assert!(content.contains("[ai.providers.new-provider]"));
+
+        // Non-ai sections survive.
+        assert!(content.contains("[aider]"));
+        assert!(content.contains("model = \"claude-3-5-sonnet\""));
+        assert!(content.contains("[agent]"));
+
+        // Persisted output must be valid TOML that re-parses cleanly.
+        let parsed: CoreConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
+        assert!(parsed.ai.providers.contains_key("new-provider"));
+        assert_eq!(parsed.ai.providers.len(), 1);
     }
 }
