@@ -958,6 +958,21 @@ async fn cmd_mount(
             .into());
     }
 
+    // Hermes nested skills use slash-containing skill ids that the
+    // daemon-driven control-socket activation path cannot resolve (the
+    // control socket delegates to the same live-source resolver that
+    // rejects slash ids). This gate runs before the control-socket
+    // prerequisite validation so the 'incompatible' message surfaces
+    // instead of a missing-arg complaint.
+    let control_plane_enabled = control_socket.is_some() || trusted_peer_exe.is_some();
+    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) && control_plane_enabled {
+        return Err("--skill-layout hermes is incompatible with \
+                 --control-socket (the daemon-driven control-socket \
+                 activation path cannot resolve slash-containing hermes \
+                 nested skill ids)"
+            .into());
+    }
+
     // Activation source validation:
     //   --security + --decision-command           => scan -> resolve path
     //   --security + --activation-mode file        => activation.json consumer
@@ -1022,21 +1037,22 @@ async fn cmd_mount(
     }
     // The control plane is enabled by either an explicit socket path or a
     // trusted peer (which selects the default endpoint).
-    let control_plane_enabled = control_socket.is_some() || trusted_peer_exe.is_some();
+    // NOTE: control_plane_enabled was already computed above (before the
+    // hermes incompatibility gate); reuse it here.
     if control_plane_enabled {
         if !security {
-            return Err("control socket requires --security (the control socket \
+            return Err("--control-socket requires --security (the control socket \
                  writes activation state through the active resolver)"
                 .into());
         }
         if activation_mode != ActivationMode::File {
-            return Err("control socket requires --activation-mode file (the \
+            return Err("--control-socket requires --activation-mode file (the \
                  control socket writes activation files consumed by the \
                  file-based activation path)"
                 .into());
         }
         if parsed_decision_command.is_some() {
-            return Err("control socket and --decision-command are mutually \
+            return Err("--control-socket and --decision-command are mutually \
                  exclusive (control socket is the daemon-driven activation \
                  path; --decision-command is the CLI-driven refresh path)"
                 .into());
