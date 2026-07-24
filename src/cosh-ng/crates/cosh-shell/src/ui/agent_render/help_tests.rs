@@ -2,9 +2,28 @@
 //! guarantees that its layered layout depends on.
 
 use super::{
-    strip_ansi_escape, HelpPanelEntry, HelpPanelGroup, HelpPanelModel, NoticePanelModel,
-    RatatuiInlineRenderer,
+    strip_ansi_escape, wrap_plain_line, HelpPanelEntry, HelpPanelGroup, HelpPanelModel,
+    NoticePanelModel, RatatuiInlineRenderer,
 };
+
+#[test]
+fn wrap_preserves_deep_space_indentation_with_hanging_indent() {
+    // Nested panel hierarchies (e.g. /hooks event groups) rely on 4-space
+    // entries under 2-space headers; the wrapper must keep the exact indent
+    // width on the first line and reuse it as the hanging indent.
+    let wrapped = wrap_plain_line(
+        "    • some-hook with a rather long descriptive tail that wraps",
+        30,
+    );
+    assert!(wrapped.len() >= 2, "{wrapped:?}");
+    assert!(wrapped[0].starts_with("    • some-hook"), "{wrapped:?}");
+    assert!(
+        wrapped[1..]
+            .iter()
+            .all(|line| line.starts_with("    ") && !line.starts_with("     ")),
+        "{wrapped:?}"
+    );
+}
 
 #[test]
 fn rich_notice_panel_preserves_leading_indent_and_hanging_wrap() {
