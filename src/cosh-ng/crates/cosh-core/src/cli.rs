@@ -54,6 +54,7 @@ pub enum McpCommand {
 #[derive(Parser, Debug)]
 #[command(
     name = "cosh-core",
+    version,
     about = "cosh core — agent core + interactive terminal"
 )]
 pub struct CliArgs {
