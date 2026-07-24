@@ -9,6 +9,7 @@ use super::reference_style::{
     reference_body_style, reference_emphasis_style, reference_group_style, reference_muted_style,
     reference_section_style,
 };
+use super::wrap::{strip_ansi_escape, wrap_plain_line, wrap_plain_line_with_prefix};
 use super::RatatuiInlineRenderer;
 
 #[derive(Debug)]
@@ -52,16 +53,33 @@ impl RatatuiInlineRenderer {
         model: HookStatusPanelModel<'_>,
     ) -> io::Result<()> {
         if self.plain {
-            let body = plain_hook_status_lines(&model);
+            let width = self.content_width();
+            let body = plain_hook_status_lines(&model, width);
             return self.write_block(output, model.title, body, Some(&model.footer));
         }
+        let inner = usize::from(self.panel_standard_width().saturating_sub(4)).max(1);
         let title = model.title;
-        let body = styled_hook_status_lines(&model);
+        let body = styled_hook_status_lines(&model, inner);
         self.write_styled_block(output, title, body)
     }
 }
 
-fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>) -> Vec<Line<'static>> {
+/// Removes ANSI escape sequences and any remaining control characters from
+/// registry- or error-provided text before it reaches a terminal. The legacy
+/// notice-panel path stripped escapes in `render_lines`; this panel writes
+/// spans directly, so sanitizing is this module's responsibility for both
+/// backends.
+fn sanitize(text: &str) -> String {
+    strip_ansi_escape(text)
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect()
+}
+
+const ENTRY_INDENT: &str = "    ";
+const ENTRY_HANG: &str = "      ";
+
+fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> Vec<Line<'static>> {
     let section = reference_section_style();
     let group = reference_group_style();
     let emphasis = reference_emphasis_style();
@@ -70,49 +88,87 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>) -> Vec<Line<'stati
 
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
-        model.shell_label.to_string(),
+        sanitize(model.shell_label),
         section,
     )));
     for shell_line in &model.shell_lines {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", shell_line.trim_start()),
-            body_style,
-        )));
+        for segment in
+            wrap_plain_line_with_prefix(&sanitize(shell_line.trim_start()), "  ", "  ", inner)
+        {
+            lines.push(Line::from(Span::styled(segment, body_style)));
+        }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        model.agent_label.to_string(),
+        sanitize(model.agent_label),
         section,
     )));
     match &model.agent {
         AgentHooksView::Message(message) => {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", message.trim_start()),
-                body_style,
-            )));
+            for segment in
+                wrap_plain_line_with_prefix(&sanitize(message.trim_start()), "  ", "  ", inner)
+            {
+                lines.push(Line::from(Span::styled(segment, body_style)));
+            }
         }
         AgentHooksView::Groups(groups) => {
             for (index, event_group) in groups.iter().enumerate() {
                 if index > 0 {
                     lines.push(Line::from(""));
                 }
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", event_group.event),
-                    group,
-                )));
+                for segment in
+                    wrap_plain_line_with_prefix(&sanitize(&event_group.event), "  ", "  ", inner)
+                {
+                    lines.push(Line::from(Span::styled(segment, group)));
+                }
                 for hook in &event_group.hooks {
+                    let name = sanitize(&hook.name);
+                    let extension = sanitize(&hook.extension);
                     if hook.disabled {
-                        lines.push(Line::from(Span::styled(
-                            format!("    ○ {} (ext: {}) [disabled]", hook.name, hook.extension),
-                            muted,
-                        )));
+                        for segment in wrap_plain_line_with_prefix(
+                            &format!("○ {name} (ext: {extension}) [disabled]"),
+                            ENTRY_INDENT,
+                            ENTRY_HANG,
+                            inner,
+                        ) {
+                            lines.push(Line::from(Span::styled(segment, muted)));
+                        }
                     } else {
-                        lines.push(Line::from(vec![
-                            Span::raw("    ".to_string()),
-                            Span::styled("• ".to_string(), emphasis),
-                            Span::raw(hook.name.clone()),
-                            Span::styled(format!(" (ext: {})", hook.extension), muted),
-                        ]));
+                        let wrapped = wrap_plain_line_with_prefix(
+                            &format!("• {name} (ext: {extension})"),
+                            ENTRY_INDENT,
+                            ENTRY_HANG,
+                            inner,
+                        );
+                        for (segment_index, segment) in wrapped.iter().enumerate() {
+                            if segment_index == 0 {
+                                // First segment: "    " + "• " + name [+ metadata tail].
+                                let rest = segment
+                                    .strip_prefix(ENTRY_INDENT)
+                                    .and_then(|rest| rest.strip_prefix("• "));
+                                match rest {
+                                    Some(rest) => {
+                                        let (head, tail) = match rest.find(" (ext:") {
+                                            Some(split) => rest.split_at(split),
+                                            None => (rest, ""),
+                                        };
+                                        let mut spans = vec![
+                                            Span::raw(ENTRY_INDENT.to_string()),
+                                            Span::styled("• ".to_string(), emphasis),
+                                            Span::raw(head.to_string()),
+                                        ];
+                                        if !tail.is_empty() {
+                                            spans.push(Span::styled(tail.to_string(), muted));
+                                        }
+                                        lines.push(Line::from(spans));
+                                    }
+                                    None => lines.push(Line::from(Span::raw(segment.clone()))),
+                                }
+                            } else {
+                                // Continuation segments carry metadata overflow.
+                                lines.push(Line::from(Span::styled(segment.clone(), muted)));
+                            }
+                        }
                     }
                 }
             }
@@ -121,29 +177,48 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>) -> Vec<Line<'stati
     // Spacer before the footer is owned by the styled layout; the plain
     // backend delegates footer spacing to write_block instead.
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(model.footer.clone(), body_style)));
+    for segment in wrap_plain_line(&sanitize(&model.footer), inner) {
+        lines.push(Line::from(Span::styled(segment, body_style)));
+    }
     lines
 }
 
-fn plain_hook_status_lines(model: &HookStatusPanelModel<'_>) -> Vec<String> {
+fn plain_hook_status_lines(model: &HookStatusPanelModel<'_>, width: usize) -> Vec<String> {
     let mut body = Vec::new();
-    body.push(format!("── {} ──", model.shell_label));
-    body.extend(model.shell_lines.iter().cloned());
-    body.push(format!("── {} ──", model.agent_label));
+    body.push(format!("── {} ──", sanitize(model.shell_label)));
+    for shell_line in &model.shell_lines {
+        body.extend(wrap_plain_line(&sanitize(shell_line), width));
+    }
+    body.push(format!("── {} ──", sanitize(model.agent_label)));
     match &model.agent {
-        AgentHooksView::Message(message) => body.push(format!("  {}", message.trim_start())),
+        AgentHooksView::Message(message) => body.extend(wrap_plain_line_with_prefix(
+            &sanitize(message.trim_start()),
+            "  ",
+            "  ",
+            width,
+        )),
         AgentHooksView::Groups(groups) => {
             for event_group in groups {
-                body.push(format!("  {}", event_group.event));
+                body.extend(wrap_plain_line_with_prefix(
+                    &sanitize(&event_group.event),
+                    "  ",
+                    "  ",
+                    width,
+                ));
                 for hook in &event_group.hooks {
-                    if hook.disabled {
-                        body.push(format!(
-                            "    ○ {} (ext: {}) [disabled]",
-                            hook.name, hook.extension
-                        ));
+                    let name = sanitize(&hook.name);
+                    let extension = sanitize(&hook.extension);
+                    let entry = if hook.disabled {
+                        format!("○ {name} (ext: {extension}) [disabled]")
                     } else {
-                        body.push(format!("    • {} (ext: {})", hook.name, hook.extension));
-                    }
+                        format!("• {name} (ext: {extension})")
+                    };
+                    body.extend(wrap_plain_line_with_prefix(
+                        &entry,
+                        ENTRY_INDENT,
+                        ENTRY_HANG,
+                        width,
+                    ));
                 }
             }
         }
