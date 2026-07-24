@@ -770,6 +770,11 @@ jobs:
           cd src/tokenless
           cargo test --workspace -- --test-threads=1
 
+      - name: Run hook integration tests (Python)
+        run: |
+          cd src/tokenless
+          python3 tests/test_compress_response_hook.py
+
   # =========================================================================
   # Step 7: Test ws-ckpt
   # =========================================================================

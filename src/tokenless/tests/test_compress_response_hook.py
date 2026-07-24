@@ -94,8 +94,21 @@ def _create_mock_claude(tmpdir: str, version: str = "2.1.121") -> str:
     return mock_script
 
 
-def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str) -> dict:
-    """Run the hook as a subprocess with mocked tokenless binary."""
+def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
+              isolated_home: str = None) -> dict:
+    """Run the hook as a subprocess with mocked tokenless binary.
+
+    Args:
+        stdin_data: JSON payload to feed to the hook via stdin.
+        agent_id: The adapter agent ID (e.g. "claude-code").
+        mock_tokenless_path: Path to the mock tokenless binary.
+        isolated_home: Temporary HOME directory for the subprocess to avoid
+            touching the caller's ~/.tokenless state.
+
+    Returns:
+        Parsed JSON output dict from the hook, or a dict with ``_subprocess_error``
+        key when the hook exits non-zero.
+    """
     hooks_dir = os.path.normpath(os.path.join(
         os.path.dirname(__file__),
         os.pardir, "adapters", "tokenless", "common", "hooks",
@@ -105,6 +118,9 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str) -> dict
     env = os.environ.copy()
     env["TOKENLESS_AGENT_ID"] = agent_id
     env["PATH"] = os.path.dirname(mock_tokenless_path) + ":" + env.get("PATH", "")
+    # Isolate HOME so hook doesn't read/write ~/.tokenless/.claude-version
+    if isolated_home:
+        env["HOME"] = isolated_home
 
     proc = subprocess.run(
         [sys.executable, hook_path],
@@ -114,6 +130,18 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str) -> dict
         timeout=10,
         env=env,
     )
+
+    # Check returncode first — a non-zero exit indicates a real failure
+    # (import error, runtime crash, etc.) that should not be silently
+    # swallowed as an empty result.
+    if proc.returncode != 0:
+        return {
+            "_subprocess_error": True,
+            "_returncode": proc.returncode,
+            "_stderr": proc.stderr,
+            "_stdout": proc.stdout,
+        }
+
     stdout = proc.stdout.strip()
     if not stdout or stdout == "{}":
         return {}
@@ -132,6 +160,7 @@ class TestReplacementProtocol(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
         self.mock_claude = _create_mock_claude(self.tmpdir)
 
@@ -148,8 +177,11 @@ class TestReplacementProtocol(unittest.TestCase):
             },
             agent_id="claude-code",
             mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
         )
 
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
         self.assertEqual(hso.get("hookEventName"), "PostToolUse")
         self.assertIn("updatedToolOutput", hso,
@@ -170,8 +202,11 @@ class TestReplacementProtocol(unittest.TestCase):
             },
             agent_id="claude-code",
             mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
         )
 
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
         replacement = hso.get("updatedToolOutput", "")
         original_size = len(json.dumps(large_payload, separators=(",", ":")))
@@ -182,6 +217,44 @@ class TestReplacementProtocol(unittest.TestCase):
         )
         self.assertLess(replacement_size, original_size,
                         "Replacement should be smaller than original")
+
+    def test_replacement_content_structure(self):
+        """Replacement should contain compressed stdout and valid schema fields."""
+        large_payload = _make_large_json_payload()
+
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": large_payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        replacement = hso.get("updatedToolOutput", "")
+
+        # The mock compressor truncates strings > 20 chars, so stdout should
+        # be truncated. Verify the compressed content is present and parseable.
+        try:
+            compressed_data = json.loads(replacement)
+        except (json.JSONDecodeError, TypeError):
+            self.fail(f"updatedToolOutput should be valid JSON, got: {replacement!r}")
+
+        # Verify stdout field was compressed (truncated to 20 chars by mock)
+        self.assertIn("stdout", compressed_data,
+                       "Compressed output should preserve stdout key")
+        self.assertLessEqual(len(compressed_data["stdout"]), 20,
+                             "stdout should be compressed to <= 20 chars")
+
+        # Verify schema fields are preserved
+        self.assertIn("exit_code", compressed_data)
+        self.assertIn("interrupted", compressed_data)
 
     def test_no_duplicate_content(self):
         """The original sentinel must not appear alongside compressed output."""
@@ -197,19 +270,30 @@ class TestReplacementProtocol(unittest.TestCase):
             },
             agent_id="claude-code",
             mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
         )
 
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
+
+        # additionalContext must not contain compressed content
         additional = hso.get("additionalContext", "")
         self.assertNotIn(sentinel, additional,
                          "additionalContext must not contain compressed content")
 
-        updated = hso.get("updatedToolOutput", "")
-        self.assertTrue(updated,
-                        "updatedToolOutput should be present for Claude Code")
+        # updatedToolOutput should exist and contain compressed (truncated) sentinel
+        self.assertIn("updatedToolOutput", hso,
+                       "Claude Code should use updatedToolOutput")
+        updated = hso["updatedToolOutput"]
         updated_str = json.dumps(updated) if isinstance(updated, (dict, list)) else str(updated)
         self.assertNotIn(sentinel * 30, updated_str,
                          "updatedToolOutput must not contain the full original sentinel")
+
+        # Verify sentinel appears at most once (truncated) in the replacement
+        sentinel_count = updated_str.count(sentinel)
+        self.assertLessEqual(sentinel_count, 1,
+                             f"Sentinel should appear at most once in replacement, found {sentinel_count}")
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
@@ -218,6 +302,7 @@ class TestPassthrough(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "no-savings")
         self.mock_claude = _create_mock_claude(self.tmpdir)
 
@@ -234,8 +319,11 @@ class TestPassthrough(unittest.TestCase):
             },
             agent_id="claude-code",
             mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
         )
 
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         self.assertEqual(result, {},
                          "Should skip when compression yields no savings")
 
@@ -246,6 +334,7 @@ class TestSkipTools(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
         self.mock_claude = _create_mock_claude(self.tmpdir)
 
@@ -262,8 +351,11 @@ class TestSkipTools(unittest.TestCase):
             },
             agent_id="claude-code",
             mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
         )
 
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         self.assertEqual(result, {},
                          "Skip-tools (Read) should produce empty result (pass-through)")
         hso = result.get("hookSpecificOutput", {})
@@ -277,6 +369,7 @@ class TestNonReplacementAdapters(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
         self.mock_claude = _create_mock_claude(self.tmpdir)
 
@@ -293,8 +386,11 @@ class TestNonReplacementAdapters(unittest.TestCase):
             },
             agent_id="qwencode",
             mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
         )
 
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
         self.assertIn("additionalContext", hso,
                        "Non-replacement adapters should use additionalContext")

@@ -176,7 +176,7 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks
+test: test-tokenless test-hooks test-integration
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -185,6 +185,10 @@ test-tokenless:
 test-hooks:
 	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
+
+test-integration:
+	@echo "==> Testing hook integration (Python)..."
+	python3 tests/test_compress_response_hook.py
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
