@@ -290,6 +290,49 @@ api_key = "sk-project"
 }
 
 #[test]
+fn registry_auth_delete_removes_user_provider_and_credentials() {
+    let home = tempfile::tempdir().expect("temp home");
+    let home_config_dir = home.path().join(".copilot-shell");
+    std::fs::create_dir_all(&home_config_dir).unwrap();
+    let config_path = home_config_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[ai]
+active_provider = "remove-me"
+
+[ai.providers.keep-me]
+type = "dashscope"
+api_key = "sk-keep"
+
+[ai.providers.remove-me]
+type = "openai"
+api_key = "sk-remove"
+model = "remove-model"
+"#,
+    )
+    .unwrap();
+
+    let response = run_registry_request_with_context(
+        "auth",
+        "delete",
+        serde_json::json!({ "provider_id": "remove-me" }),
+        home.path(),
+        None,
+    );
+
+    assert_eq!(response["success"], true);
+    assert_eq!(response["data"]["deleted_provider"], "remove-me");
+    assert!(response["data"]["active_provider"].is_null());
+
+    let persisted = std::fs::read_to_string(&config_path).unwrap();
+    assert!(!persisted.contains("[ai.providers.remove-me]"));
+    assert!(!persisted.contains("sk-remove"));
+    assert!(persisted.contains("[ai.providers.keep-me]"));
+    assert!(persisted.contains("sk-keep"));
+}
+
+#[test]
 fn registry_unknown_domain_returns_error() {
     let resp = run_registry_request("unknown_domain", "list", Value::Null);
     assert_eq!(resp["type"], "registry_response");

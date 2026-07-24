@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
@@ -195,6 +196,74 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
             .providers
             .insert(response.provider_id.clone(), provider);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoveAuthProviderError {
+    NotFound,
+    NotEditable,
+}
+
+impl fmt::Display for RemoveAuthProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("provider not found"),
+            Self::NotEditable => formatter.write_str("provider is not removable"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemovedAuthProvider {
+    pub(crate) active_provider: Option<String>,
+}
+
+pub(crate) fn remove_auth_provider(
+    config: &mut CoreConfig,
+    provider_id: &str,
+) -> Result<RemovedAuthProvider, RemoveAuthProviderError> {
+    if !config.user_ai.providers.contains_key(provider_id) {
+        return Err(if config.ai.providers.contains_key(provider_id) {
+            RemoveAuthProviderError::NotEditable
+        } else {
+            RemoveAuthProviderError::NotFound
+        });
+    }
+
+    let was_active = config.ai.active_provider.as_deref() == Some(provider_id);
+    config.user_ai.providers.remove(provider_id);
+    if config.user_ai.active_provider.as_deref() == Some(provider_id) {
+        config.user_ai.active_provider = None;
+    }
+
+    if let Some(system_provider) = config.system_ai.providers.get(provider_id).cloned() {
+        config
+            .ai
+            .providers
+            .insert(provider_id.to_string(), system_provider);
+    } else {
+        config.ai.providers.remove(provider_id);
+    }
+
+    if was_active {
+        let active_provider = config
+            .system_ai
+            .active_provider
+            .clone()
+            .filter(|fallback| config.ai.providers.contains_key(fallback));
+        config.ai.active_provider = active_provider.clone();
+        config.ai.active_model = active_provider.as_ref().and_then(|fallback| {
+            config
+                .ai
+                .providers
+                .get(fallback)
+                .and_then(|provider| provider.model.clone())
+        });
+    }
+
+    Ok(RemovedAuthProvider {
+        active_provider: config.ai.active_provider.clone(),
+    })
 }
 
 /// Result of waiting for auth, including any stdin lines consumed during the wait.
@@ -453,6 +522,96 @@ mod tests {
                 .get("user-provider")
                 .and_then(|provider| provider.api_key.as_deref()),
             Some("sk-user")
+        );
+    }
+
+    #[test]
+    fn remove_auth_provider_drops_user_credentials_and_active_selection() {
+        let provider = ProviderConfig {
+            provider_type: Some("dashscope".to_string()),
+            api_key: Some("sk-user".to_string()),
+            model: Some("user-model".to_string()),
+            ..Default::default()
+        };
+        let mut config = CoreConfig::default();
+        config.ai.active_provider = Some("user-provider".to_string());
+        config.ai.active_model = Some("user-model".to_string());
+        config
+            .ai
+            .providers
+            .insert("user-provider".to_string(), provider.clone());
+        config.user_ai.active_provider = Some("user-provider".to_string());
+        config
+            .user_ai
+            .providers
+            .insert("user-provider".to_string(), provider);
+
+        let removed = remove_auth_provider(&mut config, "user-provider").unwrap();
+
+        assert_eq!(removed.active_provider, None);
+        assert_eq!(config.ai.active_provider, None);
+        assert_eq!(config.ai.active_model, None);
+        assert!(!config.ai.providers.contains_key("user-provider"));
+        assert!(!config.user_ai.providers.contains_key("user-provider"));
+    }
+
+    #[test]
+    fn remove_auth_provider_reveals_system_provider_with_same_id() {
+        let system_provider = ProviderConfig {
+            provider_type: Some("dashscope".to_string()),
+            api_key: Some("sk-system".to_string()),
+            model: Some("system-model".to_string()),
+            ..Default::default()
+        };
+        let user_provider = ProviderConfig {
+            provider_type: Some("openai".to_string()),
+            api_key: Some("sk-user".to_string()),
+            model: Some("user-model".to_string()),
+            ..Default::default()
+        };
+        let mut config = CoreConfig::default();
+        config.ai.active_provider = Some("shared".to_string());
+        config
+            .ai
+            .providers
+            .insert("shared".to_string(), user_provider.clone());
+        config
+            .system_ai
+            .providers
+            .insert("shared".to_string(), system_provider);
+        config.system_ai.active_provider = Some("shared".to_string());
+        config.user_ai.active_provider = Some("shared".to_string());
+        config
+            .user_ai
+            .providers
+            .insert("shared".to_string(), user_provider);
+
+        let removed = remove_auth_provider(&mut config, "shared").unwrap();
+
+        assert_eq!(removed.active_provider.as_deref(), Some("shared"));
+        assert_eq!(
+            config
+                .ai
+                .providers
+                .get("shared")
+                .and_then(|provider| provider.api_key.as_deref()),
+            Some("sk-system")
+        );
+        assert_eq!(config.ai.active_model.as_deref(), Some("system-model"));
+        assert_eq!(config.user_ai.active_provider, None);
+    }
+
+    #[test]
+    fn remove_auth_provider_rejects_system_provider() {
+        let mut config = CoreConfig::default();
+        config
+            .ai
+            .providers
+            .insert("system-provider".to_string(), ProviderConfig::default());
+
+        assert_eq!(
+            remove_auth_provider(&mut config, "system-provider"),
+            Err(RemoveAuthProviderError::NotEditable)
         );
     }
 

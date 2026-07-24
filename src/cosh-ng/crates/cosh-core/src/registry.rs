@@ -195,6 +195,31 @@ fn handle_auth(
                 error: None,
             }
         }
+        "delete" => {
+            let provider_id = params
+                .get("provider_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if provider_id.is_empty() {
+                return registry_error(request_id, "missing provider_id");
+            }
+            let removed = match crate::auth::remove_auth_provider(config, provider_id) {
+                Ok(removed) => removed,
+                Err(error) => return registry_error(request_id, &error.to_string()),
+            };
+            if let Err(error) = crate::config::persist_config(config) {
+                return registry_error(request_id, &format!("failed to persist config: {error}"));
+            }
+            OutputMessage::RegistryResponse {
+                request_id: request_id.to_string(),
+                success: true,
+                data: Some(serde_json::json!({
+                    "deleted_provider": provider_id,
+                    "active_provider": removed.active_provider,
+                })),
+                error: None,
+            }
+        }
         "prepare" => {
             let provider_type = params
                 .get("provider_type")
@@ -912,5 +937,36 @@ mod tests {
         assert!(!success);
         assert!(error.unwrap().contains("not editable"));
         assert!(!config.user_ai.providers.contains_key("system-provider"));
+    }
+
+    #[test]
+    fn auth_delete_rejects_system_provider() {
+        let mut config = CoreConfig::default();
+        config.ai.providers.insert(
+            "system-provider".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-system".to_string()),
+                ..Default::default()
+            },
+        );
+        config.system_ai = AiConfig {
+            providers: config.ai.providers.clone(),
+            ..Default::default()
+        };
+
+        let response = handle_auth(
+            "test-1",
+            "delete",
+            &serde_json::json!({ "provider_id": "system-provider" }),
+            &mut config,
+        );
+
+        let OutputMessage::RegistryResponse { success, error, .. } = response else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert!(!success);
+        assert!(error.unwrap().contains("not removable"));
+        assert!(config.ai.providers.contains_key("system-provider"));
     }
 }
