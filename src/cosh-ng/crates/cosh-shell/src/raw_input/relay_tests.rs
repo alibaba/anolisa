@@ -670,6 +670,44 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
 }
 
 #[test]
+fn native_slash_tab_is_not_redrawn_before_shell_completion() {
+    let (path, mut master) = output_file("native-slash-tab");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+    };
+
+    relay_passthrough_input(b"/ho", &mut relay).expect("buffer slash prefix");
+    relay_passthrough_input(b"\t", &mut relay).expect("send completion to shell");
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RawInputEvent::CandidateRedraw { input, .. } if input == b"/ho"
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        RawInputEvent::CandidateRedraw { input, .. } if input.contains(&b'\t')
+    )));
+    assert!(events.contains(&RawInputEvent::CandidateClearLine));
+    assert_eq!(fs::read(&path).expect("read test output"), b"/ho\t");
+    assert!(!line_buffer.is_active());
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn native_shell_input_reports_editing_then_empty_without_content() {
     let (path, mut master) = output_file("input-state");
     let (tx, rx) = mpsc::channel();

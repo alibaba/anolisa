@@ -257,7 +257,6 @@ fn relay_native_passthrough(
         || starts_native_intercept_candidate(bytes, relay.native_line_state)
     {
         relay.line_buffer.push(bytes);
-        redraw_candidate_line(relay.input_events, relay.line_buffer);
         if native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer) {
             return flush_candidate_line_to_shell(
                 relay.master,
@@ -268,6 +267,9 @@ fn relay_native_passthrough(
                 emit_activity,
             );
         }
+        // Control bytes such as Tab must reach readline without first changing
+        // the outer terminal cursor, whose display width differs from byte count.
+        redraw_candidate_line(relay.input_events, relay.line_buffer);
         return relay_candidate_line(relay, emit_activity);
     }
     // Non-slash input: send directly to PTY. Shell marker's preexec/
