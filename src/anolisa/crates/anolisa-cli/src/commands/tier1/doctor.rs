@@ -3440,7 +3440,14 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read journal");
         std::fs::write(
             &path,
-            text.replacen("schema_version = 1", "schema_version = 999", 1),
+            text.replacen(
+                &format!(
+                    "schema_version = {}",
+                    anolisa_core::transaction::JOURNAL_SCHEMA_VERSION
+                ),
+                "schema_version = 999",
+                1,
+            ),
         )
         .expect("future schema");
 

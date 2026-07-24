@@ -172,7 +172,9 @@ pub struct JournalInventory {
 }
 
 impl JournalInventory {
-    /// Load and validate every `*.journal.toml` file covered by `evidence`.
+    /// Load and validate every journal file (see
+    /// [`JOURNAL_FILE_SUFFIX`](crate::transaction::JOURNAL_FILE_SUFFIX))
+    /// covered by `evidence`.
     ///
     /// A missing directory is an empty inventory. Enumeration, IO, parse, and
     /// schema failures are returned with the directory or journal path that
@@ -198,10 +200,13 @@ impl JournalInventory {
                 source,
             })?;
             let path = entry.path();
-            if !path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with(".journal.toml"))
-            {
+            // Filter on the shared naming constant: the journal dir also
+            // holds `<op>.state.snapshot` sidecars that must not be
+            // parsed as journals.
+            if !path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .ends_with(crate::transaction::JOURNAL_FILE_SUFFIX)
+            }) {
                 continue;
             }
             paths.push(path);
@@ -434,7 +439,8 @@ mod tests {
     use crate::providers::test_fakes::{FakeQuery, FakeTxn, InstalledOutcome, pkg_info};
     use crate::state::{FileOwner, OperationRecord, OwnedFile, OwnedFileKind};
     use crate::transaction::{
-        DelegatedRecordAction, DelegatedRecoveryContext, TransactionOutcomeStatus, TransactionStep,
+        DelegatedRecordAction, DelegatedRecoveryContext, JOURNAL_SCHEMA_VERSION,
+        TransactionOutcomeStatus, TransactionStep,
     };
 
     const NOW: &str = "2026-07-16T00:00:00Z";
@@ -885,7 +891,11 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read journal");
         fs::write(
             &path,
-            text.replacen("schema_version = 1", "schema_version = 999", 1),
+            text.replacen(
+                &format!("schema_version = {JOURNAL_SCHEMA_VERSION}"),
+                "schema_version = 999",
+                1,
+            ),
         )
         .expect("write future journal");
 
