@@ -771,7 +771,14 @@ fn install_resolves_legacy_template_form_repo_url() {
 fn install_unpublished_version_is_invalid_argument() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
-    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    // Two published versions, so the refusal must enumerate the complete
+    // list (highest-first), not just whichever entry resolution saw last.
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
@@ -780,6 +787,142 @@ fn install_unpublished_version_is_invalid_argument() {
         .expect_err("must fail to resolve");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(err.reason().contains("9.9.9"), "got: {}", err.reason());
+    // The pin refusal must name what the repository actually publishes, so
+    // the caller can correct the request without a second query.
+    assert!(
+        err.reason().contains("not published"),
+        "pin refusal must be a dedicated message: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("installable versions: 0.2.0, 0.1.0"),
+        "pin refusal must list every installable version, highest first: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_pinned_unsupported_artifact_type_is_reported_as_not_installable() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    // Publish 9.0.0 as a binary-only entry: present in the repository, but
+    // outside what the raw backend can install.
+    let index_path = repo_root.join("v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    let env = anolisa_env::EnvService::detect();
+    index.push_str(&format!(
+        r#"
+[[entries]]
+component = "agentsight"
+version = "9.0.0"
+channel = "stable"
+artifact_type = "binary"
+backend = "raw"
+url = "legacy-agentsight-9.0.0"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{sha}"
+"#,
+        os = env.os,
+        arch = env.arch,
+        sha = "0".repeat(64),
+    ));
+    std::fs::write(index_path, index).expect("write mixed index");
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("9.0.0".to_string());
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("must fail to resolve");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    // A published-but-binary-only pin must not be misreported as
+    // unpublished; the refusal names the artifact-type gap instead.
+    assert!(
+        !err.reason().contains("not published"),
+        "published version must not be reported as unpublished: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason()
+            .contains("artifact types the raw backend cannot install"),
+        "refusal must name the artifact-type gap: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("installable versions: 0.2.0"),
+        "refusal must still list installable versions: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_pinned_version_places_exact_published_version() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.1.0".to_string());
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("pinned install must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(layout.bin_dir.join("agentsight").exists());
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("installed object");
+    let artifact = owned_artifact(installation);
+    assert_eq!(
+        artifact.version, "0.1.0",
+        "the pin must beat the higher published 0.2.0"
+    );
+    assert!(
+        artifact
+            .distribution_source
+            .as_deref()
+            .is_some_and(|url| url.ends_with("agentsight-0.1.0.tar.gz")),
+        "distribution_source must record the pinned artifact URL: {:?}",
+        artifact.distribution_source
+    );
+}
+
+#[test]
+fn install_pinned_version_dry_run_previews_without_writing_files() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.1.0".to_string());
+    let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    ctx.dry_run = true;
+    handle_with_fake_rpm(a, &ctx).expect("pinned dry-run must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "dry-run must not install the binary"
+    );
+    assert!(
+        !layout.state_dir.join("installed.toml").exists(),
+        "dry-run must not write state"
+    );
 }
 
 // ---------------------------------------------------------------------------

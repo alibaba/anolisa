@@ -11,7 +11,8 @@ use anolisa_core::install_runner::{
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::{
     ArtifactType, CapabilityRequest, ComponentManifest, DistributionIndex, FileKind, HookPhase,
-    HookSpec, ResolveQuery, ServiceRequest, expand_layout_placeholders, resolve_manifest_hooks,
+    HookSpec, ResolveError, ResolveQuery, ServiceRequest, expand_layout_placeholders,
+    resolve_manifest_hooks,
 };
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -49,12 +50,16 @@ pub(crate) fn resolve_raw(
             command: COMMAND.to_string(),
             reason: format!("failed to fetch distribution index {index_url}: {err}"),
         })?;
-    let index = DistributionIndex::load(&downloaded_index.cached_path)
-        .map(installable_raw_index)
-        .map_err(|err| CliError::Runtime {
+    // The unfiltered index is kept for error attribution: a pinned version
+    // that only ships non-installable artifact types must be reported as
+    // "published but not installable", not as unpublished.
+    let full_index = DistributionIndex::load(&downloaded_index.cached_path).map_err(|err| {
+        CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!("failed to parse distribution index {index_url}: {err}"),
-        })?;
+        }
+    })?;
+    let index = installable_raw_index(full_index.clone());
 
     // The index is keyed by the backend-native package name so that
     // `package_map` / `--package` select between alternate publications.
@@ -69,15 +74,59 @@ pub(crate) fn resolve_raw(
         pkg_base: env.pkg_base.as_deref(),
         preferred_types: &[],
     };
-    let entry = index.resolve(&query).map_err(|err| CliError::InvalidArgument {
-        command: COMMAND.to_string(),
-        reason: format!(
-            "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_url}: {err}",
-            version.unwrap_or("latest"),
-            env.os,
-            env.arch,
-            ctx.install_mode.as_str(),
-        ),
+    let entry = index.resolve(&query).map_err(|err| {
+        // A pinned version the installable index cannot satisfy gets a
+        // dedicated refusal, symmetric with the rpm backend's version-pin
+        // errors. The unfiltered index decides the wording: a version that
+        // exists there but not in the installable view is published — only
+        // its artifact types are outside what the raw backend can place.
+        // Every other resolution failure keeps the generic query rendering.
+        if let (Some(pinned), ResolveError::NotFound) = (version, &err) {
+            let unversioned = ResolveQuery {
+                version: None,
+                ..query.clone()
+            };
+            let installable = index.matching_versions(&unversioned);
+            let installable_note = if installable.is_empty() {
+                String::new()
+            } else {
+                format!(" — installable versions: {}", installable.join(", "))
+            };
+            let published_any_type = full_index
+                .matching_versions(&unversioned)
+                .iter()
+                .any(|v| v == pinned);
+            if published_any_type {
+                return CliError::InvalidArgument {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "version '{pinned}' of component '{component}' (package '{package}') is published in the raw repository {index_url} but only with artifact types the raw backend cannot install (supported: {}); nothing was changed{installable_note}",
+                        SUPPORTED_ARTIFACT_TYPES.join(", "),
+                    ),
+                };
+            }
+            if !installable.is_empty() {
+                return CliError::InvalidArgument {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "version '{pinned}' of component '{component}' (package '{package}') is not published in the raw repository {index_url} for {}/{} ({} mode); nothing was changed{installable_note}",
+                        env.os,
+                        env.arch,
+                        ctx.install_mode.as_str(),
+                    ),
+                };
+            }
+        }
+        CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_url}: {err}",
+                version.unwrap_or("latest"),
+                env.os,
+                env.arch,
+                ctx.install_mode.as_str(),
+            ),
+        }
     })?;
 
     let wire_type = artifact_type_wire(&entry.artifact_type);
@@ -125,6 +174,7 @@ pub(crate) fn resolve_raw(
         package,
         artifact_url,
         entry,
+        base_url,
         warnings,
     })
 }
