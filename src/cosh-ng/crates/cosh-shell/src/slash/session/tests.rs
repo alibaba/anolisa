@@ -1,4 +1,5 @@
 use super::*;
+use crate::adapter::{SessionHealth, SessionSummary};
 use crate::agent::run::{ActiveAgentRun, AgentRunOrigin};
 use crate::evidence::stream::CoshRequestStreamFilter;
 
@@ -87,6 +88,55 @@ fn direct_resume_refuses_to_select_while_agent_run_is_active() {
         },
         SessionRecoveryState::None
     );
+}
+
+#[test]
+fn picker_panel_shows_short_ids_marked_count_and_key_semantics() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    let panel_id = state.control.session_mut().new_panel_id();
+    let mut selected_for_clear = HashSet::new();
+    selected_for_clear.insert(SESSION_ID.to_string());
+    state
+        .control
+        .session_mut()
+        .set_pending_panel(RuntimeSessionPanel {
+            id: panel_id,
+            workspace_scope: "/tmp".to_string(),
+            sessions: vec![SessionSummary {
+                session_id: SESSION_ID.to_string(),
+                workspace_scope: "/tmp".to_string(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                model: Some("mock".to_string()),
+                message_count: 2,
+                first_prompt: Some("first prompt".to_string()),
+                schema_version: Some(1),
+                health: SessionHealth::Ready,
+            }],
+            next_cursor: None,
+            selected_option: 0,
+            selected_for_clear,
+            clear_confirmation_ids: Vec::new(),
+            protected_clear_ids: Vec::new(),
+            phase: RuntimeSessionPanelPhase::Browse,
+        });
+    let mut output = Vec::new();
+
+    render_current_session_panel(&adapter, &mut state, &mut output).expect("render picker panel");
+
+    // Collapse renderer wrapping so contract assertions stay width-agnostic.
+    let rendered = String::from_utf8(output).expect("UTF-8 picker panel");
+    let flat = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("[x] 00000000… · first prompt"), "{rendered}");
+    assert!(flat.contains("1/1 · 1 marked"), "{rendered}");
+    assert!(flat.contains("Enter resume"), "{rendered}");
+    assert!(flat.contains("Space toggle clear mark"), "{rendered}");
+    assert!(flat.contains("d review clear"), "{rendered}");
+    assert!(!flat.contains("Space mark for clear"), "{rendered}");
 }
 
 fn render_session_arguments(arguments: &str) -> String {

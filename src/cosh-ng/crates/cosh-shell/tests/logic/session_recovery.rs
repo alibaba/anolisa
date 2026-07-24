@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use cosh_shell::adapter::{
     CoshCoreAdapter, SessionHealth, SessionRecoveryState, SessionRuntimeState,
 };
+use cosh_shell::{I18n, Language, MessageId};
 
 #[test]
 fn recovery_states_and_health_have_stable_user_labels() {
@@ -33,4 +34,25 @@ fn active_and_selected_provider_sessions_are_both_protected() {
     };
 
     assert_eq!(adapter.protected_session_ids(), vec![active, selected]);
+}
+
+#[test]
+fn picker_footer_keeps_resume_and_clear_semantics_distinct() {
+    let en = I18n::new(Language::EnUs).t(MessageId::SessionPickerFooter);
+    assert!(en.contains("Enter resume"), "{en}");
+    assert!(en.contains("Space toggle clear mark"), "{en}");
+    assert!(en.contains("d review clear"), "{en}");
+    assert!(en.contains("Esc cancel"), "{en}");
+    assert!(!en.contains("Space mark for clear"), "{en}");
+
+    let zh = I18n::new(Language::ZhCn).t(MessageId::SessionPickerFooter);
+    assert!(zh.contains("Enter 恢复"), "{zh}");
+    assert!(zh.contains("Space 切换清理标记"), "{zh}");
+    assert!(zh.contains("d 打开清理确认"), "{zh}");
+    assert!(zh.contains("Esc 取消"), "{zh}");
+
+    // The confirmation-phase footer stays a separate message: y/Enter only
+    // deletes after `d` has opened the confirmation.
+    let confirm = I18n::new(Language::EnUs).t(MessageId::SessionClearConfirmFooter);
+    assert!(confirm.contains("Enter or y confirms"), "{confirm}");
 }

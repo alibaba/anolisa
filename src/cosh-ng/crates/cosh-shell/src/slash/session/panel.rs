@@ -38,7 +38,7 @@ pub(super) fn render_current_session_panel<W: Write>(
                 body.extend(panel.sessions[start..end].iter().enumerate().map(
                     |(offset, summary)| {
                         let index = start + offset;
-                        session_summary_line(
+                        session_picker_line(
                             summary,
                             panel.selected_option == index,
                             panel.selected_for_clear.contains(&summary.session_id),
@@ -50,12 +50,22 @@ pub(super) fn render_current_session_panel<W: Write>(
                 if end < panel.sessions.len() {
                     body.push(format!("  … +{}", panel.sessions.len() - end));
                 }
-                let footer = format!(
-                    "{} · {}/{}",
-                    state.i18n().t(MessageId::SessionPickerFooter),
+                // Counters lead the footer so they stay on the first visual
+                // line when the key-hint text wraps on narrow terminals.
+                let mut footer = format!(
+                    "{}/{}",
                     panel.selected_option.saturating_add(1),
                     panel.sessions.len()
                 );
+                if !panel.selected_for_clear.is_empty() {
+                    footer.push_str(" · ");
+                    footer.push_str(&state.i18n().format(
+                        MessageId::SessionPickerMarkedCount,
+                        &[("count", &panel.selected_for_clear.len().to_string())],
+                    ));
+                }
+                footer.push_str(" · ");
+                footer.push_str(state.i18n().t(MessageId::SessionPickerFooter));
                 (
                     state.i18n().t(MessageId::SessionTitle).to_string(),
                     body,
@@ -173,7 +183,37 @@ fn session_notice_height(body: &[String], footer: Option<&str>) -> usize {
     lines.len().max(1) + 2
 }
 
-pub(super) fn session_summary_line(
+/// Renders one `/session list` entry: the full canonical session ID leads so
+/// it can be copied verbatim into `/session resume <id>` or
+/// `/session clear <id>`, followed by an indented prompt preview when the
+/// session has one.
+pub(super) fn session_list_lines(summary: &SessionSummary) -> Vec<String> {
+    let model = summary.model.as_deref().unwrap_or("-");
+    let mut lines = vec![format!(
+        "{} · {} · {} · {} msg · {}",
+        summary.session_id,
+        summary.health.label(),
+        model,
+        summary.message_count,
+        relative_time(summary.updated_at_ms),
+    )];
+    if let Some(prompt) = summary
+        .first_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        lines.push(format!(
+            "  {}",
+            bounded_prompt_preview(prompt, SESSION_PREVIEW_CHARS)
+        ));
+    }
+    lines
+}
+
+/// Renders one interactive picker row. The short ID prefix is visual
+/// disambiguation only — resume and clear always operate on the full
+/// canonical UUID carried by the panel state, never on the prefix.
+pub(super) fn session_picker_line(
     summary: &SessionSummary,
     focused: bool,
     marked_for_clear: bool,
@@ -190,12 +230,24 @@ pub(super) fn session_summary_line(
     let prompt = bounded_prompt_preview(prompt, SESSION_PREVIEW_CHARS);
     let model = summary.model.as_deref().unwrap_or("-");
     format!(
-        "{cursor} {marked} {prompt} · {} · {} msg · {} · {}{protected}",
+        "{cursor} {marked} {} · {prompt} · {} · {} msg · {} · {}{protected}",
+        short_session_id(&summary.session_id),
         relative_time(summary.updated_at_ms),
         summary.message_count,
         model,
         summary.health.label()
     )
+}
+
+/// First eight characters of the session ID plus an ellipsis when truncated.
+/// Character-based so a malformed non-ASCII ID cannot split a code point.
+fn short_session_id(session_id: &str) -> String {
+    let prefix: String = session_id.chars().take(8).collect();
+    if session_id.chars().count() > 8 {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
 }
 
 fn session_viewport(total: usize, selected: usize, capacity: usize) -> (usize, usize) {
@@ -421,9 +473,8 @@ mod tests {
     use super::*;
     use crate::adapter::SessionHealth;
 
-    #[test]
-    fn session_lines_surface_health_and_clear_mark() {
-        let summary = SessionSummary {
+    fn ready_summary() -> SessionSummary {
+        SessionSummary {
             session_id: "00000000-0000-4000-8000-000000000000".to_string(),
             workspace_scope: "/tmp".to_string(),
             created_at_ms: 1,
@@ -433,11 +484,72 @@ mod tests {
             first_prompt: Some("remember this".to_string()),
             schema_version: Some(1),
             health: SessionHealth::Corrupt,
-        };
-        let line = session_summary_line(&summary, true, true, false);
-        assert!(line.contains("> [x] remember this"));
+        }
+    }
+
+    #[test]
+    fn picker_lines_surface_short_id_health_and_clear_mark() {
+        let line = session_picker_line(&ready_summary(), true, true, false);
+        assert!(
+            line.starts_with("> [x] 00000000… · remember this"),
+            "{line}"
+        );
         assert!(line.contains("3 msg"));
         assert!(line.contains("corrupt"));
+        assert!(
+            !line.contains("00000000-0000-4000-8000-000000000000"),
+            "picker rows stay compact: {line}"
+        );
+    }
+
+    #[test]
+    fn list_lines_keep_full_id_when_first_prompt_is_present() {
+        let lines = session_list_lines(&ready_summary());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("00000000-0000-4000-8000-000000000000 · corrupt · mock · 3 msg"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("remember this"), "{lines:?}");
+    }
+
+    #[test]
+    fn list_lines_sanitize_prompt_preview() {
+        let mut summary = ready_summary();
+        summary.first_prompt = Some("line one\nline\u{7} two".to_string());
+        let lines = session_list_lines(&summary);
+        assert_eq!(lines[1], "  line one line two", "{lines:?}");
+    }
+
+    #[test]
+    fn empty_prompt_falls_back_to_session_id_without_losing_ids() {
+        let mut summary = ready_summary();
+        summary.first_prompt = Some("   ".to_string());
+
+        let lines = session_list_lines(&summary);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("00000000-0000-4000-8000-000000000000"),
+            "{lines:?}"
+        );
+
+        let line = session_picker_line(&summary, false, false, true);
+        assert!(line.contains("00000000…"), "{line}");
+        assert!(
+            line.contains("· 00000000-0000-4000-8000-000000000000 ·"),
+            "fallback preview keeps the full ID: {line}"
+        );
+        assert!(line.ends_with("protected"), "{line}");
+    }
+
+    #[test]
+    fn short_session_id_is_utf8_safe_and_skips_ellipsis_when_short() {
+        assert_eq!(short_session_id("abcd"), "abcd");
+        assert_eq!(short_session_id("0123456789"), "01234567…");
+        assert_eq!(
+            short_session_id("会话标识符测试超长编号"),
+            "会话标识符测试超…"
+        );
     }
 
     #[test]

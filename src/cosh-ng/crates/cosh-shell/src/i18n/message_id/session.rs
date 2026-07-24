@@ -72,3 +72,15 @@ macro_rules! session_compaction_ids {
         );
     };
 }
+
+// Registered as the final segment in message_id.rs so the picker-count ID
+// does not shift the discriminants pinned by the fieldless-enum test.
+macro_rules! session_picker_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            SessionPickerMarkedCount,
+        );
+    };
+}

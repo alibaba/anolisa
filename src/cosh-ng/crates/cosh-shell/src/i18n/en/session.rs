@@ -23,8 +23,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Historical terminal evidence was not restored; only model conversation context resumes."
         }
         MessageId::SessionPickerFooter => {
-            "Up/Down or j/k move · Enter resume · Space mark for clear · d clear · Esc cancel"
+            "Up/Down or j/k move · Enter resume · Space toggle clear mark · d review clear · Esc cancel"
         }
+        MessageId::SessionPickerMarkedCount => "{count} marked",
         MessageId::SessionClearConfirmTitle => "Confirm session clear",
         MessageId::SessionClearConfirmCountLine => {
             "The following {count} persisted session(s) will be deleted:"

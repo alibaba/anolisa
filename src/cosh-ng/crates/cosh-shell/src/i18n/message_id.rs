@@ -81,4 +81,5 @@ collect_message_ids!([
     slash_parse_error_ids,
     question_hardening_ids,
     question_interaction_ids,
+    session_picker_ids,
 ],);

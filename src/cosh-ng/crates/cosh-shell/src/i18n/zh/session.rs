@@ -17,8 +17,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "历史终端证据不会恢复；仅恢复模型可见的对话上下文。"
         }
         MessageId::SessionPickerFooter => {
-            "上/下或 j/k 移动 · Enter 恢复 · Space 标记清理 · d 清理 · Esc 取消"
+            "上/下或 j/k 移动 · Enter 恢复 · Space 切换清理标记 · d 打开清理确认 · Esc 取消"
         }
+        MessageId::SessionPickerMarkedCount => "已标记 {count}",
         MessageId::SessionClearConfirmTitle => "确认清理会话",
         MessageId::SessionClearConfirmCountLine => "将删除以下 {count} 个持久化会话：",
         MessageId::SessionClearConfirmFooter => "Enter 或 y 确认 · Esc、Ctrl+C 或 n 取消",

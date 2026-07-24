@@ -22,11 +22,59 @@ fn raw_cli_session_picker_navigates_selects_and_restores_prompt() {
 
     assert!(output.contains("Agent sessions"), "{output}");
     assert!(output.contains("second prompt"), "{output}");
+    assert!(output.contains("00000000…"), "{output}");
+    assert!(output.contains("11111111…"), "{output}");
     assert!(output.contains("Session selected"), "{output}");
     assert!(output.contains(SESSION_TWO), "{output}");
     assert!(output.contains("recovery state: selected"), "{output}");
     assert!(output.contains("after-session-select"), "{output}");
     assert!(!output.contains("bash: /session"), "{output}");
+}
+
+#[test]
+fn raw_cli_session_list_prints_full_canonical_ids() {
+    let fixture = SessionFixture::new("list-full-ids", FixtureMode::Ready);
+    let output = fixture.run(
+        &[],
+        vec![
+            (b"/session list\n".to_vec(), Duration::from_millis(400)),
+            (
+                b"echo after-session-list\nexit\n".to_vec(),
+                Duration::from_millis(200),
+            ),
+        ],
+    );
+
+    // Full canonical UUIDs must be copyable into /session resume|clear even
+    // though both fixture sessions carry a non-empty first prompt.
+    assert!(output.contains(SESSION_ONE), "{output}");
+    assert!(output.contains(SESSION_TWO), "{output}");
+    assert!(output.contains("first prompt"), "{output}");
+    assert!(output.contains("second prompt"), "{output}");
+    assert!(output.contains("after-session-list"), "{output}");
+}
+
+#[test]
+fn raw_cli_session_picker_space_then_enter_resumes_without_deleting() {
+    let fixture = SessionFixture::new("picker-space-enter", FixtureMode::Ready);
+    let output = fixture.run(
+        &[],
+        vec![
+            (b"/session\n".to_vec(), Duration::from_millis(400)),
+            (b" ".to_vec(), Duration::from_millis(300)),
+            (b"\n".to_vec(), Duration::from_millis(300)),
+            (
+                b"echo after-space-enter\nexit\n".to_vec(),
+                Duration::from_millis(200),
+            ),
+        ],
+    );
+
+    assert!(output.contains("Session selected"), "{output}");
+    assert!(output.contains(SESSION_ONE), "{output}");
+    assert!(!output.contains("Confirm session clear"), "{output}");
+    assert!(output.contains("after-space-enter"), "{output}");
+    assert!(!fixture.clear_log.exists());
 }
 
 #[test]
@@ -159,6 +207,7 @@ fn raw_cli_session_multi_clear_requires_confirmation_and_cancel_is_safe() {
         ],
     );
     let request = fs::read_to_string(&confirmed.clear_log).expect("clear request log");
+    assert!(output.contains("Confirm session clear"), "{output}");
     assert!(request.contains(SESSION_ONE), "{request}");
     assert!(request.contains(SESSION_TWO), "{request}");
     assert!(
