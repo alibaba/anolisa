@@ -42,7 +42,7 @@ impl QwenCliAdapter {
 
     /// Detaches from the committed provider session so the next invocation
     /// omits `--resume` and starts a fresh conversation.
-    pub fn start_fresh_session(&self) -> FreshSessionOutcome {
+    pub(super) fn start_fresh_session(&self) -> FreshSessionOutcome {
         detach_committed_session(&self.session_id)
     }
 

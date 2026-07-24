@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::cosh_core::{CoshCoreAdapter, SessionRecoveryState, SessionRuntimeState};
-use super::{AdapterError, AgentAdapter, AgentRunPoll};
+use super::{AdapterError, AgentAdapter, AgentRunPoll, FreshSessionOutcome};
 use crate::types::{
     AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
 };
@@ -97,6 +97,41 @@ fn assert_failed_selection_was_released(adapter: &CoshCoreAdapter) {
     assert_eq!(
         adapter.protected_session_ids(),
         vec!["00000000-0000-4000-8000-000000000000"]
+    );
+}
+
+#[test]
+fn fresh_session_detaches_active_and_selected_without_protecting_them() {
+    let active = "00000000-0000-4000-8000-000000000000".to_string();
+    let selected = "11111111-1111-4111-8111-111111111111".to_string();
+    let mut session = SessionRuntimeState::with_active(active.clone(), "/tmp");
+    session.recovery.state = SessionRecoveryState::Selected;
+    session.recovery.selected_session_id = Some(selected);
+    session.recovery.selected_workspace_scope = Some("/tmp".to_string());
+    let adapter = CoshCoreAdapter {
+        program: "unused".to_string(),
+        allow_model_call: false,
+        session: Arc::new(Mutex::new(session)),
+    };
+
+    assert_eq!(
+        adapter.start_fresh_session(),
+        FreshSessionOutcome::Detached {
+            previous_session_id: Some(active),
+        }
+    );
+    assert_eq!(adapter.committed_session_id(), None);
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::None
+    );
+    assert!(adapter.protected_session_ids().is_empty());
+
+    assert_eq!(
+        adapter.start_fresh_session(),
+        FreshSessionOutcome::Detached {
+            previous_session_id: None,
+        }
     );
 }
 

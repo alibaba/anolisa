@@ -200,7 +200,7 @@ impl CoshCoreAdapter {
     /// Serializes with management mutations through the management gate.
     /// The recovery generation separately prevents a late turn commit from
     /// re-binding the detached session.
-    pub fn start_fresh_session(&self) -> FreshSessionOutcome {
+    pub(super) fn start_fresh_session(&self) -> FreshSessionOutcome {
         let gate = self.management_gate();
         let _management = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous_session_id = self

@@ -58,7 +58,7 @@ pub struct AdapterError {
 
 /// Result of detaching an adapter from its current provider session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FreshSessionOutcome {
+pub(crate) enum FreshSessionOutcome {
     /// Provider-session bindings were cleared; the next request starts fresh.
     ///
     /// `previous_session_id` is the id we detached from, or `None` when no
@@ -388,7 +388,7 @@ impl AdapterInstance {
     /// Detaches the adapter from its current provider session so the next
     /// Agent request starts a fresh conversation, without deleting or
     /// rewriting any persisted session.
-    pub fn start_fresh_session(&self) -> FreshSessionOutcome {
+    pub(crate) fn start_fresh_session(&self) -> FreshSessionOutcome {
         match self {
             Self::ClaudeCode(adapter) => adapter.start_fresh_session(),
             Self::QwenCli(adapter) => adapter.start_fresh_session(),
