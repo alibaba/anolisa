@@ -26,6 +26,12 @@ pub(crate) fn cancel_ownership_for_event(
     if foreground_command_active && is_control_cancel_event(event) {
         return CancelOwnership::ForegroundCommand;
     }
+    if is_control_esc_event(event) {
+        if state.agent_run.active.is_some() {
+            return CancelOwnership::ActiveAgentTurn;
+        }
+        return CancelOwnership::NotCancel;
+    }
     if is_approval_card_cancel_event(event) {
         return CancelOwnership::ActiveApprovalCard;
     }
@@ -199,6 +205,12 @@ fn is_control_cancel_event(event: &ShellEvent) -> bool {
         && event.input.as_deref() == Some("ctrl_c")
 }
 
+fn is_control_esc_event(event: &ShellEvent) -> bool {
+    event.kind == ShellEventKind::UserInputIntercepted
+        && event.component.as_deref() == Some("control")
+        && event.input.as_deref() == Some("esc")
+}
+
 fn is_approval_card_cancel_event(event: &ShellEvent) -> bool {
     event.component.as_deref() == Some("card")
         && event
@@ -302,6 +314,36 @@ mod tests {
     }
 
     #[test]
+    fn control_esc_cancels_active_agent_run() {
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run());
+        let mut output = Vec::new();
+
+        render_agent_cancel_actions(&[control_esc()], &[], &mut state, &mut output, 0)
+            .expect("render ESC agent cancel");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(state.agent_run.active.is_none());
+        assert!(
+            rendered.contains("Agent cancellation requested"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Details: provider-cancel-1"));
+    }
+
+    #[test]
+    fn control_esc_without_active_run_is_ignored() {
+        let mut state = InlineState::default();
+        let mut output = Vec::new();
+
+        render_agent_cancel_actions(&[control_esc()], &[], &mut state, &mut output, 0)
+            .expect("render ESC with no active run");
+
+        assert!(state.agent_run.active.is_none());
+        assert!(output.is_empty());
+    }
+
+    #[test]
     fn cancel_ownership_classifies_foreground_cards_agent_and_prompt() {
         let mut state = InlineState::default();
         assert_eq!(
@@ -346,6 +388,12 @@ mod tests {
 
     fn control_ctrl_c() -> ShellEvent {
         let mut event = ShellEvent::user_input_intercepted("session-1", "ctrl_c");
+        event.component = Some("control".to_string());
+        event
+    }
+
+    fn control_esc() -> ShellEvent {
+        let mut event = ShellEvent::user_input_intercepted("session-1", "esc");
         event.component = Some("control".to_string());
         event
     }

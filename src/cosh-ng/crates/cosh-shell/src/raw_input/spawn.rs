@@ -20,9 +20,10 @@ use super::relay::{
     relay_prompt_ghost_input, send_held_input_events, send_raw_input_events, ExplicitExitTracker,
     InputRelayContext,
 };
-use super::{PromptGhostRoute, RawInputEvent, RawRelayAction};
+use super::{PromptGhostRoute, RawInputEvent, RawRelayAction, ESC};
 
 const PROMPT_GHOST_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
+const DELAY_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 // Retain a complete split Shift+Tab sequence while the relay handles ESC.
 const INPUT_READ_AHEAD_CAPACITY: usize = 3;
 
@@ -43,6 +44,11 @@ impl PendingPromptGhostEscape {
     }
 }
 
+struct PendingDelayEscape {
+    bytes: Vec<u8>,
+    deadline: Instant,
+}
+
 #[derive(Default)]
 pub(super) struct RawInputRelayState {
     card_state: CardInputState,
@@ -50,6 +56,7 @@ pub(super) struct RawInputRelayState {
     native_line_state: NativeLineState,
     exit_tracker: ExplicitExitTracker,
     pending_prompt_ghost_escape: Option<PendingPromptGhostEscape>,
+    pending_delay_escape: Option<PendingDelayEscape>,
 }
 
 enum InputRead {
@@ -82,6 +89,15 @@ where
                 Ok(input) => input,
                 Err(RecvTimeoutError::Timeout) => {
                     flush_pending_prompt_ghost_escape(
+                        false,
+                        Instant::now(),
+                        &mut master,
+                        &input_events,
+                        &input_classifier,
+                        &input_mode,
+                        &mut state,
+                    )?;
+                    flush_pending_delay_escape(
                         false,
                         Instant::now(),
                         &mut master,
@@ -146,11 +162,24 @@ fn receive_input(
     receiver: &Receiver<InputRead>,
     state: &RawInputRelayState,
 ) -> Result<InputRead, RecvTimeoutError> {
-    match state.pending_prompt_ghost_escape.as_ref() {
-        Some(pending) => {
-            receiver.recv_timeout(pending.deadline.saturating_duration_since(Instant::now()))
-        }
+    match next_pending_deadline(state) {
+        Some(deadline) => receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())),
         None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+    }
+}
+
+fn next_pending_deadline(state: &RawInputRelayState) -> Option<Instant> {
+    match (
+        state
+            .pending_prompt_ghost_escape
+            .as_ref()
+            .map(|p| p.deadline),
+        state.pending_delay_escape.as_ref().map(|p| p.deadline),
+    ) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -213,6 +242,49 @@ pub(super) fn relay_input_bytes(
         bytes
     };
 
+    let mut delay_combined = Vec::new();
+    let bytes = if let Some(pending) = state.pending_delay_escape.take() {
+        if !matches!(mode, RawInputMode::Delay) {
+            // The active agent run finished while ESC was pending; forward it.
+            relay_input_for_mode(
+                &pending.bytes,
+                mode,
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+            )?;
+            return relay_input_bytes(
+                bytes,
+                received_at,
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+            );
+        }
+        if received_at > pending.deadline {
+            // Bare ESC while an agent run is active: request cancellation.
+            let _ = input_events.send(RawInputEvent::Esc);
+            return relay_input_bytes(
+                bytes,
+                received_at,
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+            );
+        }
+        delay_combined.extend_from_slice(&pending.bytes);
+        delay_combined.extend_from_slice(bytes);
+        &delay_combined
+    } else {
+        bytes
+    };
+
     if let RawInputMode::PromptGhost {
         text,
         route: route @ PromptGhostRoute::AgentSelection { .. },
@@ -227,6 +299,14 @@ pub(super) fn relay_input_bytes(
             });
             return Ok(());
         }
+    }
+
+    if matches!(mode, RawInputMode::Delay) && bytes.len() == 1 && bytes[0] == ESC {
+        state.pending_delay_escape = Some(PendingDelayEscape {
+            bytes: bytes.to_vec(),
+            deadline: received_at + DELAY_ESCAPE_TIMEOUT,
+        });
+        return Ok(());
     }
 
     relay_input_for_mode(
@@ -351,6 +431,41 @@ fn flush_pending_prompt_ghost_escape(
     )
 }
 
+fn flush_pending_delay_escape(
+    force: bool,
+    now: Instant,
+    master: &mut File,
+    input_events: &Sender<RawInputEvent>,
+    input_classifier: &InputClassifier,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &mut RawInputRelayState,
+) -> io::Result<()> {
+    let should_flush = state
+        .pending_delay_escape
+        .as_ref()
+        .is_some_and(|pending| force || now >= pending.deadline);
+    if !should_flush {
+        return Ok(());
+    }
+    let Some(pending) = state.pending_delay_escape.take() else {
+        return Ok(());
+    };
+    let mode = current_raw_input_mode(input_mode);
+    if matches!(mode, RawInputMode::Delay) {
+        let _ = input_events.send(RawInputEvent::Esc);
+        return Ok(());
+    }
+    relay_input_for_mode(
+        &pending.bytes,
+        mode,
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+    )
+}
+
 pub(super) fn finish_input_relay(
     master: &mut File,
     input_events: &Sender<RawInputEvent>,
@@ -359,6 +474,15 @@ pub(super) fn finish_input_relay(
     state: &mut RawInputRelayState,
 ) -> io::Result<()> {
     flush_pending_prompt_ghost_escape(
+        true,
+        Instant::now(),
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+    )?;
+    flush_pending_delay_escape(
         true,
         Instant::now(),
         master,
@@ -382,17 +506,22 @@ fn wait_for_raw_action(
     state: &mut RawInputRelayState,
 ) -> io::Result<()> {
     let action_end = Instant::now() + duration;
-    while let Some(deadline) = state
-        .pending_prompt_ghost_escape
-        .as_ref()
-        .map(|pending| pending.deadline)
-    {
+    while let Some(deadline) = next_pending_deadline(state) {
         if deadline > action_end {
             break;
         }
         thread::sleep(deadline.saturating_duration_since(Instant::now()));
         // Scripted input must resolve ESC at the same boundary as live input.
         flush_pending_prompt_ghost_escape(
+            false,
+            Instant::now(),
+            master,
+            input_events,
+            input_classifier,
+            input_mode,
+            state,
+        )?;
+        flush_pending_delay_escape(
             false,
             Instant::now(),
             master,

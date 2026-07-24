@@ -133,6 +133,131 @@ impl SelectionRelay {
     }
 }
 
+struct DelayRelay {
+    path: std::path::PathBuf,
+    master: File,
+    input_tx: Option<mpsc::Sender<Vec<u8>>>,
+    event_rx: mpsc::Receiver<RawInputEvent>,
+    input_mode: Arc<Mutex<RawInputMode>>,
+    relay: thread::JoinHandle<io::Result<()>>,
+}
+
+impl DelayRelay {
+    fn start(label: &str) -> Self {
+        let (path, master) = output_file(label);
+        let (input_tx, input_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Delay));
+        let relay = super::super::spawn_raw_input_relay(
+            ChannelReader {
+                receiver: input_rx,
+                pending: Vec::new(),
+            },
+            master.try_clone().expect("clone output file"),
+            event_tx,
+            InputClassifier::default(),
+            input_mode.clone(),
+        );
+        Self {
+            path,
+            master,
+            input_tx: Some(input_tx),
+            event_rx,
+            input_mode,
+            relay,
+        }
+    }
+
+    fn send(&self, bytes: &[u8]) {
+        self.input_tx
+            .as_ref()
+            .expect("input sender")
+            .send(bytes.to_vec())
+            .expect("send input");
+    }
+
+    fn finish(mut self) -> (Vec<RawInputEvent>, Vec<u8>, RawInputMode) {
+        self.input_tx.take();
+        self.relay
+            .join()
+            .expect("relay thread")
+            .expect("relay result");
+        self.master.sync_all().expect("sync test output");
+        let output = fs::read(&self.path).expect("read test output");
+        fs::remove_file(&self.path).ok();
+        let mode = self.input_mode.lock().expect("input mode").clone();
+        (self.event_rx.try_iter().collect(), output, mode)
+    }
+}
+
+fn expect_esc_event(receiver: &mpsc::Receiver<RawInputEvent>) {
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_millis(250)),
+        Ok(RawInputEvent::Esc),
+        "expected Esc cancel event"
+    );
+}
+
+#[test]
+fn delay_bare_escape_requests_cancel_and_does_not_forward() {
+    let relay = DelayRelay::start("delay-bare-escape");
+    relay.send(b"\x1b");
+    expect_esc_event(&relay.event_rx);
+    let (events, output, mode) = relay.finish();
+    assert!(
+        !events.contains(&RawInputEvent::CtrlC),
+        "unexpected CtrlC event"
+    );
+    assert_eq!(output, b"exit\n");
+    assert!(matches!(mode, RawInputMode::Delay));
+}
+
+#[test]
+fn delay_escape_sequence_is_forwarded_without_cancel() {
+    let relay = DelayRelay::start("delay-escape-sequence");
+    relay.send(b"\x1b[A");
+    thread::sleep(Duration::from_millis(100));
+    let (events, output, mode) = relay.finish();
+    assert!(
+        !events.contains(&RawInputEvent::Esc),
+        "unexpected Esc event for arrow sequence"
+    );
+    assert_eq!(output, b"\x1b[Aexit\n");
+    assert!(matches!(mode, RawInputMode::Delay));
+}
+
+#[test]
+fn delay_split_escape_sequence_is_forwarded_without_cancel() {
+    let relay = DelayRelay::start("delay-split-escape-sequence");
+    relay.send(b"\x1b");
+    thread::sleep(Duration::from_millis(10));
+    relay.send(b"[A");
+    thread::sleep(Duration::from_millis(100));
+    let (events, output, mode) = relay.finish();
+    assert!(
+        !events.contains(&RawInputEvent::Esc),
+        "unexpected Esc event for split arrow sequence"
+    );
+    assert_eq!(output, b"\x1b[Aexit\n");
+    assert!(matches!(mode, RawInputMode::Delay));
+}
+
+#[test]
+fn delay_escape_is_forwarded_when_run_finishes_before_deadline() {
+    let relay = DelayRelay::start("delay-escape-run-finishes");
+    relay.send(b"\x1b");
+    thread::sleep(Duration::from_millis(10));
+    *relay.input_mode.lock().expect("input mode") = RawInputMode::Passthrough;
+    relay.send(b"x");
+    let (events, output, mode) = relay.finish();
+    assert!(
+        !events.contains(&RawInputEvent::Esc),
+        "unexpected Esc event after run finished"
+    );
+    assert_eq!(output, b"\x1bxexit\n");
+    assert!(matches!(mode, RawInputMode::Passthrough));
+}
+
 #[test]
 fn selection_bare_escape_times_out_without_waiting_for_another_key() {
     let (path, master) = output_file("selection-bare-escape");

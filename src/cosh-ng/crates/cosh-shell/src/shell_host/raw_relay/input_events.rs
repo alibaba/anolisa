@@ -21,6 +21,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 parser.push_shell_input_activity_event(empty)
             }
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
+            RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::CandidateRedraw { input, hint } => {
                 if native_mode {
                     if input.len() >= *native_candidate_echoed_len {

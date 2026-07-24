@@ -19,6 +19,7 @@ pub(crate) use spawn::{spawn_raw_action_relay, spawn_raw_input_relay};
 
 pub(super) const CTRL_C: u8 = 0x03;
 pub(super) const CTRL_U: u8 = 0x15;
+pub(super) const ESC: u8 = 0x1b;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawInputEvent {
@@ -26,6 +27,7 @@ pub(crate) enum RawInputEvent {
         empty: bool,
     },
     CtrlC,
+    Esc,
     CandidateRedraw {
         input: Vec<u8>,
         hint: Option<String>,
