@@ -85,40 +85,56 @@ fn approval_panel_high_risk_shows_reason_continuation_line() {
 #[test]
 fn approval_panel_high_risk_continuation_wraps_within_narrow_width() {
     // Review follow-up: full-card width contract for the continuation line,
-    // not just the phrase-level budget (validation.md S2).
-    let renderer = RatatuiInlineRenderer::with_width(60);
-    let phrase = crate::ui::card_reason_phrase(
-        "high",
-        "service-or-container-control",
-        crate::I18n::new(crate::Language::EnUs),
-    )
-    .expect("whitelisted high-risk phrase");
-    let text = renderer
-        .approval_panel_lines(ApprovalPanelModel {
-            id: "req-9",
-            kind: "tool request",
-            risk: "high",
-            reason: Some(&phrase),
-            subject: "tool Bash",
-            preview_label: "Tool input",
-            preview: "kubectl delete pod payments --grace-period=0",
-            queue_position: 1,
-            queue_total: 1,
-            next_label: None,
-            selected_action: ApprovalPanelAction::Approve,
-            expanded: false,
-            hook_warnings: Vec::new(),
-        })
-        .join("\n");
+    // not just the phrase-level budget (validation.md S2), in both catalogs
+    // with the widest phrase of each language.
+    for (language, code, expected_label) in [
+        (
+            crate::Language::EnUs,
+            "service-or-container-control",
+            "\u{2514} Risk:",
+        ),
+        (
+            crate::Language::ZhCn,
+            "interactive-editor",
+            "\u{2514} 风险:",
+        ),
+    ] {
+        let renderer = RatatuiInlineRenderer::with_width(60).with_language(language);
+        let phrase = crate::ui::card_reason_phrase("high", code, crate::I18n::new(language))
+            .expect("whitelisted high-risk phrase");
+        assert!(
+            crate::ui::agent_render::display_width(&phrase)
+                <= crate::ui::CARD_REASON_PHRASE_MAX_WIDTH,
+            "{language:?} phrase exceeds SDD budget: {phrase}"
+        );
+        let text = renderer
+            .approval_panel_lines(ApprovalPanelModel {
+                id: "req-9",
+                kind: "tool request",
+                risk: "high",
+                reason: Some(&phrase),
+                subject: "tool Bash",
+                preview_label: "Tool input",
+                preview: "kubectl delete pod payments --grace-period=0",
+                queue_position: 1,
+                queue_total: 1,
+                next_label: None,
+                selected_action: ApprovalPanelAction::Approve,
+                expanded: false,
+                hook_warnings: Vec::new(),
+            })
+            .join("\n");
 
-    assert!(text.contains("\u{2514} Risk:"), "{text}");
-    assert_rendered_width(&text, 60);
+        assert!(text.contains(expected_label), "{language:?}: {text}");
+        assert_rendered_width(&text, 60);
+    }
 }
 
 #[test]
-fn approval_panel_unknown_risk_value_passes_through_without_panic() {
-    // Review follow-up: legacy_risk() is a closed low/medium/high domain; an
-    // unknown value must render verbatim (defensive pass-through contract).
+fn approval_panel_unknown_risk_value_falls_back_to_localized_label() {
+    // Review follow-up: values outside the closed legacy_risk() domain must
+    // render a neutral localized badge instead of leaking the raw string
+    // into a mixed-language metadata row.
     let renderer = RatatuiInlineRenderer::with_width(120).with_language(crate::Language::ZhCn);
     let text = renderer
         .approval_panel_lines(ApprovalPanelModel {
@@ -138,8 +154,8 @@ fn approval_panel_unknown_risk_value_passes_through_without_panic() {
         })
         .join("\n");
 
-    assert!(text.contains("Bash · critical"), "{text}");
-    assert!(!text.contains("风险 critical"), "{text}");
+    assert!(text.contains("Bash · 未知风险"), "{text}");
+    assert!(!text.contains("critical"), "{text}");
     assert_rendered_width(&text, 120);
 }
 

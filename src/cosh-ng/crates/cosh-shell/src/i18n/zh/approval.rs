@@ -126,6 +126,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseCommandSubstitution => "命令替换语法",
         MessageId::ApprovalRiskPhraseRedirectionWrite => "重定向写文件",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk 执行外部命令",
+        MessageId::ApprovalRiskLevelUnknown => "未知风险",
         _ => return None,
     })
 }

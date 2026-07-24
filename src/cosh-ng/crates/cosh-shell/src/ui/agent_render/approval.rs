@@ -753,16 +753,16 @@ fn approval_reason_styled_lines(
 }
 
 /// Localized risk badge value (ARP-R7): high/medium/low map to i18n labels;
-/// unknown values pass through unchanged.
+/// values outside the closed `legacy_risk()` domain fall back to a neutral
+/// localized label so the badge never mixes languages (review follow-up).
 fn risk_level_label(risk: &str, i18n: crate::I18n) -> String {
-    match risk {
-        "high" => i18n.t(crate::MessageId::ApprovalRiskLevelHigh).to_string(),
-        "medium" => i18n
-            .t(crate::MessageId::ApprovalRiskLevelMedium)
-            .to_string(),
-        "low" => i18n.t(crate::MessageId::ApprovalRiskLevelLow).to_string(),
-        other => other.to_string(),
-    }
+    let id = match risk {
+        "high" => crate::MessageId::ApprovalRiskLevelHigh,
+        "medium" => crate::MessageId::ApprovalRiskLevelMedium,
+        "low" => crate::MessageId::ApprovalRiskLevelLow,
+        _ => crate::MessageId::ApprovalRiskLevelUnknown,
+    };
+    i18n.t(id).to_string()
 }
 
 /// Metadata-row queue suffix, only rendered when more than one card is pending.

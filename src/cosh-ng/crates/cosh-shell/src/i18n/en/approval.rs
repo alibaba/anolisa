@@ -142,6 +142,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseCommandSubstitution => "command substitution",
         MessageId::ApprovalRiskPhraseRedirectionWrite => "write redirection",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk shell execution",
+        MessageId::ApprovalRiskLevelUnknown => "unknown risk",
         _ => return None,
     })
 }

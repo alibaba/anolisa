@@ -120,6 +120,7 @@ macro_rules! approval_reason_ids {
             ApprovalRiskPhraseCommandSubstitution,
             ApprovalRiskPhraseRedirectionWrite,
             ApprovalRiskPhraseAwkShellExecution,
+            ApprovalRiskLevelUnknown,
         );
     };
 }

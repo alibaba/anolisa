@@ -1,5 +1,11 @@
 use crate::tools::command_risk::HIGH_RISK_EXPLANATION_REASONS;
 
+/// Display-width budget for card risk phrases (ARP SDD validation.md S2:
+/// <= 32 columns / 16 fullwidth chars). Referenced by the exhaustive i18n
+/// test below and by full-card rendering tests so the budget cannot drift
+/// from the SDD contract.
+pub(crate) const CARD_REASON_PHRASE_MAX_WIDTH: usize = 32;
+
 /// Card-facing reason policy (ARP SDD design.md §2).
 ///
 /// Returns the natural-language risk phrase for the approval card
@@ -56,7 +62,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("missing phrase for {code} ({language:?})"));
                 assert_ne!(&phrase, code, "phrase must not echo the raw code: {code}");
                 assert!(
-                    display_width(&phrase) <= 32,
+                    display_width(&phrase) <= CARD_REASON_PHRASE_MAX_WIDTH,
                     "phrase too wide for {code} ({language:?}): {phrase}"
                 );
             }
