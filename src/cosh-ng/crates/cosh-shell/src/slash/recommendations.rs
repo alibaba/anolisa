@@ -76,17 +76,27 @@ fn set_enabled<W: Write>(
         output,
         result.map(|_| {
             if enabled {
-                localized(
+                vec![localized(
                     &state.i18n(),
                     "Prompt recommendations are on.",
                     "已开启个性化提示词推荐。",
                 )
+                .to_string()]
             } else {
-                localized(
-                    &state.i18n(),
-                    "Prompt recommendations are off and local recommendation data was cleared.",
-                    "已关闭提示词推荐，并清理本地推荐数据。",
-                )
+                vec![
+                    localized(
+                        &state.i18n(),
+                        "Prompt recommendations are off and local recommendation data was cleared.",
+                        "已关闭提示词推荐，并清理本地推荐数据。",
+                    )
+                    .to_string(),
+                    localized(
+                        &state.i18n(),
+                        "Command failure insights are controlled separately with /mode analysis.",
+                        "失败命令 Insight 由 /mode analysis 单独控制。",
+                    )
+                    .to_string(),
+                ]
             }
         }),
     )
@@ -120,17 +130,19 @@ fn clear<W: Write>(
         output,
         result.map(|recovered| {
             if recovered {
-                localized(
+                vec![localized(
                     &state.i18n(),
                     "Damaged recommendation data was reset. Recommendations are off; run /recommendations on to enable them.",
                     "已重置损坏的推荐数据。推荐当前关闭，可运行 /recommendations on 开启。",
                 )
+                .to_string()]
             } else {
-                localized(
+                vec![localized(
                     &state.i18n(),
                     "Local recommendation data was cleared. Your on/off setting was kept.",
                     "已清理本地推荐数据，并保留当前开关设置。",
                 )
+                .to_string()]
             }
         }),
     )
@@ -314,25 +326,20 @@ fn render_usage<W: Write>(state: &InlineState, output: &mut W) -> std::io::Resul
     )
 }
 
-fn render_result<W: Write, T: Into<String>>(
+fn render_result<W: Write>(
     state: &InlineState,
     output: &mut W,
-    result: Result<T, impl std::fmt::Display>,
+    result: Result<Vec<String>, impl std::fmt::Display>,
 ) -> std::io::Result<()> {
     let body = match result {
-        Ok(message) => message.into(),
-        Err(error) => localized_owned(
+        Ok(lines) => lines,
+        Err(error) => vec![localized_owned(
             &state.i18n(),
             format!("Recommendation operation failed: {error}"),
             format!("推荐操作失败：{error}"),
-        ),
+        )],
     };
-    render_notice_panel(
-        output,
-        recommendations_title(&state.i18n()),
-        vec![body],
-        None,
-    )
+    render_notice_panel(output, recommendations_title(&state.i18n()), body, None)
 }
 
 fn recommendations_title(i18n: &I18n) -> &'static str {
@@ -420,6 +427,133 @@ mod tests {
         for hidden in ["gate4", "http://", "https://", "provider_id"] {
             assert!(!text.contains(hidden));
         }
+    }
+
+    #[test]
+    fn off_panel_points_to_mode_analysis_for_failure_insights() {
+        let root = std::env::temp_dir().join(format!(
+            "cosh-slash-off-hint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime =
+            crate::recommendation::personal_runtime::PersonalRuntime::open(true, &root, 1).unwrap();
+        let mut state = crate::runtime::state::InlineState {
+            personalization: crate::recommendation::personal_state::PersonalizationState {
+                store_root: Some(root.clone()),
+                configured_enabled: true,
+                writer: Some(runtime.spawn_writer().unwrap()),
+                ..Default::default()
+            },
+            ..crate::runtime::state::InlineState::default()
+        };
+        let mut output = Vec::new();
+
+        render_recommendations_command(
+            Some("off"),
+            None,
+            None,
+            &crate::types::ShellEvent::user_input_intercepted(
+                "test-session",
+                "/recommendations off",
+            ),
+            &AdapterInstance::Fake(FakeAgentAdapter),
+            &mut state,
+            &mut output,
+        )
+        .unwrap();
+
+        let raw = String::from_utf8(output).unwrap();
+        let normalized = raw
+            .replace(['│', '╭', '╮', '╰', '╯', '─'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            normalized.contains(
+                "Prompt recommendations are off and local recommendation data was cleared."
+            ),
+            "panel output: {normalized}"
+        );
+        assert!(
+            normalized.contains(
+                "Command failure insights are controlled separately with /mode analysis."
+            ),
+            "panel output: {normalized}"
+        );
+
+        let mut writer = state.personalization.writer.take().unwrap();
+        writer
+            .shutdown(1, std::time::Duration::from_secs(1))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn off_panel_hint_stays_accurate_in_manual_mode() {
+        // In Manual mode failure insights are already silenced, so the hint
+        // must stay state-agnostic instead of claiming insights are on.
+        let root = std::env::temp_dir().join(format!(
+            "cosh-slash-off-hint-manual-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime =
+            crate::recommendation::personal_runtime::PersonalRuntime::open(true, &root, 1).unwrap();
+        let mut state = crate::runtime::state::InlineState {
+            analysis_mode: crate::runtime::state::AnalysisMode::Manual,
+            personalization: crate::recommendation::personal_state::PersonalizationState {
+                store_root: Some(root.clone()),
+                configured_enabled: true,
+                writer: Some(runtime.spawn_writer().unwrap()),
+                ..Default::default()
+            },
+            ..crate::runtime::state::InlineState::default()
+        };
+        let mut output = Vec::new();
+
+        render_recommendations_command(
+            Some("off"),
+            None,
+            None,
+            &crate::types::ShellEvent::user_input_intercepted(
+                "test-session",
+                "/recommendations off",
+            ),
+            &AdapterInstance::Fake(FakeAgentAdapter),
+            &mut state,
+            &mut output,
+        )
+        .unwrap();
+
+        let raw = String::from_utf8(output).unwrap();
+        let normalized = raw
+            .replace(['│', '╭', '╮', '╰', '╯', '─'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            normalized.contains(
+                "Command failure insights are controlled separately with /mode analysis."
+            ),
+            "panel output: {normalized}"
+        );
+        assert!(
+            !normalized.contains("stay on"),
+            "panel output: {normalized}"
+        );
+
+        let mut writer = state.personalization.writer.take().unwrap();
+        writer
+            .shutdown(1, std::time::Duration::from_secs(1))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -70,7 +70,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Only a narrow set of high-confidence failures auto-starts Agent analysis; other cases remain suggestions."
         }
         MessageId::AnalysisModeManualFooter => {
-            "Passive suggestions and automatic analysis are off; use slash commands to trigger analysis."
+            "Passive suggestions, failure insights, and automatic analysis are off; use slash commands to trigger analysis. Personalized prompt recommendations also pause; manage them with /recommendations."
         }
         MessageId::AnalysisModeCardSmartLine => {
             "{marker}[ smart  ] Suggested mode (recommended)"

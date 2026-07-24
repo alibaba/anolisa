@@ -12,11 +12,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryAuth => "configure AI provider credentials",
         MessageId::HelpSummaryConfig => "configure UI language",
         MessageId::HelpSummaryRecommendations => {
-            "manage recommendations; analysis sends bounded activity to the provider, and local clear does not control provider retention"
+            "manage personalized prompt recommendations only (failure insights: /mode analysis); analysis sends bounded activity to the provider, and local clear does not control provider retention"
         }
         MessageId::HelpSummaryModeApproval => "change approval mode",
         MessageId::HelpSummaryModeAnalysis => {
-            "choose suggested mode, automatic analysis, or no proactive assistance"
+            "choose suggested mode, automatic analysis, or no proactive assistance; controls passive suggestions and failure insights after failed commands"
         }
         MessageId::HelpSummaryAgent => "start an explicit Agent request",
         MessageId::HelpSummaryExplain => "analyze the last failed command",

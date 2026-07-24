@@ -213,4 +213,47 @@ mod tests {
             "不支持带引号的参数。本例请改用 /mode approval trust confirm。"
         );
     }
+
+    #[test]
+    fn help_and_mode_messages_distinguish_recommendation_and_insight_scopes() {
+        let en = I18n::new(Language::EnUs);
+        let zh = I18n::new(Language::ZhCn);
+
+        // /help: /recommendations is scoped to personalization only and points to /mode analysis.
+        assert!(en
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("personalized prompt recommendations only"));
+        assert!(en
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("/mode analysis"));
+        assert!(zh
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("仅管理个性化提示词推荐"));
+        assert!(zh
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("/mode analysis"));
+
+        // /help: /mode analysis owns passive suggestions and failure insights.
+        assert!(en
+            .t(MessageId::HelpSummaryModeAnalysis)
+            .contains("failure insights"));
+        assert!(zh
+            .t(MessageId::HelpSummaryModeAnalysis)
+            .contains("失败命令 Insight"));
+
+        // /mode analysis manual: footer states insight scope and the asymmetric
+        // pause of personalized recommendations.
+        assert!(en
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("failure insights"));
+        assert!(en
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("/recommendations"));
+        assert!(zh
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("失败命令 Insight"));
+        assert!(zh
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("/recommendations"));
+    }
 }

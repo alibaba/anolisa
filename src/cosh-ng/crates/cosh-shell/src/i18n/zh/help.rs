@@ -12,10 +12,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryAuth => "配置 AI 服务商凭证",
         MessageId::HelpSummaryConfig => "配置界面语言",
         MessageId::HelpSummaryRecommendations => {
-            "管理个性化提示词推荐；分析会向服务商发送有界活动，本地 clear 不控制服务商侧保留"
+            "仅管理个性化提示词推荐（失败命令 Insight 由 /mode analysis 控制）；分析会向服务商发送有界活动，本地 clear 不控制服务商侧保留"
         }
         MessageId::HelpSummaryModeApproval => "切换审批模式",
-        MessageId::HelpSummaryModeAnalysis => "选择建议模式、自动分析或关闭主动介入",
+        MessageId::HelpSummaryModeAnalysis => {
+            "选择建议模式、自动分析或关闭主动介入；控制被动建议与失败命令 Insight"
+        }
         MessageId::HelpSummaryAgent => "发起明确的 Agent 请求",
         MessageId::HelpSummaryExplain => "分析上一个失败命令",
         MessageId::HelpSummaryCancel => "取消正在运行的 Agent 工作",

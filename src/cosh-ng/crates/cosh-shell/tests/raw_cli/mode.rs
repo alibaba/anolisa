@@ -218,8 +218,18 @@ fn raw_cli_mode_approval_and_analysis_use_zh_language_env() {
         output.contains("仅对少量高置信故障自动触发 Agent 分析；其他情况仍先提示。"),
         "{output}"
     );
+    let manual_footer = output
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        output.contains("已关闭被动建议和自动分析；使用 slash 命令手动触发。"),
+        manual_footer
+            .contains("已关闭被动建议、失败命令 Insight 和自动分析；使用 slash 命令手动触发。"),
+        "{output}"
+    );
+    assert!(
+        manual_footer.contains("个性化提示词推荐同时暂停，可用 /recommendations 管理。"),
         "{output}"
     );
     assert!(!output.contains("bash: /mode"), "{output}");
