@@ -531,6 +531,20 @@ fn execute_planned(
             .as_ref()
             .map(|r| r.entry.version.clone())
             .or_else(|| args.version.clone());
+
+        // Dry-run must detect component conflicts so `install --dry-run` and
+        // a real `install` agree on the conflict conclusion. The contract
+        // validation (including component_conflict) is side-effect free
+        // outside the download cache, so it is safe to run in dry-run mode.
+        if let Some(resolution) = resolution {
+            // validate_owned_install downloads the artifact, verifies its
+            // digest, parses the embedded manifest, and checks for
+            // component conflicts — all side-effect free outside the
+            // download cache. If a conflict is found it returns
+            // INVALID_ARGUMENT, which the caller surfaces as an error.
+            let _ = validate_owned_install(ctx, &layout, &store, resolution, &command)?;
+        }
+
         let mut payload = InstallResultPayload {
             component,
             package: native_package,

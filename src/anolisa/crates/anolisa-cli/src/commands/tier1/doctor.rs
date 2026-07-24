@@ -1263,6 +1263,10 @@ fn add_rpm_drift(
             &out.name,
             "backfill RPM package metadata from rpmdb",
         ));
+        out.fix_plan.push(simple_repair_suggestion(
+            &out.name,
+            "backfill RPM package metadata from rpmdb",
+        ));
         return;
     };
     match status::probe_rpm_drift(package, recorded_evr, rpm_query) {
@@ -1288,6 +1292,10 @@ fn add_rpm_drift(
                 out.remediation_scope,
                 "repair_state",
                 "repair",
+                &out.name,
+                "refresh ANOLISA state from rpmdb",
+            ));
+            out.fix_plan.push(simple_repair_suggestion(
                 &out.name,
                 "refresh ANOLISA state from rpmdb",
             ));
@@ -2068,6 +2076,18 @@ fn component_suggestion(
         Some(common::scoped_component_command_for_mode(
             mode, operation, component,
         )),
+        reason,
+    )
+}
+
+/// A simplified repair suggestion that uses the bare `anolisa repair <comp>`
+/// form (no `--install-mode` prefix). The `repair` command auto-detects the
+/// install scope from the recorded state, so the scoped form is redundant
+/// for user-facing fix_plan hints.
+fn simple_repair_suggestion(component: &str, reason: impl Into<String>) -> FixSuggestion {
+    suggestion(
+        "repair_state",
+        Some(format!("anolisa repair {component}")),
         reason,
     )
 }
