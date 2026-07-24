@@ -241,10 +241,17 @@ class TestReplacementProtocol(unittest.TestCase):
 
         # The mock compressor truncates strings > 20 chars, so stdout should
         # be truncated. Verify the compressed content is present and parseable.
-        try:
-            compressed_data = json.loads(replacement)
-        except (json.JSONDecodeError, TypeError):
-            self.fail(f"updatedToolOutput should be valid JSON, got: {replacement!r}")
+        # Note: updatedToolOutput may be a JSON string or already-parsed dict
+        # depending on how the hook encodes it.
+        if isinstance(replacement, str):
+            try:
+                compressed_data = json.loads(replacement)
+            except json.JSONDecodeError:
+                self.fail(f"updatedToolOutput should be valid JSON, got: {replacement!r}")
+        elif isinstance(replacement, (dict, list)):
+            compressed_data = replacement
+        else:
+            self.fail(f"updatedToolOutput unexpected type: {type(replacement)}")
 
         # Verify stdout field was compressed (truncated to 20 chars by mock)
         self.assertIn("stdout", compressed_data,
