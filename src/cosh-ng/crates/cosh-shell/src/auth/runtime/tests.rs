@@ -2,11 +2,12 @@
 
 use super::{
     apply_aliyun_prepare, begin_sysom_shortcut, clear_ecs_auth_source_for_manual_aliyun_edit,
+    clear_observed_model_after_provider_change, clear_observed_model_after_provider_delete,
     ecs_ram_role_prepare, handle_auth_answer, management_entry, render_auth_card_actions,
     should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
     should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
-    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, EcsRamRolePrepare,
-    ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
+    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, DeleteConfirmationOutcome,
+    EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
 };
 use crate::adapter::{AdapterInstance, FakeAgentAdapter};
 use crate::auth::capture::auth_capture_id;
@@ -303,6 +304,73 @@ fn active_run_aliyun_selection_can_prepare_without_provider_id_field() {
         "aliyun",
         Some("provider_id"),
     ));
+}
+
+#[test]
+fn provider_change_discards_the_previous_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("previous-provider-model".to_string());
+
+    clear_observed_model_after_provider_change(&mut state);
+
+    assert_eq!(state.personalization.foreground_model, None);
+}
+
+#[test]
+fn deleting_the_active_provider_with_a_fallback_discards_the_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("deleted-provider-model".to_string());
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".to_string(),
+        needs_reselection: false,
+    };
+
+    clear_observed_model_after_provider_delete(&mut state, true, &outcome);
+
+    assert_eq!(state.personalization.foreground_model, None);
+}
+
+#[test]
+fn deleting_the_active_provider_without_a_fallback_discards_the_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("deleted-provider-model".to_string());
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".to_string(),
+        needs_reselection: true,
+    };
+
+    clear_observed_model_after_provider_delete(&mut state, true, &outcome);
+
+    assert_eq!(state.personalization.foreground_model, None);
+}
+
+#[test]
+fn cancelling_or_deleting_an_inactive_provider_keeps_the_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("active-provider-model".to_string());
+
+    clear_observed_model_after_provider_delete(
+        &mut state,
+        true,
+        &DeleteConfirmationOutcome::Cancelled,
+    );
+    assert_eq!(
+        state.personalization.foreground_model.as_deref(),
+        Some("active-provider-model")
+    );
+
+    clear_observed_model_after_provider_delete(
+        &mut state,
+        false,
+        &DeleteConfirmationOutcome::Deleted {
+            provider_name: "inactive-provider".to_string(),
+            needs_reselection: false,
+        },
+    );
+    assert_eq!(
+        state.personalization.foreground_model.as_deref(),
+        Some("active-provider-model")
+    );
 }
 
 #[test]

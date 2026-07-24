@@ -9,7 +9,7 @@ use crate::auth::capture::matches_auth_capture;
 use crate::auth::completion::finish_auth_configuration;
 use crate::auth::delete_confirm::{
     begin_delete_confirmation, focus_delete_confirmation, render_delete_outcome,
-    submit_delete_confirmation,
+    submit_delete_confirmation, DeleteConfirmationOutcome,
 };
 use crate::auth::menu::{
     has_manageable_entries, management_entry, management_entry_count, management_entry_index,
@@ -207,6 +207,20 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
 
     render_current_auth_panel(state, output)?;
     Ok(())
+}
+
+fn clear_observed_model_after_provider_change(state: &mut InlineState) {
+    state.personalization.foreground_model = None;
+}
+
+fn clear_observed_model_after_provider_delete(
+    state: &mut InlineState,
+    deleted_provider_was_active: bool,
+    outcome: &DeleteConfirmationOutcome,
+) {
+    if deleted_provider_was_active && matches!(outcome, DeleteConfirmationOutcome::Deleted { .. }) {
+        clear_observed_model_after_provider_change(state);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,6 +424,7 @@ fn handle_auth_answer<W: std::io::Write>(
             match action {
                 ProviderAction::Activate => {
                     core_auth_activate(adapter, &existing.name).map_err(std::io::Error::other)?;
+                    clear_observed_model_after_provider_change(state);
                     // Clear and show confirmation
                     state.auth.state.take();
                     clear_active_auth_panel(state, output)?;
@@ -519,8 +534,17 @@ fn handle_auth_answer<W: std::io::Write>(
             Ok(true)
         }
         AuthPhase::ConfirmDelete { provider_idx } => {
+            let deleted_provider_was_active = auth
+                .existing_providers
+                .get(provider_idx)
+                .is_some_and(|provider| provider.is_active);
             let outcome = submit_delete_confirmation(adapter, auth, provider_idx)
                 .map_err(std::io::Error::other)?;
+            clear_observed_model_after_provider_delete(
+                state,
+                deleted_provider_was_active,
+                &outcome,
+            );
             clear_active_auth_panel(state, output)?;
             let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
             render_delete_outcome(&outcome, &renderer, output)?;
@@ -722,8 +746,12 @@ fn send_auth_response<W: std::io::Write>(
     };
 
     if let Some(active_run) = state.agent_run.active.as_ref() {
+        let result = active_run.handle.respond_auth(response);
+        if result.is_ok() {
+            clear_observed_model_after_provider_change(state);
+        }
         return finish_active_submission(
-            active_run.handle.respond_auth(response),
+            result,
             &auth.id,
             &mut state.auth.completed_ids,
             state.language,
@@ -751,6 +779,7 @@ fn send_auth_response<W: std::io::Write>(
                     render_current_auth_panel(state, output)?;
                     return Ok(());
                 }
+                clear_observed_model_after_provider_change(state);
             }
             AuthBackend::ActiveRun => {}
         }
