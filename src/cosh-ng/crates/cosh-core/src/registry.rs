@@ -918,6 +918,33 @@ mod tests {
     }
 
     #[test]
+    fn auth_configure_rejects_invalid_base_url_without_mutating_config() {
+        let mut config = CoreConfig::default();
+        let response = handle_auth(
+            "test-1",
+            "configure",
+            &serde_json::json!({
+                "provider_id": "bad-url",
+                "provider_type": "openai_compat",
+                "values": {
+                    "base_url": "error-testhttps://api.example.com/v1",
+                    "api_key": "sk-user",
+                    "model": "qwen-test"
+                }
+            }),
+            &mut config,
+        );
+
+        let OutputMessage::RegistryResponse { success, error, .. } = response else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert!(!success);
+        assert!(error.unwrap().contains("invalid base_url"));
+        assert!(config.ai.providers.is_empty());
+        assert!(config.user_ai.providers.is_empty());
+    }
+
+    #[test]
     fn auth_configure_rejects_system_provider_overwrite() {
         let mut config = CoreConfig::default();
         config.ai.providers.insert(

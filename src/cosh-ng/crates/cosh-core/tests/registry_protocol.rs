@@ -838,6 +838,37 @@ api_key = "sk-project"
 }
 
 #[test]
+fn registry_auth_configure_rejects_invalid_base_url_without_writing_config() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_path = home.path().join(".copilot-shell/config.toml");
+
+    let response = run_registry_request_with_context(
+        "auth",
+        "configure",
+        serde_json::json!({
+            "provider_id": "bad-url",
+            "provider_type": "openai_compat",
+            "values": {
+                "base_url": "error-testhttps://api.example.com/v1",
+                "api_key": "sk-test",
+                "model": "qwen-test"
+            }
+        }),
+        home.path(),
+        None,
+    );
+
+    assert_eq!(response["success"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid base_url")),
+        "{response}"
+    );
+    assert!(!config_path.exists());
+}
+
+#[test]
 fn registry_auth_delete_removes_user_provider_and_credentials() {
     let home = tempfile::tempdir().expect("temp home");
     let home_config_dir = home.path().join(".copilot-shell");

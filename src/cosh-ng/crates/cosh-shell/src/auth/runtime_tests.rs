@@ -14,20 +14,48 @@ fn provider(id: &str, label: &str) -> AuthProviderInfo {
 }
 
 fn governed_auth_required(providers: Vec<AuthProviderInfo>) -> GovernedEvent {
+    governed_auth_required_with_error("req-1", providers, None)
+}
+
+fn governed_auth_required_with_error(
+    request_id: &str,
+    providers: Vec<AuthProviderInfo>,
+    error_message: Option<&str>,
+) -> GovernedEvent {
     GovernedEvent {
         decision: GovernanceDecision::Display,
         policy_decision: GovernancePolicyDecision::DisplayOnly,
         event: AgentEvent::AuthRequired {
             run_id: "run-1".into(),
-            request_id: "req-1".into(),
+            request_id: request_id.into(),
             reason: "test".into(),
-            error_message: None,
+            error_message: error_message.map(str::to_string),
             providers,
         },
         reason: "test".into(),
         display_text: "test".into(),
         auto_execute: false,
     }
+}
+
+#[test]
+fn retry_auth_request_surfaces_validation_error() {
+    let mut state = InlineState::default();
+    state.auth.completed_ids.insert("auth-req-1".to_string());
+    let event = governed_auth_required_with_error(
+        "req-1-retry-1",
+        vec![provider("openai_compat", "OpenAI Compatible")],
+        Some("invalid base_url"),
+    );
+
+    let ids = record_auth_required(&mut state, &[event]);
+    let mut output = Vec::new();
+    render_auth_panel(&mut state, &ids, &mut output).expect("render retry auth");
+
+    assert_eq!(ids, vec!["auth-req-1-retry-1".to_string()]);
+    assert!(String::from_utf8(output)
+        .expect("utf8 auth panel")
+        .contains("invalid base_url"));
 }
 
 #[test]

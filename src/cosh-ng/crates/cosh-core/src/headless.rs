@@ -3,16 +3,19 @@ use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::auth::{apply_auth_credentials, builtin_auth_providers, wait_for_auth_response};
 use crate::cli::CliArgs;
 use crate::compaction::{ContextBudget, ModelCapability};
-use crate::config::{self, CoreConfig};
+use crate::config::CoreConfig;
 use crate::core::CoshCore;
 use crate::extension::{ExtensionManager, RuntimeSnapshotBuilder};
 use crate::metrics::TurnMetrics;
-use crate::protocol::{AuthReason, InputMessage, OutputMessage, ShellControlRequest};
+use crate::protocol::{InputMessage, OutputMessage, ShellControlRequest};
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 use crate::sls;
+
+mod auth;
+
+use auth::request_auth;
 
 pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> {
     apply_cli_overrides(args, &mut config);
@@ -675,58 +678,6 @@ fn load_runtime_config(args: &CliArgs, workspace: &std::path::Path) -> CoreConfi
     };
     apply_cli_overrides(args, &mut config);
     config
-}
-
-/// Request authentication from Shell via the control protocol.
-/// Returns a Provider if auth succeeds, None otherwise.
-/// Buffered lines consumed during auth wait are appended to `buffered`.
-async fn request_auth<W, R>(
-    config: &mut CoreConfig,
-    lines: &mut tokio::io::Lines<R>,
-    writer: &mut W,
-    buffered: &mut Vec<String>,
-) -> Option<Box<dyn crate::provider::ContentGenerator>>
-where
-    W: std::io::Write,
-    R: AsyncBufReadExt + Unpin,
-{
-    let request_id = "auth-init";
-    let providers = builtin_auth_providers();
-
-    let auth_msg =
-        OutputMessage::auth_required(request_id, AuthReason::NotConfigured, None, providers);
-
-    // Emit auth request
-    if let Ok(json) = serde_json::to_string(&auth_msg) {
-        let _ = writeln!(writer, "{json}");
-        let _ = writer.flush();
-    }
-
-    // Wait for response
-    let auth_result = wait_for_auth_response(request_id, lines).await;
-    buffered.extend(auth_result.buffered_lines);
-
-    let response = auth_result.response?;
-
-    // Apply credentials
-    apply_auth_credentials(config, &response);
-
-    // Persist if requested
-    if response.persist {
-        if let Err(e) = config::persist_config(config) {
-            tracing::warn!("failed to persist config: {e}");
-        }
-    }
-
-    // Emit success status
-    let status_msg = OutputMessage::system_status("auth_ok");
-    if let Ok(json) = serde_json::to_string(&status_msg) {
-        let _ = writeln!(writer, "{json}");
-        let _ = writer.flush();
-    }
-
-    // Create provider from new config
-    Some(crate::create_provider(config))
 }
 
 #[cfg(test)]

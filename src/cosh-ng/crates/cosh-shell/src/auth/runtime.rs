@@ -4,13 +4,13 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::adapter::AdapterInstance;
+use crate::auth::active_submission::finish_active_submission;
 use crate::auth::capture::{auth_capture_id, matches_auth_capture};
 use crate::auth::completion::finish_auth_configuration;
 use crate::auth::delete_confirm::{
     begin_delete_confirmation, focus_delete_confirmation, render_delete_confirmation,
     render_delete_outcome, submit_delete_confirmation,
 };
-use crate::auth::provider_display::auth_required_providers_for_display;
 use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
     provider_action_options, ExistingProvider, ProviderAction,
@@ -18,13 +18,13 @@ use crate::auth::provider_management::{
 use crate::auth::retry::restore_after_failed_submission;
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
-    AgentEvent, AuthFieldInfo, AuthProviderInfo, AuthResponse, GovernedEvent, NoticePanelModel,
-    QuestionInputFeedback, QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer,
-    ShellEvent, ShellEventKind,
+    AuthFieldInfo, AuthProviderInfo, AuthResponse, NoticePanelModel, QuestionInputFeedback,
+    QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer, ShellEvent, ShellEventKind,
 };
 use crate::runtime::state::InlineState;
 
 pub(crate) use crate::auth::capture::pending_auth_capture;
+pub(crate) use crate::auth::required::{record_auth_required, render_auth_panel};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeAuthState {
@@ -41,11 +41,12 @@ pub(crate) struct RuntimeAuthState {
     pub(crate) existing_providers: Vec<ExistingProvider>,
     /// The section name of the provider being edited (None = new provider)
     pub(crate) editing_provider_name: Option<String>,
-    backend: AuthBackend,
+    pub(super) error_message: Option<String>,
+    pub(super) backend: AuthBackend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuthBackend {
+pub(super) enum AuthBackend {
     ActiveRun,
     CoreRegistry,
 }
@@ -89,62 +90,6 @@ pub(crate) struct AuthState {
     pub(crate) state: Option<RuntimeAuthState>,
     pub(crate) handled_card_events: HashSet<String>,
     pub(crate) completed_ids: HashSet<String>,
-}
-
-pub(crate) fn record_auth_required(
-    state: &mut InlineState,
-    governed_events: &[GovernedEvent],
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    for event in governed_events {
-        if let AgentEvent::AuthRequired {
-            request_id,
-            providers,
-            ..
-        } = &event.event
-        {
-            if state.auth.state.is_some() {
-                continue;
-            }
-            let id = format!("auth-{request_id}");
-            if state.auth.completed_ids.contains(&id) {
-                continue;
-            }
-            let providers = auth_required_providers_for_display(providers);
-            state.auth.state = Some(RuntimeAuthState {
-                id: id.clone(),
-                request_id: request_id.clone(),
-                phase: AuthPhase::SelectingProvider,
-                providers,
-                selected_provider: 0,
-                current_field: 0,
-                collected_values: HashMap::new(),
-                field_input: String::new(),
-                existing_providers: Vec::new(),
-                editing_provider_name: None,
-                backend: AuthBackend::ActiveRun,
-            });
-            ids.push(id);
-        }
-    }
-    ids
-}
-
-pub(crate) fn render_auth_panel<W: std::io::Write>(
-    state: &mut InlineState,
-    ids: &[String],
-    output: &mut W,
-) -> std::io::Result<()> {
-    for id in ids {
-        let Some(auth) = &state.auth.state else {
-            continue;
-        };
-        if auth.id != *id {
-            continue;
-        }
-        render_current_auth_panel(state, output)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
@@ -226,6 +171,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         field_input: String::new(),
         existing_providers,
         editing_provider_name: None,
+        error_message: None,
         backend: AuthBackend::CoreRegistry,
     });
 
@@ -679,23 +625,13 @@ fn send_auth_response<W: std::io::Write>(
     };
 
     if let Some(active_run) = state.agent_run.active.as_ref() {
-        if active_run.handle.respond_auth(response.clone()).is_err() {
-            let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-            renderer.write_notice_panel(
-                output,
-                NoticePanelModel {
-                    title: "Auth failed",
-                    body: vec![
-                        "Unable to send credentials to cosh-core.".to_string(),
-                        "Run /auth again after the current run finishes.".to_string(),
-                    ],
-                    footer: None,
-                },
-            )?;
-            state.auth.completed_ids.insert(auth.id);
-            output.flush()?;
-            return Ok(());
-        }
+        return finish_active_submission(
+            active_run.handle.respond_auth(response),
+            &auth.id,
+            &mut state.auth.completed_ids,
+            state.language,
+            output,
+        );
     } else {
         match auth.backend {
             AuthBackend::CoreRegistry => {
@@ -727,7 +663,7 @@ fn send_auth_response<W: std::io::Write>(
     finish_auth_configuration(state, output, &provider_label)
 }
 
-fn render_current_auth_panel<W: std::io::Write>(
+pub(super) fn render_current_auth_panel<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {

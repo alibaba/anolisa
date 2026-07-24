@@ -242,7 +242,9 @@ pub(super) fn handle_auth(
                 values,
                 persist: true,
             };
-            crate::auth::apply_auth_credentials(config, &response);
+            if let Err(error) = crate::auth::apply_auth_credentials(config, &response) {
+                return registry_error(request_id, &error.to_string());
+            }
             if let Err(e) = crate::config::persist_config(config) {
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }

@@ -11,9 +11,7 @@ use cosh_platform::audit::LoadedPolicy;
 use cosh_types::audit::{AuditOutcomeStatus, AuditProviderData, AuditToolData, Outcome};
 
 use crate::audit::{CoreAuditRecorder, CoreAuditScope};
-use crate::auth::{
-    apply_auth_credentials, builtin_auth_providers, is_auth_error, wait_for_auth_response,
-};
+use crate::auth::is_auth_error;
 use crate::compaction::CompactionRuntime;
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
@@ -26,6 +24,7 @@ use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message};
 use crate::tool::{ToolContext, ToolKind, ToolRegistry, ToolResult};
 use crate::truncator::OutputTruncator;
 
+mod auth;
 mod extensions;
 
 pub struct CoshCore {
@@ -1665,71 +1664,6 @@ impl CoshCore {
             }
         }
         ApprovalResult::Interrupted
-    }
-
-    /// Attempt to re-authenticate by sending auth_required to Shell.
-    /// Returns true if re-auth succeeded and provider was rebuilt.
-    async fn try_reauth<W, R>(&mut self, reader: &mut tokio::io::Lines<R>, writer: &mut W) -> bool
-    where
-        W: Write,
-        R: AsyncBufReadExt + Unpin,
-    {
-        use crate::protocol::AuthReason;
-
-        let request_id = self.next_request_id();
-        let providers = builtin_auth_providers();
-
-        let auth_msg = OutputMessage::auth_required(
-            &request_id,
-            AuthReason::Invalid,
-            Some("API authentication failed (401/403)".to_string()),
-            providers,
-        );
-        self.emit(writer, &auth_msg);
-
-        let auth_result = wait_for_auth_response(&request_id, reader).await;
-        // Note: buffered_lines during mid-session re-auth are discarded since
-        // the retry loop will re-send if needed.
-        let response = match auth_result.response {
-            Some(r) => r,
-            None => return false,
-        };
-
-        apply_auth_credentials(&mut self.config, &response);
-
-        if response.persist {
-            if let Err(e) = config::persist_config(&self.config) {
-                tracing::warn!("failed to persist config: {e}");
-            }
-        }
-
-        // Rebuild provider
-        let resolved = self.config.resolve_provider();
-        if resolved.provider_type == "aliyun" {
-            if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
-                self.provider =
-                    Box::new(crate::provider::sysom::SysomProvider::from_ecs_ram_role());
-            } else if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
-                self.provider = Box::new(crate::provider::sysom::SysomProvider::new(
-                    &resolved.access_key_id,
-                    &resolved.access_key_secret,
-                    resolved.security_token.as_deref(),
-                ));
-            } else {
-                tracing::warn!("Aliyun auth response missing AK/SK");
-                return false;
-            }
-        } else {
-            let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
-            self.provider = Box::new(crate::provider::openai_compat::OpenAICompatProvider::new(
-                &resolved.base_url,
-                &resolved.api_key,
-                profile,
-            ));
-        }
-
-        self.emit(writer, &OutputMessage::system_status("auth_ok"));
-        true
     }
 }
 
