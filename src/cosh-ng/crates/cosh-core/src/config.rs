@@ -886,6 +886,22 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
     persist_config_to_dir(config, &dir)
 }
 
+/// Matches only the `[ai]` table header and its dotted children (`[ai.providers.x]`),
+/// not lookalike sections such as `[aider]` or `[ai_drivers]`.
+/// Trailing whitespace or an inline comment after the closing bracket is accepted.
+fn is_ai_section_header(line: &str) -> bool {
+    let t = line.trim();
+    let Some(end) = t.find(']') else {
+        return false;
+    };
+    let rest = t[end + 1..].trim_start();
+    if !(rest.is_empty() || rest.starts_with('#')) {
+        return false;
+    }
+    let header = &t[..end + 1];
+    header == "[ai]" || header.starts_with("[ai.")
+}
+
 fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
 
@@ -896,11 +912,11 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
     let mut preserved = String::new();
     let mut in_ai_section = false;
     for line in existing.lines() {
-        if line.trim().starts_with("[ai") {
+        if is_ai_section_header(line) {
             in_ai_section = true;
             continue;
         }
-        if in_ai_section && line.trim().starts_with('[') && !line.trim().starts_with("[ai") {
+        if in_ai_section && line.trim().starts_with('[') && !is_ai_section_header(line) {
             in_ai_section = false;
         }
         if !in_ai_section {
@@ -1619,5 +1635,141 @@ api_key = "sk-user"
         assert!(content.contains("api_key = \"sk-user\""));
         assert!(!content.contains("system-provider"));
         assert!(!content.contains("sk-system"));
+    }
+
+    #[test]
+    fn persist_preserves_non_ai_sections_whose_names_start_with_ai() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"[ai]
+active_provider = "old"
+
+[ai.providers.old]
+type = "openai_compat"
+base_url = "https://old.example/v1"
+api_key = "sk-old"
+model = "old-model"
+
+[aider]
+model = "claude-3-5-sonnet"
+edit_format = "diff"
+
+[aide]
+theme = "dark"
+
+[ai_drivers]
+enabled = true
+
+[agent]
+approval_mode = "balanced"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        config.user_ai.active_provider = Some("new-provider".to_string());
+        config.user_ai.providers.clear();
+        let provider = ProviderConfig {
+            provider_type: Some("openai_compat".to_string()),
+            base_url: Some("https://new.example/v1".to_string()),
+            api_key: Some("sk-new".to_string()),
+            model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+        config
+            .user_ai
+            .providers
+            .insert("new-provider".to_string(), provider);
+
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+
+        // Non-ai sections with ai-prefixed names must survive.
+        assert!(content.contains("[aider]"));
+        assert!(content.contains("model = \"claude-3-5-sonnet\""));
+        assert!(content.contains("edit_format = \"diff\""));
+        assert!(content.contains("[aide]"));
+        assert!(content.contains("theme = \"dark\""));
+        assert!(content.contains("[ai_drivers]"));
+        assert!(content.contains("enabled = true"));
+        assert!(content.contains("[agent]"));
+        assert!(content.contains("approval_mode = \"balanced\""));
+
+        // Old ai content must be gone, new content present exactly once.
+        assert!(!content.contains("sk-old"));
+        assert!(!content.contains("old-model"));
+        assert!(!content.contains("[ai.providers.old]"));
+        assert!(content.contains("active_provider = \"new-provider\""));
+        assert!(content.contains("[ai.providers.new-provider]"));
+        assert!(content.contains("api_key = \"sk-new\""));
+        assert_eq!(content.matches("[ai]").count(), 1);
+        assert_eq!(content.matches("[ai.providers.").count(), 1);
+    }
+
+    #[test]
+    fn persist_replaces_ai_headers_with_inline_comments_without_duplication() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"[ai] # valid inline comment
+active_provider = "old"
+
+[ai.providers.old] # legacy provider
+type = "openai_compat"
+api_key = "sk-old"
+
+[aider]
+model = "claude-3-5-sonnet"
+
+[agent]
+approval_mode = "balanced"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        config.user_ai.active_provider = Some("new-provider".to_string());
+        config.user_ai.providers.clear();
+        let provider = ProviderConfig {
+            provider_type: Some("openai_compat".to_string()),
+            api_key: Some("sk-new".to_string()),
+            ..Default::default()
+        };
+        config
+            .user_ai
+            .providers
+            .insert("new-provider".to_string(), provider);
+
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+
+        // No duplicate [ai] table; old content fully replaced.
+        assert_eq!(content.matches("[ai]").count(), 1);
+        assert!(!content.contains("sk-old"));
+        assert!(!content.contains("[ai.providers.old]"));
+        assert!(content.contains("active_provider = \"new-provider\""));
+        assert!(content.contains("[ai.providers.new-provider]"));
+
+        // Non-ai sections survive.
+        assert!(content.contains("[aider]"));
+        assert!(content.contains("model = \"claude-3-5-sonnet\""));
+        assert!(content.contains("[agent]"));
+
+        // Persisted output must be valid TOML that re-parses cleanly.
+        let parsed: CoreConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
+        assert!(parsed.ai.providers.contains_key("new-provider"));
+        assert_eq!(parsed.ai.providers.len(), 1);
     }
 }
