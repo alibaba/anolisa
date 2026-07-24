@@ -143,7 +143,15 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Jul 23 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Fri Jul 24 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Raw `anolisa install --version` now installs the exact published component version.
+- Raw `anolisa install --version` output now reports requested and resolved versions, artifact URL, and source repository.
+- Raw `anolisa install --version` now lists published alternatives when the requested version is unavailable.
+- Raw `anolisa install --version` no longer installs another version when the requested version is unavailable.
+- Raw component uninstalls with many files now complete faster and write substantially less data.
+- Recovery now preserves installed state when operation recovery data is missing or corrupted.
+
+* Thu Jul 23 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.10-1
 - `anolisa telemetry` now lets administrators enable or disable data collection.
 - `anolisa telemetry` now lets administrators link or unlink named reporting.
 - `anolisa telemetry status` now reports collection and named-reporting states in text or JSON.

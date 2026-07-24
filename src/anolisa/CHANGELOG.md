@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-07-24
+
+### Added
+
+- Raw `anolisa install --version` now installs the exact published component version.
+- Raw `anolisa install --version` output now reports requested and resolved versions, artifact URL, and source repository.
+
+### Changed
+
+- Raw `anolisa install --version` now lists published alternatives when the requested version is unavailable.
+
+### Fixed
+
+- Raw `anolisa install --version` no longer installs another version when the requested version is unavailable.
+- Raw component uninstalls with many files now complete faster and write substantially less data.
+- Recovery now preserves installed state when operation recovery data is missing or corrupted.
+
 ## [0.2.10] - 2026-07-23
 
 ### Added
@@ -645,6 +662,23 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.11] - 2026-07-24
+
+### 新增
+
+- raw `anolisa install --version` 现可安装指定的已发布组件版本。
+- raw `anolisa install --version` 输出现显示请求版本、解析版本、制品地址和来源。
+
+### 变更
+
+- 请求的 raw 版本不可用时，`anolisa install --version` 现列出已发布版本。
+
+### 修复
+
+- 请求的 raw 版本不可用时，`anolisa install --version` 不再安装其他版本。
+- 包含大量文件的 raw 组件卸载速度更快，写入量显著降低。
+- 操作恢复数据缺失或损坏时，恢复流程现会保留已安装状态。
 
 ## [0.2.10] - 2026-07-23
 
