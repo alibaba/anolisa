@@ -2,8 +2,8 @@
 //! reference-panel visual contract with `/help`.
 
 use super::{
-    strip_ansi_escape, AgentHooksView, HookEntryView, HookEventGroup, HookStatusPanelModel,
-    RatatuiInlineRenderer,
+    display_width, strip_ansi_escape, AgentHooksView, HookEntryView, HookEventGroup,
+    HookStatusPanelModel, RatatuiInlineRenderer,
 };
 
 fn sample_model() -> HookStatusPanelModel<'static> {
@@ -212,8 +212,11 @@ fn hook_status_panel_wraps_long_entries_with_hanging_indent_when_narrow() {
     let mut output = Vec::new();
     plain.write_hook_status_panel(&mut output, model).unwrap();
     let text = String::from_utf8(output).unwrap();
+    // The plain renderer is constructed with width 40; every emitted line
+    // must stay within that display-width contract (not merely a loose
+    // char-count bound).
     assert!(
-        text.lines().all(|line| line.chars().count() <= 60),
+        text.lines().all(|line| display_width(line) <= 40),
         "plain line overflowed the width contract: {text}"
     );
     assert!(text.contains("very-long-hook-name-that-wraps"), "{text}");

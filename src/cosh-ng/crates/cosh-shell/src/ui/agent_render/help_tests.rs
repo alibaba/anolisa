@@ -26,6 +26,36 @@ fn wrap_preserves_deep_space_indentation_with_hanging_indent() {
 }
 
 #[test]
+fn wrap_indent_detection_excludes_control_whitespace() {
+    // Only consecutive ASCII spaces count as indentation: control whitespace
+    // after the spaces must be dropped from both the prefix and the body,
+    // never replayed into terminal output (wrap is shared by every panel).
+    for (input, forbidden) in [
+        ("  \rsecret", '\r'),
+        ("  \tsecret", '\t'),
+        ("  \nsecret", '\n'),
+    ] {
+        let wrapped = wrap_plain_line(input, 30);
+        assert!(
+            wrapped.iter().all(|line| !line.contains(forbidden)),
+            "{input:?} -> {wrapped:?}"
+        );
+        assert!(
+            wrapped.first().is_some_and(|line| line == "  secret"),
+            "{input:?} -> {wrapped:?}"
+        );
+    }
+    // Hanging indent still derives from the space run alone.
+    let wrapped = wrap_plain_line("  \ta rather long body that must wrap around", 20);
+    assert!(
+        wrapped[1..]
+            .iter()
+            .all(|line| line.starts_with("  ") && !line.starts_with("   ") && !line.contains('\t')),
+        "{wrapped:?}"
+    );
+}
+
+#[test]
 fn rich_notice_panel_preserves_leading_indent_and_hanging_wrap() {
     let renderer = RatatuiInlineRenderer::with_width(44);
     let mut output = Vec::new();
