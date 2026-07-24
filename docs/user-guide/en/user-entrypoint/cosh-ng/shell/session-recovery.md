@@ -36,7 +36,9 @@ Use these commands from the shell prompt:
 | Command | Behavior |
 |---------|----------|
 | `/session` | Open the newest-first session picker |
-| `/session list` | Print the first bounded summary page without opening the picker |
+| `/session list` | Print the first bounded summary page with complete, copyable session UUIDs |
+| `/session new` | Detach the current provider conversation so the next Agent request starts fresh |
+| `/new` | Alias for `/session new` |
 | `/session status` | Show shell, selected, restoring, and active provider identities |
 | `/session resume <id>` | Validate and select one provider session |
 | `/resume [id]` | Alias for `/session` or `/session resume <id>` |
@@ -49,6 +51,13 @@ after the resumed request completes successfully. A failed restore remains
 recoverable and leaves the shell prompt usable. Direct and picker-based resume
 both refuse to change selection while an Agent run or another interactive
 decision is active.
+
+Starting a fresh session clears only the shell adapter's active or selected
+provider-session binding. It does not delete the previous persisted session,
+restart the shell, or change the working directory, shell history, or settings.
+The next Agent request omits the old resume ID and creates the new provider
+identity when that request runs successfully. The command is idempotent when
+no provider session is attached.
 
 If automatic continuation of an active session reports that its stored record
 is missing, corrupt, incompatible, or in another scope, cosh-shell releases
@@ -68,12 +77,14 @@ not consume a session you selected explicitly.
 | `y` | Confirm the exact clear set |
 | `n`, `Esc`, `Ctrl-C` | Cancel confirmation or close the picker |
 
-Each row shows a prompt preview or session ID, relative update time, message
-count, model, health, and whether the entry is protected. The picker fetches
-the next bounded cursor page only when navigation approaches the loaded edge,
-and renders a bounded window around the current row. Prompt previews are
-normalized and bounded by Core before transport, then truncated further for
-the terminal row.
+Each picker row shows a compact session-ID prefix for visual disambiguation,
+plus the prompt preview, relative update time, message count, model, health,
+and whether the entry is protected. The prefix is not accepted by direct
+resume or clear commands; use the complete canonical UUID printed by
+`/session list`. The picker fetches the next bounded cursor page only when
+navigation approaches the loaded edge and renders a bounded window around the
+current row. Prompt previews are normalized and bounded by Core before
+transport, then truncated further for the terminal row.
 
 ## Workspace Scope and Storage
 
