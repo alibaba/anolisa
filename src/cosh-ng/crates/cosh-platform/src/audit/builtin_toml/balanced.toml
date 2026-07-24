@@ -545,12 +545,53 @@ arg = [{ key = { glob = "/proc/self/*" } }]
 
 # SSH keys and config: ~/.ssh/*, /home/*/.ssh/*, /root/.ssh/*
 [[rules]]
-name = "shell-sensitive-ssh"
+name = "shell-sensitive-ssh-home"
 outcome = "RequireApproval"
 reason = "Command references SSH key or configuration"
 [rules.matches]
 subsystem = "shell"
-arg = [{ key = { glob = "*.ssh/*" } }]
+arg = [{ key = { glob = "/home/*/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-root"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-tilde"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.ssh/*" } }]
+
+# Shell history files: ~/.bash_history, /home/*/.bash_history, /root/.bash_history
+[[rules]]
+name = "shell-sensitive-shell-history-home"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-root"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-tilde"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.bash_history" } }]
 
 # ==========================================================================
 # Shell: read-only single-token commands. Safe unless arguments reference

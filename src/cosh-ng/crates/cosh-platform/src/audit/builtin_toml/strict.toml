@@ -6,11 +6,11 @@
 version = "v1-strict"
 default = "Deny"
 
-# Sensitive-path guard — deny access to sensitive system and credential
+# Sensitive-path guard — deny direct access to sensitive system and credential
 # files. Must appear BEFORE shell-allow-readonly-singletons.
 [[rules]]
 name = "shell-sensitive-system-files"
-outcome = "RequireApproval"
+outcome = "Deny"
 reason = "Command references sensitive system file"
 [rules.matches]
 subsystem = "shell"
@@ -20,7 +20,7 @@ arg = [{ key = { one_of = [
 
 [[rules]]
 name = "shell-sensitive-sudoersd"
-outcome = "RequireApproval"
+outcome = "Deny"
 reason = "Command references sensitive sudoers configuration"
 [rules.matches]
 subsystem = "shell"
@@ -28,19 +28,60 @@ arg = [{ key = { glob = "/etc/sudoers.d/*" } }]
 
 [[rules]]
 name = "shell-sensitive-proc-self"
-outcome = "RequireApproval"
+outcome = "Deny"
 reason = "Command references process self-info"
 [rules.matches]
 subsystem = "shell"
 arg = [{ key = { glob = "/proc/self/*" } }]
 
 [[rules]]
-name = "shell-sensitive-ssh"
-outcome = "RequireApproval"
+name = "shell-sensitive-ssh-home"
+outcome = "Deny"
 reason = "Command references SSH key or configuration"
 [rules.matches]
 subsystem = "shell"
-arg = [{ key = { glob = "*.ssh/*" } }]
+arg = [{ key = { glob = "/home/*/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-root"
+outcome = "Deny"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-tilde"
+outcome = "Deny"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.ssh/*" } }]
+
+# Shell history files: ~/.bash_history, /home/*/.bash_history, /root/.bash_history
+[[rules]]
+name = "shell-sensitive-shell-history-home"
+outcome = "Deny"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-root"
+outcome = "Deny"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-tilde"
+outcome = "Deny"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.bash_history" } }]
 
 # Read-only single-token shell commands.
 [[rules]]

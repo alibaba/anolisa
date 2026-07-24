@@ -272,6 +272,8 @@ mod tests {
             "cat ~/.ssh/id_ed25519",
             "head ~/.ssh/config",
             "cat /root/.ssh/authorized_keys",
+            "cat /home/user/.ssh/id_rsa",
+            "head /home/alice/.ssh/config",
         ] {
             assert_outcome(cmd, Outcome::RequireApproval);
         }
@@ -283,6 +285,18 @@ mod tests {
             "cat /proc/self/environ",
             "cat /proc/self/cmdline",
             "cat /etc/sudoers.d/myuser",
+        ] {
+            assert_outcome(cmd, Outcome::RequireApproval);
+        }
+    }
+
+    #[test]
+    fn balanced_require_approval_for_shell_history() {
+        for cmd in [
+            "cat ~/.bash_history",
+            "cat /root/.bash_history",
+            "cat /home/user/.bash_history",
+            "head /home/alice/.bash_history",
         ] {
             assert_outcome(cmd, Outcome::RequireApproval);
         }
@@ -318,12 +332,35 @@ mod tests {
     }
 
     #[test]
-    fn strict_require_approval_for_sensitive_paths() {
-        // Strict mode also uses RequireApproval for sensitive paths.
-        let action = parse_action_string("cat /etc/passwd").unwrap();
+    fn strict_denies_sensitive_paths() {
+        // Strict mode denies direct access to sensitive system and credential
+        // files; non-sensitive read-only commands still fall through to Allow.
         let loaded = builtin::strict();
-        let d = evaluate(&action, &loaded);
-        assert_eq!(d.outcome, Outcome::RequireApproval);
+        for cmd in [
+            "cat /etc/passwd",
+            "cat /etc/shadow",
+            "head /etc/sudoers",
+            "cat /etc/sudoers.d/myuser",
+            "cat /proc/self/environ",
+            "cat /proc/self/cmdline",
+            "cat ~/.ssh/id_rsa",
+            "cat /root/.ssh/authorized_keys",
+            "cat /home/user/.ssh/id_rsa",
+            "cat ~/.bash_history",
+            "cat /root/.bash_history",
+            "cat /home/user/.bash_history",
+        ] {
+            let action = parse_action_string(cmd).unwrap();
+            let d = evaluate(&action, &loaded);
+            assert_eq!(
+                d.outcome,
+                Outcome::Deny,
+                "for input {:?}: expected Deny, got {:?} (matched={:?})",
+                cmd,
+                d.outcome,
+                d.matched_rule
+            );
+        }
     }
 
     #[test]
