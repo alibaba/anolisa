@@ -22,6 +22,10 @@ pub(crate) struct HookStatusPanelModel<'a> {
     pub(crate) shell_lines: Vec<String>,
     pub(crate) agent_label: &'a str,
     pub(crate) agent: AgentHooksView,
+    /// Localized template for the truncation marker on the styled backend;
+    /// `{count}` is replaced with the number of hooks not shown. The plain
+    /// backend never truncates.
+    pub(crate) omitted_template: String,
     pub(crate) footer: String,
 }
 
@@ -33,13 +37,13 @@ pub(crate) enum AgentHooksView {
     Message(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct HookEventGroup {
     pub(crate) event: String,
     pub(crate) hooks: Vec<HookEntryView>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct HookEntryView {
     pub(crate) name: String,
     pub(crate) extension: String,
@@ -79,6 +83,14 @@ fn sanitize(text: &str) -> String {
 const ENTRY_INDENT: &str = "    ";
 const ENTRY_HANG: &str = "      ";
 
+/// The rich block renderer caps a panel at 200 buffer rows (borders
+/// included). Grouped agent hooks can exceed that on large registries, and
+/// `Paragraph` would silently drop the overflow — including the footer. Keep
+/// the body within this budget and surface an explicit omission marker
+/// instead; the reserve covers the marker, the pre-footer spacer, and the
+/// footer itself.
+const STYLED_BODY_LINE_BUDGET: usize = 195;
+
 fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> Vec<Line<'static>> {
     let section = reference_section_style();
     let group = reference_group_style();
@@ -112,7 +124,14 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> V
             }
         }
         AgentHooksView::Groups(groups) => {
+            let mut omitted = 0usize;
             for (index, event_group) in groups.iter().enumerate() {
+                // Stop emitting once the line budget is spent; keep counting
+                // the hooks that will not be shown.
+                if lines.len() >= STYLED_BODY_LINE_BUDGET {
+                    omitted += event_group.hooks.len();
+                    continue;
+                }
                 if index > 0 {
                     lines.push(Line::from(""));
                 }
@@ -122,6 +141,10 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> V
                     lines.push(Line::from(Span::styled(segment, group)));
                 }
                 for hook in &event_group.hooks {
+                    if lines.len() >= STYLED_BODY_LINE_BUDGET {
+                        omitted += 1;
+                        continue;
+                    }
                     let name = sanitize(&hook.name);
                     let extension = sanitize(&hook.extension);
                     if hook.disabled {
@@ -170,6 +193,14 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> V
                             }
                         }
                     }
+                }
+            }
+            if omitted > 0 {
+                let marker = model
+                    .omitted_template
+                    .replace("{count}", &omitted.to_string());
+                for segment in wrap_plain_line_with_prefix(&sanitize(&marker), "  ", "  ", inner) {
+                    lines.push(Line::from(Span::styled(segment, muted)));
                 }
             }
         }

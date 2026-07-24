@@ -40,6 +40,7 @@ fn sample_model() -> HookStatusPanelModel<'static> {
                 }],
             },
         ]),
+        omitted_template: "… {count} more hook(s) not shown".to_string(),
         footer: "3 hook(s) registered.".to_string(),
     }
 }
@@ -155,6 +156,7 @@ fn hook_status_panel_wraps_long_entries_with_hanging_indent_when_narrow() {
             event: "PreToolUse".to_string(),
             hooks: vec![long_entry],
         }]),
+        omitted_template: "… {count} more hook(s) not shown".to_string(),
         footer: "1 hook(s) registered.".to_string(),
     };
 
@@ -207,6 +209,7 @@ fn hook_status_panel_wraps_long_entries_with_hanging_indent_when_narrow() {
                 disabled: false,
             }],
         }]),
+        omitted_template: "… {count} more hook(s) not shown".to_string(),
         footer: "1 hook(s) registered.".to_string(),
     };
     let mut output = Vec::new();
@@ -220,6 +223,77 @@ fn hook_status_panel_wraps_long_entries_with_hanging_indent_when_narrow() {
         "plain line overflowed the width contract: {text}"
     );
     assert!(text.contains("very-long-hook-name-that-wraps"), "{text}");
+}
+
+#[test]
+fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
+    // The rich block renderer caps panels at 200 buffer rows; a large
+    // registry must degrade to an explicit omission marker instead of
+    // Paragraph silently dropping the tail (including the footer).
+    let groups: Vec<HookEventGroup> = (0..12)
+        .map(|group_index| HookEventGroup {
+            event: format!("Event-{group_index}"),
+            hooks: (0..15)
+                .map(|hook_index| HookEntryView {
+                    name: format!("hook-{group_index}-{hook_index}"),
+                    extension: "agent-sec-core".to_string(),
+                    disabled: false,
+                })
+                .collect(),
+        })
+        .collect();
+    let model = HookStatusPanelModel {
+        title: "Hook status",
+        shell_label: "Shell Hooks",
+        shell_lines: vec!["Registered: 2; enabled: 2; disabled: 0.".to_string()],
+        agent_label: "Agent Hooks",
+        agent: AgentHooksView::Groups(groups.clone()),
+        omitted_template: "… {count} more hook(s) not shown".to_string(),
+        footer: "180 hook(s) registered.".to_string(),
+    };
+
+    let renderer = RatatuiInlineRenderer::with_width(80);
+    let mut output = Vec::new();
+    renderer
+        .write_hook_status_panel(&mut output, model)
+        .unwrap();
+
+    let text = strip_ansi_escape(&String::from_utf8(output).unwrap());
+    // Footer survives, an omission marker is present, and nothing overflows
+    // the renderer's 200-row cap.
+    assert!(text.contains("180 hook(s) registered."), "{text}");
+    assert!(text.contains("more hook(s) not shown"), "{text}");
+    assert!(text.lines().count() <= 200, "{}", text.lines().count());
+    let marker_line = text
+        .lines()
+        .find(|line| line.contains("more hook(s) not shown"))
+        .unwrap();
+    let omitted: usize = marker_line
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap();
+    assert!(omitted > 0 && omitted < 180, "{marker_line}");
+
+    // The plain backend never truncates: all hooks and the footer remain.
+    let plain = RatatuiInlineRenderer::plain_with_width(120);
+    let model = HookStatusPanelModel {
+        title: "Hook status",
+        shell_label: "Shell Hooks",
+        shell_lines: vec!["Registered: 2; enabled: 2; disabled: 0.".to_string()],
+        agent_label: "Agent Hooks",
+        agent: AgentHooksView::Groups(groups),
+        omitted_template: "… {count} more hook(s) not shown".to_string(),
+        footer: "180 hook(s) registered.".to_string(),
+    };
+    let mut output = Vec::new();
+    plain.write_hook_status_panel(&mut output, model).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("hook-11-14"), "{text}");
+    assert!(text.contains("180 hook(s) registered."), "{text}");
+    assert!(!text.contains("more hook(s) not shown"), "{text}");
 }
 
 #[test]

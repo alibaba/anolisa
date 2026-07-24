@@ -45,6 +45,11 @@ pub(crate) fn render_hooks_command<W: Write>(
                 };
 
             let total_hook_count = hooks.len() + agent_hook_count;
+            let omitted_template = if i18n.language() == crate::config::Language::ZhCn {
+                "… 另有 {count} 个 hook 未显示（完整列表见 plain 输出）".to_string()
+            } else {
+                "… {count} more hook(s) not shown (full list in plain output)".to_string()
+            };
             RatatuiInlineRenderer::for_terminal().write_hook_status_panel(
                 output,
                 HookStatusPanelModel {
@@ -53,6 +58,7 @@ pub(crate) fn render_hooks_command<W: Write>(
                     shell_lines,
                     agent_label: i18n.t(MessageId::SlashHooksAgentSection),
                     agent: agent_view,
+                    omitted_template,
                     footer: hooks_footer(state, total_hook_count, &i18n),
                 },
             )
