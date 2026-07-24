@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 use actix_web::{HttpResponse, Responder, get, post, web};
 use serde::{Deserialize, Serialize};
 
-use agentsight_opt::{AnalyzePipeline, AtifTrajectory, LlmClient};
+use agentsight_opt::{AnalyzePipeline, AtifTrajectory, LlmClient, TrajectoryRecorder};
 use agentsight_opt_store::{Dimension, OptimizationStore};
 
 use super::AppState;
@@ -19,6 +19,7 @@ use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
 const DB_FILE_NAME: &str = "optimization.db";
+const TRAJECTORIES_DIR_NAME: &str = "opt-trajectories";
 
 // ─── LLM configuration ───────────────────────────────────────────────────────
 
@@ -259,29 +260,64 @@ pub async fn run_optimization(
                 .json(serde_json::json!({"error": e.to_string()})),
         },
         Dimension::PerfIssues | Dimension::CostWaste | Dimension::Accuracy => {
-            let client = match state.build_client() {
+            let mut client = match state.build_client() {
                 Ok(c) => c,
                 Err(resp) => return resp,
             };
+
+            // Attach trajectory recorder to capture LLM calls.
+            let recorder = std::sync::Arc::new(TrajectoryRecorder::new(
+                client.model().to_string(),
+                session_id.clone(),
+            ));
+            client.set_recorder(std::sync::Arc::clone(&recorder));
+
             let pipeline = AnalyzePipeline::new(&client);
-            match dimension {
-                Dimension::PerfIssues => match pipeline.run_perf_issues(&trajectory).await {
-                    Ok(report) => persist_and_respond(&state, &session_id, dimension, &report),
-                    Err(e) => HttpResponse::InternalServerError()
-                        .json(serde_json::json!({"error": e.to_string()})),
-                },
-                Dimension::CostWaste => match pipeline.run_cost_waste(&trajectory).await {
-                    Ok(report) => persist_and_respond(&state, &session_id, dimension, &report),
-                    Err(e) => HttpResponse::InternalServerError()
-                        .json(serde_json::json!({"error": e.to_string()})),
-                },
-                Dimension::Accuracy => match pipeline.run_accuracy(&trajectory, None).await {
-                    Ok(result) => persist_and_respond(&state, &session_id, dimension, &result),
-                    Err(e) => HttpResponse::InternalServerError()
-                        .json(serde_json::json!({"error": e.to_string()})),
-                },
+            let result: Result<String, anyhow::Error> = match dimension {
+                Dimension::PerfIssues => pipeline
+                    .run_perf_issues(&trajectory)
+                    .await
+                    .and_then(|r| serde_json::to_string(&r).map_err(|e| anyhow::anyhow!(e))),
+                Dimension::CostWaste => pipeline
+                    .run_cost_waste(&trajectory)
+                    .await
+                    .and_then(|r| serde_json::to_string(&r).map_err(|e| anyhow::anyhow!(e))),
+                Dimension::Accuracy => pipeline
+                    .run_accuracy(&trajectory, None)
+                    .await
+                    .and_then(|r| serde_json::to_string(&r).map_err(|e| anyhow::anyhow!(e))),
                 // Pure-compute dimensions handled in the outer match.
                 Dimension::Perf | Dimension::Cost => unreachable!(),
+            };
+
+            // Save LLM trajectory as ATIF file (best-effort, non-blocking).
+            if !recorder.is_empty() {
+                let traj_dir = state
+                    .config_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+                    .join(TRAJECTORIES_DIR_NAME)
+                    .join(&dimension_raw);
+                if let Err(e) = recorder.save_to_dir(&traj_dir) {
+                    log::warn!("Failed to save opt LLM trajectory: {e}");
+                }
+            }
+
+            match result {
+                Ok(json) => {
+                    if let Some(ref store) = state.store {
+                        if let Err(e) = store.save_dimension(&session_id, dimension, &json) {
+                            log::warn!(
+                                "Failed to persist optimization result for {session_id}: {e}"
+                            );
+                        }
+                    }
+                    HttpResponse::Ok()
+                        .content_type("application/json")
+                        .body(json)
+                }
+                Err(e) => HttpResponse::InternalServerError()
+                    .json(serde_json::json!({"error": e.to_string()})),
             }
         }
     }

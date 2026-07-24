@@ -7,6 +7,7 @@ use rig_core::{
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+use super::recorder::{RecordParams, TrajectoryRecorder};
 use super::types::*;
 
 pub struct LlmClient {
@@ -16,6 +17,7 @@ pub struct LlmClient {
     temperature: Option<f64>,
     semaphore: Arc<Semaphore>,
     max_retries: u32,
+    recorder: Option<Arc<TrajectoryRecorder>>,
 }
 
 impl LlmClient {
@@ -37,6 +39,7 @@ impl LlmClient {
             temperature: None,
             semaphore: Arc::new(Semaphore::new(5)),
             max_retries: 3,
+            recorder: None,
         })
     }
 
@@ -52,6 +55,7 @@ impl LlmClient {
             temperature: None,
             semaphore: Arc::new(Semaphore::new(5)),
             max_retries: 3,
+            recorder: None,
         }
     }
 
@@ -73,6 +77,16 @@ impl LlmClient {
 
     pub fn set_concurrency(&mut self, n: usize) {
         self.semaphore = Arc::new(Semaphore::new(n));
+    }
+
+    /// Attach a trajectory recorder to capture all LLM calls.
+    pub fn set_recorder(&mut self, recorder: Arc<TrajectoryRecorder>) {
+        self.recorder = Some(recorder);
+    }
+
+    /// Get a reference to the attached recorder, if any.
+    pub fn recorder(&self) -> Option<&Arc<TrajectoryRecorder>> {
+        self.recorder.as_ref()
     }
 
     /// Build a rig-core OpenAI Completions API client from current config.
@@ -236,6 +250,7 @@ impl LlmClient {
         let client = self.build_rig_client()?;
         let rig_messages = Self::to_rig_messages(&messages);
         let tag = label.unwrap_or("llm");
+        let start_ts = chrono::Utc::now().to_rfc3339();
 
         let mut last_err = None;
         for attempt in 0..=self.max_retries {
@@ -259,7 +274,7 @@ impl LlmClient {
                 .do_request(&client, &rig_messages, json_mode, max_tokens, tag)
                 .await
             {
-                Ok(text) if text.trim().is_empty() => {
+                Ok((text, _, _)) if text.trim().is_empty() => {
                     tracing::warn!(
                         "[{tag}] LLM returned empty content (attempt {attempt}/{}), will retry with max_tokens",
                         self.max_retries
@@ -268,7 +283,27 @@ impl LlmClient {
                         "LLM returned empty content (reasoning model token exhaustion suspected)"
                     ));
                 }
-                Ok(text) => return Ok(text),
+                Ok((text, input_tokens, output_tokens)) => {
+                    // Record successful call if recorder is attached.
+                    if let Some(ref recorder) = self.recorder {
+                        let end_ts = chrono::Utc::now().to_rfc3339();
+                        recorder.record(RecordParams {
+                            label: tag,
+                            messages: &messages,
+                            response: &text,
+                            model: &self.model,
+                            input_tokens,
+                            output_tokens,
+                            start_ts: &start_ts,
+                            end_ts: &end_ts,
+                        });
+                        tracing::debug!(
+                            "[{tag}] Recorded LLM call ({} calls total)",
+                            recorder.len()
+                        );
+                    }
+                    return Ok(text);
+                }
                 Err(e) => {
                     tracing::warn!("[{tag}] LLM call attempt {attempt} failed: {e}");
                     last_err = Some(e);
@@ -279,6 +314,7 @@ impl LlmClient {
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("LLM call failed with no recorded error")))
     }
 
+    /// Returns (text, input_tokens, output_tokens) on success.
     async fn do_request(
         &self,
         client: &openai::CompletionsClient,
@@ -286,7 +322,7 @@ impl LlmClient {
         json_mode: bool,
         max_tokens: Option<u64>,
         tag: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, u32, u32)> {
         let model = client.completion_model(&self.model);
 
         // Split messages: system → preamble, rest → chat_history, last → prompt
@@ -323,11 +359,14 @@ impl LlmClient {
             .await
             .map_err(|e| anyhow::anyhow!("Completion failed: {e}"))?;
 
+        let input_tokens = response.usage.input_tokens as u32;
+        let output_tokens = response.usage.output_tokens as u32;
+
         // Log token usage
         tracing::debug!(
             "[{tag}] Tokens: input={} output={} total={}",
-            response.usage.input_tokens,
-            response.usage.output_tokens,
+            input_tokens,
+            output_tokens,
             response.usage.total_tokens
         );
 
@@ -357,7 +396,7 @@ impl LlmClient {
             }
         }
 
-        Ok(text)
+        Ok((text, input_tokens, output_tokens))
     }
 
     /// Split messages into (preamble, history, prompt).

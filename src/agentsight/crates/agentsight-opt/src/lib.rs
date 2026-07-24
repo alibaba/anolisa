@@ -18,5 +18,5 @@ pub mod trace;
 pub mod types;
 
 pub use atif::AtifTrajectory;
-pub use llm::LlmClient;
+pub use llm::{LlmClient, TrajectoryRecorder};
 pub use pipeline::AnalyzePipeline;
