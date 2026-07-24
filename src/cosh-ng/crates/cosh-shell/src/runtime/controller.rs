@@ -269,7 +269,9 @@ pub(crate) fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool
             ShellEventKind::CommandStarted => {
                 active.insert(command_id.as_str());
             }
-            ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed => {
+            ShellEventKind::CommandCompleted
+            | ShellEventKind::CommandFailed
+            | ShellEventKind::UserInputIntercepted => {
                 active.remove(command_id.as_str());
             }
             _ => {}

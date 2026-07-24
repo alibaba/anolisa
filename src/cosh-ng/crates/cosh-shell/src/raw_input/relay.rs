@@ -11,6 +11,7 @@ use super::event_parser::{
     CandidateLineBuffer, CandidateLineStatus, NativeLineState,
 };
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
+use super::mode::new_delay_input_mode;
 use super::{write_all_pty, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
 pub(super) struct InputRelayContext<'a> {
@@ -173,7 +174,7 @@ pub(super) fn relay_prompt_ghost_input(
                     });
                 send_shell_input_state(true, relay.input_events);
                 if let Ok(mut mode) = relay.input_mode.lock() {
-                    *mode = RawInputMode::Delay;
+                    *mode = new_delay_input_mode();
                 }
                 return Ok(true);
             }
@@ -349,7 +350,7 @@ fn relay_candidate_line(
                     redact_extension_setting_value(line.as_bytes()),
                 ));
                 if let Ok(mut mode) = relay.input_mode.lock() {
-                    *mode = RawInputMode::Delay;
+                    *mode = new_delay_input_mode();
                 }
                 let _ = relay
                     .input_events
@@ -369,7 +370,7 @@ fn relay_candidate_line(
                         redact_extension_setting_value(line.as_bytes()),
                     ));
                     if let Ok(mut mode) = relay.input_mode.lock() {
-                        *mode = RawInputMode::Delay;
+                        *mode = new_delay_input_mode();
                     }
                     let _ = relay
                         .input_events

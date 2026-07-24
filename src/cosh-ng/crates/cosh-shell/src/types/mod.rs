@@ -2,12 +2,14 @@ use serde::{Deserialize, Serialize};
 
 pub mod audit;
 pub mod hooks;
+mod shell_event_metadata;
 
 pub(crate) use hooks::BuiltinFactRecord;
 pub use hooks::{
     BuiltinFindingFacts, EvaluatedHookFinding, FindingSeverity, HighMemoryProcessFacts,
     HookFinding, HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,
 };
+pub use shell_event_metadata::{ShellCaptureLifecycle, ShellCaptureMetadata, ShellRoutingMetadata};
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -120,6 +122,7 @@ pub enum ShellEventKind {
     ShellStarted,
     ShellReady,
     UserInputIntercepted,
+    CommandRoutingObserved,
     CommandStarted,
     CommandCompleted,
     CommandFailed,
@@ -173,6 +176,10 @@ pub struct ShellEvent {
     pub shell_environment_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_identity: Option<ShellCommandAuditIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<ShellRoutingMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<ShellCaptureMetadata>,
 }
 
 impl ShellEvent {
@@ -202,6 +209,8 @@ impl ShellEvent {
             command_origin: Some(CommandOrigin::UserInteractive),
             shell_environment_generation: None,
             audit_identity: None,
+            routing: None,
+            capture: None,
         }
     }
 
@@ -245,6 +254,8 @@ impl ShellEvent {
             command_origin: None,
             shell_environment_generation: None,
             audit_identity: None,
+            routing: None,
+            capture: None,
         }
     }
 
@@ -268,6 +279,8 @@ impl ShellEvent {
             command_origin: None,
             shell_environment_generation: None,
             audit_identity: None,
+            routing: None,
+            capture: None,
         }
     }
 }

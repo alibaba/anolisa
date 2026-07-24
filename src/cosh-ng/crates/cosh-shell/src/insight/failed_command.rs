@@ -48,7 +48,10 @@ pub(crate) fn decide_failure_intervention(
                 FailureInsightKind::BuildOrTestFailure | FailureInsightKind::AbnormalSignal
             ) && output_usable));
     match (kind, candidate.suggestion.as_ref()) {
-        (FailureInsightKind::CommandNotFound, Some(PromptSuggestion::ShellRewrite { .. }))
+        (
+            FailureInsightKind::CommandNotFound,
+            Some(PromptSuggestion::ShellRewrite { .. } | PromptSuggestion::AgentPrompt { .. }),
+        )
         | (
             FailureInsightKind::PermissionDenied
             | FailureInsightKind::BuildOrTestFailure

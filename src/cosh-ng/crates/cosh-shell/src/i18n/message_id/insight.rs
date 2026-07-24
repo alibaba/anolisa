@@ -31,3 +31,14 @@ macro_rules! hook_insight_ids {
         );
     };
 }
+
+macro_rules! routing_insight_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            InsightCommandNotFoundSummary,
+            InsightCommandNotFoundPrompt,
+        );
+    };
+}

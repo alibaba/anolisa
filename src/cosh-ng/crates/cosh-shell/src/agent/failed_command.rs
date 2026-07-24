@@ -1,5 +1,11 @@
+// Owner: agent. Candidate construction is split under failed_command/.
+mod candidate;
+mod routing;
+
 use crate::hooks::interrupt::command_should_skip_failure_analysis;
 use crate::runtime::prelude::*;
+use candidate::command_not_found_agent_candidate;
+use routing::has_proven_top_level_missing;
 
 use crate::command::{classify_failure, FailureClass, FailureConfidence, FailureReason};
 use crate::evidence::model::{EvidenceExcerpt, OutputExcerptDirection};
@@ -68,8 +74,8 @@ pub(crate) fn collect_failed_command_insights<W: Write>(
 
         let excerpt = failure_output_evidence(block);
         let semantics = classify_failure(block, events, excerpt.text.as_deref());
-        let command_not_found = semantics.class == FailureClass::CommandNotFound;
-        let rewrite = if state.analysis_mode != AnalysisMode::Manual && command_not_found {
+        let proven_missing = block.exit_code == 127 && has_proven_top_level_missing(events, block);
+        let rewrite = if state.analysis_mode != AnalysisMode::Manual && proven_missing {
             let diagnostic_tail = command_not_found_diagnostic_tail(block);
             state
                 .shell_rewrite
@@ -79,6 +85,10 @@ pub(crate) fn collect_failed_command_insights<W: Write>(
         };
         let candidate = rewrite
             .map(|text| shell_rewrite_candidate(block, text))
+            .or_else(|| {
+                (state.analysis_mode != AnalysisMode::Manual && proven_missing)
+                    .then(|| command_not_found_agent_candidate(block, &excerpt))
+            })
             .or_else(|| failed_command_candidate(events, block));
         let Some(candidate) = candidate else {
             continue;

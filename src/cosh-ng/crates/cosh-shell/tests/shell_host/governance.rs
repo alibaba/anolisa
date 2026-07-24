@@ -5,6 +5,9 @@ fn raw_relay_host_intercepts_natural_language_via_bash_hook() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
 
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-raw-hook-test-{}-{}",

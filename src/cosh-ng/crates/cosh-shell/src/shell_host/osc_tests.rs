@@ -1,6 +1,7 @@
 use super::marker::{bash_marker_script, zsh_marker_script};
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use super::osc::*;
+use crate::ledger::build_command_blocks;
 use crate::types::{
     CommandOrigin, ShellEventKind, ShellHandoffRequest, COMMAND_OUTPUT_REF_MAX_BYTES,
     SESSION_OUTPUT_REF_MAX_BYTES,
@@ -9,6 +10,51 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
+
+#[test]
+fn routing_markers_require_matching_attempt_generation() {
+    let mut parser = parser_for_test("routing-generation");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"command\":\"Who are you\",\"cwd\":\"/tmp\",\"generation\":2}\x07")
+        .expect("feed preexec");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"top_level_missing\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"generation\":1,\"proven\":true,\"intent\":\"ambiguous\",\"sensitive\":false,\"unsafe\":false}\x07")
+        .expect("feed stale provenance");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"command\":\"stale input\",\"reason\":\"natural_language\",\"generation\":1,\"top_level_missing\":true}\x07")
+        .expect("feed stale intercept");
+
+    let stale = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
+        .expect("stale provenance event");
+    assert!(stale.command_id.is_none());
+    assert!(stale.routing.as_ref().is_some_and(|routing| {
+        routing.top_level_missing && !routing.proven && routing.generation == 1
+    }));
+    assert!(!parser.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("stale input")
+    }));
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"command\":\"Who are you\",\"reason\":\"natural_language\",\"generation\":2,\"top_level_missing\":true}\x07")
+        .expect("feed matching intercept");
+
+    let intercept = parser
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("Who are you")
+        })
+        .expect("matching intercept");
+    assert_eq!(intercept.command_id.as_deref(), Some("cmd-1"));
+    let ledger = build_command_blocks(&parser.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert!(ledger.blocks.is_empty());
+}
 
 #[test]
 fn trusted_history_file_marker_is_private_and_observed() {

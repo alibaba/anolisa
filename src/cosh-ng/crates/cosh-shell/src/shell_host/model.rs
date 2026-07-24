@@ -93,6 +93,11 @@ impl ShellHostConfig {
         self
     }
 
+    pub fn with_ai_enabled(mut self, enabled: bool) -> Self {
+        self.input_classifier = self.input_classifier.with_ai_enabled(enabled);
+        self
+    }
+
     pub(crate) fn set_shell_environment_observer<F>(&mut self, observer: F)
     where
         F: Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static,

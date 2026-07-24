@@ -1,6 +1,27 @@
 use super::{CardInputState, RawInputCapture, RawInputEvent};
 
 #[test]
+fn submitted_capture_preserves_same_read_suffix() {
+    let capture = RawInputCapture::Question {
+        id: "question-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, remainder) = state.consume_split(&capture, b"yes\nWho are you\n");
+
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardAnswer("yes".to_string()))
+    );
+    assert_eq!(remainder, b"Who are you\n");
+}
+
+#[test]
 fn question_capture_custom_option_waits_for_text_before_submit() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
@@ -449,10 +470,7 @@ fn mode_capture_supports_escape_and_ctrl_c_cancel() {
 
     assert_eq!(
         state.consume(&capture, b"\x1b\x1b\x03"),
-        vec![
-            RawInputEvent::ModeCancel("mode".to_string()),
-            RawInputEvent::ModeCancel("mode".to_string()),
-        ]
+        vec![RawInputEvent::ModeCancel("mode".to_string())]
     );
 }
 
@@ -591,10 +609,14 @@ fn approval_capture_escape_then_enter_cancels_without_submit() {
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
 
-    assert_eq!(
-        state.consume(&capture, b"\x1b"),
-        vec![RawInputEvent::CardCancel("req-1".to_string())]
-    );
+    let (events, remainder) = state.consume_split(&capture, b"\x1b");
+    assert_eq!(events, vec![RawInputEvent::CardCancel("req-1".to_string())]);
+    assert!(remainder.is_empty());
+
+    state.apply_capture(&capture);
+    let (events, remainder) = state.consume_split(&capture, b"\x1bxnext");
+    assert_eq!(events, vec![RawInputEvent::CardCancel("req-1".to_string())]);
+    assert_eq!(remainder, b"xnext");
 }
 
 #[test]

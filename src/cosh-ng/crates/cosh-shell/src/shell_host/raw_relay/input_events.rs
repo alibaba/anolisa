@@ -99,6 +99,34 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 let session_id = parser.session_id.clone();
                 parser.push_intercept_event(&session_id, input, None, reason.as_str())
             }
+            RawInputEvent::CaptureSubmitted {
+                kind,
+                target_id,
+                generation,
+            } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Submitted,
+                generation,
+                Some(kind),
+                Some(&target_id),
+            ),
+            RawInputEvent::CaptureDrained { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Drained,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CaptureExpired { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Expired,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CaptureOverflow { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Overflow,
+                generation,
+                None,
+                None,
+            ),
             RawInputEvent::CardFocus(id, selected) => {
                 parser.push_card_event("focus", &format!("{id}:{selected}"))
             }

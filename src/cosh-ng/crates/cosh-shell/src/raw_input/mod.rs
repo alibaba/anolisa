@@ -57,6 +57,20 @@ pub(crate) enum RawInputEvent {
     },
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
+    CaptureSubmitted {
+        kind: &'static str,
+        target_id: String,
+        generation: u64,
+    },
+    CaptureDrained {
+        generation: u64,
+    },
+    CaptureExpired {
+        generation: u64,
+    },
+    CaptureOverflow {
+        generation: u64,
+    },
     CardFocus(String, usize),
     CardToggle(String, usize),
     CardInput(String, String),

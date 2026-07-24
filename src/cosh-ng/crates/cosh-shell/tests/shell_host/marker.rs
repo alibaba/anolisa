@@ -52,11 +52,14 @@ fn shell_host_runs_bash_pty_and_emits_command_events() {
             && event.input.as_deref() == Some("/explain last error")
             && event.component.as_deref() == Some("slash")
     }));
-    assert!(output.events.iter().any(|event| {
-        event.kind == ShellEventKind::UserInputIntercepted
-            && event.input.as_deref() == Some("please explain the last error")
-            && event.component.as_deref() == Some("natural_language")
-    }));
+    assert_eq!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("please explain the last error")
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        bash_supports_command_not_found_handler()
+    );
     assert!(!output
         .terminal_output
         .windows(b"\x1b]1337;COSH;".len())
@@ -94,6 +97,691 @@ fn shell_host_runs_bash_pty_and_emits_command_events() {
         .expect("terminal output ref");
     let output_ref_text = std::fs::read_to_string(output_ref).expect("output ref text");
     assert!(output_ref_text.contains("No such file") || output_ref_text.contains("cannot access"));
+}
+
+#[test]
+fn shell_host_bash_valid_cue_named_function_wins_over_natural_language() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-valid-cue-function-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "Who() { printf '__who_function__:%s\\n' \"$*\"; }\n",
+    )
+    .expect("bashrc");
+    let config = ShellHostConfig::new("valid-cue-function", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+
+    let output = run_scripted_bash(&config, &[ScriptedInput::user_line("Who are you")])
+        .expect("scripted bash");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(terminal.contains("__who_function__:are you"), "{terminal}");
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[test]
+fn shell_host_bash_valid_cue_matrix_wins_over_natural_language() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-valid-cue-matrix-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    let bin_dir = work_dir.join("bin");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "alias Who='printf \"__alias_who__:%s\\\\n\"'\n",
+    )
+    .expect("bashrc");
+    let kindly = bin_dir.join("Kindly");
+    std::fs::write(
+        &kindly,
+        "#!/bin/sh\nprintf '__path_kindly__:%s\\n' \"$*\"\n",
+    )
+    .expect("Kindly executable");
+    make_executable(&kindly);
+    let han = bin_dir.join("帮我看看");
+    std::fs::write(&han, "#!/bin/sh\nprintf '__han_path__:%s\\n' \"$*\"\n")
+        .expect("Han executable");
+    make_executable(&han);
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let config = with_raw_byte_readline(
+        ShellHostConfig::new("valid-cue-matrix", &work_dir)
+            .with_env("HOME", home_dir.display().to_string())
+            .with_env("PATH", path),
+    );
+
+    let inputs = [
+        "Who are you",
+        "help file",
+        "Kindly explain this",
+        "帮我看看 当前目录",
+    ];
+    let output = run_scripted_bash(
+        &config,
+        &inputs
+            .iter()
+            .map(|input| ScriptedInput::user_line(*input))
+            .collect::<Vec<_>>(),
+    )
+    .expect("scripted bash");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(terminal.contains("__alias_who__:are"), "{terminal}");
+    assert!(
+        terminal.contains("__path_kindly__:explain this"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("__han_path__:当前目录"), "{terminal}");
+    for input in inputs {
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("natural_language")
+        }));
+    }
+}
+
+#[test]
+fn shell_host_zsh_valid_cue_matrix_wins_over_natural_language() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-valid-cue-matrix-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    let bin_dir = work_dir.join("bin");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        "alias Who='printf \"__zsh_alias_who__:%s\\\\n\"'\n\
+         how() { printf '__zsh_function_how__:%s\\n' \"$*\"; }\n",
+    )
+    .expect("zshrc");
+    let kindly = bin_dir.join("Kindly");
+    std::fs::write(
+        &kindly,
+        "#!/bin/sh\nprintf '__zsh_path_kindly__:%s\\n' \"$*\"\n",
+    )
+    .expect("Kindly executable");
+    make_executable(&kindly);
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let config = ShellHostConfig::new("zsh-valid-cue-matrix", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string())
+        .with_env("PATH", path);
+
+    let inputs = [
+        "Who are you",
+        "how file",
+        "Kindly explain this",
+        "test this",
+    ];
+    let output = run_scripted_zsh(
+        &config,
+        &inputs
+            .iter()
+            .map(|input| ScriptedInput::user_line(*input))
+            .collect::<Vec<_>>(),
+    )
+    .expect("scripted zsh");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(terminal.contains("__zsh_alias_who__:are"), "{terminal}");
+    assert!(terminal.contains("__zsh_function_how__:file"), "{terminal}");
+    assert!(
+        terminal.contains("__zsh_path_kindly__:explain this"),
+        "{terminal}"
+    );
+    for input in inputs {
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("natural_language")
+        }));
+    }
+}
+
+#[test]
+fn shell_host_bash_missing_natural_language_closes_started_command() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-natural-language-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("missing-natural-language", &work_dir);
+    config.native_mode = false;
+
+    let output = run_scripted_bash(&config, &[ScriptedInput::user_line("Kindly explain this")])
+        .expect("scripted bash");
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("Kindly explain this")
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| panic!("natural-language intercept: {:?}", output.events));
+
+    assert!(intercept.command_id.is_some(), "{:?}", output.events);
+    assert!(
+        intercept
+            .routing
+            .as_ref()
+            .is_some_and(|routing| routing.top_level_missing && routing.proven),
+        "{:?}",
+        output.events
+    );
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert!(!ledger
+        .blocks
+        .iter()
+        .any(|block| block.command == "Kindly explain this"));
+    assert!(
+        !String::from_utf8_lossy(&output.terminal_output).contains("command not found"),
+        "{}",
+        String::from_utf8_lossy(&output.terminal_output)
+    );
+}
+
+#[test]
+fn shell_host_zsh_missing_natural_language_closes_started_command() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-natural-language-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-missing-natural-language", &work_dir);
+    config.native_mode = false;
+
+    for input in ["Kindly explain this", "Just do it"] {
+        let output =
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(input)]).expect("scripted zsh");
+        let intercept = output
+            .events
+            .iter()
+            .find(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+                    && event.component.as_deref() == Some("natural_language")
+            })
+            .unwrap_or_else(|| panic!("natural-language intercept: {:?}", output.events));
+
+        assert!(intercept.command_id.is_some(), "{:?}", output.events);
+        assert!(
+            intercept
+                .routing
+                .as_ref()
+                .is_some_and(|routing| routing.top_level_missing && routing.proven),
+            "{:?}",
+            output.events
+        );
+        let ledger = build_command_blocks(&output.events);
+        assert!(!ledger.blocks.iter().any(|block| block.command == input));
+        assert!(
+            !String::from_utf8_lossy(&output.terminal_output).contains("command not found"),
+            "{}",
+            String::from_utf8_lossy(&output.terminal_output)
+        );
+    }
+}
+
+#[test]
+fn shell_host_zsh_ambiguous_phrase_stays_in_shell() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-ambiguous-phrase-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-ambiguous-phrase", &work_dir);
+    config.native_mode = false;
+
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line(
+            "_cosh_test_missing_ambiguous build",
+        )],
+    )
+    .expect("scripted zsh");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(
+        terminal.contains("command not found: _cosh_test_missing_ambiguous"),
+        "{terminal}"
+    );
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("_cosh_test_missing_ambiguous build")
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[test]
+fn shell_host_bash_sensitive_missing_emits_raw_free_provenance() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-sensitive-missing-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let input = "missing_sensitive_cli --token=secretvalue";
+    let output = run_scripted_bash(
+        &ShellHostConfig::new("bash-sensitive-missing", &work_dir),
+        &[ScriptedInput::user_line(input)],
+    )
+    .expect("scripted bash");
+    let routing = output
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
+        .unwrap_or_else(|| panic!("routing provenance: {:?}", output.events));
+
+    assert_eq!(routing.component.as_deref(), Some("ambiguous"));
+    assert!(routing.routing.as_ref().is_some_and(|metadata| {
+        metadata.generation == 1
+            && metadata.top_level_missing
+            && metadata.proven
+            && metadata.sensitive
+            && !metadata.unsafe_input
+    }));
+    assert!(routing.input.is_none());
+    assert!(routing.command.is_none());
+    assert!(!format!("{:?}", output.events).contains("secretvalue"));
+    assert!(String::from_utf8_lossy(&output.terminal_output).contains("command not found"));
+}
+
+#[test]
+fn shell_host_missing_cksum_fails_closed_without_sensitive_provenance() {
+    let input = "missing_sensitive_cli --token=secretvalue";
+    let mut shells = vec!["bash"];
+    if Command::new("zsh").arg("--version").output().is_ok() {
+        shells.push("zsh");
+    }
+    let mut outputs = Vec::new();
+    for shell in shells {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-{shell}-missing-cksum-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let bin_dir = work_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("stub bin dir");
+        let cksum = bin_dir.join("cksum");
+        std::fs::write(&cksum, "#!/bin/sh\nexit 1\n").expect("cksum stub");
+        make_executable(&cksum);
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let config = ShellHostConfig::new(format!("{shell}-missing-cksum"), &work_dir)
+            .with_env("PATH", path);
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line(input)])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(input)])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        outputs.push((shell, output));
+    }
+
+    for (shell, output) in outputs {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandStarted
+                && event.command.as_deref() == Some("<redacted sensitive command>")
+        }));
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandFailed && event.exit_code == Some(127)
+        }));
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|event| event.kind == ShellEventKind::CommandRoutingObserved),
+            "{shell}: {:?}",
+            output.events
+        );
+        assert!(
+            !format!("{:?}", output.events).contains("secretvalue"),
+            "{shell}: {:?}",
+            output.events
+        );
+        assert!(
+            String::from_utf8_lossy(&output.terminal_output).contains("command not found"),
+            "{shell}: {}",
+            String::from_utf8_lossy(&output.terminal_output)
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_host_linux_bash_natural_language_routes_directly_to_agent() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-who-are-you-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("bash-who-are-you", &work_dir);
+    config.native_mode = false;
+
+    for input in ["Who are you", "Just do it"] {
+        let output =
+            run_scripted_bash(&config, &[ScriptedInput::user_line(input)]).expect("scripted bash");
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+        assert!(!terminal.contains("command not found"), "{terminal}");
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.command_id.is_some()
+                && event.component.as_deref() == Some("natural_language")
+        }));
+        let ledger = build_command_blocks(&output.events);
+        assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+        assert!(!ledger.blocks.iter().any(|block| block.command == input));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_host_linux_bash_ambiguous_phrase_stays_in_shell() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-ambiguous-phrase-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("bash-ambiguous-phrase", &work_dir);
+    config.native_mode = false;
+
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line(
+            "_cosh_test_missing_ambiguous build",
+        )],
+    )
+    .expect("scripted bash");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(terminal.contains("command not found"), "{terminal}");
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("_cosh_test_missing_ambiguous build")
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shell_host_linux_bash_ignores_inherited_system_missing_handler() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-system-missing-handler-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("bash-system-missing-handler", &work_dir).with_env(
+        "BASH_FUNC_command_not_found_handle%%",
+        "() { printf '__system_handler__\\n'; return 127; }",
+    );
+    config.native_mode = false;
+
+    let output = run_scripted_bash(&config, &[ScriptedInput::user_line("Who are you")])
+        .expect("scripted bash");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(!terminal.contains("__system_handler__"), "{terminal}");
+    assert!(!terminal.contains("command not found"), "{terminal}");
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("Who are you")
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[test]
+fn shell_host_zsh_ai_disabled_keeps_missing_natural_language_in_shell() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-ai-disabled-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-ai-disabled", &work_dir).with_ai_enabled(false);
+    config.native_mode = false;
+
+    let output = run_scripted_zsh(&config, &[ScriptedInput::user_line("Kindly explain this")])
+        .expect("scripted zsh");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(terminal.contains("command not found: Kindly"), "{terminal}");
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[test]
+fn shell_host_zsh_nested_missing_is_not_treated_as_top_level_input() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-nested-missing-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(home_dir.join(".zshrc"), "ask() { please explain this; }\n").expect("zshrc");
+    let config = ShellHostConfig::new("zsh-nested-missing", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+
+    let output =
+        run_scripted_zsh(&config, &[ScriptedInput::user_line("ask")]).expect("scripted zsh");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(terminal.contains("command not found: please"), "{terminal}");
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[test]
+fn shell_host_bash_preserves_user_missing_handler_contract() {
+    if Command::new("bash").arg("--version").output().is_err()
+        || !bash_supports_command_not_found_handler()
+    {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-user-missing-handler-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "command_not_found_handle() {\n\
+         printf '__user_handler__:%s:%s\\n' \"$#\" \"$*\"\n\
+         handler_inner_missing\n\
+         return 42\n\
+         }\n",
+    )
+    .expect("bashrc");
+    let config = ShellHostConfig::new("bash-user-missing-handler", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("terraform plan"),
+            ScriptedInput::user_line("please explain this"),
+        ],
+    )
+    .expect("scripted bash");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(
+        terminal.contains("__user_handler__:2:terraform plan"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("handler_inner_missing"), "{terminal}");
+    assert!(
+        terminal.contains("__user_handler__:3:please explain this"),
+        "{terminal}"
+    );
+    let ledger = ledger_from_output(&output);
+    for command in ["terraform plan", "please explain this"] {
+        let block = ledger
+            .blocks
+            .iter()
+            .find(|block| block.command == command)
+            .unwrap_or_else(|| panic!("{command} block"));
+        assert_eq!(block.exit_code, 42, "{terminal}\n{:?}", output.events);
+    }
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[test]
+fn shell_host_zsh_preserves_user_missing_handler_contract() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-user-missing-handler-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        "command_not_found_handler() {\n\
+         printf '__user_handler__:%s:%s\\n' \"$#\" \"$*\"\n\
+         handler_inner_missing\n\
+         return 42\n\
+         }\n",
+    )
+    .expect("zshrc");
+    let config = ShellHostConfig::new("zsh-user-missing-handler", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line("terraform plan"),
+            ScriptedInput::user_line("please explain this"),
+        ],
+    )
+    .expect("scripted zsh");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(
+        terminal.contains("__user_handler__:2:terraform plan"),
+        "{terminal}"
+    );
+    assert!(
+        terminal.contains("command not found: handler_inner_missing"),
+        "{terminal}"
+    );
+    assert!(
+        terminal.contains("__user_handler__:3:please explain this"),
+        "{terminal}"
+    );
+    let ledger = ledger_from_output(&output);
+    for command in ["terraform plan", "please explain this"] {
+        let block = ledger
+            .blocks
+            .iter()
+            .find(|block| block.command == command)
+            .unwrap_or_else(|| panic!("{command} block"));
+        assert_eq!(block.exit_code, 42, "{terminal}\n{:?}", output.events);
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandRoutingObserved
+                && event.command_id.as_deref() == Some(block.id.as_str())
+                && event.routing.as_ref().is_some_and(|routing| routing.proven)
+        }));
+    }
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("natural_language")
+    }));
 }
 
 #[test]

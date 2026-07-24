@@ -31,6 +31,8 @@ fn prompt_ghost_event(message: Option<&str>, input: Option<&str>) -> ShellEvent 
         command_origin: None,
         shell_environment_generation: None,
         audit_identity: None,
+        routing: None,
+        capture: None,
     }
 }
 

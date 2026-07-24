@@ -1,3 +1,6 @@
+// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs.
+mod routing;
+
 use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -7,8 +10,9 @@ use serde::Deserialize;
 
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use crate::types::{
-    CommandOrigin, ShellCommandAuditIdentity, ShellEnvironmentSnapshot, ShellEvent, ShellEventKind,
-    ShellHandoffRequest, SESSION_OUTPUT_REF_MAX_BYTES,
+    CommandOrigin, ShellCaptureLifecycle, ShellCaptureMetadata, ShellCommandAuditIdentity,
+    ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
+    SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
 #[cfg(test)]
@@ -38,6 +42,7 @@ struct CurrentCommand {
     audit_identity: Option<ShellCommandAuditIdentity>,
     started_at_ms: u64,
     output_start: usize,
+    attempt_generation: Option<u64>,
     shell_environment_generation: Option<u64>,
 }
 
@@ -196,6 +201,8 @@ impl OscParser {
                     command_origin: None,
                     shell_environment_generation: None,
                     audit_identity: None,
+                    routing: None,
+                    capture: None,
                 }),
             }
         }
@@ -228,21 +235,14 @@ impl OscParser {
             .unwrap_or_else(|| self.session_id.clone());
         let timestamp = marker.timestamp_ms.unwrap_or_else(now_ms);
 
+        if matches!(marker.event.as_str(), "intercept" | "top_level_missing") {
+            self.handle_routing_marker(marker, session_id, timestamp);
+            return Ok(());
+        }
+
         match marker.event.as_str() {
             "prompt_ready" => {
                 self.prompt_ready_display_start = Some(self.display.len());
-            }
-            "intercept" => {
-                let input = marker.command.unwrap_or_default();
-                let reason = marker
-                    .reason
-                    .unwrap_or_else(|| "natural_language".to_string());
-                self.intervention_cuts.push(self.clean.len());
-                self.intervention_display_cuts
-                    .push((self.display.len(), DisplayCutKind::Intercept));
-                self.push_intercept_event(&session_id, input, marker.cwd, &reason);
-                self.current = None;
-                self.prompt_ready_display_start = None;
             }
             "preexec" => {
                 let command = marker.command.unwrap_or_default();
@@ -258,6 +258,7 @@ impl OscParser {
                     audit_identity: audit_identity.clone(),
                     started_at_ms: timestamp,
                     output_start: self.clean.len(),
+                    attempt_generation: marker.generation,
                     shell_environment_generation: marker
                         .path_trusted
                         .unwrap_or(false)
@@ -300,6 +301,8 @@ impl OscParser {
                         command_origin: None,
                         shell_environment_generation: None,
                         audit_identity: None,
+                        routing: None,
+                        capture: None,
                     });
                     return Ok(());
                 };
@@ -644,26 +647,7 @@ impl OscParser {
         cwd: Option<String>,
         reason: &str,
     ) {
-        self.events.push(ShellEvent {
-            kind: ShellEventKind::UserInputIntercepted,
-            session_id: session_id.to_string(),
-            command_id: None,
-            command: None,
-            cwd,
-            end_cwd: None,
-            exit_code: None,
-            started_at_ms: Some(now_ms()),
-            ended_at_ms: None,
-            duration_ms: None,
-            terminal_output_ref: None,
-            terminal_output_bytes: None,
-            input: Some(input),
-            component: Some(reason.to_string()),
-            message: Some("input intercepted before reaching bash".to_string()),
-            command_origin: None,
-            shell_environment_generation: None,
-            audit_identity: None,
-        });
+        self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false);
     }
 
     pub(super) fn push_control_event(&mut self, input: &str) {
@@ -688,6 +672,48 @@ impl OscParser {
 
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {
         self.push_self_session_input_event("card", action, Some(value));
+    }
+
+    pub(super) fn push_capture_event(
+        &mut self,
+        lifecycle: ShellCaptureLifecycle,
+        generation: u64,
+        kind: Option<&str>,
+        target_id: Option<&str>,
+    ) {
+        let message = match lifecycle {
+            ShellCaptureLifecycle::Submitted => "capture_submitted",
+            ShellCaptureLifecycle::Drained => "capture_drained",
+            ShellCaptureLifecycle::Expired => "capture_expired",
+            ShellCaptureLifecycle::Overflow => "capture_overflow",
+        };
+        self.events.push(ShellEvent {
+            kind: ShellEventKind::UserInputIntercepted,
+            session_id: self.session_id.clone(),
+            command_id: None,
+            command: None,
+            cwd: None,
+            end_cwd: None,
+            exit_code: None,
+            started_at_ms: Some(now_ms()),
+            ended_at_ms: None,
+            duration_ms: None,
+            terminal_output_ref: None,
+            terminal_output_bytes: None,
+            input: None,
+            component: Some("card".to_string()),
+            message: Some(message.to_string()),
+            command_origin: None,
+            shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: Some(ShellCaptureMetadata {
+                kind: kind.map(str::to_string),
+                target_id: target_id.map(str::to_string),
+                generation,
+                lifecycle,
+            }),
+        });
     }
 
     pub(super) fn push_secret_card_event(&mut self, action: &str, value: &str) {
@@ -726,6 +752,8 @@ impl OscParser {
             command_origin: None,
             shell_environment_generation: None,
             audit_identity: None,
+            routing: None,
+            capture: None,
         });
     }
 }
@@ -748,6 +776,13 @@ struct Marker {
     path: Option<String>,
     path_trusted: Option<bool>,
     history_file: Option<String>,
+    generation: Option<u64>,
+    top_level_missing: Option<bool>,
+    proven: Option<bool>,
+    intent: Option<String>,
+    sensitive: Option<bool>,
+    #[serde(rename = "unsafe")]
+    unsafe_input: Option<bool>,
 }
 
 fn command_finished_event(
@@ -792,6 +827,8 @@ fn command_finished_event(
             command_origin: None,
             shell_environment_generation: None,
             audit_identity: None,
+            routing: None,
+            capture: None,
         },
     }
 }

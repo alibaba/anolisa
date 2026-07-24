@@ -345,7 +345,8 @@ where
 
 struct RawModeGuard {
     fd: i32,
-    original: libc::termios,
+    original_termios: Option<libc::termios>,
+    original_flags: i32,
     active: bool,
 }
 
@@ -355,26 +356,44 @@ impl RawModeGuard {
     }
 
     fn activate_fd(fd: i32) -> io::Result<Option<Self>> {
-        if unsafe { libc::isatty(fd) } != 1 {
-            return Ok(None);
+        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if original_flags < 0 {
+            return Err(io::Error::last_os_error());
         }
-
-        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-        if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
             return Err(io::Error::last_os_error());
         }
 
-        let mut raw = original;
-        unsafe {
-            libc::cfmakeraw(&mut raw);
-        }
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let original_termios = if unsafe { libc::isatty(fd) } == 1 {
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::fcntl(fd, libc::F_SETFL, original_flags);
+                }
+                return Err(error);
+            }
+
+            let mut raw = original;
+            unsafe {
+                libc::cfmakeraw(&mut raw);
+            }
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } < 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::fcntl(fd, libc::F_SETFL, original_flags);
+                }
+                return Err(error);
+            }
+            Some(original)
+        } else {
+            None
+        };
 
         Ok(Some(Self {
             fd,
-            original,
+            original_termios,
+            original_flags,
             active: true,
         }))
     }
@@ -383,8 +402,13 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.active {
+            if let Some(original) = &self.original_termios {
+                unsafe {
+                    libc::tcsetattr(self.fd, libc::TCSANOW, original);
+                }
+            }
             unsafe {
-                libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+                libc::fcntl(self.fd, libc::F_SETFL, self.original_flags);
             }
         }
     }
@@ -416,6 +440,24 @@ mod tests {
             restored.c_lflag & libc::ICANON,
             original.c_lflag & libc::ICANON
         );
+    }
+
+    #[test]
+    fn raw_mode_guard_restores_nonblocking_flag_for_pipe_input() {
+        let pipe = nix::unistd::pipe().expect("open pipe");
+        let fd = pipe.0.as_raw_fd();
+        let original = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+
+        {
+            let _guard = RawModeGuard::activate_fd(fd)
+                .expect("activate input mode")
+                .expect("pipe guard");
+            let active = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            assert_ne!(active & libc::O_NONBLOCK, 0);
+        }
+
+        let restored = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_eq!(restored & libc::O_NONBLOCK, original & libc::O_NONBLOCK);
     }
 
     fn termios_for_fd(fd: i32) -> libc::termios {

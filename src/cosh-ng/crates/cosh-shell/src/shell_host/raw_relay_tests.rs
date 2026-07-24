@@ -25,6 +25,24 @@ fn feed_shell_ready(parser: &mut OscParser) {
 }
 
 #[test]
+fn capture_ack_generation_expires_at_terminal_event() {
+    let mut parser = parser_for_test("capture-ack-lifecycle");
+    parser.push_capture_event(
+        crate::types::ShellCaptureLifecycle::Submitted,
+        7,
+        Some("question"),
+        Some("question-1"),
+    );
+    assert_eq!(
+        latest_capture_submission_generation(&parser.events),
+        Some(7)
+    );
+
+    parser.push_capture_event(crate::types::ShellCaptureLifecycle::Drained, 7, None, None);
+    assert_eq!(latest_capture_submission_generation(&parser.events), None);
+}
+
+#[test]
 fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
     let mut parser = parser_for_test("handoff-prompt-restore");
     feed_shell_ready(&mut parser);

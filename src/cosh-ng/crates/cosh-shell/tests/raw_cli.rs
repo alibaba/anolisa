@@ -87,6 +87,20 @@ fn assert_no_approval_request_card(output: &str) {
     assert!(!approval_request_card_visible(output), "{output}");
 }
 
+fn bash_supports_command_not_found_handler() -> bool {
+    Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-ic",
+            "command_not_found_handle(){ return 0; }; __cosh_missing_probe",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub(crate) fn assert_approval_prompt_visible(output: &str) {
     assert!(
         output.contains("Approval required") || output.contains("Approval req-1"),

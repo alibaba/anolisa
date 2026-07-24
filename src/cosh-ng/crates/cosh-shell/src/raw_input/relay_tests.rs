@@ -5,8 +5,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::super::generation::LineSubmitCounter;
-use super::super::spawn::{finish_input_relay, relay_input_bytes, RawInputRelayState};
-use super::super::{PromptGhostCandidate, RawRelayAction, UserPtyInputGeneration};
+use super::super::mode::current_raw_input_mode;
+use super::super::spawn::{
+    finish_input_relay, relay_input_bytes, relay_late_capture_input, RawInputRelayState,
+};
+use super::super::{
+    update_input_mode, PromptGhostCandidate, RawInputCapture, RawObserverAction, RawRelayAction,
+    UserPtyInputGeneration,
+};
 use super::*;
 
 fn output_file(label: &str) -> (std::path::PathBuf, File) {
@@ -74,6 +80,49 @@ impl Read for ChannelReader {
         buffer[..count].copy_from_slice(&self.pending[..count]);
         self.pending.drain(..count);
         Ok(count)
+    }
+}
+
+struct ReadStartChannelReader {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    read_started_tx: mpsc::Sender<()>,
+}
+
+impl Read for ReadStartChannelReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.read_started_tx.send(()).expect("observe read start");
+        let bytes = match self.receiver.recv() {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(0),
+        };
+        assert!(bytes.len() <= buffer.len());
+        buffer[..bytes.len()].copy_from_slice(&bytes);
+        Ok(bytes.len())
+    }
+}
+
+struct PausingChannelReader {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    pause_on_read: usize,
+    read_count: usize,
+    bytes_ready_tx: mpsc::Sender<()>,
+    resume_rx: mpsc::Receiver<()>,
+}
+
+impl Read for PausingChannelReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let bytes = match self.receiver.recv() {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(0),
+        };
+        assert!(bytes.len() <= buffer.len());
+        buffer[..bytes.len()].copy_from_slice(&bytes);
+        self.read_count += 1;
+        if self.read_count == self.pause_on_read {
+            self.bytes_ready_tx.send(()).expect("observe read bytes");
+            self.resume_rx.recv().expect("resume read");
+        }
+        Ok(bytes.len())
     }
 }
 
@@ -149,7 +198,7 @@ impl DelayRelay {
         let (path, master) = output_file(label);
         let (input_tx, input_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        let input_mode = Arc::new(Mutex::new(RawInputMode::Delay));
+        let input_mode = Arc::new(Mutex::new(super::super::mode::new_delay_input_mode()));
         let relay = super::super::spawn_raw_input_relay(
             ChannelReader {
                 receiver: input_rx,
@@ -212,7 +261,7 @@ fn delay_bare_escape_requests_cancel_and_does_not_forward() {
         "unexpected CtrlC event"
     );
     assert_eq!(output, b"exit\n");
-    assert!(matches!(mode, RawInputMode::Delay));
+    assert!(matches!(mode, RawInputMode::Delay { .. }));
 }
 
 #[test]
@@ -226,7 +275,7 @@ fn delay_escape_sequence_is_forwarded_without_cancel() {
         "unexpected Esc event for arrow sequence"
     );
     assert_eq!(output, b"\x1b[Aexit\n");
-    assert!(matches!(mode, RawInputMode::Delay));
+    assert!(matches!(mode, RawInputMode::Delay { .. }));
 }
 
 #[test]
@@ -242,7 +291,7 @@ fn delay_split_escape_sequence_is_forwarded_without_cancel() {
         "unexpected Esc event for split arrow sequence"
     );
     assert_eq!(output, b"\x1b[Aexit\n");
-    assert!(matches!(mode, RawInputMode::Delay));
+    assert!(matches!(mode, RawInputMode::Delay { .. }));
 }
 
 #[test]
@@ -259,6 +308,364 @@ fn delay_escape_is_forwarded_when_run_finishes_before_deadline() {
     );
     assert_eq!(output, b"\x1bxexit\n");
     assert!(matches!(mode, RawInputMode::Passthrough));
+}
+
+#[test]
+fn submitted_capture_discards_a_later_owned_read_when_the_chain_ends() {
+    let (path, master) = output_file("capture-read-ahead");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let first = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let second = RawInputCapture::Question {
+        id: "q-2".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+        capture: first,
+        generation: 1,
+        installed_at: Instant::now(),
+    }));
+    let relay = super::super::spawn_raw_input_relay(
+        ChannelReader {
+            receiver: input_rx,
+            pending: Vec::new(),
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"first\n".to_vec()).expect("first answer");
+    let mut events = Vec::new();
+    let first_generation = loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first capture submission");
+        let generation = match &event {
+            RawInputEvent::CaptureSubmitted { generation, .. } => Some(*generation),
+            _ => None,
+        };
+        events.push(event);
+        if let Some(generation) = generation {
+            break generation;
+        }
+    };
+
+    input_tx
+        .send(b"typed-ahead\n".to_vec())
+        .expect("read during ack");
+    thread::sleep(Duration::from_millis(50));
+    update_input_mode(
+        &input_mode,
+        &RawObserverAction::CaptureInput(second),
+        Some(first_generation),
+    );
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while let Ok(event) = event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        let second_generation = match &event {
+            RawInputEvent::CaptureSubmitted {
+                target_id,
+                generation,
+                ..
+            } if target_id == "q-2" => Some(*generation),
+            _ => None,
+        };
+        events.push(event);
+        if let Some(generation) = second_generation {
+            update_input_mode(&input_mode, &RawObserverAction::Continue, Some(generation));
+            break;
+        }
+    }
+    drop(input_tx);
+    relay.join().expect("relay thread").expect("relay result");
+    events.extend(event_rx.try_iter());
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| event == &RawInputEvent::CardAnswer("typed-ahead".to_string())),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn input_obtained_before_capture_replacement_does_not_enter_the_new_capture() {
+    let (path, master) = output_file("capture-read-return-cutoff");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let first = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let second = RawInputCapture::Question {
+        id: "q-2".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+        capture: first,
+        generation: 1,
+        installed_at: Instant::now(),
+    }));
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 2,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"first\n".to_vec()).expect("first answer");
+    let first_generation = loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first capture submission");
+        if let RawInputEvent::CaptureSubmitted { generation, .. } = event {
+            break generation;
+        }
+    };
+
+    input_tx.send(b"stale".to_vec()).expect("stale input");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("stale bytes obtained before replacement");
+    update_input_mode(
+        &input_mode,
+        &RawObserverAction::CaptureInput(second),
+        Some(first_generation),
+    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if matches!(
+            current_raw_input_mode(&input_mode),
+            RawInputMode::Capture {
+                capture: RawInputCapture::Question { ref id, .. },
+                ..
+            } if id == "q-2"
+        ) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replacement capture not installed"
+        );
+        thread::yield_now();
+    }
+    resume_tx.send(()).expect("release stale read");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::CardInput(target_id, _) if target_id == "q-2"
+        )),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn input_obtained_after_capture_install_enters_the_new_capture() {
+    let (path, master) = output_file("capture-read-after-install");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (read_started_tx, read_started_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let relay = super::super::spawn_raw_input_relay(
+        ReadStartChannelReader {
+            receiver: input_rx,
+            read_started_tx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    read_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reader blocked before capture install");
+    update_input_mode(&input_mode, &RawObserverAction::CaptureInput(capture), None);
+    input_tx.send(b"answer\n".to_vec()).expect("capture answer");
+
+    let mut events = Vec::new();
+    let generation = loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("capture submission");
+        let generation = match &event {
+            RawInputEvent::CaptureSubmitted { generation, .. } => Some(*generation),
+            _ => None,
+        };
+        events.push(event);
+        if let Some(generation) = generation {
+            break generation;
+        }
+    };
+    update_input_mode(&input_mode, &RawObserverAction::Continue, Some(generation));
+    drop(input_tx);
+    relay.join().expect("relay thread").expect("relay result");
+    events.extend(event_rx.try_iter());
+
+    assert!(
+        events
+            .iter()
+            .any(|event| event == &RawInputEvent::CardAnswer("answer".to_string())),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn stale_generation_reads_are_discarded_without_affecting_the_next_capture() {
+    let (path, mut master) = output_file("capture-overflow-tagged-reads");
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+        capture: RawInputCapture::Question {
+            id: "q-2".to_string(),
+            option_count: 0,
+            allow_free_text: true,
+            multiple: false,
+            secret: false,
+        },
+        generation: 2,
+        installed_at: Instant::now(),
+    }));
+    let classifier = InputClassifier::default();
+    let mut state = RawInputRelayState::default();
+    let chunks = (0..12)
+        .map(|index| vec![b'a' + index; 8192])
+        .collect::<Vec<_>>();
+    for chunk in &chunks {
+        relay_late_capture_input(
+            chunk,
+            1,
+            &mut master,
+            &event_tx,
+            &classifier,
+            &input_mode,
+            &mut state,
+        )
+        .expect("relay tagged capture input");
+    }
+    assert!(matches!(
+        current_raw_input_mode(&input_mode),
+        RawInputMode::Capture {
+            capture: RawInputCapture::Question { id, .. },
+            generation: 2,
+            ..
+        } if id == "q-2"
+    ));
+    finish_input_relay(&mut master, &event_tx, &classifier, &input_mode, &mut state)
+        .expect("finish relay");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::CardInput(target_id, _)
+                | RawInputEvent::CaptureSubmitted { target_id, .. }
+                if target_id == "q-2"
+        )),
+        "{events:?}"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, RawInputEvent::CaptureOverflow { .. })));
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn active_capture_eof_drains_the_generation_without_input() {
+    let (path, master) = output_file("capture-empty-eof");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+        capture: RawInputCapture::Question {
+            id: "q-1".to_string(),
+            option_count: 0,
+            allow_free_text: true,
+            multiple: false,
+            secret: false,
+        },
+        generation: 9,
+        installed_at: Instant::now(),
+    }));
+    let relay = super::super::spawn_raw_input_relay(
+        ChannelReader {
+            receiver: input_rx,
+            pending: Vec::new(),
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    drop(input_tx);
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| { matches!(event, RawInputEvent::CaptureDrained { generation: 9 }) })
+            .count(),
+        1,
+        "{events:?}"
+    );
+    assert!(matches!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::Terminal { generation: 9, .. }
+    ));
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
 }
 
 #[test]
@@ -748,6 +1155,145 @@ fn selection_pending_escape_is_forwarded_when_the_input_mode_changes() {
 }
 
 #[test]
+fn selection_pending_escape_does_not_cancel_a_new_capture() {
+    let (path, mut master) = output_file("selection-to-capture");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = selection_input_mode();
+    let classifier = InputClassifier::default();
+    let mut state = RawInputRelayState::default();
+    let received_at = Instant::now();
+
+    relay_input_bytes(
+        b"\x1b",
+        received_at,
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("buffer escape");
+    *input_mode.lock().expect("input mode") = RawInputMode::Capture {
+        capture: RawInputCapture::Question {
+            id: "q-1".to_string(),
+            option_count: 0,
+            allow_free_text: true,
+            multiple: false,
+            secret: false,
+        },
+        generation: 7,
+        installed_at: Instant::now(),
+    };
+
+    let mode_for_ack = input_mode.clone();
+    let ack = thread::spawn(move || {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(Duration::from_millis(250)) {
+            let generation = match &event {
+                RawInputEvent::CaptureSubmitted { generation, .. } => Some(*generation),
+                _ => None,
+            };
+            events.push(event);
+            if let Some(generation) = generation {
+                update_input_mode(
+                    &mode_for_ack,
+                    &RawObserverAction::Continue,
+                    Some(generation),
+                );
+                break;
+            }
+        }
+        events
+    });
+
+    relay_input_bytes(
+        b"",
+        received_at + Duration::from_millis(1),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("flush pending escape after capture install");
+    let events = ack.join().expect("ack thread");
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::QuestionCancel(_) | RawInputEvent::CaptureSubmitted { .. }
+        )),
+        "{events:?}"
+    );
+    assert!(matches!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::Capture { generation: 7, .. }
+    ));
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn selection_split_shift_tab_suffix_does_not_enter_a_new_capture() {
+    let (path, mut master) = output_file("selection-split-shift-tab-to-capture");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = selection_input_mode();
+    let classifier = InputClassifier::default();
+    let mut state = RawInputRelayState::default();
+    let received_at = Instant::now();
+
+    relay_input_bytes(
+        b"\x1b",
+        received_at,
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("buffer escape");
+    *input_mode.lock().expect("input mode") = RawInputMode::Capture {
+        capture: RawInputCapture::Question {
+            id: "q-1".to_string(),
+            option_count: 0,
+            allow_free_text: true,
+            multiple: false,
+            secret: false,
+        },
+        generation: 7,
+        installed_at: Instant::now(),
+    };
+
+    relay_input_bytes(
+        b"[Z",
+        received_at + Duration::from_millis(1),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("discard replaced ghost suffix");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::CardInput(_, _)
+                | RawInputEvent::QuestionCancel(_)
+                | RawInputEvent::CaptureSubmitted { .. }
+        )),
+        "{events:?}"
+    );
+    assert!(matches!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::Capture { generation: 7, .. }
+    ));
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
     let (path, mut master) = output_file("native");
     let (tx, rx) = mpsc::channel();
@@ -1011,7 +1557,10 @@ fn selection_enter_submits_the_active_prompt_without_shell_execution() {
         .iter()
         .any(|event| matches!(event, RawInputEvent::PromptGhostAccepted { .. })));
     assert_eq!(fs::read(&path).unwrap(), b"");
-    assert!(matches!(*input_mode.lock().unwrap(), RawInputMode::Delay));
+    assert!(matches!(
+        *input_mode.lock().unwrap(),
+        RawInputMode::Delay { .. }
+    ));
     fs::remove_file(path).ok();
 }
 

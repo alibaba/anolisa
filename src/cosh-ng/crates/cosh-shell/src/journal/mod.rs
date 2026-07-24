@@ -50,6 +50,10 @@ fn redacted_event(event: &ShellEvent) -> ShellEvent {
     event.command = event.command.as_deref().map(redact);
     event.component = event.component.as_deref().map(redact);
     event.message = event.message.as_deref().map(redact);
+    if let Some(capture) = event.capture.as_mut() {
+        capture.kind = capture.kind.as_deref().map(redact);
+        capture.target_id = capture.target_id.as_deref().map(redact);
+    }
     event
 }
 

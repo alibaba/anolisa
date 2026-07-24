@@ -66,11 +66,20 @@ fn raw_cli_zsh_shell_arg_intercepts_fragmented_natural_language() {
 
 #[test]
 fn raw_cli_natural_language_omits_recent_command_facts_by_default() {
-    let output = run_raw_cli_with_input(
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let output = run_raw_cli_with_delayed_input(
         "fake",
-        "echo shell-context-ok\n\
-         please show context\n\
-         exit\n",
+        vec![
+            (b"echo shell-context-ok\n".to_vec(), Duration::ZERO),
+            (
+                b"please show context\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+        ],
     );
 
     assert!(output.contains("shell-context-ok"), "{output}");

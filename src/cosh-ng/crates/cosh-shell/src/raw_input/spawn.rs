@@ -1,27 +1,40 @@
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use nix::libc;
-
 use crate::input::InputClassifier;
 
-use super::capture_bridge::consume_captured_input;
+use super::capture_bridge::{consume_captured_input, CaptureConsumeResult};
 use super::card_capture::CardInputState;
 use super::event_parser::{CandidateLineBuffer, NativeLineState};
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
-use super::mode::{current_raw_input_mode, RawInputMode};
-use super::pty::{set_pty_winsize, signal_process_group, write_all_pty};
+use super::mode::{
+    abandon_active_capture, complete_capture_chain_if_pending, complete_capture_replay,
+    current_raw_input_mode, expire_capture_submission, RawInputMode,
+};
+use super::pty::write_all_pty;
 use super::relay::{
     dismiss_prompt_ghost_input, relay_delayed_input, relay_passthrough_input,
     relay_prompt_ghost_input, send_held_input_events, send_raw_input_events,
     write_user_bytes_to_pty, ExplicitExitTracker, InputRelayContext,
 };
-use super::{PromptGhostRoute, RawInputEvent, RawRelayAction, ESC};
+use super::{PromptGhostRoute, RawInputEvent, ESC};
+
+mod action;
+mod capture;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use action::spawn_raw_action_relay;
+use action::{flush_pending_delay_escape, resolve_pending_delay_escape, PendingDelayEscape};
+use capture::{
+    capture_owns_input, capture_quarantine_generation, capture_read_context,
+    drain_abandoned_capture, relay_input_chunk, CaptureOwnedInput,
+};
+pub(super) use capture::{finish_input_relay, relay_late_capture_input};
 
 const PROMPT_GHOST_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 const DELAY_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
@@ -35,6 +48,12 @@ struct PendingPromptGhostEscape {
     deadline: Instant,
 }
 
+struct PendingReplacedPromptGhostSuffix {
+    bytes: Vec<u8>,
+    deadline: Instant,
+    expected_capture_generation: Option<u64>,
+}
+
 impl PendingPromptGhostEscape {
     fn matches_mode(&self, mode: &RawInputMode) -> bool {
         matches!(
@@ -45,9 +64,9 @@ impl PendingPromptGhostEscape {
     }
 }
 
-struct PendingDelayEscape {
-    bytes: Vec<u8>,
-    deadline: Instant,
+fn dismiss_replaced_prompt_ghost(input_events: &Sender<RawInputEvent>) {
+    let _ = input_events.send(RawInputEvent::PromptGhostClear);
+    let _ = input_events.send(RawInputEvent::PromptGhostDismissed);
 }
 
 #[derive(Default)]
@@ -60,6 +79,9 @@ pub(super) struct RawInputRelayState {
     line_submits: LineSubmitCounter,
     pending_prompt_ghost_escape: Option<PendingPromptGhostEscape>,
     pending_delay_escape: Option<PendingDelayEscape>,
+    pending_replaced_prompt_ghost_suffix: Option<PendingReplacedPromptGhostSuffix>,
+    capture_owned_input: CaptureOwnedInput,
+    deferred_input: Option<InputRead>,
 }
 
 impl RawInputRelayState {
@@ -75,9 +97,17 @@ enum InputRead {
     Bytes {
         bytes: Vec<u8>,
         received_at: Instant,
+        capture_generation: Option<u64>,
+        capture_observed_at: Instant,
     },
     Eof,
     Error(io::Error),
+}
+
+#[derive(Clone, Copy, Default)]
+struct RelayReadContext<'a> {
+    read_ahead: Option<&'a Receiver<InputRead>>,
+    expected_capture_generation: Option<u64>,
 }
 
 pub(crate) fn spawn_raw_input_relay<R>(
@@ -94,11 +124,12 @@ where
     thread::spawn(move || {
         let (read_tx, read_rx) = mpsc::sync_channel(INPUT_READ_AHEAD_CAPACITY);
         // The relay must wake without a later keystroke to resolve a bare ESC.
-        thread::spawn(move || read_input_chunks(input, read_tx));
+        let reader_input_mode = input_mode.clone();
+        thread::spawn(move || read_input_chunks(input, read_tx, reader_input_mode));
 
         let mut state = RawInputRelayState::with_generation(input_generation);
         loop {
-            let input = match receive_input(&read_rx, &state) {
+            let input = match receive_input(&read_rx, &mut state) {
                 Ok(input) => input,
                 Err(RecvTimeoutError::Timeout) => {
                     flush_pending_prompt_ghost_escape(
@@ -119,20 +150,60 @@ where
                         &input_mode,
                         &mut state,
                     )?;
+                    let mode = current_raw_input_mode(&input_mode);
+                    flush_pending_replaced_prompt_ghost_suffix(
+                        false,
+                        Instant::now(),
+                        &mode,
+                        &mut master,
+                        &input_events,
+                        &input_classifier,
+                        &input_mode,
+                        &mut state,
+                    )?;
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => InputRead::Eof,
             };
             match input {
-                InputRead::Bytes { bytes, received_at } => relay_input_bytes(
-                    &bytes,
+                InputRead::Bytes {
+                    bytes,
                     received_at,
-                    &mut master,
-                    &input_events,
-                    &input_classifier,
-                    &input_mode,
-                    &mut state,
-                )?,
+                    capture_generation,
+                    capture_observed_at,
+                } => {
+                    let mode = current_raw_input_mode(&input_mode);
+                    if let Some(generation) = capture_quarantine_generation(
+                        capture_generation,
+                        capture_observed_at,
+                        received_at,
+                        &mode,
+                    ) {
+                        relay_late_capture_input(
+                            &bytes,
+                            generation,
+                            &mut master,
+                            &input_events,
+                            &input_classifier,
+                            &input_mode,
+                            &mut state,
+                        )?;
+                    } else {
+                        relay_input_bytes_with_read_ahead(
+                            &bytes,
+                            received_at,
+                            &mut master,
+                            &input_events,
+                            &input_classifier,
+                            &input_mode,
+                            &mut state,
+                            RelayReadContext {
+                                read_ahead: Some(&read_rx),
+                                expected_capture_generation: capture_generation,
+                            },
+                        )?;
+                    }
+                }
                 InputRead::Eof => {
                     finish_input_relay(
                         &mut master,
@@ -149,19 +220,32 @@ where
     })
 }
 
-fn read_input_chunks<R>(mut input: R, sender: SyncSender<InputRead>)
-where
+fn read_input_chunks<R>(
+    mut input: R,
+    sender: SyncSender<InputRead>,
+    input_mode: Arc<Mutex<RawInputMode>>,
+) where
     R: Read,
 {
     let mut buffer = [0_u8; 8192];
     loop {
+        let (capture_generation, capture_observed_at) = capture_read_context(&input_mode);
         let input = match input.read(&mut buffer) {
             Ok(0) => InputRead::Eof,
-            Ok(count) => InputRead::Bytes {
-                bytes: buffer[..count].to_vec(),
-                received_at: Instant::now(),
-            },
+            Ok(count) => {
+                let received_at = Instant::now();
+                InputRead::Bytes {
+                    bytes: buffer[..count].to_vec(),
+                    received_at,
+                    capture_generation,
+                    capture_observed_at,
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
             Err(error) => InputRead::Error(error),
         };
         let done = !matches!(input, InputRead::Bytes { .. });
@@ -173,27 +257,36 @@ where
 
 fn receive_input(
     receiver: &Receiver<InputRead>,
-    state: &RawInputRelayState,
+    state: &mut RawInputRelayState,
 ) -> Result<InputRead, RecvTimeoutError> {
+    if let Some(input) = state.deferred_input.take() {
+        return Ok(input);
+    }
     match next_pending_deadline(state) {
         Some(deadline) => receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())),
         None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
     }
 }
 
-fn next_pending_deadline(state: &RawInputRelayState) -> Option<Instant> {
-    match (
-        state
-            .pending_prompt_ghost_escape
-            .as_ref()
-            .map(|p| p.deadline),
-        state.pending_delay_escape.as_ref().map(|p| p.deadline),
-    ) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
+pub(super) fn next_pending_deadline(state: &RawInputRelayState) -> Option<Instant> {
+    state
+        .pending_prompt_ghost_escape
+        .as_ref()
+        .map(|pending| pending.deadline)
+        .into_iter()
+        .chain(
+            state
+                .pending_delay_escape
+                .as_ref()
+                .map(|pending| pending.deadline),
+        )
+        .chain(
+            state
+                .pending_replaced_prompt_ghost_suffix
+                .as_ref()
+                .map(|pending| pending.deadline),
+        )
+        .min()
 }
 
 pub(super) fn relay_input_bytes(
@@ -204,6 +297,28 @@ pub(super) fn relay_input_bytes(
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
+) -> io::Result<()> {
+    relay_input_bytes_with_read_ahead(
+        bytes,
+        received_at,
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+        RelayReadContext::default(),
+    )
+}
+
+fn relay_input_bytes_with_read_ahead(
+    bytes: &[u8],
+    received_at: Instant,
+    master: &mut File,
+    input_events: &Sender<RawInputEvent>,
+    input_classifier: &InputClassifier,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &mut RawInputRelayState,
+    read_context: RelayReadContext<'_>,
 ) -> io::Result<()> {
     if state
         .pending_prompt_ghost_escape
@@ -222,10 +337,113 @@ pub(super) fn relay_input_bytes(
     }
 
     let mode = current_raw_input_mode(input_mode);
+    flush_pending_replaced_prompt_ghost_suffix(
+        false,
+        received_at,
+        &mode,
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+    )?;
+
+    let replaced_combined;
+    let bytes = if let Some(pending) = state.pending_replaced_prompt_ghost_suffix.take() {
+        if pending.expected_capture_generation != read_context.expected_capture_generation {
+            if !pending.bytes.is_empty() {
+                relay_input_for_mode(
+                    &pending.bytes,
+                    mode.clone(),
+                    master,
+                    input_events,
+                    input_classifier,
+                    input_mode,
+                    state,
+                    RelayReadContext {
+                        read_ahead: read_context.read_ahead,
+                        expected_capture_generation: pending.expected_capture_generation,
+                    },
+                )?;
+            }
+            return relay_input_bytes_with_read_ahead(
+                bytes,
+                received_at,
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+                read_context,
+            );
+        }
+        replaced_combined = [pending.bytes.as_slice(), bytes].concat();
+        if b"[Z".starts_with(&replaced_combined) && replaced_combined.len() < 2 {
+            state.pending_replaced_prompt_ghost_suffix = Some(PendingReplacedPromptGhostSuffix {
+                bytes: replaced_combined,
+                deadline: pending.deadline,
+                expected_capture_generation: pending
+                    .expected_capture_generation
+                    .or(read_context.expected_capture_generation),
+            });
+            return Ok(());
+        }
+        if replaced_combined.starts_with(b"[Z") {
+            &replaced_combined[2..]
+        } else if pending.bytes.is_empty() {
+            bytes
+        } else {
+            relay_input_for_mode(
+                &pending.bytes,
+                mode.clone(),
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+                RelayReadContext {
+                    read_ahead: read_context.read_ahead,
+                    expected_capture_generation: pending.expected_capture_generation,
+                },
+            )?;
+            return relay_input_bytes_with_read_ahead(
+                bytes,
+                received_at,
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+                read_context,
+            );
+        }
+    } else {
+        bytes
+    };
+
     let mut pending_deadline = None;
     let mut combined = Vec::new();
     let bytes = if let Some(pending) = state.pending_prompt_ghost_escape.take() {
         if !pending.matches_mode(&mode) {
+            if capture_owns_input(&mode) {
+                dismiss_replaced_prompt_ghost(input_events);
+                state.pending_replaced_prompt_ghost_suffix =
+                    Some(PendingReplacedPromptGhostSuffix {
+                        bytes: Vec::new(),
+                        deadline: pending.deadline,
+                        expected_capture_generation: read_context.expected_capture_generation,
+                    });
+                return relay_input_bytes_with_read_ahead(
+                    bytes,
+                    received_at,
+                    master,
+                    input_events,
+                    input_classifier,
+                    input_mode,
+                    state,
+                    read_context,
+                );
+            }
             // The pending prefix belongs to the previous ghost. Route it before
             // processing the new bytes so they cannot become its Shift+Tab suffix.
             relay_input_for_mode(
@@ -236,8 +454,12 @@ pub(super) fn relay_input_bytes(
                 input_classifier,
                 input_mode,
                 state,
+                RelayReadContext {
+                    expected_capture_generation: None,
+                    ..read_context
+                },
             )?;
-            return relay_input_bytes(
+            return relay_input_bytes_with_read_ahead(
                 bytes,
                 received_at,
                 master,
@@ -245,6 +467,7 @@ pub(super) fn relay_input_bytes(
                 input_classifier,
                 input_mode,
                 state,
+                read_context,
             );
         }
         pending_deadline = Some(pending.deadline);
@@ -255,48 +478,27 @@ pub(super) fn relay_input_bytes(
         bytes
     };
 
-    let mut delay_combined = Vec::new();
-    let bytes = if let Some(pending) = state.pending_delay_escape.take() {
-        if !matches!(mode, RawInputMode::Delay) {
-            // The active agent run finished while ESC was pending; forward it.
-            relay_input_for_mode(
-                &pending.bytes,
-                mode,
-                master,
-                input_events,
-                input_classifier,
-                input_mode,
-                state,
-            )?;
-            return relay_input_bytes(
-                bytes,
-                received_at,
-                master,
-                input_events,
-                input_classifier,
-                input_mode,
-                state,
-            );
-        }
-        if received_at > pending.deadline {
-            // Bare ESC while an agent run is active: request cancellation.
-            let _ = input_events.send(RawInputEvent::Esc);
-            return relay_input_bytes(
-                bytes,
-                received_at,
-                master,
-                input_events,
-                input_classifier,
-                input_mode,
-                state,
-            );
-        }
-        delay_combined.extend_from_slice(&pending.bytes);
-        delay_combined.extend_from_slice(bytes);
-        &delay_combined
+    let delay_combined = if let Some(pending) = state.pending_delay_escape.take() {
+        let Some(combined) = resolve_pending_delay_escape(
+            pending,
+            bytes,
+            received_at,
+            &mode,
+            master,
+            input_events,
+            input_classifier,
+            input_mode,
+            state,
+            read_context,
+        )?
+        else {
+            return Ok(());
+        };
+        Some(combined)
     } else {
-        bytes
+        None
     };
+    let bytes = delay_combined.as_deref().unwrap_or(bytes);
 
     if let RawInputMode::PromptGhost {
         text,
@@ -314,10 +516,23 @@ pub(super) fn relay_input_bytes(
         }
     }
 
-    if matches!(mode, RawInputMode::Delay) && bytes.len() == 1 && bytes[0] == ESC {
+    if let RawInputMode::Delay { generation } = mode {
+        if bytes.len() != 1 || bytes[0] != ESC {
+            return relay_input_for_mode(
+                bytes,
+                RawInputMode::Delay { generation },
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+                read_context,
+            );
+        }
         state.pending_delay_escape = Some(PendingDelayEscape {
             bytes: bytes.to_vec(),
             deadline: received_at + DELAY_ESCAPE_TIMEOUT,
+            generation,
         });
         return Ok(());
     }
@@ -330,6 +545,46 @@ pub(super) fn relay_input_bytes(
         input_classifier,
         input_mode,
         state,
+        read_context,
+    )
+}
+
+fn flush_pending_replaced_prompt_ghost_suffix(
+    force: bool,
+    now: Instant,
+    mode: &RawInputMode,
+    master: &mut File,
+    input_events: &Sender<RawInputEvent>,
+    input_classifier: &InputClassifier,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &mut RawInputRelayState,
+) -> io::Result<()> {
+    if !force
+        && state
+            .pending_replaced_prompt_ghost_suffix
+            .as_ref()
+            .is_none_or(|pending| now <= pending.deadline)
+    {
+        return Ok(());
+    }
+    let Some(pending) = state.pending_replaced_prompt_ghost_suffix.take() else {
+        return Ok(());
+    };
+    if pending.bytes.is_empty() {
+        return Ok(());
+    }
+    relay_input_for_mode(
+        &pending.bytes,
+        mode.clone(),
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+        RelayReadContext {
+            read_ahead: None,
+            expected_capture_generation: pending.expected_capture_generation,
+        },
     )
 }
 
@@ -341,58 +596,40 @@ fn relay_input_for_mode(
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
+    read_context: RelayReadContext<'_>,
 ) -> io::Result<()> {
-    match mode {
-        RawInputMode::Capture(capture) => {
-            if consume_captured_input(
-                &mut state.card_state,
-                &capture,
-                bytes,
-                input_events,
-                input_mode,
-            ) {
-                state.line_buffer.clear();
-                state.native_line_state.clear();
-            }
-        }
-        RawInputMode::Hold => {
-            state.card_state.reset();
-            send_held_input_events(bytes, input_events);
-        }
-        RawInputMode::Delay => {
-            state.card_state.reset();
-            let mut relay =
-                input_relay_context(master, input_classifier, input_events, input_mode, state);
-            relay_delayed_input(bytes, &mut relay)?;
-        }
-        RawInputMode::Passthrough => {
-            state.card_state.reset();
-            let mut relay =
-                input_relay_context(master, input_classifier, input_events, input_mode, state);
-            let _ = relay_passthrough_input(bytes, &mut relay)?;
-        }
-        RawInputMode::PromptGhost { text, route } => {
-            state.card_state.reset();
-            let mut relay =
-                input_relay_context(master, input_classifier, input_events, input_mode, state);
-            let _ = relay_prompt_ghost_input(bytes, &text, &route, &mut relay)?;
-        }
-        RawInputMode::RawPassthrough => {
-            state.card_state.reset();
-            state.line_buffer.clear();
-            send_raw_input_events(bytes, input_events);
-            state.native_line_state.observe_shell_bytes(bytes);
-            state.exit_tracker.observe_shell_bytes(bytes);
-            write_user_bytes_to_pty(
-                master,
-                &state.input_generation,
-                &mut state.line_submits,
-                input_events,
-                bytes,
-            )?;
-        }
-    }
-    Ok(())
+    let RawInputRelayState {
+        card_state,
+        line_buffer,
+        native_line_state,
+        exit_tracker,
+        capture_owned_input,
+        deferred_input,
+        input_generation,
+        line_submits,
+        ..
+    } = state;
+    let mut relay = InputRelayContext {
+        master,
+        input_classifier,
+        input_events,
+        input_mode,
+        input_generation,
+        line_submits,
+        line_buffer,
+        native_line_state,
+        exit_tracker,
+    };
+    relay_input_chunk(
+        bytes,
+        mode,
+        card_state,
+        capture_owned_input,
+        deferred_input,
+        read_context.read_ahead,
+        read_context.expected_capture_generation,
+        &mut relay,
+    )
 }
 
 fn input_relay_context<'a>(
@@ -441,39 +678,8 @@ fn flush_pending_prompt_ghost_escape(
         let _ = dismiss_prompt_ghost_input(&pending.bytes, &mut relay)?;
         return Ok(());
     }
-    relay_input_for_mode(
-        &pending.bytes,
-        mode,
-        master,
-        input_events,
-        input_classifier,
-        input_mode,
-        state,
-    )
-}
-
-fn flush_pending_delay_escape(
-    force: bool,
-    now: Instant,
-    master: &mut File,
-    input_events: &Sender<RawInputEvent>,
-    input_classifier: &InputClassifier,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-    state: &mut RawInputRelayState,
-) -> io::Result<()> {
-    let should_flush = state
-        .pending_delay_escape
-        .as_ref()
-        .is_some_and(|pending| force || now >= pending.deadline);
-    if !should_flush {
-        return Ok(());
-    }
-    let Some(pending) = state.pending_delay_escape.take() else {
-        return Ok(());
-    };
-    let mode = current_raw_input_mode(input_mode);
-    if matches!(mode, RawInputMode::Delay) {
-        let _ = input_events.send(RawInputEvent::Esc);
+    if capture_owns_input(&mode) {
+        dismiss_replaced_prompt_ghost(input_events);
         return Ok(());
     }
     relay_input_for_mode(
@@ -484,135 +690,6 @@ fn flush_pending_delay_escape(
         input_classifier,
         input_mode,
         state,
+        RelayReadContext::default(),
     )
-}
-
-pub(super) fn finish_input_relay(
-    master: &mut File,
-    input_events: &Sender<RawInputEvent>,
-    input_classifier: &InputClassifier,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-    state: &mut RawInputRelayState,
-) -> io::Result<()> {
-    flush_pending_prompt_ghost_escape(
-        true,
-        Instant::now(),
-        master,
-        input_events,
-        input_classifier,
-        input_mode,
-        state,
-    )?;
-    flush_pending_delay_escape(
-        true,
-        Instant::now(),
-        master,
-        input_events,
-        input_classifier,
-        input_mode,
-        state,
-    )?;
-    if !state.exit_tracker.saw_explicit_exit() {
-        write_user_bytes_to_pty(
-            master,
-            &state.input_generation,
-            &mut state.line_submits,
-            input_events,
-            b"exit\n",
-        )?;
-    }
-    Ok(())
-}
-
-fn wait_for_raw_action(
-    duration: Duration,
-    master: &mut File,
-    input_events: &Sender<RawInputEvent>,
-    input_classifier: &InputClassifier,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-    state: &mut RawInputRelayState,
-) -> io::Result<()> {
-    let action_end = Instant::now() + duration;
-    while let Some(deadline) = next_pending_deadline(state) {
-        if deadline > action_end {
-            break;
-        }
-        thread::sleep(deadline.saturating_duration_since(Instant::now()));
-        // Scripted input must resolve ESC at the same boundary as live input.
-        flush_pending_prompt_ghost_escape(
-            false,
-            Instant::now(),
-            master,
-            input_events,
-            input_classifier,
-            input_mode,
-            state,
-        )?;
-        flush_pending_delay_escape(
-            false,
-            Instant::now(),
-            master,
-            input_events,
-            input_classifier,
-            input_mode,
-            state,
-        )?;
-    }
-    thread::sleep(action_end.saturating_duration_since(Instant::now()));
-    Ok(())
-}
-
-pub(crate) fn spawn_raw_action_relay(
-    actions: Vec<RawRelayAction>,
-    mut master: File,
-    child_pid: u32,
-    input_events: Sender<RawInputEvent>,
-    input_classifier: InputClassifier,
-    input_mode: Arc<Mutex<RawInputMode>>,
-    input_generation: UserPtyInputGeneration,
-) -> JoinHandle<io::Result<()>> {
-    thread::spawn(move || {
-        let mut state = RawInputRelayState::with_generation(input_generation);
-        for action in actions {
-            flush_pending_prompt_ghost_escape(
-                false,
-                Instant::now(),
-                &mut master,
-                &input_events,
-                &input_classifier,
-                &input_mode,
-                &mut state,
-            )?;
-            match action {
-                RawRelayAction::Write(bytes) => relay_input_bytes(
-                    &bytes,
-                    Instant::now(),
-                    &mut master,
-                    &input_events,
-                    &input_classifier,
-                    &input_mode,
-                    &mut state,
-                )?,
-                RawRelayAction::Resize(winsize) => {
-                    set_pty_winsize(master.as_raw_fd(), winsize)?;
-                    signal_process_group(child_pid, libc::SIGWINCH)?;
-                }
-                RawRelayAction::Wait(duration) => wait_for_raw_action(
-                    duration,
-                    &mut master,
-                    &input_events,
-                    &input_classifier,
-                    &input_mode,
-                    &mut state,
-                )?,
-            }
-        }
-        finish_input_relay(
-            &mut master,
-            &input_events,
-            &input_classifier,
-            &input_mode,
-            &mut state,
-        )
-    })
 }
