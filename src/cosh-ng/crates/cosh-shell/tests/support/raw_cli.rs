@@ -135,6 +135,7 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input_after_start(
         chunks,
         RawCliRunMode::Shared,
         Some(session_started),
+        None,
     )
 }
 
@@ -388,6 +389,7 @@ pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input(
         chunks,
         RawCliRunMode::Exclusive,
         None,
+        None,
     )
 }
 
@@ -406,6 +408,27 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
         chunks,
         RawCliRunMode::Shared,
         None,
+        None,
+    )
+}
+
+pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input_after_marker(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+    ready_marker: &str,
+    chunks: Vec<(Vec<u8>, Duration)>,
+) -> String {
+    run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
+        adapter,
+        extra_args,
+        envs,
+        current_dir,
+        chunks,
+        RawCliRunMode::Shared,
+        None,
+        Some(ready_marker),
     )
 }
 
@@ -476,6 +499,7 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     chunks: Vec<(Vec<u8>, Duration)>,
     run_mode: RawCliRunMode,
     session_started: Option<mpsc::Sender<()>>,
+    ready_marker: Option<&str>,
 ) -> String {
     let _run_guard = raw_cli_run_guard(run_mode);
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
@@ -491,15 +515,19 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     apply_raw_cli_envs(&mut command, envs);
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw");
-    // Large hook fixtures can fill the output pipe before delayed input is
-    // complete, so drain before signaling that this session has started.
-    let readers = session_started
-        .as_ref()
-        .map(|_| start_raw_cli_output_readers(&mut child));
+    let stdout = child.stdout.take().expect("child stdout");
+    let stderr = child.stderr.take().expect("child stderr");
+    let (output_receiver, stdout_reader) = read_pipe_with_chunks(stdout);
+    let stderr_reader = read_pipe(stderr);
     if let Some(session_started) = session_started {
         session_started
             .send(())
             .expect("signal raw CLI session start");
+    }
+    if let Some(marker) = ready_marker {
+        let mut observed = Vec::new();
+        wait_for_raw_cli_marker(&output_receiver, &mut observed, marker)
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     {
@@ -511,10 +539,7 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         }
     }
 
-    let output = match readers {
-        Some(readers) => wait_for_raw_cli_output_with_readers(child, readers),
-        None => wait_for_raw_cli_output(child),
-    };
+    let output = wait_for_raw_cli_output_with_readers(child, (stdout_reader, stderr_reader));
     assert!(
         output.status.success(),
         "status={:?}\nstdout={}\nstderr={}",

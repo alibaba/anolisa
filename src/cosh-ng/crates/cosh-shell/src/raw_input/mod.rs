@@ -12,7 +12,7 @@ mod spawn;
 
 pub(crate) use event_parser::redact_extension_setting_value;
 pub(crate) use generation::UserPtyInputGeneration;
-pub(crate) use mode::{update_input_mode, RawInputMode};
+pub(crate) use mode::{update_input_mode, update_locked_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 pub(crate) use pty::{
     set_pty_winsize, signal_foreground_process_group, signal_process_group, write_all_pty,

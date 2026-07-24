@@ -71,9 +71,12 @@ struct ChannelReader {
 impl Read for ChannelReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         while self.pending.is_empty() {
-            match self.receiver.recv() {
+            match self.receiver.try_recv() {
                 Ok(bytes) => self.pending = bytes,
-                Err(_) => return Ok(0),
+                Err(mpsc::TryRecvError::Empty) => {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(0),
             }
         }
         let count = buffer.len().min(self.pending.len());
@@ -91,9 +94,12 @@ struct ReadStartChannelReader {
 impl Read for ReadStartChannelReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.read_started_tx.send(()).expect("observe read start");
-        let bytes = match self.receiver.recv() {
+        let bytes = match self.receiver.try_recv() {
             Ok(bytes) => bytes,
-            Err(_) => return Ok(0),
+            Err(mpsc::TryRecvError::Empty) => {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(0),
         };
         assert!(bytes.len() <= buffer.len());
         buffer[..bytes.len()].copy_from_slice(&bytes);
@@ -458,11 +464,21 @@ fn input_obtained_before_capture_replacement_does_not_enter_the_new_capture() {
     bytes_ready_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("stale bytes obtained before replacement");
-    update_input_mode(
-        &input_mode,
-        &RawObserverAction::CaptureInput(second),
-        Some(first_generation),
-    );
+    let (updated_tx, updated_rx) = mpsc::channel();
+    let update_mode = input_mode.clone();
+    let updater = thread::spawn(move || {
+        update_input_mode(
+            &update_mode,
+            &RawObserverAction::CaptureInput(second),
+            Some(first_generation),
+        );
+        updated_tx.send(()).expect("replacement update");
+    });
+    updated_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("replacement installs while read is pending");
+    resume_tx.send(()).expect("release stale read");
+    updater.join().expect("replacement updater");
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         if matches!(
@@ -480,7 +496,6 @@ fn input_obtained_before_capture_replacement_does_not_enter_the_new_capture() {
         );
         thread::yield_now();
     }
-    resume_tx.send(()).expect("release stale read");
     drop(input_tx);
 
     relay.join().expect("relay thread").expect("relay result");
@@ -556,6 +571,243 @@ fn input_obtained_after_capture_install_enters_the_new_capture() {
     );
     master.sync_all().expect("sync test output");
     assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn passthrough_owned_input_does_not_enter_a_later_capture() {
+    let (path, master) = output_file("passthrough-read-capture-cutover");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"stale".to_vec()).expect("passthrough input");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("passthrough bytes obtained");
+    let (updated_tx, updated_rx) = mpsc::channel();
+    let update_mode = input_mode.clone();
+    let updater = thread::spawn(move || {
+        update_input_mode(
+            &update_mode,
+            &RawObserverAction::CaptureInput(RawInputCapture::Question {
+                id: "q-1".to_string(),
+                option_count: 0,
+                allow_free_text: true,
+                multiple: false,
+                secret: false,
+            }),
+            None,
+        );
+        updated_tx.send(()).expect("capture update");
+    });
+    updated_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("capture installs while read is pending");
+    resume_tx.send(()).expect("release passthrough read");
+    updater.join().expect("capture updater");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::CardInput(target, _) if target == "q-1")),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn delay_owned_escape_does_not_reach_a_later_capture_or_shell() {
+    let (path, master) = output_file("delay-read-capture-cutover");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Delay { generation: 1 }));
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(vec![0x1b]).expect("delay escape");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("delay escape obtained");
+    update_input_mode(
+        &input_mode,
+        &RawObserverAction::CaptureInput(RawInputCapture::Question {
+            id: "q-1".to_string(),
+            option_count: 0,
+            allow_free_text: true,
+            multiple: false,
+            secret: false,
+        }),
+        None,
+    );
+    resume_tx.send(()).expect("release delay read");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::QuestionCancel(target) if target == "q-1"
+        )),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn capture_owned_input_does_not_enter_later_passthrough() {
+    let (path, master) = output_file("capture-read-passthrough-cutover");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, _event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+        capture: RawInputCapture::Question {
+            id: "q-1".to_string(),
+            option_count: 0,
+            allow_free_text: true,
+            multiple: false,
+            secret: false,
+        },
+        generation: 1,
+        installed_at: Instant::now(),
+    }));
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx
+        .send(b"stale-capture-input\n".to_vec())
+        .expect("capture input");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("capture bytes obtained");
+    let (updated_tx, updated_rx) = mpsc::channel();
+    let update_mode = input_mode.clone();
+    let updater = thread::spawn(move || {
+        *update_mode.lock().expect("input mode") = RawInputMode::Passthrough;
+        updated_tx.send(()).expect("passthrough update");
+    });
+    updated_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("passthrough installs while read is pending");
+    resume_tx.send(()).expect("release capture read");
+    updater.join().expect("passthrough updater");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn prompt_ghost_candidate_cycle_during_read_does_not_drop_input() {
+    let (path, master) = output_file("ghost-cycle-read-ownership");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = selection_input_mode();
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"x".to_vec()).expect("typed input");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("input bytes obtained");
+    // Simulate Shift+Tab candidate cycling landing between the read obtaining
+    // bytes and the reader publishing them: same prompt ghost owner, only the
+    // active candidate changes.
+    {
+        let mut mode = input_mode.lock().expect("input mode");
+        let RawInputMode::PromptGhost {
+            route: PromptGhostRoute::AgentSelection { candidates, .. },
+            ..
+        } = mode.clone()
+        else {
+            panic!("prompt ghost selection mode");
+        };
+        *mode = RawInputMode::PromptGhost {
+            text: candidates[1].text.clone(),
+            route: PromptGhostRoute::AgentSelection {
+                candidates,
+                active: 1,
+            },
+        };
+    }
+    resume_tx.send(()).expect("release read");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.contains(&RawInputEvent::PromptGhostDismissed),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"xexit\n");
     fs::remove_file(path).ok();
 }
 

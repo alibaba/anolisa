@@ -13,7 +13,8 @@ use nix::pty::Winsize;
 
 use crate::raw_input::{
     set_pty_winsize, signal_foreground_process_group, signal_process_group, update_input_mode,
-    write_all_pty, RawInputEvent, RawInputMode, RawObserverAction, UserPtyInputGeneration,
+    update_locked_input_mode, write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
+    UserPtyInputGeneration,
 };
 use crate::types::{ShellEvent, ShellEventKind, ShellHandoffRequest};
 
@@ -76,7 +77,7 @@ where
             &mut prompt_replay,
         )?;
         let mut observer_action = merge_pending_prompt_restore(
-            event_observer(&parser.events, output)?,
+            observe_with_input_mode_lock(event_observer, &parser.events, output, input_mode)?,
             &mut pending_prompt_restore,
         );
         observer_action = resolve_pty_emit(
@@ -140,7 +141,12 @@ where
                             display_start = cut;
                         }
                         observer_action = merge_pending_prompt_restore(
-                            event_observer(&parser.events, output)?,
+                            observe_with_input_mode_lock(
+                                event_observer,
+                                &parser.events,
+                                output,
+                                input_mode,
+                            )?,
                             &mut pending_prompt_restore,
                         );
                         observer_action = resolve_pty_emit(
@@ -179,7 +185,12 @@ where
                         }
                     }
                     observer_action = merge_pending_prompt_restore(
-                        event_observer(&parser.events, output)?,
+                        observe_with_input_mode_lock(
+                            event_observer,
+                            &parser.events,
+                            output,
+                            input_mode,
+                        )?,
                         &mut pending_prompt_restore,
                     );
                     observer_action = resolve_pty_emit(
@@ -260,7 +271,7 @@ where
             &mut prompt_replay,
         )?;
         observer_action = merge_pending_prompt_restore(
-            event_observer(&parser.events, output)?,
+            observe_with_input_mode_lock(event_observer, &parser.events, output, input_mode)?,
             &mut pending_prompt_restore,
         );
         observer_action = resolve_pty_emit(
@@ -321,6 +332,23 @@ fn latest_capture_submission_generation(events: &[ShellEvent]) -> Option<u64> {
         }
     }
     None
+}
+fn observe_with_input_mode_lock<W: Write, F>(
+    event_observer: &mut F,
+    events: &[ShellEvent],
+    output: &mut W,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+) -> io::Result<RawObserverAction>
+where
+    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+{
+    let Ok(mut mode) = input_mode.lock() else {
+        return event_observer(events, output);
+    };
+    let action = event_observer(events, output)?;
+    let acknowledged = latest_capture_submission_generation(events);
+    update_locked_input_mode(&mut mode, &action, acknowledged);
+    Ok(action)
 }
 
 fn release_held_shell_output<W: Write, F>(
@@ -678,7 +706,6 @@ fn same_winsize(left: &Winsize, right: &Winsize) -> bool {
         && left.ws_xpixel == right.ws_xpixel
         && left.ws_ypixel == right.ws_ypixel
 }
-
 #[cfg(test)]
 #[path = "raw_relay_tests.rs"]
 mod tests;

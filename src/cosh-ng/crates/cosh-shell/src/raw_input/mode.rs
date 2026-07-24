@@ -87,6 +87,39 @@ pub(crate) enum RawInputMode {
     },
 }
 
+/// Input ownership boundary for a [`RawInputMode`]. Display-only updates
+/// inside the same owner (prompt ghost candidate cycling, card selection
+/// redraws) keep the owner stable, so bytes obtained across such updates are
+/// not treated as an ownership cutover and never get silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputOwnership {
+    Passthrough,
+    RawPassthrough,
+    Hold,
+    Delay(u64),
+    PromptGhost,
+    Capture(u64),
+    Submitted(u64),
+    Draining(u64),
+    Terminal(u64),
+}
+
+impl RawInputMode {
+    pub(crate) fn input_ownership(&self) -> InputOwnership {
+        match self {
+            Self::Passthrough => InputOwnership::Passthrough,
+            Self::RawPassthrough => InputOwnership::RawPassthrough,
+            Self::Hold => InputOwnership::Hold,
+            Self::Delay { generation } => InputOwnership::Delay(*generation),
+            Self::PromptGhost { .. } => InputOwnership::PromptGhost,
+            Self::Capture { generation, .. } => InputOwnership::Capture(*generation),
+            Self::Submitted { generation, .. } => InputOwnership::Submitted(*generation),
+            Self::Draining { generation, .. } => InputOwnership::Draining(*generation),
+            Self::Terminal { generation, .. } => InputOwnership::Terminal(*generation),
+        }
+    }
+}
+
 static CAPTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
 static DELAY_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -146,10 +179,23 @@ pub(crate) fn update_input_mode(
     let Ok(mut mode) = input_mode.lock() else {
         return;
     };
+    update_locked_input_mode(&mut mode, action, acknowledged_generation);
+}
+
+pub(crate) fn update_locked_input_mode(
+    mode: &mut RawInputMode,
+    action: &RawObserverAction,
+    acknowledged_generation: Option<u64>,
+) {
     if matches!(
         action,
         RawObserverAction::Continue | RawObserverAction::RawPassthrough
-    ) && matches!(&*mode, RawInputMode::PromptGhost { .. })
+    ) && matches!(mode, RawInputMode::PromptGhost { .. })
+    {
+        return;
+    }
+    if matches!(action, RawObserverAction::DelayShellOutput)
+        && matches!(mode, RawInputMode::Delay { .. })
     {
         return;
     }
@@ -400,6 +446,69 @@ pub(crate) fn abandon_active_capture(input_mode: &Arc<Mutex<RawInputMode>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_delay_action_preserves_generation() {
+        let state = Arc::new(Mutex::new(new_delay_input_mode()));
+        let initial = current_raw_input_mode(&state);
+        update_input_mode(&state, &RawObserverAction::DelayShellOutput, None);
+        assert_eq!(current_raw_input_mode(&state), initial);
+    }
+
+    #[test]
+    fn input_ownership_ignores_same_owner_display_updates() {
+        let candidates = vec![
+            PromptGhostCandidate {
+                text: "inspect memory".to_string(),
+                suggestion_id: "health-1".to_string(),
+            },
+            PromptGhostCandidate {
+                text: "continue deployment".to_string(),
+                suggestion_id: "personal-1".to_string(),
+            },
+        ];
+        let first = RawInputMode::PromptGhost {
+            text: candidates[0].text.clone(),
+            route: PromptGhostRoute::AgentSelection {
+                candidates: candidates.clone(),
+                active: 0,
+            },
+        };
+        let cycled = RawInputMode::PromptGhost {
+            text: candidates[1].text.clone(),
+            route: PromptGhostRoute::AgentSelection {
+                candidates,
+                active: 1,
+            },
+        };
+        assert_ne!(first, cycled);
+        assert_eq!(first.input_ownership(), cycled.input_ownership());
+
+        let capture = RawInputCapture::Consultation {
+            id: "consult-1".to_string(),
+        };
+        let lease = RawInputMode::Capture {
+            capture: capture.clone(),
+            generation: 7,
+            installed_at: std::time::Instant::now(),
+        };
+        let refreshed = RawInputMode::Capture {
+            capture: capture.clone(),
+            generation: 7,
+            installed_at: std::time::Instant::now(),
+        };
+        assert_eq!(lease.input_ownership(), refreshed.input_ownership());
+        let replaced = RawInputMode::Capture {
+            capture,
+            generation: 8,
+            installed_at: std::time::Instant::now(),
+        };
+        assert_ne!(lease.input_ownership(), replaced.input_ownership());
+        assert_ne!(
+            first.input_ownership(),
+            RawInputMode::Passthrough.input_ownership()
+        );
+    }
 
     #[test]
     fn capture_lease_waits_for_ack_and_drains_before_replacement() {

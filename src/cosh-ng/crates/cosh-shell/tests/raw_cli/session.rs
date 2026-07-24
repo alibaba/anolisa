@@ -565,11 +565,12 @@ impl SessionFixture {
     fn run(&self, args: &[&str], chunks: Vec<(Vec<u8>, Duration)>) -> String {
         let home = self.home.to_string_lossy().into_owned();
         let core = self.core.to_string_lossy().into_owned();
-        run_raw_cli_with_args_env_current_dir_and_delayed_input(
+        run_raw_cli_with_args_env_current_dir_and_delayed_input_after_marker(
             "cosh-core",
             args,
             &[("HOME", &home), ("COSH_CORE_PATH", &core)],
             &self.workspace,
+            "cosh-osc$ ",
             chunks,
         )
     }

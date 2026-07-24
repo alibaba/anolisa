@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{self, Read};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -25,16 +25,18 @@ use super::{PromptGhostRoute, RawInputEvent, ESC};
 
 mod action;
 mod capture;
+mod reader;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use action::spawn_raw_action_relay;
 use action::{flush_pending_delay_escape, resolve_pending_delay_escape, PendingDelayEscape};
 use capture::{
-    capture_owns_input, capture_quarantine_generation, capture_read_context,
-    drain_abandoned_capture, relay_input_chunk, CaptureOwnedInput,
+    capture_generation, capture_owns_input, capture_quarantine_generation, drain_abandoned_capture,
+    relay_input_chunk, CaptureOwnedInput,
 };
 pub(super) use capture::{finish_input_relay, relay_late_capture_input};
+use reader::read_input_chunks;
 
 const PROMPT_GHOST_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 const DELAY_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
@@ -97,8 +99,8 @@ enum InputRead {
     Bytes {
         bytes: Vec<u8>,
         received_at: Instant,
-        capture_generation: Option<u64>,
-        capture_observed_at: Instant,
+        observed_mode: RawInputMode,
+        ownership_changed_during_read: bool,
     },
     Eof,
     Error(io::Error),
@@ -108,6 +110,7 @@ enum InputRead {
 struct RelayReadContext<'a> {
     read_ahead: Option<&'a Receiver<InputRead>>,
     expected_capture_generation: Option<u64>,
+    observed_mode: Option<&'a RawInputMode>,
 }
 
 pub(crate) fn spawn_raw_input_relay<R>(
@@ -169,16 +172,29 @@ where
                 InputRead::Bytes {
                     bytes,
                     received_at,
-                    capture_generation,
-                    capture_observed_at,
+                    observed_mode,
+                    ownership_changed_during_read,
                 } => {
                     let mode = current_raw_input_mode(&input_mode);
-                    if let Some(generation) = capture_quarantine_generation(
-                        capture_generation,
-                        capture_observed_at,
-                        received_at,
-                        &mode,
-                    ) {
+                    let observed_generation = capture_generation(&observed_mode);
+                    if stale_delay_escape_reached_interactive_owner(&bytes, &observed_mode, &mode) {
+                        continue;
+                    }
+                    if ownership_changed_during_read {
+                        if let Some(generation) = observed_generation {
+                            relay_late_capture_input(
+                                &bytes,
+                                generation,
+                                &mut master,
+                                &input_events,
+                                &input_classifier,
+                                &input_mode,
+                                &mut state,
+                            )?;
+                        }
+                    } else if let Some(generation) =
+                        capture_quarantine_generation(observed_generation, &mode)
+                    {
                         relay_late_capture_input(
                             &bytes,
                             generation,
@@ -187,6 +203,17 @@ where
                             &input_classifier,
                             &input_mode,
                             &mut state,
+                        )?;
+                    } else if observed_generation.is_none() && capture_owns_input(&mode) {
+                        relay_input_for_mode(
+                            &bytes,
+                            observed_mode,
+                            &mut master,
+                            &input_events,
+                            &input_classifier,
+                            &input_mode,
+                            &mut state,
+                            RelayReadContext::default(),
                         )?;
                     } else {
                         relay_input_bytes_with_read_ahead(
@@ -199,7 +226,8 @@ where
                             &mut state,
                             RelayReadContext {
                                 read_ahead: Some(&read_rx),
-                                expected_capture_generation: capture_generation,
+                                expected_capture_generation: observed_generation,
+                                observed_mode: Some(&mode),
                             },
                         )?;
                     }
@@ -220,39 +248,21 @@ where
     })
 }
 
-fn read_input_chunks<R>(
-    mut input: R,
-    sender: SyncSender<InputRead>,
-    input_mode: Arc<Mutex<RawInputMode>>,
-) where
-    R: Read,
-{
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let (capture_generation, capture_observed_at) = capture_read_context(&input_mode);
-        let input = match input.read(&mut buffer) {
-            Ok(0) => InputRead::Eof,
-            Ok(count) => {
-                let received_at = Instant::now();
-                InputRead::Bytes {
-                    bytes: buffer[..count].to_vec(),
-                    received_at,
-                    capture_generation,
-                    capture_observed_at,
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(2));
-                continue;
-            }
-            Err(error) => InputRead::Error(error),
-        };
-        let done = !matches!(input, InputRead::Bytes { .. });
-        if sender.send(input).is_err() || done {
-            return;
-        }
-    }
+fn stale_delay_escape_reached_interactive_owner(
+    bytes: &[u8],
+    observed_mode: &RawInputMode,
+    current_mode: &RawInputMode,
+) -> bool {
+    bytes == [ESC]
+        && matches!(observed_mode, RawInputMode::Delay { .. })
+        && matches!(
+            current_mode,
+            RawInputMode::Capture { .. }
+                | RawInputMode::Submitted { .. }
+                | RawInputMode::Draining { .. }
+                | RawInputMode::Terminal { .. }
+                | RawInputMode::PromptGhost { .. }
+        )
 }
 
 fn receive_input(
@@ -320,11 +330,11 @@ fn relay_input_bytes_with_read_ahead(
     state: &mut RawInputRelayState,
     read_context: RelayReadContext<'_>,
 ) -> io::Result<()> {
-    if state
+    let prompt_ghost_timed_out = state
         .pending_prompt_ghost_escape
         .as_ref()
-        .is_some_and(|pending| received_at > pending.deadline)
-    {
+        .is_some_and(|pending| received_at > pending.deadline);
+    if prompt_ghost_timed_out {
         flush_pending_prompt_ghost_escape(
             false,
             received_at,
@@ -336,7 +346,14 @@ fn relay_input_bytes_with_read_ahead(
         )?;
     }
 
-    let mode = current_raw_input_mode(input_mode);
+    let mode = if prompt_ghost_timed_out {
+        current_raw_input_mode(input_mode)
+    } else {
+        read_context
+            .observed_mode
+            .cloned()
+            .unwrap_or_else(|| current_raw_input_mode(input_mode))
+    };
     flush_pending_replaced_prompt_ghost_suffix(
         false,
         received_at,
@@ -363,6 +380,7 @@ fn relay_input_bytes_with_read_ahead(
                     RelayReadContext {
                         read_ahead: read_context.read_ahead,
                         expected_capture_generation: pending.expected_capture_generation,
+                        ..read_context
                     },
                 )?;
             }
@@ -404,6 +422,7 @@ fn relay_input_bytes_with_read_ahead(
                 RelayReadContext {
                     read_ahead: read_context.read_ahead,
                     expected_capture_generation: pending.expected_capture_generation,
+                    ..read_context
                 },
             )?;
             return relay_input_bytes_with_read_ahead(
@@ -584,6 +603,7 @@ fn flush_pending_replaced_prompt_ghost_suffix(
         RelayReadContext {
             read_ahead: None,
             expected_capture_generation: pending.expected_capture_generation,
+            observed_mode: None,
         },
     )
 }

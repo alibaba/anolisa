@@ -33,45 +33,30 @@ pub(super) fn capture_owns_input(mode: &RawInputMode) -> bool {
     )
 }
 
-pub(super) fn capture_read_context(
-    input_mode: &Arc<Mutex<RawInputMode>>,
-) -> (Option<u64>, Instant) {
-    let Ok(mode) = input_mode.lock() else {
-        return (None, Instant::now());
-    };
-    let observed_at = Instant::now();
-    let generation = match &*mode {
+pub(super) fn capture_generation(mode: &RawInputMode) -> Option<u64> {
+    match mode {
         RawInputMode::Capture { generation, .. }
         | RawInputMode::Submitted { generation, .. }
         | RawInputMode::Draining { generation, .. } => Some(*generation),
         _ => None,
-    };
-    (generation, observed_at)
+    }
 }
 
 pub(super) fn capture_quarantine_generation(
     observed_generation: Option<u64>,
-    observed_at: Instant,
-    received_at: Instant,
     mode: &RawInputMode,
 ) -> Option<u64> {
-    match mode {
-        RawInputMode::Capture {
-            generation,
-            installed_at,
-            ..
-        } if observed_generation == Some(*generation) && observed_at > *installed_at => None,
-        RawInputMode::Capture { installed_at, .. }
-            if observed_generation.is_none() && received_at > *installed_at =>
+    match observed_generation {
+        Some(observed)
+            if matches!(
+                mode,
+                RawInputMode::Capture { generation, .. } if *generation == observed
+            ) =>
         {
             None
         }
-        RawInputMode::Capture { generation, .. }
-        | RawInputMode::Submitted { generation, .. }
-        | RawInputMode::Draining { generation, .. } => {
-            Some(observed_generation.unwrap_or(*generation))
-        }
-        _ => None,
+        Some(observed) => Some(observed),
+        None => None,
     }
 }
 
