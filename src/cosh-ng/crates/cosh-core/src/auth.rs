@@ -114,7 +114,6 @@ pub struct AuthResponse {
     pub provider_type: Option<String>,
     pub values: HashMap<String, String>,
     pub persist: bool,
-    pub reset_unavailable_credentials: bool,
 }
 
 /// Apply auth credentials to the config, rebuilding provider settings.
@@ -152,19 +151,7 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
         .cloned();
     let final_model = user_model.or(default_model);
 
-    // Missing or semantically empty (whitespace-only) optional credentials must
-    // normalize to None. Storing Some("") would make a credential-less provider
-    // (e.g. an Aliyun ECS RAM role) look like it carries a runtime credential,
-    // wrongly triggering salt creation, encryption of an empty api_key, and
-    // credential-reset prompts.
-    let credential_value = |key: &str| {
-        response
-            .values
-            .get(key)
-            .filter(|value| !value.trim().is_empty())
-            .cloned()
-    };
-    let api_key = credential_value("api_key");
+    let api_key = response.values.get("api_key").cloned().unwrap_or_default();
 
     // Aliyun provider uses AK/SK instead of API key
     let auth_source = response.values.get("auth_source").cloned();
@@ -172,17 +159,17 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
     let access_key_id = if is_ecs_ram_role {
         None
     } else {
-        credential_value("access_key_id")
+        response.values.get("access_key_id").cloned()
     };
     let access_key_secret = if is_ecs_ram_role {
         None
     } else {
-        credential_value("access_key_secret")
+        response.values.get("access_key_secret").cloned()
     };
     let security_token = if is_ecs_ram_role {
         None
     } else {
-        credential_value("security_token")
+        response.values.get("security_token").cloned()
     };
 
     config.ai.active_provider = Some(response.provider_id.clone());
@@ -190,7 +177,7 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
         provider_type: Some(provider_type),
         auth_source,
         base_url: Some(base_url),
-        api_key,
+        api_key: Some(api_key),
         model: final_model,
         extra_params: None,
         access_key_id,
@@ -202,7 +189,6 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
         .providers
         .insert(response.provider_id.clone(), provider.clone());
     if response.persist {
-        config.clear_unavailable_credentials(&response.provider_id);
         config.user_ai.active_provider = Some(response.provider_id.clone());
         config
             .user_ai
@@ -294,7 +280,6 @@ fn parse_auth_response(body: &ControlResponseBody) -> Option<AuthResponse> {
         provider_type: body.provider_type.clone(),
         values,
         persist: body.persist.unwrap_or(true),
-        reset_unavailable_credentials: body.reset_unavailable_credentials.unwrap_or(false),
     })
 }
 
@@ -372,7 +357,6 @@ mod tests {
             provider_type: None,
             values: HashMap::from([("api_key".to_string(), "sk-test123".to_string())]),
             persist: true,
-            reset_unavailable_credentials: false,
         };
         apply_auth_credentials(&mut config, &response);
 
@@ -401,7 +385,6 @@ mod tests {
                 ("api_key".to_string(), "sk-openai".to_string()),
             ]),
             persist: false,
-            reset_unavailable_credentials: false,
         };
         apply_auth_credentials(&mut config, &response);
 
@@ -420,7 +403,6 @@ mod tests {
             provider_type: Some("dashscope".to_string()),
             values: HashMap::from([("api_key".to_string(), "sk-prod".to_string())]),
             persist: true,
-            reset_unavailable_credentials: false,
         };
 
         apply_auth_credentials(&mut config, &response);
@@ -453,7 +435,6 @@ mod tests {
             provider_type: Some("dashscope".to_string()),
             values: HashMap::from([("api_key".to_string(), "sk-user".to_string())]),
             persist: true,
-            reset_unavailable_credentials: false,
         };
 
         apply_auth_credentials(&mut config, &response);
@@ -497,7 +478,6 @@ mod tests {
             provider_type: None,
             values: None,
             persist: None,
-            reset_unavailable_credentials: None,
         };
         assert!(parse_auth_response(&body).is_none());
     }
@@ -519,7 +499,6 @@ mod tests {
                 "sk-xxx".to_string(),
             )])),
             persist: Some(true),
-            reset_unavailable_credentials: None,
         };
         let resp = parse_auth_response(&body).unwrap();
         assert_eq!(resp.provider_id, "dashscope");

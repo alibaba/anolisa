@@ -10,8 +10,6 @@ use crate::protocol::{InputMessage, OutputMessage};
 use crate::skill::manager::expand_path;
 use crate::skill::SkillManager;
 
-const CREDENTIAL_RESET_REQUIRED: &str = "credential_reset_required";
-
 pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -150,7 +148,6 @@ fn handle_auth(
                         "access_key_id_len": provider.access_key_id.as_ref().map(|v| v.chars().count()).unwrap_or(0),
                         "access_key_secret_len": provider.access_key_secret.as_ref().map(|v| v.chars().count()).unwrap_or(0),
                         "security_token_len": provider.security_token.as_ref().map(|v| v.chars().count()).unwrap_or(0),
-                        "credentials_unavailable": config.has_unavailable_credentials(provider_id),
                         "active": Some(provider_id) == active_provider.as_ref(),
                         "has_api_key": provider.api_key.as_ref().is_some_and(|v| !v.is_empty()),
                         "has_access_key_id": provider.access_key_id.as_ref().is_some_and(|v| !v.is_empty()),
@@ -277,10 +274,6 @@ fn handle_auth(
             if !is_valid_provider_id(provider_id) {
                 return registry_error(request_id, "invalid provider_id");
             }
-            let reset_unavailable_credentials = params
-                .get("reset_unavailable_credentials")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
             if config.ai.providers.contains_key(provider_id)
                 && !config.user_ai.providers.contains_key(provider_id)
             {
@@ -299,47 +292,31 @@ fn handle_auth(
                 })
                 .unwrap_or_default();
             if let Some(existing) = config.ai.providers.get(provider_id) {
-                let masked_fields = [
-                    ("api_key", existing.api_key.as_deref()),
-                    ("access_key_id", existing.access_key_id.as_deref()),
-                    ("access_key_secret", existing.access_key_secret.as_deref()),
-                    ("security_token", existing.security_token.as_deref()),
-                ];
-                for (field, current) in masked_fields {
-                    if let Err(error) = preserve_masked_secret(&mut values, field, current) {
-                        return registry_error(request_id, &error);
-                    }
-                }
-            }
-            if let Err(error) = validate_configure_credentials(provider_type, &values) {
-                return registry_error(request_id, &error);
+                preserve_masked_secret(&mut values, "api_key", existing.api_key.as_deref());
+                preserve_masked_secret(
+                    &mut values,
+                    "access_key_id",
+                    existing.access_key_id.as_deref(),
+                );
+                preserve_masked_secret(
+                    &mut values,
+                    "access_key_secret",
+                    existing.access_key_secret.as_deref(),
+                );
+                preserve_masked_secret(
+                    &mut values,
+                    "security_token",
+                    existing.security_token.as_deref(),
+                );
             }
             let response = crate::auth::AuthResponse {
                 provider_id: provider_id.to_string(),
                 provider_type: Some(provider_type.to_string()),
                 values,
                 persist: true,
-                reset_unavailable_credentials: false,
             };
-            let original_config = config.clone();
-            if reset_unavailable_credentials {
-                if let Err(error) = config.reset_unavailable_credentials() {
-                    return registry_error(
-                        request_id,
-                        &format!("failed to reset unavailable credentials: {error}"),
-                    );
-                }
-            }
             crate::auth::apply_auth_credentials(config, &response);
-            if !reset_unavailable_credentials
-                && (config.requires_unavailable_credentials_reset()
-                    || config.requires_credential_salt_repair())
-            {
-                *config = original_config;
-                return registry_error(request_id, CREDENTIAL_RESET_REQUIRED);
-            }
             if let Err(e) = crate::config::persist_config(config) {
-                *config = original_config;
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }
             OutputMessage::RegistryResponse {
@@ -363,69 +340,19 @@ fn is_valid_provider_id(provider_id: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
-/// Rejects credentials that cannot authenticate before any salt rotation or
-/// persistence happens, so a failed `configure` leaves config and salt intact.
-fn validate_configure_credentials(
-    provider_type: &str,
-    values: &std::collections::HashMap<String, String>,
-) -> Result<(), String> {
-    let uses_access_key = crate::auth::builtin_auth_providers()
-        .iter()
-        .find(|provider| provider.id == provider_type)
-        .is_some_and(|provider| provider.builtin_provider_type == "aliyun");
-    if uses_access_key {
-        if values.get("auth_source").map(String::as_str) == Some("ecs_ram_role") {
-            return Ok(());
-        }
-        let access_key_id = values.get("access_key_id").map(|v| v.trim()).unwrap_or("");
-        let access_key_secret = values
-            .get("access_key_secret")
-            .map(|v| v.trim())
-            .unwrap_or("");
-        if access_key_id.is_empty() || access_key_secret.is_empty() {
-            return Err("access_key_id and access_key_secret must not be empty".to_string());
-        }
-        Ok(())
-    } else if values
-        .get("api_key")
-        .map(|v| v.trim())
-        .unwrap_or("")
-        .is_empty()
-    {
-        Err("api_key must not be empty".to_string())
-    } else {
-        Ok(())
-    }
-}
-
-/// Restores a masked secret to its stored value, or fails closed.
-///
-/// The shell sends an all-bullet mask to mean "keep the existing secret". If
-/// that secret can no longer be recovered (its ciphertext turned opaque between
-/// state and submit), the mask must not be persisted as a literal credential:
-/// doing so would silently overwrite still-encrypted data with "••••". In that
-/// case we reject and ask the operator to re-enter the credential.
 fn preserve_masked_secret(
     values: &mut std::collections::HashMap<String, String>,
     key: &str,
     existing: Option<&str>,
-) -> Result<(), String> {
+) {
     let Some(value) = values.get(key) else {
-        return Ok(());
+        return;
     };
     if !value.is_empty() && value.chars().all(|ch| ch == '•') {
-        match existing {
-            Some(existing) => {
-                values.insert(key.to_string(), existing.to_string());
-            }
-            None => {
-                return Err(format!(
-                    "{key} could not be recovered; re-enter this credential"
-                ));
-            }
+        if let Some(existing) = existing {
+            values.insert(key.to_string(), existing.to_string());
         }
     }
-    Ok(())
 }
 
 fn registry_error(request_id: &str, error: &str) -> OutputMessage {

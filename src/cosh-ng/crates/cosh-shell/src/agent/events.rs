@@ -244,7 +244,6 @@ fn should_render_governance_block(event: &GovernedEvent) -> bool {
         AgentEvent::ToolOutputDelta { .. } | AgentEvent::ToolCompleted { .. } => false,
         AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
         AgentEvent::AuthRequired { .. } => false,
-        AgentEvent::AuthResult { .. } => false,
         AgentEvent::ShellEvidenceRequest { .. } => false,
         AgentEvent::HookNotification { .. } => true,
     }

@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::adapter::AdapterInstance;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::adapter::{AdapterInstance, CoshCoreAdapter};
+use crate::auth::completion::finish_auth_configuration;
 use crate::auth::provider_display::auth_required_providers_for_display;
-use crate::auth::reset;
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
     AgentEvent, AuthFieldInfo, AuthProviderInfo, AuthResponse, GovernedEvent, NoticePanelModel,
@@ -10,21 +13,6 @@ use crate::runtime::prelude::{
     RawInputCapture, ShellEvent, ShellEventKind,
 };
 use crate::runtime::state::InlineState;
-
-mod core_registry;
-#[cfg(test)]
-mod reset_flow_tests;
-mod result;
-
-use self::core_registry::{
-    activate as core_auth_activate, configure as core_auth_configure, load_core_auth_state,
-    prepare as core_auth_prepare, providers_with_provider_id_field,
-    verify_aliyun_ecs as core_auth_verify_aliyun_ecs,
-};
-#[cfg(test)]
-pub(crate) use self::result::record_auth_results;
-pub(crate) use self::result::render_auth_events;
-use self::result::{apply_registry_configure_outcome, close_failed_active_run};
 
 /// An existing provider loaded from config.toml for the ManagingProviders phase.
 #[derive(Debug, Clone)]
@@ -42,7 +30,18 @@ pub(crate) struct ExistingProvider {
     pub(crate) access_key_secret_mask: Option<String>,
     pub(crate) security_token_mask: Option<String>,
     pub(crate) auth_source: Option<String>,
-    pub(crate) credentials_unavailable: bool,
+}
+
+fn secret_mask(len: usize) -> String {
+    "•".repeat(len)
+}
+
+fn label_for_provider_type(provider_type: &str) -> &'static str {
+    match provider_type {
+        "dashscope" => "DashScope (\u{767e}\u{70bc})",
+        "aliyun" => "Aliyun Authentication",
+        _ => "OpenAI Compatible",
+    }
 }
 
 fn provider_action_options(is_active: bool, editable: bool) -> Vec<String> {
@@ -71,7 +70,7 @@ fn provider_action_choice(is_active: bool, editable: bool, selected: usize) -> &
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeAuthState {
     pub(crate) id: String,
-    pub(crate) run_id: String,
+    #[allow(dead_code)]
     pub(crate) request_id: String,
     pub(crate) phase: AuthPhase,
     pub(crate) providers: Vec<AuthProviderInfo>,
@@ -83,12 +82,6 @@ pub(crate) struct RuntimeAuthState {
     pub(crate) existing_providers: Vec<ExistingProvider>,
     /// The section name of the provider being edited (None = new provider)
     pub(crate) editing_provider_name: Option<String>,
-    reset_unavailable_credentials: bool,
-    /// Selection within the reset-confirmation prompt (0 = reset, 1 = keep).
-    /// Kept separate from `selected_provider` so confirming or cancelling the
-    /// reset still submits the originally selected provider and its fields.
-    reset_confirm_selection: usize,
-    pub(crate) credentials_unavailable: bool,
     backend: AuthBackend,
 }
 
@@ -112,17 +105,9 @@ pub(crate) enum AuthPhase {
         instance_id: String,
         console_url: String,
     },
-    ConfirmResetUnavailable,
-    AwaitingResult {
-        provider_label: String,
-    },
 }
 
 impl RuntimeAuthState {
-    fn completion_key(&self) -> (String, String) {
-        (self.run_id.clone(), self.request_id.clone())
-    }
-
     fn current_provider(&self) -> &AuthProviderInfo {
         &self.providers[self.selected_provider]
     }
@@ -140,7 +125,7 @@ impl RuntimeAuthState {
 pub(crate) struct AuthState {
     pub(crate) state: Option<RuntimeAuthState>,
     pub(crate) handled_card_events: HashSet<String>,
-    pub(crate) completed_ids: HashSet<(String, String)>,
+    pub(crate) completed_ids: HashSet<String>,
 }
 
 pub(crate) fn record_auth_required(
@@ -150,9 +135,7 @@ pub(crate) fn record_auth_required(
     let mut ids = Vec::new();
     for event in governed_events {
         if let AgentEvent::AuthRequired {
-            run_id,
             request_id,
-            credentials_unavailable,
             providers,
             ..
         } = &event.event
@@ -160,15 +143,13 @@ pub(crate) fn record_auth_required(
             if state.auth.state.is_some() {
                 continue;
             }
-            let completion_key = (run_id.clone(), request_id.clone());
-            if state.auth.completed_ids.contains(&completion_key) {
+            let id = format!("auth-{request_id}");
+            if state.auth.completed_ids.contains(&id) {
                 continue;
             }
-            let id = format!("auth-{run_id}-{request_id}");
             let providers = auth_required_providers_for_display(providers);
             state.auth.state = Some(RuntimeAuthState {
                 id: id.clone(),
-                run_id: run_id.clone(),
                 request_id: request_id.clone(),
                 phase: AuthPhase::SelectingProvider,
                 providers,
@@ -178,9 +159,6 @@ pub(crate) fn record_auth_required(
                 field_input: String::new(),
                 existing_providers: Vec::new(),
                 editing_provider_name: None,
-                reset_unavailable_credentials: false,
-                reset_confirm_selection: 1,
-                credentials_unavailable: *credentials_unavailable,
                 backend: AuthBackend::ActiveRun,
             });
             ids.push(id);
@@ -252,29 +230,18 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
                 secret,
             })
         }
-        AuthPhase::AliyunEcsChallenge { .. } | AuthPhase::ConfirmResetUnavailable => {
-            Some(RawInputCapture::Question {
-                id: auth.id.clone(),
-                option_count: if auth.phase == AuthPhase::ConfirmResetUnavailable {
-                    2
-                } else {
-                    1
-                },
-                allow_free_text: false,
-                multiple: false,
-                secret: false,
-            })
-        }
-        AuthPhase::AwaitingResult { .. } => None,
+        AuthPhase::AliyunEcsChallenge { .. } => Some(RawInputCapture::Question {
+            id: auth.id.clone(),
+            option_count: 1,
+            allow_free_text: false,
+            multiple: false,
+            secret: false,
+        }),
     }
 }
 
 pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
-    state
-        .auth
-        .state
-        .as_ref()
-        .is_some_and(|auth| !matches!(auth.phase, AuthPhase::AwaitingResult { .. }))
+    state.auth.state.is_some()
 }
 
 /// Trigger auth panel from `/auth` slash command.
@@ -345,13 +312,9 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     } else {
         AuthPhase::ManagingProviders
     };
-    let credentials_unavailable = existing_providers
-        .iter()
-        .any(|provider| provider.credentials_unavailable);
 
     state.auth.state = Some(RuntimeAuthState {
         id: id.clone(),
-        run_id: "registry".to_string(),
         request_id,
         phase,
         providers,
@@ -361,14 +324,169 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         field_input: String::new(),
         existing_providers,
         editing_provider_name: None,
-        reset_unavailable_credentials: false,
-        reset_confirm_selection: 1,
-        credentials_unavailable,
         backend: AuthBackend::CoreRegistry,
     });
 
     render_current_auth_panel(state, output)?;
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreAuthState {
+    templates: Vec<AuthProviderInfo>,
+    #[serde(default)]
+    saved_providers: Vec<CoreSavedProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreSavedProvider {
+    provider_id: String,
+    provider_type: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    auth_source: Option<String>,
+    active: bool,
+    #[serde(default = "default_provider_source")]
+    source: String,
+    #[serde(default = "default_provider_editable")]
+    editable: bool,
+    #[serde(default)]
+    api_key_len: usize,
+    #[serde(default)]
+    access_key_id_len: usize,
+    #[serde(default)]
+    access_key_secret_len: usize,
+    #[serde(default)]
+    security_token_len: usize,
+}
+
+fn default_provider_source() -> String {
+    "user".to_string()
+}
+
+fn default_provider_editable() -> bool {
+    true
+}
+
+fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAuthState, String> {
+    let value = cosh_core.registry_query("auth", "state", Value::Null)?;
+    serde_json::from_value(value).map_err(|e| format!("invalid auth state: {e}"))
+}
+
+fn core_auth_activate(adapter: &AdapterInstance, provider_id: &str) -> Result<(), String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    cosh_core
+        .registry_query("auth", "activate", json!({ "provider_id": provider_id }))
+        .map(|_| ())
+}
+
+fn core_auth_configure(adapter: &AdapterInstance, response: &AuthResponse) -> Result<(), String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    cosh_core
+        .registry_query(
+            "auth",
+            "configure",
+            json!({
+                "provider_id": response.provider_id,
+                "provider_type": response.provider_type,
+                "values": response.values,
+            }),
+        )
+        .map(|_| ())
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreAuthVerify {
+    authorized: bool,
+}
+
+fn core_auth_verify_aliyun_ecs(adapter: &AdapterInstance) -> Result<bool, String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    let value = cosh_core.registry_query(
+        "auth",
+        "verify",
+        json!({
+            "provider_type": "aliyun",
+            "auth_source": "ecs_ram_role"
+        }),
+    )?;
+    let verify: CoreAuthVerify =
+        serde_json::from_value(value).map_err(|e| format!("invalid auth verify response: {e}"))?;
+    Ok(verify.authorized)
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreAuthPrepare {
+    mode: String,
+    instance_id: Option<String>,
+    console_url: Option<String>,
+    #[serde(default)]
+    values: HashMap<String, String>,
+}
+
+fn core_auth_prepare(
+    adapter: &AdapterInstance,
+    provider_type: &str,
+) -> Result<CoreAuthPrepare, String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    let value =
+        cosh_core.registry_query("auth", "prepare", json!({ "provider_type": provider_type }))?;
+    serde_json::from_value(value).map_err(|e| format!("invalid auth prepare response: {e}"))
+}
+
+impl From<CoreSavedProvider> for ExistingProvider {
+    fn from(provider: CoreSavedProvider) -> Self {
+        let provider_type = provider
+            .provider_type
+            .unwrap_or_else(|| "openai_compat".to_string());
+        let model = provider.model.unwrap_or_default();
+        ExistingProvider {
+            name: provider.provider_id,
+            label: label_for_provider_type(&provider_type).to_string(),
+            provider_type,
+            model,
+            is_active: provider.active,
+            editable: provider.editable,
+            source: provider.source,
+            base_url: provider.base_url,
+            api_key_mask: (provider.api_key_len > 0).then(|| secret_mask(provider.api_key_len)),
+            access_key_id_mask: (provider.access_key_id_len > 0)
+                .then(|| secret_mask(provider.access_key_id_len)),
+            access_key_secret_mask: (provider.access_key_secret_len > 0)
+                .then(|| secret_mask(provider.access_key_secret_len)),
+            security_token_mask: (provider.security_token_len > 0)
+                .then(|| secret_mask(provider.security_token_len)),
+            auth_source: provider.auth_source,
+        }
+    }
+}
+
+fn providers_with_provider_id_field(providers: Vec<AuthProviderInfo>) -> Vec<AuthProviderInfo> {
+    providers
+        .into_iter()
+        .map(|mut provider| {
+            provider.fields.insert(
+                0,
+                AuthFieldInfo {
+                    name: "provider_id".to_string(),
+                    label: "Provider ID".to_string(),
+                    hint: Some("Unique config id, e.g. qwen-prod".to_string()),
+                    secret: false,
+                    required: true,
+                    placeholder: Some(provider.id.clone()),
+                },
+            );
+            provider
+        })
+        .collect()
 }
 
 fn handle_auth_focus<W: std::io::Write>(
@@ -387,11 +505,6 @@ fn handle_auth_focus<W: std::io::Write>(
         AuthPhase::ManagingProviders => {
             let max = auth.existing_providers.len(); // last item = "+ Add new"
             auth.selected_provider = selected.min(max);
-            clear_active_auth_panel(state, output)?;
-            render_current_auth_panel(state, output)?;
-        }
-        AuthPhase::ConfirmResetUnavailable => {
-            auth.reset_confirm_selection = selected.min(1);
             clear_active_auth_panel(state, output)?;
             render_current_auth_panel(state, output)?;
         }
@@ -619,7 +732,7 @@ fn handle_auth_answer<W: std::io::Write>(
 
             if auth.all_fields_collected() {
                 clear_active_auth_panel(state, output)?;
-                submit_or_confirm_auth_response(Some(adapter), state, output)?;
+                send_auth_response(Some(adapter), state, output)?;
                 Ok(true)
             } else {
                 clear_active_auth_panel(state, output)?;
@@ -647,60 +760,9 @@ fn handle_auth_answer<W: std::io::Write>(
                 return Ok(true);
             }
             clear_active_auth_panel(state, output)?;
-            submit_or_confirm_auth_response(Some(adapter), state, output)?;
+            send_auth_response(Some(adapter), state, output)?;
             Ok(true)
         }
-        AuthPhase::ConfirmResetUnavailable => {
-            if apply_reset_confirmation(auth) {
-                clear_active_auth_panel(state, output)?;
-                send_auth_response(Some(adapter), state, output)?;
-            } else {
-                auth.phase = AuthPhase::FillingField;
-                auth.current_field = 0;
-                load_current_field_input(auth);
-                clear_active_auth_panel(state, output)?;
-                render_current_auth_panel(state, output)?;
-            }
-            Ok(true)
-        }
-        AuthPhase::AwaitingResult { .. } => Ok(true),
-    }
-}
-
-fn submit_or_confirm_auth_response<W: std::io::Write>(
-    adapter: Option<&AdapterInstance>,
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    let requires_reset_confirmation = state.auth.state.as_ref().is_some_and(|auth| {
-        reset::should_confirm_reset_before_submit(
-            auth.backend == AuthBackend::ActiveRun,
-            auth.credentials_unavailable,
-            auth.reset_unavailable_credentials,
-            reset::values_write_encryptable_credentials(&auth.collected_values),
-        )
-    });
-    if requires_reset_confirmation {
-        if let Some(auth) = state.auth.state.as_mut() {
-            auth.phase = AuthPhase::ConfirmResetUnavailable;
-            auth.reset_confirm_selection = 1;
-        }
-        render_current_auth_panel(state, output)
-    } else {
-        send_auth_response(adapter, state, output)
-    }
-}
-
-/// Applies the reset-confirmation choice (0 = reset, otherwise keep). Returns
-/// `true` when the operator chose to reset — the flag is set so the resubmitted
-/// request carries `reset_unavailable_credentials: true` — and `false` when
-/// they chose to keep the existing credentials and return to editing.
-fn apply_reset_confirmation(auth: &mut RuntimeAuthState) -> bool {
-    if auth.reset_confirm_selection == 0 {
-        auth.reset_unavailable_credentials = true;
-        true
-    } else {
-        false
     }
 }
 
@@ -767,74 +829,57 @@ fn apply_aliyun_prepare(
     Ok(true)
 }
 
-/// Assembles the `AuthResponse` submitted to the backend from the current auth
-/// state. Split out so a reset resubmission's `reset_unavailable_credentials`
-/// flag can be asserted as pure logic.
-fn build_auth_response(auth: &RuntimeAuthState) -> AuthResponse {
+fn send_auth_response<W: std::io::Write>(
+    adapter: Option<&AdapterInstance>,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let auth = state.auth.state.take().expect("auth state present");
+    state.auth.completed_ids.insert(auth.id.clone());
     let provider = &auth.providers[auth.selected_provider];
     let provider_id = auth
         .editing_provider_name
         .clone()
         .or_else(|| auth.collected_values.get("provider_id").cloned())
         .unwrap_or_else(|| provider.id.clone());
-    AuthResponse {
+    let response = AuthResponse {
         request_id: auth.request_id.clone(),
-        provider_id,
+        provider_id: provider_id.clone(),
         provider_type: Some(provider.id.clone()),
-        values: auth.collected_values.clone(),
+        values: auth.collected_values,
         persist: true,
-        reset_unavailable_credentials: auth.reset_unavailable_credentials,
-    }
-}
-
-fn send_auth_response<W: std::io::Write>(
-    adapter: Option<&AdapterInstance>,
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    let auth = state
-        .auth
-        .state
-        .as_ref()
-        .ok_or_else(|| std::io::Error::other("auth state is not available"))?;
-    let response = build_auth_response(auth);
-    let provider_label = auth.providers[auth.selected_provider].label.clone();
-    let backend = auth.backend;
+    };
 
     if let Some(active_run) = state.agent_run.active.as_ref() {
-        match active_run.handle.respond_auth(response) {
-            Ok(()) => {
-                if let Some(auth) = state.auth.state.as_mut() {
-                    auth.phase = AuthPhase::AwaitingResult { provider_label };
-                }
-                let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-                renderer.write_notice_panel(
-                    output,
-                    NoticePanelModel {
-                        title: "Saving credentials",
-                        body: vec![
-                            "Waiting for cosh-core to confirm the credentials were saved."
-                                .to_string(),
-                        ],
-                        footer: None,
-                    },
-                )?;
-                output.flush()
-            }
-            Err(_) => close_failed_active_run(state, output),
+        if active_run.handle.respond_auth(response.clone()).is_err() {
+            let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+            renderer.write_notice_panel(
+                output,
+                NoticePanelModel {
+                    title: "Auth failed",
+                    body: vec![
+                        "Unable to send credentials to cosh-core.".to_string(),
+                        "Run /auth again after the current run finishes.".to_string(),
+                    ],
+                    footer: None,
+                },
+            )?;
+            output.flush()?;
+            return Ok(());
         }
     } else {
-        match backend {
+        match auth.backend {
             AuthBackend::CoreRegistry => {
                 let adapter = adapter.ok_or_else(|| {
                     std::io::Error::other("missing adapter for cosh-core auth registry")
                 })?;
-                let outcome = core_auth_configure(adapter, &response);
-                apply_registry_configure_outcome(outcome, state, output, &provider_label)
+                core_auth_configure(adapter, &response).map_err(std::io::Error::other)?;
             }
-            AuthBackend::ActiveRun => close_failed_active_run(state, output),
+            AuthBackend::ActiveRun => {}
         }
     }
+
+    finish_auth_configuration(state, output, &provider.label)
 }
 
 fn render_current_auth_panel<W: std::io::Write>(
@@ -863,14 +908,9 @@ fn render_current_auth_panel<W: std::io::Write>(
                     } else {
                         ""
                     };
-                    let unavailable_info = if ep.credentials_unavailable {
-                        " [credentials unavailable]"
-                    } else {
-                        ""
-                    };
                     format!(
-                        "{}{} - \"{}\"{}{}{}",
-                        active_mark, ep.label, ep.name, model_info, source_info, unavailable_info
+                        "{}{} - \"{}\"{}{}",
+                        active_mark, ep.label, ep.name, model_info, source_info
                     )
                 })
                 .collect();
@@ -997,27 +1037,6 @@ fn render_current_auth_panel<W: std::io::Write>(
             state.questions.active_panel_height = height;
             state.questions.active_panel_id = Some(auth.id.clone());
         }
-        AuthPhase::ConfirmResetUnavailable => {
-            let options = vec![
-                "Reset unreadable credentials and save this configuration".to_string(),
-                "Keep unreadable credentials and return to editing".to_string(),
-            ];
-            let model = QuestionPanelModel {
-                id: &auth.id,
-                question: "Encrypted credentials could not be recovered with the current salt. Resetting permanently removes every unreadable credential. Continue?",
-                options: &options,
-                selected_option: auth.reset_confirm_selection,
-                selected_options: &[],
-                custom_answer: "",
-                allow_free_text: false,
-                selection_mode: QuestionSelectionMode::Single,
-                input_feedback: QuestionInputFeedback::Disabled,
-            };
-            let height = renderer.write_question_panel(output, model)?;
-            state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(auth.id.clone());
-        }
-        AuthPhase::AwaitingResult { .. } => {}
     }
     output.flush()?;
     Ok(())
@@ -1058,7 +1077,7 @@ fn cancel_auth_panel<W: std::io::Write>(
 ) -> std::io::Result<()> {
     clear_active_auth_panel(state, output)?;
     if let Some(auth) = state.auth.state.as_ref() {
-        state.auth.completed_ids.insert(auth.completion_key());
+        state.auth.completed_ids.insert(auth.id.clone());
     }
     state.auth.state = None;
 
@@ -1283,7 +1302,6 @@ mod tests {
             access_key_secret_mask: Some("••••••".to_string()),
             security_token_mask: None,
             auth_source: None,
-            credentials_unavailable: false,
         };
         let ecs = ExistingProvider {
             auth_source: Some("ecs_ram_role".to_string()),
@@ -1312,7 +1330,6 @@ mod tests {
             access_key_secret_mask: None,
             security_token_mask: None,
             auth_source: Some("ecs_ram_role".to_string()),
-            credentials_unavailable: false,
         };
         let manual = ExistingProvider {
             auth_source: None,

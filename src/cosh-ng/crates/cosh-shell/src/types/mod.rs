@@ -434,21 +434,6 @@ pub enum QuestionSelectionMode {
     Multiple,
 }
 
-/// Internal auth-submission outcome used by `AgentEvent::AuthResult`.
-///
-/// The enclosing `types` module exposes this only within the crate because it
-/// is a cosh-core control-protocol detail, not a supported shell API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthOutcome {
-    /// Credentials were applied and persisted to disk.
-    Saved,
-    /// Credentials were applied to the current run but not persisted.
-    Applied,
-    /// Credentials could not be applied or persisted.
-    Failed,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -525,13 +510,7 @@ pub enum AgentEvent {
         request_id: String,
         reason: String,
         error_message: Option<String>,
-        credentials_unavailable: bool,
         providers: Vec<crate::adapter::AuthProviderInfo>,
-    },
-    AuthResult {
-        run_id: String,
-        request_id: String,
-        outcome: AuthOutcome,
     },
     ShellEvidenceRequest {
         run_id: String,

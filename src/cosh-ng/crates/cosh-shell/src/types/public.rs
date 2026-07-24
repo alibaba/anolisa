@@ -12,7 +12,7 @@ pub use implementation::{
 
 #[allow(unused_imports)]
 pub(crate) use implementation::{
-    set_request_context_binding, AgentContextBinding, AuthOutcome, BuiltinFactRecord,
-    BuiltinFindingFacts, EvaluatedHookFinding, HighMemoryProcessFacts, HookProvenance,
-    MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact, ShellEnvironmentSnapshot,
+    set_request_context_binding, AgentContextBinding, BuiltinFactRecord, BuiltinFindingFacts,
+    EvaluatedHookFinding, HighMemoryProcessFacts, HookProvenance, MemoryPressureFacts,
+    MetricsConfidence, ProcessMemoryFact, ShellEnvironmentSnapshot,
 };

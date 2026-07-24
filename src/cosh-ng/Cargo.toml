@@ -31,7 +31,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 signal-hook = "0.3"
-getrandom = "0.2"
 
 [profile.release]
 opt-level = 3

@@ -184,7 +184,6 @@ pub fn serialize_auth_response(
     provider_type: Option<&str>,
     values: &HashMap<String, String>,
     persist: bool,
-    reset_unavailable_credentials: bool,
 ) -> String {
     let values_json: Value = values
         .iter()
@@ -200,8 +199,7 @@ pub fn serialize_auth_response(
                 "provider_id": provider_id,
                 "provider_type": provider_type,
                 "values": values_json,
-                "persist": persist,
-                "reset_unavailable_credentials": reset_unavailable_credentials
+                "persist": persist
             }
         }
     })

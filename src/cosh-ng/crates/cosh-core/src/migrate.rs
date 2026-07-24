@@ -1,7 +1,20 @@
 use std::path::Path;
 
+use aes_gcm::aead::generic_array::typenum::U16;
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    aes::Aes256,
+    AesGcm,
+};
+use scrypt::{scrypt, Params};
+
 use crate::config::config_dir;
-use crate::credential::{write_private_atomic, CredentialCodec, ENCRYPTED_PREFIX};
+
+/// AES-256-GCM with 16-byte nonce (matching Node.js crypto.createCipheriv behavior).
+type Aes256Gcm16 = AesGcm<Aes256, U16>;
+
+const ENCRYPTED_PREFIX: &str = "enc:";
+const CREDENTIAL_PASSWORD: &[u8] = b"copilot-credential-encrypt";
 
 pub fn try_migrate() {
     let dir = config_dir();
@@ -45,19 +58,9 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
     };
 
     let salt_path = cfg_dir.join(".encryption-salt");
-    let codec = match CredentialCodec::for_decryption(&salt_path) {
-        Ok(codec) => codec,
-        Err(_) => {
-            tracing::warn!("unable to decrypt legacy Aliyun credentials; migration skipped");
-            return;
-        }
-    };
-    let decrypted = match codec.decrypt(&encrypted) {
-        Ok(value) => value,
-        Err(_) => {
-            tracing::warn!("unable to decrypt legacy Aliyun credentials; migration skipped");
-            return;
-        }
+    let decrypted = match decrypt_credential(&encrypted, &salt_path) {
+        Some(d) => d,
+        None => return,
     };
 
     let creds: serde_json::Value = match serde_json::from_str(&decrypted) {
@@ -74,30 +77,6 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
         .as_str()
         .filter(|token| !token.is_empty());
 
-    let encrypted_ak = match codec.encrypt(ak) {
-        Ok(value) => value,
-        Err(_) => {
-            tracing::warn!("unable to encrypt migrated Aliyun access key ID; migration skipped");
-            return;
-        }
-    };
-    let encrypted_sk = match codec.encrypt(sk) {
-        Ok(value) => value,
-        Err(_) => {
-            tracing::warn!(
-                "unable to encrypt migrated Aliyun access key secret; migration skipped"
-            );
-            return;
-        }
-    };
-    let encrypted_st = match st.map(|token| codec.encrypt(token)).transpose() {
-        Ok(value) => value,
-        Err(_) => {
-            tracing::warn!("unable to encrypt migrated Aliyun security token; migration skipped");
-            return;
-        }
-    };
-
     let mut existing = if config_path.exists() {
         std::fs::read_to_string(config_path).unwrap_or_default()
     } else {
@@ -113,22 +92,33 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
     provider.push_str("type = \"aliyun\"\n");
     provider.push_str(&format!(
         "access_key_id = \"{}\"\n",
-        escape_toml_migrate(&encrypted_ak)
+        escape_toml_migrate(ak)
     ));
     provider.push_str(&format!(
         "access_key_secret = \"{}\"\n",
-        escape_toml_migrate(&encrypted_sk)
+        escape_toml_migrate(sk)
     ));
-    if let Some(st) = encrypted_st {
+    if let Some(st) = st {
         provider.push_str(&format!(
             "security_token = \"{}\"\n",
-            escape_toml_migrate(&st)
+            escape_toml_migrate(st)
         ));
     }
     provider.push_str("model = \"qwen3.7-plus\"\n");
     upsert_provider_section(&mut existing, "[ai.providers.aliyun]", &provider);
 
-    if write_private_atomic(config_path, existing.as_bytes()).is_err() {
+    let pid = std::process::id();
+    let tmp_path = cfg_dir.join(format!("config.toml.tmp.{pid}"));
+    if std::fs::write(&tmp_path, &existing).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+    }
+    if std::fs::rename(&tmp_path, config_path).is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
         return;
     }
 
@@ -174,20 +164,15 @@ fn migrate_settings(
     let raw_api_key = auth["apiKey"].as_str().unwrap_or("");
     let api_key = if raw_api_key.starts_with(ENCRYPTED_PREFIX) {
         let salt_path = cfg_dir.join(".encryption-salt");
-        let codec = CredentialCodec::for_decryption(&salt_path)
-            .map_err(|error| format!("failed to decrypt migrated API key: {error}"))?;
-        let plaintext = codec
-            .decrypt(raw_api_key)
-            .map_err(|error| format!("failed to decrypt migrated API key: {error}"))?;
-        codec
-            .encrypt(&plaintext)
-            .map_err(|error| format!("failed to encrypt migrated API key: {error}"))?
-    } else if raw_api_key.is_empty() {
-        String::new()
+        match decrypt_credential(raw_api_key, &salt_path) {
+            Some(k) => k,
+            None => {
+                tracing::warn!("failed to decrypt API key, skipping");
+                String::new()
+            }
+        }
     } else {
-        CredentialCodec::for_encryption(&cfg_dir.join(".encryption-salt"))
-            .and_then(|codec| codec.encrypt(raw_api_key))
-            .map_err(|error| format!("failed to encrypt migrated API key: {error}"))?
+        raw_api_key.to_string()
     };
 
     let base_url = auth["baseUrl"].as_str().unwrap_or("").to_string();
@@ -230,10 +215,61 @@ fn migrate_settings(
         output_language,
     });
 
-    write_private_atomic(config_path, toml.as_bytes())
-        .map_err(|error| format!("failed to write config.toml: {error}"))?;
+    std::fs::write(config_path, toml.as_bytes())
+        .map_err(|e| format!("failed to write config.toml: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(config_path, std::fs::Permissions::from_mode(0o600));
+    }
 
     Ok(())
+}
+
+fn decrypt_credential(encrypted: &str, salt_path: &Path) -> Option<String> {
+    let without_prefix = encrypted.strip_prefix(ENCRYPTED_PREFIX)?;
+    let parts: Vec<&str> = without_prefix.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let iv_bytes = hex_decode(parts[0])?;
+    let tag_bytes = hex_decode(parts[1])?;
+    let ct_bytes = hex_decode(parts[2])?;
+
+    // copilot-shell uses 16-byte IV (Node.js crypto.createCipheriv)
+    if iv_bytes.len() != 16 || tag_bytes.len() != 16 {
+        return None;
+    }
+
+    let salt = std::fs::read(salt_path).ok()?;
+    if salt.len() != 32 {
+        return None;
+    }
+
+    let mut key = [0u8; 32];
+    let params = Params::new(14, 8, 1, 32).ok()?;
+    scrypt(CREDENTIAL_PASSWORD, &salt, &params, &mut key).ok()?;
+
+    let cipher = Aes256Gcm16::new_from_slice(&key).ok()?;
+
+    let nonce = aes_gcm::aead::generic_array::GenericArray::from_slice(&iv_bytes);
+    let mut ciphertext_with_tag = ct_bytes;
+    ciphertext_with_tag.extend_from_slice(&tag_bytes);
+
+    let plaintext = cipher.decrypt(nonce, ciphertext_with_tag.as_ref()).ok()?;
+    String::from_utf8(plaintext).ok()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn map_approval_mode(mode: &str) -> &str {
@@ -330,17 +366,6 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential::decrypt_credential;
-    use aes_gcm::aead::generic_array::typenum::U16;
-    use aes_gcm::{
-        aead::{Aead, KeyInit},
-        aes::Aes256,
-        AesGcm,
-    };
-    use scrypt::{scrypt, Params};
-
-    type Aes256Gcm16 = AesGcm<Aes256, U16>;
-    const CREDENTIAL_PASSWORD: &[u8] = b"copilot-credential-encrypt";
 
     #[test]
     fn plaintext_passthrough() {
@@ -376,7 +401,7 @@ mod tests {
         );
 
         let result = decrypt_credential(&encrypted, &salt_path);
-        assert_eq!(result, Ok("sk-test-secret-key".to_string()));
+        assert_eq!(result, Some("sk-test-secret-key".to_string()));
     }
 
     #[test]
@@ -510,7 +535,7 @@ api_key = "sk-current"
         migrate_settings(&settings_path, &config_path, tmp.path()).unwrap();
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        let config = crate::config::CoreConfig::load_from_paths(None, Some(&config_path), None);
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
 
         assert_eq!(config.ai.active_model.as_deref(), Some("test-model"));
         assert_eq!(config.agent.approval_mode, "trust");
@@ -520,52 +545,6 @@ api_key = "sk-current"
 
         let provider = config.ai.providers.get("default").unwrap();
         assert_eq!(provider.api_key.as_deref(), Some("sk-plain-key"));
-        assert!(!content.contains("sk-plain-key"));
-        assert!(content.contains("api_key = \"enc:"));
-    }
-
-    #[test]
-    fn encrypted_api_key_migration_validates_and_reencrypts_legacy_ciphertext() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let settings_path = tmp.path().join("settings.json");
-        let config_path = tmp.path().join("config.toml");
-        let salt = [0x61_u8; 32];
-        std::fs::write(tmp.path().join(".encryption-salt"), salt).unwrap();
-        let encrypted = encrypt_test_credential("legacy-api-key", &salt);
-        std::fs::write(
-            &settings_path,
-            format!(
-                "{{\"security\":{{\"auth\":{{\"selectedType\":\"openai\",\"apiKey\":\"{encrypted}\"}}}}}}"
-            ),
-        )
-        .unwrap();
-
-        migrate_settings(&settings_path, &config_path, tmp.path()).unwrap();
-
-        let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("api_key = \"enc:"));
-        assert!(!content.contains(&encrypted));
-        assert!(!content.contains("legacy-api-key"));
-        let config = crate::config::CoreConfig::load_from_paths(None, Some(&config_path), None);
-        assert_eq!(config.resolve_provider().api_key, "legacy-api-key");
-    }
-
-    #[test]
-    fn failed_settings_migration_keeps_existing_config() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let settings_path = tmp.path().join("settings.json");
-        let config_path = tmp.path().join("config.toml");
-        let original = "# existing valid config\n";
-        std::fs::write(&config_path, original).unwrap();
-        std::fs::write(tmp.path().join(".encryption-salt"), [0x01_u8; 1]).unwrap();
-        std::fs::write(
-            &settings_path,
-            r#"{"security":{"auth":{"selectedType":"openai","apiKey":"plain-api-key"}}}"#,
-        )
-        .unwrap();
-
-        assert!(migrate_settings(&settings_path, &config_path, tmp.path()).is_err());
-        assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
     }
 
     #[test]
@@ -590,7 +569,8 @@ api_key = "sk-current"
 
         migrate_settings(&settings_path, &config_path, tmp.path()).unwrap();
 
-        let config = crate::config::CoreConfig::load_from_paths(None, Some(&config_path), None);
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
         assert_eq!(config.ai.active_model.as_deref(), Some("qwen3.7-plus"));
@@ -631,7 +611,7 @@ api_key = "sk-current"
         try_migrate_from_dir(tmp.path());
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        let config = crate::config::CoreConfig::load_from_paths(None, Some(&config_path), None);
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
         let provider = config.ai.providers.get("aliyun").unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
@@ -639,9 +619,8 @@ api_key = "sk-current"
         assert_eq!(provider.access_key_id.as_deref(), Some("legacy-ak"));
         assert_eq!(provider.access_key_secret.as_deref(), Some("legacy-sk"));
         assert_eq!(provider.security_token.as_deref(), Some("legacy-token"));
-        assert!(!content.contains("legacy-ak"));
-        assert!(!content.contains("legacy-sk"));
-        assert!(!content.contains("legacy-token"));
+        assert!(content.contains("legacy-ak"));
+        assert!(content.contains("legacy-token"));
     }
 
     #[test]
@@ -662,7 +641,7 @@ api_key = "sk-current"
         try_migrate_from_dir(tmp.path());
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        let config = crate::config::CoreConfig::load_from_paths(None, Some(&config_path), None);
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
         let provider = config.ai.providers.get("aliyun").unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
@@ -671,9 +650,8 @@ api_key = "sk-current"
         assert_eq!(provider.access_key_id.as_deref(), Some("legacy-ak"));
         assert_eq!(provider.access_key_secret.as_deref(), Some("legacy-sk"));
         assert_eq!(provider.security_token.as_deref(), Some("legacy-token"));
-        assert!(!content.contains("legacy-ak"));
-        assert!(!content.contains("legacy-sk"));
-        assert!(!content.contains("legacy-token"));
+        assert!(content.contains("legacy-ak"));
+        assert!(content.contains("legacy-token"));
     }
 
     #[test]
@@ -694,7 +672,7 @@ api_key = "sk-current"
         try_migrate_from_dir(tmp.path());
 
         let content = std::fs::read_to_string(&config_path).unwrap();
-        let config = crate::config::CoreConfig::load_from_paths(None, Some(&config_path), None);
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
         let provider = config.ai.providers.get("aliyun").unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
@@ -703,8 +681,6 @@ api_key = "sk-current"
         assert_eq!(provider.access_key_id.as_deref(), Some("legacy-ak"));
         assert_eq!(provider.access_key_secret.as_deref(), Some("legacy-sk"));
         assert!(provider.security_token.is_none());
-        assert!(!content.contains("legacy-ak"));
-        assert!(!content.contains("legacy-sk"));
     }
 
     fn hex_encode(bytes: &[u8]) -> String {

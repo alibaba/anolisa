@@ -1386,7 +1386,6 @@ impl CoshCore {
             &request_id,
             AuthReason::Invalid,
             Some("API authentication failed (401/403)".to_string()),
-            self.config.has_any_unavailable_credentials(),
             providers,
         );
         self.emit(writer, &auth_msg);
@@ -1399,69 +1398,40 @@ impl CoshCore {
             None => return false,
         };
 
-        let original_config = self.config.clone();
-        if response.reset_unavailable_credentials {
-            if let Err(e) = self.config.reset_unavailable_credentials() {
-                tracing::warn!("failed to reset unavailable credentials: {e}");
-                self.config = original_config;
-                self.emit(writer, &OutputMessage::auth_result(&request_id, false));
-                return false;
-            }
-        }
         apply_auth_credentials(&mut self.config, &response);
-
-        let resolved = self.config.resolve_provider();
-        if resolved.auth_required() {
-            tracing::warn!("authentication response did not contain usable credentials");
-            self.config = original_config;
-            self.emit(writer, &OutputMessage::auth_result(&request_id, false));
-            return false;
-        }
-
-        let replacement_provider: Box<dyn ContentGenerator> = if resolved.provider_type == "aliyun"
-        {
-            if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
-                Box::new(crate::provider::sysom::SysomProvider::from_ecs_ram_role())
-            } else if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
-                Box::new(crate::provider::sysom::SysomProvider::new(
-                    &resolved.access_key_id,
-                    &resolved.access_key_secret,
-                    resolved.security_token.as_deref(),
-                ))
-            } else {
-                tracing::warn!("Aliyun authentication configuration is unusable");
-                self.config = original_config;
-                self.emit(writer, &OutputMessage::auth_result(&request_id, false));
-                return false;
-            }
-        } else {
-            let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
-            Box::new(crate::provider::openai_compat::OpenAICompatProvider::new(
-                &resolved.base_url,
-                &resolved.api_key,
-                profile,
-            ))
-        };
 
         if response.persist {
             if let Err(e) = config::persist_config(&self.config) {
                 tracing::warn!("failed to persist config: {e}");
-                self.config = original_config;
-                self.emit(writer, &OutputMessage::auth_result(&request_id, false));
-                return false;
             }
         }
 
-        self.provider = replacement_provider;
-
-        // Only report the config as saved when it was actually persisted; a
-        // persist=false re-auth is applied to the current run only.
-        let status_msg = if response.persist {
-            OutputMessage::auth_result(&request_id, true)
+        // Rebuild provider
+        let resolved = self.config.resolve_provider();
+        if resolved.provider_type == "aliyun" {
+            if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
+                self.provider =
+                    Box::new(crate::provider::sysom::SysomProvider::from_ecs_ram_role());
+            } else if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
+                self.provider = Box::new(crate::provider::sysom::SysomProvider::new(
+                    &resolved.access_key_id,
+                    &resolved.access_key_secret,
+                    resolved.security_token.as_deref(),
+                ));
+            } else {
+                tracing::warn!("Aliyun auth response missing AK/SK");
+                return false;
+            }
         } else {
-            OutputMessage::auth_applied(&request_id)
-        };
-        self.emit(writer, &status_msg);
+            let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
+            self.provider = Box::new(crate::provider::openai_compat::OpenAICompatProvider::new(
+                &resolved.base_url,
+                &resolved.api_key,
+                profile,
+            ));
+        }
+
+        self.emit(writer, &OutputMessage::system_status("auth_ok"));
         true
     }
 }

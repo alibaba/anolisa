@@ -16,14 +16,10 @@ fn binary_path() -> std::path::PathBuf {
 }
 
 fn run_with_input(lines: &[&str]) -> Vec<Value> {
-    let home = tempfile::tempdir().expect("temp home");
-    run_with_input_at_home(home.path(), lines)
-}
-
-fn run_with_input_at_home(home: &std::path::Path, lines: &[&str]) -> Vec<Value> {
     let bin = binary_path();
+    let home = tempfile::tempdir().expect("temp home");
     let mut child = Command::new(&bin)
-        .env("HOME", home)
+        .env("HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -45,146 +41,6 @@ fn run_with_input_at_home(home: &std::path::Path, lines: &[&str]) -> Vec<Value> 
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}")))
         .collect()
-}
-
-#[test]
-fn failed_auth_persistence_does_not_emit_auth_ok() {
-    let home = tempfile::tempdir().expect("temp home");
-    let config_dir = home.path().join(".copilot-shell");
-    std::fs::create_dir_all(&config_dir).expect("config directory");
-    let config_path = config_dir.join("config.toml");
-    let original = r#"[ai]
-active_provider = "first"
-
-[ai.providers.first]
-api_key = "enc:broken"
-"#;
-    std::fs::write(&config_path, original).expect("opaque config");
-
-    let messages = run_with_input_at_home(
-        home.path(),
-        &[
-            r#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-init","response":{"provider_id":"dashscope","values":{"api_key":"new-secret"},"persist":true}}}"#,
-            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
-        ],
-    );
-
-    assert!(messages.iter().any(|message| {
-        message["type"] == "system"
-            && message["status"] == "auth_persist_failed"
-            && message["request_id"] == "auth-init"
-    }));
-    assert!(!messages
-        .iter()
-        .any(|message| message["type"] == "system" && message["status"] == "auth_ok"));
-    assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
-}
-
-#[test]
-fn unusable_auth_response_fails_before_persistence() {
-    let home = tempfile::tempdir().expect("temp home");
-    let config_dir = home.path().join(".copilot-shell");
-    std::fs::create_dir_all(&config_dir).expect("config directory");
-    let config_path = config_dir.join("config.toml");
-    let original = r#"[ai]
-active_provider = "aliyun"
-
-[ai.providers.aliyun]
-type = "aliyun"
-"#;
-    std::fs::write(&config_path, original).expect("incomplete Aliyun config");
-
-    let messages = run_with_input_at_home(
-        home.path(),
-        &[
-            r#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-init","response":{"provider_id":"aliyun","provider_type":"aliyun","values":{"model":"qwen3.7-plus"},"persist":true}}}"#,
-            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
-        ],
-    );
-
-    assert!(messages.iter().any(|message| {
-        message["type"] == "system"
-            && message["status"] == "auth_persist_failed"
-            && message["request_id"] == "auth-init"
-    }));
-    assert!(!messages
-        .iter()
-        .any(|message| message["type"] == "system" && message["status"] == "auth_ok"));
-    assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
-}
-
-#[test]
-fn whitespace_only_api_key_is_rejected_before_persistence() {
-    let home = tempfile::tempdir().expect("temp home");
-    let config_path = home.path().join(".copilot-shell/config.toml");
-
-    let messages = run_with_input_at_home(
-        home.path(),
-        &[
-            r#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-init","response":{"provider_id":"dashscope","provider_type":"dashscope","values":{"api_key":"   "},"persist":true}}}"#,
-            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
-        ],
-    );
-
-    assert!(messages.iter().any(|message| {
-        message["type"] == "system"
-            && message["status"] == "auth_persist_failed"
-            && message["request_id"] == "auth-init"
-    }));
-    assert!(!messages
-        .iter()
-        .any(|message| message["type"] == "system" && message["status"] == "auth_ok"));
-    assert!(!config_path.exists());
-}
-
-#[test]
-fn whitespace_only_aliyun_access_keys_are_rejected_before_persistence() {
-    let home = tempfile::tempdir().expect("temp home");
-    let config_path = home.path().join(".copilot-shell/config.toml");
-
-    let messages = run_with_input_at_home(
-        home.path(),
-        &[
-            r#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-init","response":{"provider_id":"aliyun","provider_type":"aliyun","values":{"access_key_id":"   ","access_key_secret":"\t"},"persist":true}}}"#,
-            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
-        ],
-    );
-
-    assert!(messages.iter().any(|message| {
-        message["type"] == "system"
-            && message["status"] == "auth_persist_failed"
-            && message["request_id"] == "auth-init"
-    }));
-    assert!(!messages
-        .iter()
-        .any(|message| message["type"] == "system" && message["status"] == "auth_ok"));
-    assert!(!config_path.exists());
-}
-
-#[test]
-fn persist_false_auth_reports_applied_without_saving() {
-    let home = tempfile::tempdir().expect("temp home");
-    let config_path = home.path().join(".copilot-shell/config.toml");
-
-    let messages = run_with_input_at_home(
-        home.path(),
-        &[
-            r#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-init","response":{"provider_id":"dashscope","provider_type":"dashscope","values":{"api_key":"sk-real"},"persist":false}}}"#,
-            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
-        ],
-    );
-
-    // Credentials were applied to the run but not saved: report auth_applied,
-    // never auth_ok, and leave the disk untouched.
-    assert!(messages.iter().any(|message| {
-        message["type"] == "system"
-            && message["status"] == "auth_applied"
-            && message["request_id"] == "auth-init"
-    }));
-    assert!(!messages
-        .iter()
-        .any(|message| message["type"] == "system" && message["status"] == "auth_ok"));
-    assert!(!config_path.exists());
 }
 
 #[test]

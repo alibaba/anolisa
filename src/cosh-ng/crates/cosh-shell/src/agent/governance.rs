@@ -182,13 +182,6 @@ pub fn govern_agent_events_with_language(
                 "Authentication credentials required".to_string(),
                 false,
             ),
-            AgentEvent::AuthResult { .. } => (
-                GovernanceDecision::Display,
-                GovernancePolicyDecision::AuditOnly,
-                "authentication persistence result".to_string(),
-                String::new(),
-                false,
-            ),
             AgentEvent::ShellEvidenceRequest { action, .. } => (
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::AuditOnly,

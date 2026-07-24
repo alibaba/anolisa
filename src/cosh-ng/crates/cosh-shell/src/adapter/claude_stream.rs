@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use crate::types::{AgentEvent, AuthOutcome};
+use crate::types::AgentEvent;
 
 use super::claude_stream_extract::{
     extract_claude_assistant_text, extract_claude_error_text, extract_claude_result_text,
@@ -77,9 +77,7 @@ impl ClaudeStreamParser {
             events.push(hook_event);
             return events;
         }
-        if let Some(auth_result) = self.extract_auth_result(&value) {
-            events.push(auth_result);
-        } else if let Some((phase, message)) = self.extract_claude_status(&value) {
+        if let Some((phase, message)) = self.extract_claude_status(&value) {
             events.push(AgentEvent::StatusChanged {
                 run_id: self.run_id.clone(),
                 phase,
@@ -321,29 +319,6 @@ impl ClaudeStreamParser {
             }
             _ => None,
         }
-    }
-
-    fn extract_auth_result(&self, value: &serde_json::Value) -> Option<AgentEvent> {
-        if value.get("type").and_then(|value| value.as_str()) != Some("system")
-            || value.get("subtype").and_then(|value| value.as_str()) != Some("status")
-        {
-            return None;
-        }
-        let outcome = match value.get("status").and_then(|value| value.as_str()) {
-            Some("auth_ok") => AuthOutcome::Saved,
-            Some("auth_applied") => AuthOutcome::Applied,
-            Some("auth_persist_failed") => AuthOutcome::Failed,
-            _ => return None,
-        };
-        let request_id = value.get("request_id")?.as_str()?;
-        if request_id.is_empty() {
-            return None;
-        }
-        Some(AgentEvent::AuthResult {
-            run_id: self.run_id.clone(),
-            request_id: request_id.to_string(),
-            outcome,
-        })
     }
 
     fn extract_hook_notification(&self, value: &serde_json::Value) -> Option<AgentEvent> {

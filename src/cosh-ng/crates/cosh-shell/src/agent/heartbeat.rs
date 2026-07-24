@@ -261,7 +261,6 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_phase = "auth".to_string();
                 active_run.current_message = "Authentication credentials required".to_string();
             }
-            AgentEvent::AuthResult { .. } => {}
             AgentEvent::ShellEvidenceRequest { action, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusTool).to_string();
                 active_run.current_message =

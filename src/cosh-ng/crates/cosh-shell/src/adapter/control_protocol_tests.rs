@@ -833,13 +833,11 @@ fn parse_auth_required() {
             request_id,
             reason,
             error_message,
-            credentials_unavailable,
             providers,
         } => {
             assert_eq!(request_id, "auth-init");
             assert_eq!(reason, "not_configured");
             assert!(error_message.is_none());
-            assert!(!credentials_unavailable);
             assert_eq!(providers.len(), 2);
             assert_eq!(providers[0].id, "dashscope");
             assert_eq!(providers[0].label, "DashScope");
@@ -866,14 +864,7 @@ fn parse_auth_required() {
 fn serialize_auth_response_format() {
     let mut values = HashMap::new();
     values.insert("api_key".to_string(), "sk-test".to_string());
-    let s = serialize_auth_response(
-        "auth-init",
-        "qwen-prod",
-        Some("dashscope"),
-        &values,
-        true,
-        false,
-    );
+    let s = serialize_auth_response("auth-init", "qwen-prod", Some("dashscope"), &values, true);
     let v: Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["type"], "control_response");
     assert_eq!(v["response"]["subtype"], "success");
@@ -882,8 +873,4 @@ fn serialize_auth_response_format() {
     assert_eq!(v["response"]["response"]["provider_type"], "dashscope");
     assert_eq!(v["response"]["response"]["values"]["api_key"], "sk-test");
     assert_eq!(v["response"]["response"]["persist"], true);
-    assert_eq!(
-        v["response"]["response"]["reset_unavailable_credentials"],
-        false
-    );
 }

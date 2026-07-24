@@ -44,7 +44,6 @@ pub enum ControlRequest {
         request_id: String,
         reason: String,
         error_message: Option<String>,
-        credentials_unavailable: bool,
         providers: Vec<AuthProviderInfo>,
     },
     ShellEvidence {
@@ -116,7 +115,6 @@ pub struct AuthResponse {
     pub provider_type: Option<String>,
     pub values: HashMap<String, String>,
     pub persist: bool,
-    pub reset_unavailable_credentials: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -425,10 +423,6 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                 .get("error_message")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let credentials_unavailable = request
-                .get("credentials_unavailable")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
             let providers = request
                 .get("providers")
                 .and_then(|v| v.as_array())
@@ -482,7 +476,6 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                 request_id,
                 reason,
                 error_message,
-                credentials_unavailable,
                 providers,
             })
         }

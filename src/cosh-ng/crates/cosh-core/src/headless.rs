@@ -618,13 +618,8 @@ where
     let request_id = "auth-init";
     let providers = builtin_auth_providers();
 
-    let auth_msg = OutputMessage::auth_required(
-        request_id,
-        AuthReason::NotConfigured,
-        None,
-        config.has_any_unavailable_credentials(),
-        providers,
-    );
+    let auth_msg =
+        OutputMessage::auth_required(request_id, AuthReason::NotConfigured, None, providers);
 
     // Emit auth request
     if let Ok(json) = serde_json::to_string(&auth_msg) {
@@ -638,52 +633,18 @@ where
 
     let response = auth_result.response?;
 
-    let original_config = config.clone();
-    if response.reset_unavailable_credentials {
-        if let Err(e) = config.reset_unavailable_credentials() {
-            tracing::warn!("failed to reset unavailable credentials: {e}");
-            *config = original_config;
-            let status_msg = OutputMessage::auth_result(request_id, false);
-            if let Ok(json) = serde_json::to_string(&status_msg) {
-                let _ = writeln!(writer, "{json}");
-                let _ = writer.flush();
-            }
-            return None;
-        }
-    }
+    // Apply credentials
     apply_auth_credentials(config, &response);
 
-    if config.resolve_provider().auth_required() {
-        tracing::warn!("authentication response did not contain usable credentials");
-        *config = original_config;
-        let status_msg = OutputMessage::auth_result(request_id, false);
-        if let Ok(json) = serde_json::to_string(&status_msg) {
-            let _ = writeln!(writer, "{json}");
-            let _ = writer.flush();
-        }
-        return None;
-    }
-
+    // Persist if requested
     if response.persist {
         if let Err(e) = config::persist_config(config) {
             tracing::warn!("failed to persist config: {e}");
-            *config = original_config;
-            let status_msg = OutputMessage::auth_result(request_id, false);
-            if let Ok(json) = serde_json::to_string(&status_msg) {
-                let _ = writeln!(writer, "{json}");
-                let _ = writer.flush();
-            }
-            return None;
         }
     }
 
-    // Emit success status. Only claim the config was saved when it was actually
-    // persisted; a persist=false request is applied to the current run only.
-    let status_msg = if response.persist {
-        OutputMessage::auth_result(request_id, true)
-    } else {
-        OutputMessage::auth_applied(request_id)
-    };
+    // Emit success status
+    let status_msg = OutputMessage::system_status("auth_ok");
     if let Ok(json) = serde_json::to_string(&status_msg) {
         let _ = writeln!(writer, "{json}");
         let _ = writer.flush();

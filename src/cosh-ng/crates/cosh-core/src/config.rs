@@ -4,10 +4,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::credential::{
-    rotate_invalid_salt, salt_needs_repair, write_private_atomic, CredentialCodec, ENCRYPTED_PREFIX,
-};
-
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CoreConfig {
     #[serde(default)]
@@ -18,15 +14,6 @@ pub struct CoreConfig {
     // System-layer AI state is used to expose provider ownership without persisting it.
     #[serde(skip)]
     pub(crate) system_ai: AiConfig,
-    // Failed decryptions stay unavailable at runtime but must survive unrelated saves.
-    #[serde(skip)]
-    pub(crate) unavailable_user_credentials: HashMap<String, OpaqueCredentials>,
-    // Snapshot used to distinguish a credential change from unrelated config persistence.
-    #[serde(skip)]
-    pub(crate) loaded_user_ai: AiConfig,
-    // Plaintext fields need encryption on save, so they cannot safely coexist with opaque values.
-    #[serde(skip)]
-    pub(crate) loaded_user_plain_credentials: bool,
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
@@ -72,23 +59,6 @@ pub struct ProviderConfig {
     pub access_key_secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct OpaqueCredentials {
-    api_key: Option<String>,
-    access_key_id: Option<String>,
-    access_key_secret: Option<String>,
-    security_token: Option<String>,
-}
-
-impl OpaqueCredentials {
-    fn is_empty(&self) -> bool {
-        self.api_key.is_none()
-            && self.access_key_id.is_none()
-            && self.access_key_secret.is_none()
-            && self.security_token.is_none()
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -489,12 +459,6 @@ struct PartialLoggingConfig {
     level: Option<String>,
 }
 
-struct LoadedPartialConfig {
-    config: PartialCoreConfig,
-    unavailable_credentials: HashMap<String, OpaqueCredentials>,
-    has_plain_credentials: bool,
-}
-
 fn expand_env_vars(s: &str) -> String {
     let mut result = s.to_string();
     while let Some(start) = result.find("${") {
@@ -514,10 +478,7 @@ fn expand_env_vars(s: &str) -> String {
     result
 }
 
-fn read_partial_config(
-    path: &std::path::Path,
-    decrypt_credentials: bool,
-) -> Option<LoadedPartialConfig> {
+fn read_partial_config(path: &std::path::Path) -> Option<PartialCoreConfig> {
     if !path.exists() {
         return None;
     }
@@ -535,18 +496,7 @@ fn read_partial_config(
     };
 
     match toml::from_str::<PartialCoreConfig>(&content) {
-        Ok(mut config) => {
-            let (unavailable_credentials, has_plain_credentials) = if decrypt_credentials {
-                decrypt_user_credentials(&mut config, path)
-            } else {
-                (HashMap::new(), false)
-            };
-            Some(LoadedPartialConfig {
-                config,
-                unavailable_credentials,
-                has_plain_credentials,
-            })
-        }
+        Ok(config) => Some(config),
         Err(e) => {
             eprintln!(
                 "[cosh-core] Warning: failed to parse {}: {}",
@@ -554,116 +504,6 @@ fn read_partial_config(
                 e
             );
             None
-        }
-    }
-}
-
-fn decrypt_user_credentials(
-    config: &mut PartialCoreConfig,
-    config_path: &Path,
-) -> (HashMap<String, OpaqueCredentials>, bool) {
-    let mut unavailable_credentials = HashMap::new();
-    let mut has_plain_credentials = false;
-    let Some(ai) = config.ai.as_mut() else {
-        return (unavailable_credentials, has_plain_credentials);
-    };
-    let salt_path = config_path
-        .parent()
-        .map(|directory| directory.join(".encryption-salt"));
-    let has_encrypted_credentials = ai.providers.values().any(|provider| {
-        [
-            provider.api_key.as_deref(),
-            provider.access_key_id.as_deref(),
-            provider.access_key_secret.as_deref(),
-            provider.security_token.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| value.starts_with(ENCRYPTED_PREFIX))
-    });
-    let codec = has_encrypted_credentials
-        .then(|| {
-            salt_path
-                .as_deref()
-                .and_then(|path| CredentialCodec::for_decryption(path).ok())
-        })
-        .flatten();
-    for (provider_id, provider) in &mut ai.providers {
-        let mut opaque = OpaqueCredentials::default();
-        let (api_key, opaque_api_key, api_key_is_plain) = decrypt_configured_credential(
-            provider.api_key.take(),
-            "api_key",
-            provider_id,
-            codec.as_ref(),
-        );
-        provider.api_key = api_key;
-        opaque.api_key = opaque_api_key;
-        has_plain_credentials |= api_key_is_plain;
-
-        let (access_key_id, opaque_access_key_id, access_key_id_is_plain) =
-            decrypt_configured_credential(
-                provider.access_key_id.take(),
-                "access_key_id",
-                provider_id,
-                codec.as_ref(),
-            );
-        provider.access_key_id = access_key_id;
-        opaque.access_key_id = opaque_access_key_id;
-        has_plain_credentials |= access_key_id_is_plain;
-
-        let (access_key_secret, opaque_access_key_secret, access_key_secret_is_plain) =
-            decrypt_configured_credential(
-                provider.access_key_secret.take(),
-                "access_key_secret",
-                provider_id,
-                codec.as_ref(),
-            );
-        provider.access_key_secret = access_key_secret;
-        opaque.access_key_secret = opaque_access_key_secret;
-        has_plain_credentials |= access_key_secret_is_plain;
-
-        let (security_token, opaque_security_token, security_token_is_plain) =
-            decrypt_configured_credential(
-                provider.security_token.take(),
-                "security_token",
-                provider_id,
-                codec.as_ref(),
-            );
-        provider.security_token = security_token;
-        opaque.security_token = opaque_security_token;
-        has_plain_credentials |= security_token_is_plain;
-        if !opaque.is_empty() {
-            unavailable_credentials.insert(provider_id.clone(), opaque);
-        }
-    }
-    (unavailable_credentials, has_plain_credentials)
-}
-
-fn decrypt_configured_credential(
-    value: Option<String>,
-    field: &str,
-    provider_id: &str,
-    codec: Option<&CredentialCodec>,
-) -> (Option<String>, Option<String>, bool) {
-    let Some(value) = value else {
-        return (None, None, false);
-    };
-    if !value.starts_with(ENCRYPTED_PREFIX) {
-        return (Some(value), None, true);
-    }
-    let Some(codec) = codec else {
-        eprintln!(
-            "[cosh-core] Warning: encrypted {field} for provider {provider_id} is unavailable; verify the credential salt"
-        );
-        return (None, Some(value), false);
-    };
-    match codec.decrypt(&value) {
-        Ok(plaintext) => (Some(plaintext), None, false),
-        Err(_) => {
-            eprintln!(
-                "[cosh-core] Warning: encrypted {field} for provider {provider_id} is unavailable; verify the credential salt"
-            );
-            (None, Some(value), false)
         }
     }
 }
@@ -850,55 +690,6 @@ fn apply_logging_layer(config: &mut LoggingConfig, layer: &PartialLoggingConfig)
 }
 
 impl CoreConfig {
-    pub(crate) fn clear_unavailable_credentials(&mut self, provider_id: &str) {
-        self.unavailable_user_credentials.remove(provider_id);
-    }
-
-    pub(crate) fn clear_all_unavailable_credentials(&mut self) {
-        self.unavailable_user_credentials.clear();
-    }
-
-    /// Explicitly discards unreadable credentials before replacing them.
-    ///
-    /// This always repairs a malformed (empty or short) salt, even when no
-    /// opaque credentials remain, so an explicit reset can recover a config
-    /// whose salt would otherwise block re-encryption. A valid 32-byte salt is
-    /// never replaced: it may still unlock credentials that are merely
-    /// unavailable because their ciphertext was damaged.
-    pub(crate) fn reset_unavailable_credentials(&mut self) -> Result<(), String> {
-        rotate_invalid_salt(&config_dir().join(".encryption-salt"))?;
-        self.clear_all_unavailable_credentials();
-        Ok(())
-    }
-
-    pub(crate) fn has_unavailable_credentials(&self, provider_id: &str) -> bool {
-        self.unavailable_user_credentials.contains_key(provider_id)
-    }
-
-    pub(crate) fn has_any_unavailable_credentials(&self) -> bool {
-        !self.unavailable_user_credentials.is_empty()
-    }
-
-    /// True when persistence would fail only because the encryption salt is
-    /// malformed (present but not 32 bytes) while credentials still need to be
-    /// encrypted. An explicit reset recovers this by rotating the salt, so the
-    /// registry surfaces it as `credential_reset_required` rather than a generic
-    /// persistence error the shell cannot act on.
-    pub(crate) fn requires_credential_salt_repair(&self) -> bool {
-        let has_runtime_credentials = self.user_ai.providers.values().any(|provider| {
-            provider.api_key.is_some()
-                || provider.access_key_id.is_some()
-                || provider.access_key_secret.is_some()
-                || provider.security_token.is_some()
-        });
-        has_runtime_credentials && salt_needs_repair(&config_dir().join(".encryption-salt"))
-    }
-
-    pub(crate) fn requires_unavailable_credentials_reset(&self) -> bool {
-        !self.unavailable_user_credentials.is_empty()
-            && (self.loaded_user_plain_credentials || credentials_changed_since_load(self))
-    }
-
     pub fn load() -> Self {
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self::load_for_workspace(&workspace)
@@ -935,7 +726,7 @@ impl CoreConfig {
         self.session.auto_persist = false;
     }
 
-    pub(crate) fn load_from_paths(
+    fn load_from_paths(
         system_path: Option<&std::path::Path>,
         user_path: Option<&std::path::Path>,
         project_path: Option<&std::path::Path>,
@@ -943,30 +734,27 @@ impl CoreConfig {
         let mut config = CoreConfig::default();
 
         if let Some(system_path) = system_path {
-            if let Some(system) = read_partial_config(system_path, false) {
-                apply_user_layer(&mut config, &system.config);
+            if let Some(system) = read_partial_config(system_path) {
+                apply_user_layer(&mut config, &system);
                 let mut system_snapshot = CoreConfig::default();
-                apply_user_layer(&mut system_snapshot, &system.config);
+                apply_user_layer(&mut system_snapshot, &system);
                 config.system_ai = system_snapshot.ai;
             }
         }
 
         if let Some(user_path) = user_path {
-            if let Some(user) = read_partial_config(user_path, true) {
-                apply_user_layer(&mut config, &user.config);
+            if let Some(user) = read_partial_config(user_path) {
+                apply_user_layer(&mut config, &user);
                 let mut user_snapshot = CoreConfig::default();
-                apply_user_layer(&mut user_snapshot, &user.config);
+                apply_user_layer(&mut user_snapshot, &user);
                 user_snapshot.user_ai = user_snapshot.ai.clone();
                 config.user_ai = user_snapshot.ai.clone();
-                config.loaded_user_ai = user_snapshot.ai;
-                config.unavailable_user_credentials = user.unavailable_credentials;
-                config.loaded_user_plain_credentials = user.has_plain_credentials;
             }
         }
 
         if let Some(project_path) = project_path {
-            if let Some(project) = read_partial_config(project_path, false) {
-                apply_project_layer(&mut config, &project.config, project_path);
+            if let Some(project) = read_partial_config(project_path) {
+                apply_project_layer(&mut config, &project, project_path);
             }
         }
 
@@ -1085,10 +873,9 @@ impl ResolvedProvider {
         }
         if self.provider_type == "aliyun" {
             return self.auth_source.as_deref() != Some("ecs_ram_role")
-                && (self.access_key_id.trim().is_empty()
-                    || self.access_key_secret.trim().is_empty());
+                && (self.access_key_id.is_empty() || self.access_key_secret.is_empty());
         }
-        self.api_key.trim().is_empty()
+        self.api_key.is_empty()
     }
 }
 
@@ -1162,29 +949,7 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
     }
     preserved.push('\n');
 
-    let salt_path = dir.join(".encryption-salt");
-    let has_runtime_credentials = config.user_ai.providers.values().any(|provider| {
-        provider.api_key.is_some()
-            || provider.access_key_id.is_some()
-            || provider.access_key_secret.is_some()
-            || provider.security_token.is_some()
-    });
-    if config.requires_unavailable_credentials_reset() {
-        return Err(
-            "cannot save changed credentials while encrypted credentials are unavailable; restore the credential salt or reset unavailable credentials before reconfiguring"
-                .to_string(),
-        );
-    }
-    let codec = if has_runtime_credentials {
-        Some(
-            CredentialCodec::for_encryption(&salt_path)
-                .map_err(|error| format!("failed to initialize credential encryption: {error}"))?,
-        )
-    } else {
-        None
-    };
     for (name, provider) in &config.user_ai.providers {
-        let opaque = config.unavailable_user_credentials.get(name);
         preserved.push_str(&format!("[ai.providers.{}]\n", name));
         if let Some(ref t) = provider.provider_type {
             preserved.push_str(&format!("type = \"{}\"\n", escape_toml_value(t)));
@@ -1199,99 +964,43 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
             preserved.push_str(&format!("base_url = \"{}\"\n", escape_toml_value(url)));
         }
         if let Some(ref key) = provider.api_key {
-            let encrypted = encrypt_runtime_credential(key, codec.as_ref()).map_err(|error| {
-                format!("failed to encrypt api_key for provider {name}: {error}")
-            })?;
-            preserved.push_str(&format!(
-                "api_key = \"{}\"\n",
-                escape_toml_value(&encrypted)
-            ));
-        } else if let Some(encrypted) = opaque.and_then(|credentials| credentials.api_key.as_ref())
-        {
-            preserved.push_str(&format!("api_key = \"{}\"\n", escape_toml_value(encrypted)));
+            preserved.push_str(&format!("api_key = \"{}\"\n", escape_toml_value(key)));
         }
         if let Some(ref m) = provider.model {
             preserved.push_str(&format!("model = \"{}\"\n", escape_toml_value(m)));
         }
         if let Some(ref ak) = provider.access_key_id {
-            let encrypted = encrypt_runtime_credential(ak, codec.as_ref()).map_err(|error| {
-                format!("failed to encrypt access_key_id for provider {name}: {error}")
-            })?;
-            preserved.push_str(&format!(
-                "access_key_id = \"{}\"\n",
-                escape_toml_value(&encrypted)
-            ));
-        } else if let Some(encrypted) =
-            opaque.and_then(|credentials| credentials.access_key_id.as_ref())
-        {
-            preserved.push_str(&format!(
-                "access_key_id = \"{}\"\n",
-                escape_toml_value(encrypted)
-            ));
+            preserved.push_str(&format!("access_key_id = \"{}\"\n", escape_toml_value(ak)));
         }
         if let Some(ref sk) = provider.access_key_secret {
-            let encrypted = encrypt_runtime_credential(sk, codec.as_ref()).map_err(|error| {
-                format!("failed to encrypt access_key_secret for provider {name}: {error}")
-            })?;
             preserved.push_str(&format!(
                 "access_key_secret = \"{}\"\n",
-                escape_toml_value(&encrypted)
-            ));
-        } else if let Some(encrypted) =
-            opaque.and_then(|credentials| credentials.access_key_secret.as_ref())
-        {
-            preserved.push_str(&format!(
-                "access_key_secret = \"{}\"\n",
-                escape_toml_value(encrypted)
+                escape_toml_value(sk)
             ));
         }
         if let Some(ref st) = provider.security_token {
-            let encrypted = encrypt_runtime_credential(st, codec.as_ref()).map_err(|error| {
-                format!("failed to encrypt security_token for provider {name}: {error}")
-            })?;
-            preserved.push_str(&format!(
-                "security_token = \"{}\"\n",
-                escape_toml_value(&encrypted)
-            ));
-        } else if let Some(encrypted) =
-            opaque.and_then(|credentials| credentials.security_token.as_ref())
-        {
-            preserved.push_str(&format!(
-                "security_token = \"{}\"\n",
-                escape_toml_value(encrypted)
-            ));
+            preserved.push_str(&format!("security_token = \"{}\"\n", escape_toml_value(st)));
         }
         preserved.push('\n');
     }
 
-    write_private_atomic(&config_path, preserved.as_bytes())
-        .map_err(|error| format!("failed to persist config: {error}"))?;
+    let pid = std::process::id();
+    let tmp_path = dir.join(format!("config.toml.tmp.{pid}"));
+    std::fs::write(&tmp_path, &preserved).map_err(|e| format!("Failed to write config: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&tmp_path, perms);
+    }
+
+    std::fs::rename(&tmp_path, &config_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("Failed to rename config: {e}")
+    })?;
 
     Ok(())
-}
-
-fn encrypt_runtime_credential(
-    value: &str,
-    codec: Option<&CredentialCodec>,
-) -> Result<String, String> {
-    let codec = codec.ok_or_else(|| "credential encryption was not initialized".to_string())?;
-    codec.encrypt(value)
-}
-
-fn credentials_changed_since_load(config: &CoreConfig) -> bool {
-    config
-        .user_ai
-        .providers
-        .iter()
-        .any(|(provider_id, provider)| {
-            let previous = config.loaded_user_ai.providers.get(provider_id);
-            provider.api_key != previous.and_then(|value| value.api_key.clone())
-                || provider.access_key_id != previous.and_then(|value| value.access_key_id.clone())
-                || provider.access_key_secret
-                    != previous.and_then(|value| value.access_key_secret.clone())
-                || provider.security_token
-                    != previous.and_then(|value| value.security_token.clone())
-        })
 }
 
 fn escape_toml_value(s: &str) -> String {
@@ -1303,7 +1012,6 @@ fn escape_toml_value(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential::{decrypt_credential, encrypt_credential};
 
     #[test]
     fn default_config() {
@@ -1573,10 +1281,15 @@ security_token = "manual-token"
 
         let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
         let resolved = config.resolve_provider();
+        let persisted = std::fs::read_to_string(&user_path).unwrap();
+
         assert_eq!(resolved.auth_source, None);
         assert_eq!(resolved.access_key_id, "manual-ak");
         assert_eq!(resolved.access_key_secret, "manual-sk");
         assert_eq!(resolved.security_token.as_deref(), Some("manual-token"));
+        assert!(persisted.contains("access_key_id = \"manual-ak\""));
+        assert!(persisted.contains("access_key_secret = \"manual-sk\""));
+        assert!(persisted.contains("security_token = \"manual-token\""));
     }
 
     #[test]
@@ -1875,8 +1588,7 @@ output_language = "zh-CN"
         assert!(content.contains("output_language = \"en-US\""));
         assert!(!content.contains("project-model"));
         assert!(!content.contains("zh-CN"));
-        assert!(content.contains("api_key = \"enc:"));
-        assert!(!content.contains("sk-user"));
+        assert!(content.contains("api_key = \"sk-user\""));
     }
 
     #[test]
@@ -1920,8 +1632,7 @@ api_key = "sk-user"
         let content = std::fs::read_to_string(&user_path).unwrap();
         assert!(content.contains("active_provider = \"user-provider\""));
         assert!(content.contains("[ai.providers.user-provider]"));
-        assert!(content.contains("api_key = \"enc:"));
-        assert!(!content.contains("sk-user"));
+        assert!(content.contains("api_key = \"sk-user\""));
         assert!(!content.contains("system-provider"));
         assert!(!content.contains("sk-system"));
     }
@@ -1996,8 +1707,7 @@ approval_mode = "balanced"
         assert!(!content.contains("[ai.providers.old]"));
         assert!(content.contains("active_provider = \"new-provider\""));
         assert!(content.contains("[ai.providers.new-provider]"));
-        assert!(content.contains("api_key = \"enc:"));
-        assert!(!content.contains("sk-new"));
+        assert!(content.contains("api_key = \"sk-new\""));
         assert_eq!(content.matches("[ai]").count(), 1);
         assert_eq!(content.matches("[ai.providers.").count(), 1);
     }
@@ -2061,203 +1771,5 @@ approval_mode = "balanced"
         assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
         assert!(parsed.ai.providers.contains_key("new-provider"));
         assert_eq!(parsed.ai.providers.len(), 1);
-    }
-    #[test]
-    fn plaintext_credentials_upgrade_to_encrypted_on_persist() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[ai]
-active_provider = "aliyun"
-
-[ai.providers.aliyun]
-type = "aliyun"
-access_key_id = "plain-ak"
-access_key_secret = "plain-sk"
-security_token = "plain-token"
-api_key = "plain-api-key"
-"#,
-        )
-        .unwrap();
-
-        let config = CoreConfig::load_from_paths(None, Some(&config_path), None);
-        let resolved = config.resolve_provider();
-        assert_eq!(resolved.api_key, "plain-api-key");
-        assert_eq!(resolved.access_key_id, "plain-ak");
-        assert_eq!(resolved.access_key_secret, "plain-sk");
-        assert_eq!(resolved.security_token.as_deref(), Some("plain-token"));
-
-        persist_config_to_dir(&config, tmp.path()).unwrap();
-        let persisted = std::fs::read_to_string(&config_path).unwrap();
-        for credential in ["plain-api-key", "plain-ak", "plain-sk", "plain-token"] {
-            assert!(!persisted.contains(credential));
-        }
-        assert_eq!(persisted.matches("enc:").count(), 4);
-
-        let reloaded = CoreConfig::load_from_paths(None, Some(&config_path), None);
-        let resolved = reloaded.resolve_provider();
-        assert_eq!(resolved.api_key, "plain-api-key");
-        assert_eq!(resolved.access_key_id, "plain-ak");
-        assert_eq!(resolved.access_key_secret, "plain-sk");
-        assert_eq!(resolved.security_token.as_deref(), Some("plain-token"));
-    }
-
-    #[test]
-    fn encrypted_credentials_fail_closed_for_missing_wrong_or_tampered_state() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let salt_path = tmp.path().join(".encryption-salt");
-        let encrypted = encrypt_credential("secret-api-key", &salt_path).unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        std::fs::write(
-            &config_path,
-            format!(
-                "[ai]\nactive_provider = \"default\"\n\n[ai.providers.default]\napi_key = \"{encrypted}\"\n"
-            ),
-        )
-        .unwrap();
-        std::fs::remove_file(&salt_path).unwrap();
-        let missing_salt = CoreConfig::load_from_paths(None, Some(&config_path), None);
-        assert!(missing_salt.resolve_provider().api_key.is_empty());
-
-        std::fs::write(&salt_path, [0x11_u8; 32]).unwrap();
-        let wrong_salt = CoreConfig::load_from_paths(None, Some(&config_path), None);
-        assert!(wrong_salt.resolve_provider().api_key.is_empty());
-
-        let salt_path = tmp.path().join("tampered-salt");
-        let encrypted = encrypt_credential("secret-api-key", &salt_path).unwrap();
-        let replacement = if encrypted.ends_with('0') { '1' } else { '0' };
-        let tampered = format!("{}{replacement}", &encrypted[..encrypted.len() - 1]);
-        std::fs::write(
-            &config_path,
-            format!(
-                "[ai]\nactive_provider = \"default\"\n\n[ai.providers.default]\napi_key = \"{tampered}\"\n"
-            ),
-        )
-        .unwrap();
-        std::fs::rename(&salt_path, tmp.path().join(".encryption-salt")).unwrap();
-        let tampered_ciphertext = CoreConfig::load_from_paths(None, Some(&config_path), None);
-        assert!(tampered_ciphertext.resolve_provider().api_key.is_empty());
-    }
-
-    #[test]
-    fn plaintext_starting_with_encrypted_prefix_is_encrypted() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let salt_path = tmp.path().join(".encryption-salt");
-        let plaintext = "enc:plaintext-secret";
-
-        let encrypted = encrypt_credential(plaintext, &salt_path).unwrap();
-
-        assert_ne!(encrypted, plaintext);
-        assert!(encrypted.starts_with(ENCRYPTED_PREFIX));
-        assert_eq!(
-            decrypt_credential(&encrypted, &salt_path).unwrap(),
-            plaintext
-        );
-        assert!(salt_path.exists());
-    }
-
-    #[test]
-    fn encryption_reuses_existing_valid_salt() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let salt_path = tmp.path().join(".encryption-salt");
-        let salt = [0x5a_u8; 32];
-        std::fs::write(&salt_path, salt).unwrap();
-
-        let encrypted = encrypt_credential("secret-api-key", &salt_path).unwrap();
-
-        assert_eq!(std::fs::read(&salt_path).unwrap(), salt);
-        assert_eq!(
-            decrypt_credential(&encrypted, &salt_path).unwrap(),
-            "secret-api-key"
-        );
-    }
-
-    #[test]
-    fn failed_encryption_preserves_existing_config() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-        let original = "# last known good config\n";
-        std::fs::write(&config_path, original).unwrap();
-        std::fs::write(tmp.path().join(".encryption-salt"), [0x22_u8; 1]).unwrap();
-
-        let mut config = CoreConfig::default();
-        config.user_ai.active_provider = Some("default".to_string());
-        let provider = ProviderConfig {
-            api_key: Some("secret-api-key".to_string()),
-            ..Default::default()
-        };
-        config
-            .user_ai
-            .providers
-            .insert("default".to_string(), provider);
-
-        assert!(persist_config_to_dir(&config, tmp.path()).is_err());
-        assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
-    }
-
-    #[test]
-    fn failed_decryption_preserves_opaque_credentials_on_unrelated_save() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let salt_path = tmp.path().join(".encryption-salt");
-        let first = encrypt_credential("first-secret", &salt_path).unwrap();
-        let second = encrypt_credential("second-secret", &salt_path).unwrap();
-        let config_path = tmp.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            format!(
-                "[ai]\nactive_provider = \"first\"\n\n[ai.providers.first]\napi_key = \"{first}\"\n\n[ai.providers.second]\napi_key = \"{second}\"\n"
-            ),
-        )
-        .unwrap();
-        std::fs::write(&salt_path, [0x11_u8; 32]).unwrap();
-
-        let mut config = CoreConfig::load_from_paths(None, Some(&config_path), None);
-        assert!(config.resolve_provider().api_key.is_empty());
-        assert_eq!(config.unavailable_user_credentials.len(), 2);
-        config.user_ai.active_provider = Some("second".to_string());
-        persist_config_to_dir(&config, tmp.path()).unwrap();
-
-        let persisted = std::fs::read_to_string(&config_path).unwrap();
-        assert!(persisted.contains(&first));
-        assert!(persisted.contains(&second));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn persisted_config_and_salt_are_private() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut config = CoreConfig::default();
-        config.user_ai.active_provider = Some("default".to_string());
-        let provider = ProviderConfig {
-            api_key: Some("secret-api-key".to_string()),
-            ..Default::default()
-        };
-        config
-            .user_ai
-            .providers
-            .insert("default".to_string(), provider);
-
-        persist_config_to_dir(&config, tmp.path()).unwrap();
-        assert_eq!(
-            std::fs::metadata(tmp.path().join("config.toml"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-        assert_eq!(
-            std::fs::metadata(tmp.path().join(".encryption-salt"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
     }
 }
