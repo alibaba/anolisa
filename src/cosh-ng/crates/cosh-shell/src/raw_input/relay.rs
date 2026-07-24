@@ -10,6 +10,7 @@ use super::event_parser::{
     redact_extension_setting_value, starts_intercept_candidate, starts_native_intercept_candidate,
     CandidateLineBuffer, CandidateLineStatus, NativeLineState,
 };
+use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::{write_all_pty, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
 pub(super) struct InputRelayContext<'a> {
@@ -17,9 +18,32 @@ pub(super) struct InputRelayContext<'a> {
     pub(super) input_classifier: &'a InputClassifier,
     pub(super) input_events: &'a Sender<RawInputEvent>,
     pub(super) input_mode: &'a Arc<Mutex<RawInputMode>>,
+    pub(super) input_generation: &'a UserPtyInputGeneration,
+    pub(super) line_submits: &'a mut LineSubmitCounter,
     pub(super) line_buffer: &'a mut CandidateLineBuffer,
     pub(super) native_line_state: &'a mut NativeLineState,
     pub(super) exit_tracker: &'a mut ExplicitExitTracker,
+}
+
+/// Writes real user bytes to the PTY, bumping the shared input generation
+/// first so replayed-prompt state armed for an older generation expires
+/// before the resulting PTY output can be parsed. The event also reports how
+/// many line submissions the write carried, so the output loop can match
+/// them against shell prompt boundaries.
+pub(super) fn write_user_bytes_to_pty(
+    master: &mut File,
+    input_generation: &UserPtyInputGeneration,
+    line_submits: &mut LineSubmitCounter,
+    input_events: &Sender<RawInputEvent>,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let line_submits = line_submits.count(bytes);
+    let generation = input_generation.bump();
+    let _ = input_events.send(RawInputEvent::PtyUserWrite {
+        generation,
+        line_submits,
+    });
+    write_all_pty(master, bytes)
 }
 
 pub(super) fn send_raw_input_events(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
@@ -81,7 +105,13 @@ fn relay_passthrough_input_with_activity(
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(bytes);
-    write_all_pty(relay.master, bytes)?;
+    write_user_bytes_to_pty(
+        relay.master,
+        relay.input_generation,
+        relay.line_submits,
+        relay.input_events,
+        bytes,
+    )?;
     Ok(false)
 }
 
@@ -163,12 +193,24 @@ pub(super) fn relay_prompt_ghost_input(
                 relay
                     .exit_tracker
                     .observe_shell_bytes(ghost_text.as_bytes());
-                write_all_pty(relay.master, ghost_text.as_bytes())?;
+                write_user_bytes_to_pty(
+                    relay.master,
+                    relay.input_generation,
+                    relay.line_submits,
+                    relay.input_events,
+                    ghost_text.as_bytes(),
+                )?;
                 if !remainder.is_empty() {
                     send_raw_input_events(remainder, relay.input_events);
                     relay.native_line_state.observe_shell_bytes(remainder);
                     relay.exit_tracker.observe_shell_bytes(remainder);
-                    write_all_pty(relay.master, remainder)?;
+                    write_user_bytes_to_pty(
+                        relay.master,
+                        relay.input_generation,
+                        relay.line_submits,
+                        relay.input_events,
+                        remainder,
+                    )?;
                 }
             }
             PromptGhostRoute::AgentIntercept { suggestion_id } => {
@@ -258,14 +300,7 @@ fn relay_native_passthrough(
     {
         relay.line_buffer.push(bytes);
         if native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer) {
-            return flush_candidate_line_to_shell(
-                relay.master,
-                relay.input_events,
-                relay.line_buffer,
-                relay.native_line_state,
-                relay.exit_tracker,
-                emit_activity,
-            );
+            return flush_candidate_line_to_shell(relay, emit_activity);
         }
         // Control bytes such as Tab must reach readline without first changing
         // the outer terminal cursor, whose display width differs from byte count.
@@ -280,7 +315,13 @@ fn relay_native_passthrough(
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(bytes);
-    write_all_pty(relay.master, bytes)?;
+    write_user_bytes_to_pty(
+        relay.master,
+        relay.input_generation,
+        relay.line_submits,
+        relay.input_events,
+        bytes,
+    )?;
     Ok(false)
 }
 
@@ -297,14 +338,7 @@ fn relay_candidate_line(
             send_shell_input_state(true, relay.input_events);
             Ok(true)
         }
-        CandidateLineStatus::Unsafe => flush_candidate_line_to_shell(
-            relay.master,
-            relay.input_events,
-            relay.line_buffer,
-            relay.native_line_state,
-            relay.exit_tracker,
-            emit_activity,
-        ),
+        CandidateLineStatus::Unsafe => flush_candidate_line_to_shell(relay, emit_activity),
         CandidateLineStatus::Complete { line, line_len } => {
             let force_agent_intercept = relay.line_buffer.force_agent_intercept;
             let suggestion_id = relay.line_buffer.forced_agent_suggestion_id.clone();
@@ -357,7 +391,13 @@ fn relay_candidate_line(
                         );
                     }
                     relay.exit_tracker.observe_shell_bytes(&bytes);
-                    write_all_pty(relay.master, &bytes)?;
+                    write_user_bytes_to_pty(
+                        relay.master,
+                        relay.input_generation,
+                        relay.line_submits,
+                        relay.input_events,
+                        &bytes,
+                    )?;
                     if !remainder.is_empty() {
                         relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
                     }
@@ -377,22 +417,24 @@ fn relay_candidate_line(
 }
 
 fn flush_candidate_line_to_shell(
-    master: &mut File,
-    input_events: &Sender<RawInputEvent>,
-    line_buffer: &mut CandidateLineBuffer,
-    native_line_state: &mut NativeLineState,
-    exit_tracker: &mut ExplicitExitTracker,
+    relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
 ) -> io::Result<bool> {
-    let bytes = line_buffer.take();
-    let _ = input_events.send(RawInputEvent::CandidateClearLine);
-    send_raw_input_events(&bytes, input_events);
-    native_line_state.observe_shell_bytes(&bytes);
+    let bytes = relay.line_buffer.take();
+    let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
+    send_raw_input_events(&bytes, relay.input_events);
+    relay.native_line_state.observe_shell_bytes(&bytes);
     if emit_activity && !bytes.is_empty() {
-        send_shell_input_state(native_line_state.is_empty(), input_events);
+        send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
-    exit_tracker.observe_shell_bytes(&bytes);
-    write_all_pty(master, &bytes)?;
+    relay.exit_tracker.observe_shell_bytes(&bytes);
+    write_user_bytes_to_pty(
+        relay.master,
+        relay.input_generation,
+        relay.line_submits,
+        relay.input_events,
+        &bytes,
+    )?;
     Ok(false)
 }
 

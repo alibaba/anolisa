@@ -6,21 +6,21 @@ use std::process::Child;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::libc;
 use nix::pty::Winsize;
 
 use crate::raw_input::{
     set_pty_winsize, signal_foreground_process_group, signal_process_group, update_input_mode,
-    write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
+    write_all_pty, RawInputEvent, RawInputMode, RawObserverAction, UserPtyInputGeneration,
 };
 use crate::types::{ShellEvent, ShellEventKind, ShellHandoffRequest};
 
 use super::model::current_terminal_winsize;
-use super::osc::OscParser;
+use super::osc::{DisplayCutKind, OscParser};
 use super::prompt_replay::{
-    prompt_prefixed_replay_bytes, prompt_replay_bytes, strip_replayed_prompt_prefix,
+    prompt_prefixed_replay_bytes, prompt_replay_bytes, PromptReplayTracker,
 };
 
 mod input_events;
@@ -41,6 +41,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     event_observer: &mut F,
     input_events: &Receiver<RawInputEvent>,
     input_mode: &Arc<Mutex<RawInputMode>>,
+    input_generation: &UserPtyInputGeneration,
     last_winsize: &mut Winsize,
     prompt: &str,
     recovery_request_file: &Path,
@@ -52,7 +53,8 @@ where
     let mut buffer = [0_u8; 8192];
     let mut display_start = parser.display.len();
     let mut native_candidate_echoed_len = 0;
-    let mut replayed_prompt_prefix: Option<Vec<u8>> = None;
+    let mut prompt_replay = PromptReplayTracker::new(input_generation.clone());
+    let mut last_pty_output: Option<Instant> = None;
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut pending_prompt_restore = None;
     loop {
@@ -71,6 +73,7 @@ where
             output,
             prompt,
             &mut native_candidate_echoed_len,
+            &mut prompt_replay,
         )?;
         let mut observer_action = merge_pending_prompt_restore(
             event_observer(&parser.events, output)?,
@@ -85,7 +88,7 @@ where
             input_mode,
             observer_action,
             &mut display_start,
-            &mut replayed_prompt_prefix,
+            &mut prompt_replay,
             &mut pending_terminal_restore,
             recovery_request_file,
             handoff_request_file,
@@ -98,7 +101,7 @@ where
                 parser,
                 output,
                 &mut display_start,
-                &mut replayed_prompt_prefix,
+                &mut prompt_replay,
                 input_mode,
             )?;
             output.flush()?;
@@ -107,8 +110,19 @@ where
             match master.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
+                    last_pty_output = Some(Instant::now());
                     parser.feed(&buffer[..n])?;
-                    for cut in parser.drain_intervention_display_cuts() {
+                    for (cut, cut_kind) in parser.drain_intervention_display_cuts() {
+                        // Only a real prompt boundary (precmd) confirms the
+                        // shell finished responding to the relay writes seen
+                        // so far; an intercepted line's remaining response is
+                        // just the prompt repaint replay dedup strips.
+                        match cut_kind {
+                            DisplayCutKind::PromptBoundary => {
+                                prompt_replay.observe_prompt_boundary()
+                            }
+                            DisplayCutKind::Intercept => prompt_replay.observe_intercept_cut(),
+                        }
                         let cut = cut.min(parser.display.len());
                         if !hold_shell_output && cut > display_start {
                             write_display_slice(
@@ -116,7 +130,7 @@ where
                                 output,
                                 display_start,
                                 cut,
-                                &mut replayed_prompt_prefix,
+                                &mut prompt_replay,
                             )?;
                             output.flush()?;
                             display_start = cut;
@@ -134,7 +148,7 @@ where
                             input_mode,
                             observer_action,
                             &mut display_start,
-                            &mut replayed_prompt_prefix,
+                            &mut prompt_replay,
                             &mut pending_terminal_restore,
                             recovery_request_file,
                             handoff_request_file,
@@ -150,7 +164,7 @@ where
                                 parser,
                                 output,
                                 &mut display_start,
-                                &mut replayed_prompt_prefix,
+                                &mut prompt_replay,
                                 input_mode,
                             )?;
                             output.flush()?;
@@ -169,7 +183,7 @@ where
                         input_mode,
                         observer_action,
                         &mut display_start,
-                        &mut replayed_prompt_prefix,
+                        &mut prompt_replay,
                         &mut pending_terminal_restore,
                         recovery_request_file,
                         handoff_request_file,
@@ -182,7 +196,7 @@ where
                             parser,
                             output,
                             &mut display_start,
-                            &mut replayed_prompt_prefix,
+                            &mut prompt_replay,
                             input_mode,
                         )?;
                         output.flush()?;
@@ -197,7 +211,7 @@ where
                         parser,
                         output,
                         &mut display_start,
-                        &mut replayed_prompt_prefix,
+                        &mut prompt_replay,
                     )?;
                     return Ok(());
                 }
@@ -212,7 +226,7 @@ where
                 parser,
                 output,
                 &mut display_start,
-                &mut replayed_prompt_prefix,
+                &mut prompt_replay,
             )?;
             return Ok(());
         }
@@ -231,6 +245,7 @@ where
             output,
             prompt,
             &mut native_candidate_echoed_len,
+            &mut prompt_replay,
         )?;
         observer_action = merge_pending_prompt_restore(
             event_observer(&parser.events, output)?,
@@ -245,7 +260,7 @@ where
             input_mode,
             observer_action,
             &mut display_start,
-            &mut replayed_prompt_prefix,
+            &mut prompt_replay,
             &mut pending_terminal_restore,
             recovery_request_file,
             handoff_request_file,
@@ -258,11 +273,21 @@ where
                 parser,
                 output,
                 &mut display_start,
-                &mut replayed_prompt_prefix,
+                &mut prompt_replay,
                 input_mode,
             )?;
             output.flush()?;
         }
+        // The PTY is drained (WouldBlock) at this point: write off
+        // submissions a foreground program consumed once the shell has
+        // painted a prompt after the last boundary and idles at it. A bare
+        // precmd is not enough — the user's PROMPT_COMMAND and PS1 paint run
+        // after the marker, so silence alone must never clear the ledger.
+        prompt_replay.reconcile_idle_at_prompt(
+            parser.has_active_foreground_command(),
+            parser.has_prompt_painted_since_ready(),
+            last_pty_output,
+        );
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -273,14 +298,14 @@ fn release_held_shell_output<W: Write, F>(
     parser: &OscParser,
     output: &mut W,
     display_start: &mut usize,
-    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()>
 where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
     drain_observer_until_released(event_observer, events, output)?;
     if parser.display.len() > *display_start {
-        write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
+        write_pending_display(parser, output, display_start, prompt_replay)?;
         output.flush()?;
     }
     Ok(())
@@ -290,16 +315,10 @@ fn write_pending_display<W: Write>(
     parser: &OscParser,
     output: &mut W,
     display_start: &mut usize,
-    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
     let display_end = parser.display.len();
-    write_display_slice(
-        parser,
-        output,
-        *display_start,
-        display_end,
-        replayed_prompt_prefix,
-    )?;
+    write_display_slice(parser, output, *display_start, display_end, prompt_replay)?;
     *display_start = display_end;
     Ok(())
 }
@@ -308,10 +327,10 @@ fn write_pending_display_preserving_prompt_ghost<W: Write>(
     parser: &OscParser,
     output: &mut W,
     display_start: &mut usize,
-    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    prompt_replay: &mut PromptReplayTracker,
     input_mode: &Arc<Mutex<RawInputMode>>,
 ) -> io::Result<()> {
-    write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
+    write_pending_display(parser, output, display_start, prompt_replay)?;
     let ghost = input_mode.lock().ok().and_then(|mode| match &*mode {
         RawInputMode::PromptGhost { text, route } => Some((
             text.clone(),
@@ -338,12 +357,9 @@ fn write_display_slice<W: Write>(
     output: &mut W,
     display_start: usize,
     display_end: usize,
-    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
-    let bytes = strip_replayed_prompt_prefix(
-        &parser.display[display_start..display_end],
-        replayed_prompt_prefix,
-    );
+    let bytes = prompt_replay.strip(&parser.display[display_start..display_end]);
     let prompt = parser.last_prompt_display();
     output.write_all(&prompt_prefixed_replay_bytes(bytes, prompt))
 }
@@ -468,7 +484,7 @@ fn resolve_pty_emit<W: Write>(
     input_mode: &Arc<Mutex<RawInputMode>>,
     action: RawObserverAction,
     display_start: &mut usize,
-    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    prompt_replay: &mut PromptReplayTracker,
     pending_terminal_restore: &mut PendingTerminalRecovery,
     recovery_request_file: &Path,
     handoff_request_file: &Path,
@@ -482,7 +498,7 @@ fn resolve_pty_emit<W: Write>(
                 output,
                 request,
                 display_start,
-                replayed_prompt_prefix,
+                prompt_replay,
                 pending_terminal_restore,
                 handoff_request_file,
                 false,
@@ -497,7 +513,7 @@ fn resolve_pty_emit<W: Write>(
                 output,
                 request,
                 display_start,
-                replayed_prompt_prefix,
+                prompt_replay,
                 pending_terminal_restore,
                 handoff_request_file,
                 true,
@@ -533,11 +549,11 @@ fn resolve_pty_emit<W: Write>(
                 });
             }
             if parser.display.len() > *display_start {
-                write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
+                write_pending_display(parser, output, display_start, prompt_replay)?;
             } else {
                 output.write_all(prompt)?;
                 mark_pending_prompt_replayed(parser, raw_prompt, display_start);
-                *replayed_prompt_prefix = Some(raw_prompt.to_vec());
+                prompt_replay.arm_for_replay(raw_prompt);
             }
             if let Some(text) = &ghost_text {
                 let selection = matches!(
@@ -567,19 +583,14 @@ fn emit_to_pty<W: Write>(
     output: &mut W,
     request: ShellHandoffRequest,
     display_start: &mut usize,
-    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    prompt_replay: &mut PromptReplayTracker,
     pending_terminal_restore: &mut PendingTerminalRecovery,
     handoff_request_file: &Path,
     restore_prompt: bool,
 ) -> io::Result<()> {
     output.flush()?;
     if restore_prompt {
-        restore_prompt_display_before_handoff(
-            parser,
-            output,
-            display_start,
-            replayed_prompt_prefix,
-        )?;
+        restore_prompt_display_before_handoff(parser, output, display_start, prompt_replay)?;
     }
     let bytes = request.pty_bytes().map_err(|message| {
         io::Error::new(
@@ -601,10 +612,10 @@ fn restore_prompt_display_before_handoff<W: Write>(
     parser: &OscParser,
     output: &mut W,
     display_start: &mut usize,
-    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
     if parser.display.len() > *display_start {
-        write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
+        write_pending_display(parser, output, display_start, prompt_replay)?;
         output.flush()?;
         return Ok(());
     }
@@ -617,7 +628,7 @@ fn restore_prompt_display_before_handoff<W: Write>(
     output.write_all(prompt)?;
     output.flush()?;
     mark_pending_prompt_replayed(parser, raw_prompt, display_start);
-    *replayed_prompt_prefix = Some(raw_prompt.to_vec());
+    prompt_replay.arm_for_replay(raw_prompt);
     Ok(())
 }
 

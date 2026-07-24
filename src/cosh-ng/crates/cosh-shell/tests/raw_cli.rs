@@ -50,6 +50,8 @@ mod mode;
 mod native;
 #[path = "raw_cli/passthrough.rs"]
 mod passthrough;
+#[path = "raw_cli/prompt_replay.rs"]
+mod prompt_replay;
 #[path = "raw_cli/provider_handoff/mod.rs"]
 mod provider_handoff;
 #[path = "raw_cli/provider_tools.rs"]

@@ -41,6 +41,15 @@ struct CurrentCommand {
     shell_environment_generation: Option<u64>,
 }
 
+/// Why a display cut was recorded, so consumers can tell an intercepted
+/// input (shell has not painted a prompt for it yet) apart from a real
+/// prompt boundary (precmd/shell-ready).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DisplayCutKind {
+    Intercept,
+    PromptBoundary,
+}
+
 #[derive(Debug)]
 pub(super) struct OscParser {
     pub(super) session_id: String,
@@ -54,8 +63,9 @@ pub(super) struct OscParser {
     current: Option<CurrentCommand>,
     command_seq: usize,
     intervention_cuts: Vec<usize>,
-    intervention_display_cuts: Vec<usize>,
+    intervention_display_cuts: Vec<(usize, DisplayCutKind)>,
     last_prompt_display_start: Option<usize>,
+    prompt_ready_display_start: Option<usize>,
     pub(super) captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
     pending_handoff_echo: Option<PendingHandoffEcho>,
@@ -102,6 +112,7 @@ impl OscParser {
             intervention_cuts: Vec::new(),
             intervention_display_cuts: Vec::new(),
             last_prompt_display_start: None,
+            prompt_ready_display_start: None,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
             pending_handoff_echo: None,
@@ -218,15 +229,20 @@ impl OscParser {
         let timestamp = marker.timestamp_ms.unwrap_or_else(now_ms);
 
         match marker.event.as_str() {
+            "prompt_ready" => {
+                self.prompt_ready_display_start = Some(self.display.len());
+            }
             "intercept" => {
                 let input = marker.command.unwrap_or_default();
                 let reason = marker
                     .reason
                     .unwrap_or_else(|| "natural_language".to_string());
                 self.intervention_cuts.push(self.clean.len());
-                self.intervention_display_cuts.push(self.display.len());
+                self.intervention_display_cuts
+                    .push((self.display.len(), DisplayCutKind::Intercept));
                 self.push_intercept_event(&session_id, input, marker.cwd, &reason);
                 self.current = None;
+                self.prompt_ready_display_start = None;
             }
             "preexec" => {
                 let command = marker.command.unwrap_or_default();
@@ -259,9 +275,11 @@ impl OscParser {
                 self.events.push(event);
             }
             "precmd" => {
+                self.prompt_ready_display_start = None;
                 let Some(current) = self.current.take() else {
                     self.intervention_cuts.push(self.clean.len());
-                    self.intervention_display_cuts.push(self.display.len());
+                    self.intervention_display_cuts
+                        .push((self.display.len(), DisplayCutKind::PromptBoundary));
                     self.last_prompt_display_start = Some(self.display.len());
                     self.events.push(ShellEvent {
                         kind: ShellEventKind::ShellReady,
@@ -294,7 +312,8 @@ impl OscParser {
                 let output = self.clean[current.output_start..].to_vec();
                 let output_ref = self.capture_command_output_ref(&current.id, &output)?;
                 self.intervention_cuts.push(self.clean.len());
-                self.intervention_display_cuts.push(self.display.len());
+                self.intervention_display_cuts
+                    .push((self.display.len(), DisplayCutKind::PromptBoundary));
                 self.last_prompt_display_start = Some(self.display.len());
                 let kind = if status == 0 {
                     ShellEventKind::CommandCompleted
@@ -591,8 +610,14 @@ impl OscParser {
             .count()
     }
 
-    pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<usize> {
+    pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<(usize, DisplayCutKind)> {
         std::mem::take(&mut self.intervention_display_cuts)
+    }
+
+    /// True while a marker-tracked foreground command is running (between
+    /// its preexec and precmd markers).
+    pub(super) fn has_active_foreground_command(&self) -> bool {
+        self.current.is_some()
     }
 
     pub(super) fn last_prompt_display(&self) -> &[u8] {
@@ -603,6 +628,13 @@ impl OscParser {
             return &[];
         }
         &self.display[start..]
+    }
+
+    /// True after the shell's post-hook marker is followed by visible prompt
+    /// bytes, excluding output produced by user prompt hooks.
+    pub(super) fn has_prompt_painted_since_ready(&self) -> bool {
+        self.prompt_ready_display_start
+            .is_some_and(|start| start < self.display.len())
     }
 
     pub(super) fn push_intercept_event(

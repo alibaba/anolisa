@@ -496,6 +496,9 @@ _cosh_prompt_command() {
     IFS= read -r _COSH_ACTIVE_DEBUG_TRAP < "$trap_snapshot_file" || _COSH_ACTIVE_DEBUG_TRAP=""
     rm -f -- "$trap_snapshot_file" 2>/dev/null || true
   fi
+  # The next visible shell bytes are the prompt paint. Keep this marker after
+  # every user PROMPT_COMMAND so its output cannot masquerade as the prompt.
+  _cosh_emit_marker "prompt_ready" "" "$status" false
   _COSH_IN_PROMPT_COMMAND=0
   return "$status"
 }
@@ -881,6 +884,11 @@ _cosh_precmd_marker() {
   _cosh_clear_handoff_request
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _cosh_emit_marker "precmd" "" "$exit_status" false
+  # Only claim prompt readiness while this remains the final precmd hook.
+  # Hooks appended later may still emit output or block before zsh paints.
+  if [[ "${precmd_functions[-1]:-}" == "_cosh_precmd_marker" ]]; then
+    _cosh_emit_marker "prompt_ready" "" "$exit_status" false
+  fi
 }
 
 # ── Hook setup (re-set after user rcfile may have overridden) ──

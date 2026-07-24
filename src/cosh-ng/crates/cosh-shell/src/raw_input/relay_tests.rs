@@ -4,8 +4,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::super::generation::LineSubmitCounter;
 use super::super::spawn::{finish_input_relay, relay_input_bytes, RawInputRelayState};
-use super::super::{PromptGhostCandidate, RawRelayAction};
+use super::super::{PromptGhostCandidate, RawRelayAction, UserPtyInputGeneration};
 use super::*;
 
 fn output_file(label: &str) -> (std::path::PathBuf, File) {
@@ -100,6 +101,7 @@ impl SelectionRelay {
             event_tx,
             InputClassifier::default(),
             input_mode.clone(),
+            UserPtyInputGeneration::default(),
         );
         Self {
             path,
@@ -157,6 +159,7 @@ impl DelayRelay {
             event_tx,
             InputClassifier::default(),
             input_mode.clone(),
+            UserPtyInputGeneration::default(),
         );
         Self {
             path,
@@ -283,6 +286,7 @@ fn selection_bare_escape_times_out_without_waiting_for_another_key() {
         event_tx,
         InputClassifier::default(),
         input_mode.clone(),
+        UserPtyInputGeneration::default(),
     );
 
     input_tx.send(b"\x1b".to_vec()).expect("send escape");
@@ -323,6 +327,7 @@ fn selection_action_wait_flushes_escape_at_the_deadline() {
         tx,
         InputClassifier::default(),
         input_mode.clone(),
+        UserPtyInputGeneration::default(),
     );
 
     expect_prompt_ghost_dismissal(&rx);
@@ -754,11 +759,15 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
@@ -783,7 +792,15 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
         rx.try_iter().collect::<Vec<_>>(),
         vec![
             RawInputEvent::PromptGhostClear,
-            RawInputEvent::ShellInputActivity { empty: true }
+            RawInputEvent::PtyUserWrite {
+                generation: 1,
+                line_submits: 0,
+            },
+            RawInputEvent::ShellInputActivity { empty: true },
+            RawInputEvent::PtyUserWrite {
+                generation: 2,
+                line_submits: 0,
+            },
         ]
     );
     assert!(!line_buffer.force_agent_intercept);
@@ -803,11 +820,15 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
@@ -841,11 +862,15 @@ fn native_shell_input_reports_editing_then_empty_without_content() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
@@ -858,7 +883,15 @@ fn native_shell_input_reports_editing_then_empty_without_content() {
         rx.try_iter().collect::<Vec<_>>(),
         vec![
             RawInputEvent::ShellInputActivity { empty: false },
+            RawInputEvent::PtyUserWrite {
+                generation: 1,
+                line_submits: 0,
+            },
             RawInputEvent::ShellInputActivity { empty: true },
+            RawInputEvent::PtyUserWrite {
+                generation: 2,
+                line_submits: 0,
+            },
         ]
     );
     fs::remove_file(path).ok();
@@ -879,11 +912,15 @@ fn agent_prompt_tab_stays_local_until_enter_and_keeps_suggestion_id() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
@@ -946,11 +983,15 @@ fn selection_enter_submits_the_active_prompt_without_shell_execution() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
@@ -989,11 +1030,15 @@ fn clearing_accepted_agent_prompt_emits_binding_dismissal() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
@@ -1025,11 +1070,15 @@ fn unsupported_arrow_after_agent_prompt_tab_cancels_without_writing_to_shell() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
@@ -1072,11 +1121,15 @@ fn split_cursor_sequences_after_agent_prompt_tab_never_reach_shell() {
         let mut native_line_state = NativeLineState::default();
         let mut exit_tracker = ExplicitExitTracker::default();
         let classifier = InputClassifier::default();
+        let input_generation = UserPtyInputGeneration::default();
+        let mut line_submits = LineSubmitCounter::default();
         let mut relay = InputRelayContext {
             master: &mut master,
             input_classifier: &classifier,
             input_events: &tx,
             input_mode: &input_mode,
+            input_generation: &input_generation,
+            line_submits: &mut line_submits,
             line_buffer: &mut line_buffer,
             native_line_state: &mut native_line_state,
             exit_tracker: &mut exit_tracker,
@@ -1115,11 +1168,15 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
         input_events: &tx,
         input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,

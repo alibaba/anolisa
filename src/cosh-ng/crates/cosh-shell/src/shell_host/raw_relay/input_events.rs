@@ -5,7 +5,7 @@ use std::sync::mpsc::Receiver;
 
 use crate::raw_input::RawInputEvent;
 
-use super::{clear_prompt_ghost_line, OscParser};
+use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker};
 
 pub(super) fn drain_raw_input_events<W: Write>(
     input_events: &Receiver<RawInputEvent>,
@@ -13,6 +13,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
     output: &mut W,
     prompt: &str,
     native_candidate_echoed_len: &mut usize,
+    prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
     let native_mode = prompt.is_empty();
     while let Ok(event) = input_events.try_recv() {
@@ -20,6 +21,10 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::ShellInputActivity { empty } => {
                 parser.push_shell_input_activity_event(empty)
             }
+            RawInputEvent::PtyUserWrite {
+                generation,
+                line_submits,
+            } => prompt_replay.observe_user_write(generation, line_submits),
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::CandidateRedraw { input, hint } => {

@@ -554,6 +554,9 @@ mod tests {
 
     #[test]
     fn provider_safe_command_facts_redact_home_in_working_directories() {
+        // Hold the shared env lock: doctor env-collector tests swap HOME to
+        // temp dirs in parallel, which would break the redaction assertion.
+        let _guard = crate::diagnostics::test_env::env_guard();
         let Some(home) = std::env::var("HOME").ok().filter(|home| !home.is_empty()) else {
             return;
         };

@@ -91,6 +91,48 @@ fn bash_preexec_marker_skips_completion_with_comp_type_guard() {
 }
 
 #[test]
+fn prompt_ready_markers_follow_user_prompt_hooks() {
+    let bash = bash_marker_script();
+    let prompt_command = bash
+        .find("_cosh_run_user_prompt_command \"$status\"")
+        .expect("bash user prompt command");
+    let bash_ready = bash
+        .find("_cosh_emit_marker \"prompt_ready\"")
+        .expect("bash prompt-ready marker");
+    assert!(prompt_command < bash_ready);
+
+    let zsh = zsh_marker_script();
+    let precmd = zsh
+        .find("_cosh_emit_marker \"precmd\"")
+        .expect("zsh precmd marker");
+    let zsh_ready = zsh
+        .find("_cosh_emit_marker \"prompt_ready\"")
+        .expect("zsh prompt-ready marker");
+    assert!(precmd < zsh_ready);
+    assert!(zsh[..zsh_ready].ends_with(
+        "if [[ \"${precmd_functions[-1]:-}\" == \"_cosh_precmd_marker\" ]]; then\n    "
+    ));
+}
+
+#[test]
+fn prompt_hook_output_does_not_count_as_a_painted_prompt() {
+    let mut parser = parser_for_test("prompt-ready");
+    feed_precmd(&mut parser, 0);
+
+    parser
+        .feed(b"hook output")
+        .expect("feed prompt hook output");
+    assert!(!parser.has_prompt_painted_since_ready());
+
+    let ready = b"\x1b]1337;COSH;{\"event\":\"prompt_ready\",\"token\":\"test-marker-token\"}\x07";
+    parser.feed(ready).expect("feed prompt-ready marker");
+    assert!(!parser.has_prompt_painted_since_ready());
+
+    parser.feed(b"prompt> ").expect("feed prompt paint");
+    assert!(parser.has_prompt_painted_since_ready());
+}
+
+#[test]
 fn parser_clean_strips_zsh_bracketed_paste_and_applies_backspace() {
     let mut parser = parser_for_test("clean-zsh-control");
     let input =

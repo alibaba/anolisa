@@ -3,6 +3,7 @@ use crate::input::InterceptReason;
 mod capture_bridge;
 mod card_capture;
 mod event_parser;
+mod generation;
 mod mode;
 mod pty;
 mod relay;
@@ -10,6 +11,7 @@ mod relay_action;
 mod spawn;
 
 pub(crate) use event_parser::redact_extension_setting_value;
+pub(crate) use generation::UserPtyInputGeneration;
 pub(crate) use mode::{update_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 pub(crate) use pty::{
@@ -26,6 +28,13 @@ pub(super) const ESC: u8 = 0x1b;
 pub(crate) enum RawInputEvent {
     ShellInputActivity {
         empty: bool,
+    },
+    /// User bytes the relay wrote to the PTY: the write generation plus how
+    /// many line submissions (accept-line CR/LF) the write carried. Anchors
+    /// prompt replay state so real user input expires stale replays.
+    PtyUserWrite {
+        generation: u64,
+        line_submits: usize,
     },
     CtrlC,
     Esc,

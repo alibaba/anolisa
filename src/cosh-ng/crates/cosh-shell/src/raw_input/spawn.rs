@@ -13,12 +13,13 @@ use crate::input::InputClassifier;
 use super::capture_bridge::consume_captured_input;
 use super::card_capture::CardInputState;
 use super::event_parser::{CandidateLineBuffer, NativeLineState};
+use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::{current_raw_input_mode, RawInputMode};
 use super::pty::{set_pty_winsize, signal_process_group, write_all_pty};
 use super::relay::{
     dismiss_prompt_ghost_input, relay_delayed_input, relay_passthrough_input,
-    relay_prompt_ghost_input, send_held_input_events, send_raw_input_events, ExplicitExitTracker,
-    InputRelayContext,
+    relay_prompt_ghost_input, send_held_input_events, send_raw_input_events,
+    write_user_bytes_to_pty, ExplicitExitTracker, InputRelayContext,
 };
 use super::{PromptGhostRoute, RawInputEvent, RawRelayAction, ESC};
 
@@ -55,8 +56,19 @@ pub(super) struct RawInputRelayState {
     line_buffer: CandidateLineBuffer,
     native_line_state: NativeLineState,
     exit_tracker: ExplicitExitTracker,
+    input_generation: UserPtyInputGeneration,
+    line_submits: LineSubmitCounter,
     pending_prompt_ghost_escape: Option<PendingPromptGhostEscape>,
     pending_delay_escape: Option<PendingDelayEscape>,
+}
+
+impl RawInputRelayState {
+    fn with_generation(input_generation: UserPtyInputGeneration) -> Self {
+        Self {
+            input_generation,
+            ..Self::default()
+        }
+    }
 }
 
 enum InputRead {
@@ -74,6 +86,7 @@ pub(crate) fn spawn_raw_input_relay<R>(
     input_events: Sender<RawInputEvent>,
     input_classifier: InputClassifier,
     input_mode: Arc<Mutex<RawInputMode>>,
+    input_generation: UserPtyInputGeneration,
 ) -> JoinHandle<io::Result<()>>
 where
     R: Read + Send + 'static,
@@ -83,7 +96,7 @@ where
         // The relay must wake without a later keystroke to resolve a bare ESC.
         thread::spawn(move || read_input_chunks(input, read_tx));
 
-        let mut state = RawInputRelayState::default();
+        let mut state = RawInputRelayState::with_generation(input_generation);
         loop {
             let input = match receive_input(&read_rx, &state) {
                 Ok(input) => input,
@@ -370,7 +383,13 @@ fn relay_input_for_mode(
             send_raw_input_events(bytes, input_events);
             state.native_line_state.observe_shell_bytes(bytes);
             state.exit_tracker.observe_shell_bytes(bytes);
-            write_all_pty(master, bytes)?;
+            write_user_bytes_to_pty(
+                master,
+                &state.input_generation,
+                &mut state.line_submits,
+                input_events,
+                bytes,
+            )?;
         }
     }
     Ok(())
@@ -388,6 +407,8 @@ fn input_relay_context<'a>(
         input_classifier,
         input_events,
         input_mode,
+        input_generation: &state.input_generation,
+        line_submits: &mut state.line_submits,
         line_buffer: &mut state.line_buffer,
         native_line_state: &mut state.native_line_state,
         exit_tracker: &mut state.exit_tracker,
@@ -492,7 +513,13 @@ pub(super) fn finish_input_relay(
         state,
     )?;
     if !state.exit_tracker.saw_explicit_exit() {
-        write_all_pty(master, b"exit\n")?;
+        write_user_bytes_to_pty(
+            master,
+            &state.input_generation,
+            &mut state.line_submits,
+            input_events,
+            b"exit\n",
+        )?;
     }
     Ok(())
 }
@@ -542,9 +569,10 @@ pub(crate) fn spawn_raw_action_relay(
     input_events: Sender<RawInputEvent>,
     input_classifier: InputClassifier,
     input_mode: Arc<Mutex<RawInputMode>>,
+    input_generation: UserPtyInputGeneration,
 ) -> JoinHandle<io::Result<()>> {
     thread::spawn(move || {
-        let mut state = RawInputRelayState::default();
+        let mut state = RawInputRelayState::with_generation(input_generation);
         for action in actions {
             flush_pending_prompt_ghost_escape(
                 false,

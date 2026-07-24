@@ -10,7 +10,7 @@ use nix::libc;
 use crate::input::InputClassifier;
 use crate::raw_input::{
     spawn_raw_action_relay, spawn_raw_input_relay, RawInputEvent, RawInputMode, RawObserverAction,
-    RawRelayAction,
+    RawRelayAction, UserPtyInputGeneration,
 };
 use crate::types::ShellEvent;
 
@@ -67,8 +67,15 @@ where
         output,
         event_observer,
         config.input_classifier.clone(),
-        |master, _, input_events, input_classifier, input_mode| {
-            spawn_raw_input_relay(input, master, input_events, input_classifier, input_mode)
+        |master, _, input_events, input_classifier, input_mode, input_generation| {
+            spawn_raw_input_relay(
+                input,
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                input_generation,
+            )
         },
     )
 }
@@ -90,8 +97,15 @@ where
         output,
         event_observer,
         config.input_classifier.clone(),
-        |master, _, input_events, input_classifier, input_mode| {
-            spawn_raw_input_relay(input, master, input_events, input_classifier, input_mode)
+        |master, _, input_events, input_classifier, input_mode, input_generation| {
+            spawn_raw_input_relay(
+                input,
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                input_generation,
+            )
         },
     )
 }
@@ -121,7 +135,7 @@ where
         output,
         |_, _| Ok(RawObserverAction::Continue),
         config.input_classifier.clone(),
-        |master, child_pid, input_events, input_classifier, input_mode| {
+        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -129,6 +143,7 @@ where
                 input_events,
                 input_classifier,
                 input_mode,
+                input_generation,
             )
         },
     )
@@ -154,7 +169,7 @@ where
             Ok(RawObserverAction::Continue)
         },
         config.input_classifier.clone(),
-        |master, child_pid, input_events, input_classifier, input_mode| {
+        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -162,6 +177,7 @@ where
                 input_events,
                 input_classifier,
                 input_mode,
+                input_generation,
             )
         },
     )
@@ -183,7 +199,7 @@ where
         output,
         event_observer,
         config.input_classifier.clone(),
-        |master, child_pid, input_events, input_classifier, input_mode| {
+        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -191,6 +207,7 @@ where
                 input_events,
                 input_classifier,
                 input_mode,
+                input_generation,
             )
         },
     )
@@ -213,6 +230,7 @@ where
         Sender<RawInputEvent>,
         InputClassifier,
         Arc<Mutex<RawInputMode>>,
+        UserPtyInputGeneration,
     ) -> JoinHandle<io::Result<()>>,
 {
     let mut session = start_session(config)?;
@@ -235,12 +253,14 @@ where
     let input_master = session.master.try_clone()?;
     let (input_event_sender, input_event_receiver) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let input_generation = UserPtyInputGeneration::default();
     let _input_thread = spawn_driver(
         input_master,
         session.child.id(),
         input_event_sender,
         input_classifier,
         Arc::clone(&input_mode),
+        input_generation.clone(),
     );
     let mut last_winsize = config.winsize;
     let relay_prompt = if config.native_mode {
@@ -257,6 +277,7 @@ where
         &mut event_observer,
         &input_event_receiver,
         &input_mode,
+        &input_generation,
         &mut last_winsize,
         relay_prompt,
         &session.recovery_request_file,

@@ -1,13 +1,10 @@
 use super::*;
 
 /// Single process-wide lock for every test that mutates HOME or credential
-/// env vars. All such tests MUST share this one mutex; using separate
-/// mutexes lets tests race on the same global env and read each other's
-/// config.toml.
-fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
-}
+/// env vars, shared with env-reading tests in other modules via
+/// `crate::diagnostics::test_env`; using separate mutexes lets tests race on
+/// the same global env and read each other's config.toml.
+use crate::diagnostics::test_env::env_guard;
 
 #[test]
 fn classify_provider_covers_known_and_unknown_adapters() {
