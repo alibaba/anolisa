@@ -381,6 +381,87 @@ fn raw_cli_launch_resume_value_and_picker_share_session_manager() {
     assert!(output.contains("after-launch-picker"), "{output}");
 }
 
+#[test]
+fn raw_cli_session_new_detaches_active_without_deleting_or_forcing_resume() {
+    let fixture = SessionFixture::new("session-new-detach", FixtureMode::Ready);
+    let output = fixture.run(
+        &[],
+        vec![
+            (
+                format!("/session resume {SESSION_ONE}\n?? activate first session\n").into_bytes(),
+                Duration::from_millis(1_200),
+            ),
+            (
+                b"/session new\n/session status\n".to_vec(),
+                Duration::from_millis(400),
+            ),
+            (
+                b"?? continue on a fresh conversation\n".to_vec(),
+                Duration::from_millis(1_200),
+            ),
+            (
+                b"/session status\n/session list\nexit\n".to_vec(),
+                Duration::from_millis(400),
+            ),
+        ],
+    );
+
+    // The fresh-session notice reports the detached id and the fresh contract.
+    assert!(
+        output.contains(&format!("Detached from provider session {SESSION_ONE}")),
+        "{output}"
+    );
+    assert!(
+        output.contains("The next Agent request starts a fresh conversation"),
+        "{output}"
+    );
+    // The next Agent request must not carry the old --resume id; the mock only
+    // reports its default provider id when invoked without --resume.
+    assert!(
+        output.contains("active provider session: 33333333-3333-4333-8333-333333333333"),
+        "{output}"
+    );
+    // Old persisted sessions survive the detach and remain listable.
+    assert!(output.contains("first prompt"), "{output}");
+    assert!(output.contains("second prompt"), "{output}");
+    assert!(!output.contains("bash: /session"), "{output}");
+    // Detach never deletes persisted sessions.
+    assert!(!fixture.clear_log.exists());
+}
+
+#[test]
+fn raw_cli_new_alias_starts_fresh_without_reaching_bash_or_changing_cwd() {
+    let fixture = SessionFixture::new("session-new-alias", FixtureMode::Ready);
+    let workspace = fixture.workspace.to_string_lossy().into_owned();
+    let output = fixture.run(
+        &[],
+        vec![
+            (b"pwd\n".to_vec(), Duration::from_millis(300)),
+            (b"/new\n".to_vec(), Duration::from_millis(400)),
+            (
+                b"pwd\necho after-new-alias\nexit\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+        ],
+    );
+
+    // `/new` is intercepted as the session `new` path, never sent to bash.
+    assert!(!output.contains("bash: /new"), "{output}");
+    assert!(output.contains("Fresh session"), "{output}");
+    // No session was attached, so the alias reports the idempotent contract.
+    assert!(
+        output.contains("No provider session was attached"),
+        "{output}"
+    );
+    assert!(
+        output.contains("The next Agent request starts a fresh conversation"),
+        "{output}"
+    );
+    // The shell keeps running with an unchanged cwd after the fresh session.
+    assert!(output.contains("after-new-alias"), "{output}");
+    assert!(output.contains(&workspace), "{output}");
+}
+
 #[derive(Clone, Copy)]
 enum FixtureMode {
     Ready,

@@ -74,11 +74,19 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/session",
-            usage: "/session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
+            usage: "/session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
             summary_id: MessageId::HelpSummarySession,
             group: Some("Sessions"),
             scope: "session",
             state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/new",
+            usage: "/new",
+            summary_id: MessageId::HelpSummarySession,
+            group: None,
+            scope: "session",
+            state: SlashCommandState::Hidden,
         },
         SlashCommandSpec {
             name: "/resume",
@@ -341,7 +349,7 @@ mod tests {
         assert!(visible.contains(&"/config language [auto|en-US|zh-CN]"));
         assert!(visible
             .iter()
-            .any(|usage| usage.starts_with("/session [status|list|resume")));
+            .any(|usage| usage.starts_with("/session [new|status|list|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));
@@ -392,6 +400,7 @@ mod tests {
             "/send-to-shell",
             "/debug",
             "/resume",
+            "/new",
             "/skill",
             "/approval-mode",
             "/allow",

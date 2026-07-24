@@ -18,9 +18,9 @@ use super::{
     agent_event_is_provider_progress, control_protocol, prompt_from_request_with_evidence_policy,
     record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
     start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
-    AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, PreparedInvocation,
-    ProviderCancellationArtifactStore, ProviderLineProgress, ProviderPromptArgMode,
-    ProviderRunOutcome, ProviderStdinMode,
+    AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, FreshSessionOutcome,
+    PreparedInvocation, ProviderCancellationArtifactStore, ProviderLineProgress,
+    ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
 };
 
 pub(super) mod question_ingress;
@@ -191,6 +191,26 @@ impl CoshCoreAdapter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .management_gate()
+    }
+
+    /// Detaches the active and selected provider-session bindings so the next
+    /// Agent request starts a fresh conversation, without deleting or rewriting
+    /// any persisted session.
+    ///
+    /// Serializes with management mutations through the management gate.
+    /// The recovery generation separately prevents a late turn commit from
+    /// re-binding the detached session.
+    pub fn start_fresh_session(&self) -> FreshSessionOutcome {
+        let gate = self.management_gate();
+        let _management = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_session_id = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .start_fresh_session();
+        FreshSessionOutcome::Detached {
+            previous_session_id,
+        }
     }
 
     /// Returns a consistent snapshot of interactive recovery state.

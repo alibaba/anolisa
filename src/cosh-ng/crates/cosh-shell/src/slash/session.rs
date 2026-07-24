@@ -1,5 +1,6 @@
 mod command;
 mod compact;
+mod fresh;
 mod panel;
 mod state;
 #[cfg(test)]
@@ -37,6 +38,10 @@ pub(crate) fn render_session_command<W: Write>(
 ) -> std::io::Result<bool> {
     match parse_session_command(arguments) {
         SessionCommand::OpenPicker => open_session_manager(blocks, adapter, state, output),
+        SessionCommand::New => {
+            fresh::start_fresh_session(adapter, state, output)?;
+            Ok(true)
+        }
         SessionCommand::Status => {
             render_session_status(blocks, adapter, state, output)?;
             Ok(true)

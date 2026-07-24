@@ -1,11 +1,13 @@
+use std::sync::{Arc, Mutex};
+
 use super::*;
-use crate::adapter::{SessionHealth, SessionSummary};
+use crate::adapter::{SessionHealth, SessionRuntimeState, SessionSummary};
 use crate::agent::run::{ActiveAgentRun, AgentRunOrigin};
 use crate::evidence::stream::CoshRequestStreamFilter;
 
 const SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const SESSION_USAGE: &str =
-    "Usage: /session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]";
+    "Usage: /session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]";
 const SESSION_UNAVAILABLE: &str = "Session recovery requires the cosh-core backend.";
 
 #[test]
@@ -137,6 +139,99 @@ fn picker_panel_shows_short_ids_marked_count_and_key_semantics() {
     assert!(flat.contains("Space toggle clear mark"), "{rendered}");
     assert!(flat.contains("d review clear"), "{rendered}");
     assert!(!flat.contains("Space mark for clear"), "{rendered}");
+}
+
+#[test]
+fn session_new_detaches_active_provider_session_and_clears_recovery() {
+    let adapter = active_core_adapter();
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    let mut output = Vec::new();
+
+    render_session_command("new", &[], &adapter, &mut state, &mut output)
+        .expect("render fresh session");
+    let rendered = String::from_utf8(output).expect("UTF-8 fresh notice");
+
+    assert!(rendered.contains("Fresh session"), "{rendered}");
+    assert!(
+        rendered.contains(&format!("Detached from provider session {SESSION_ID}")),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("starts a fresh conversation"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("cwd, history, and settings are unchanged"),
+        "{rendered}"
+    );
+
+    let AdapterInstance::CoshCore(core) = &adapter else {
+        unreachable!("test adapter is cosh-core");
+    };
+    assert_eq!(core.recovery_snapshot().state, SessionRecoveryState::None);
+    assert_eq!(core.committed_session_id(), None);
+}
+
+#[test]
+fn session_new_is_idempotent_when_no_session_is_attached() {
+    let adapter = AdapterInstance::CoshCore(CoshCoreAdapter {
+        program: "/must-not-be-started".to_string(),
+        ..CoshCoreAdapter::default()
+    });
+    let mut state = InlineState {
+        language: Language::EnUs,
+        ..InlineState::default()
+    };
+    let mut output = Vec::new();
+
+    render_session_command("new", &[], &adapter, &mut state, &mut output)
+        .expect("render fresh session");
+    let rendered = String::from_utf8(output).expect("UTF-8 fresh notice");
+
+    assert!(rendered.contains("Fresh session"), "{rendered}");
+    assert!(
+        rendered.contains("No provider session was attached"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("starts a fresh conversation"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn session_new_refuses_while_agent_run_is_active_without_detaching() {
+    let adapter = active_core_adapter();
+    let mut state = InlineState::default();
+    state.agent_run.active = Some(test_active_run());
+    let mut output = Vec::new();
+
+    render_session_command("new", &[], &adapter, &mut state, &mut output)
+        .expect("render busy notice");
+    let rendered = String::from_utf8(output).expect("UTF-8 notice");
+
+    assert!(
+        rendered.contains("Finish the active Agent run"),
+        "{rendered}"
+    );
+    let AdapterInstance::CoshCore(core) = &adapter else {
+        unreachable!("test adapter is cosh-core");
+    };
+    assert_eq!(core.committed_session_id().as_deref(), Some(SESSION_ID));
+    assert_eq!(core.recovery_snapshot().state, SessionRecoveryState::Active);
+}
+
+fn active_core_adapter() -> AdapterInstance {
+    AdapterInstance::CoshCore(CoshCoreAdapter {
+        program: "/must-not-be-started".to_string(),
+        allow_model_call: false,
+        session: Arc::new(Mutex::new(SessionRuntimeState::with_active(
+            SESSION_ID, "/tmp",
+        ))),
+    })
 }
 
 fn render_session_arguments(arguments: &str) -> String {

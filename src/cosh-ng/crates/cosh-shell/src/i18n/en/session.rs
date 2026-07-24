@@ -45,7 +45,14 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SessionCancelledTitle => "Session manager closed",
         MessageId::SessionCancelledBody => "No provider session or persisted file changed.",
         MessageId::SessionUsageBody => {
-            "Usage: /session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
+            "Usage: /session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
+        }
+        MessageId::SessionNewTitle => "Fresh session",
+        MessageId::SessionNewDetachedBody => {
+            "Detached from provider session {id}.\nThe next Agent request starts a fresh conversation.\nShell cwd, history, and settings are unchanged."
+        }
+        MessageId::SessionNewAlreadyFreshBody => {
+            "No provider session was attached.\nThe next Agent request starts a fresh conversation.\nShell cwd, history, and settings are unchanged."
         }
         MessageId::SessionNotReadyBody => {
             "Session {id} is {health} and cannot be resumed. It may still be cleared."

@@ -84,3 +84,17 @@ macro_rules! session_picker_ids {
         );
     };
 }
+
+// Registered after the picker segment so all existing MessageId
+// discriminants remain stable.
+macro_rules! session_fresh_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            SessionNewTitle,
+            SessionNewDetachedBody,
+            SessionNewAlreadyFreshBody,
+        );
+    };
+}

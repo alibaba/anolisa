@@ -88,6 +88,13 @@ impl<'a> SlashCommand<'a> {
             "/session" => Some(Self::Session(
                 input.strip_prefix("/session").unwrap_or_default().trim(),
             )),
+            // Compatibility alias: `/new` routes to the same session parser and
+            // dispatch as `/session new`. Stripping only the leading slash
+            // keeps the `new` keyword (and any extra tokens) in the arguments,
+            // so `/new extra` renders usage exactly like `/session new extra`.
+            "/new" => Some(Self::Session(
+                input.strip_prefix('/').unwrap_or_default().trim(),
+            )),
             "/resume" => Some(Self::Session(
                 input.strip_prefix("/resume").unwrap_or_default().trim(),
             )),
@@ -130,6 +137,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/extensions"
             | "/skills"
             | "/session"
+            | "/new"
             | "/resume"
             | "/recommendations"
             | "/"
@@ -184,6 +192,23 @@ mod tests {
         match SlashCommand::parse("/resume abc") {
             Ok(Some(SlashCommand::Session(arguments))) => assert_eq!(arguments, "abc"),
             _ => panic!("/resume did not parse as a session command"),
+        }
+    }
+
+    #[test]
+    fn new_alias_and_session_new_share_the_same_session_parser_path() {
+        for command in ["/session new", "/new"] {
+            match SlashCommand::parse(command) {
+                Ok(Some(SlashCommand::Session(arguments))) => assert_eq!(arguments, "new"),
+                _ => panic!("{command} did not parse as the session `new` path"),
+            }
+        }
+        // Extra tokens must survive so the session grammar can render usage.
+        for command in ["/session new extra", "/new extra"] {
+            match SlashCommand::parse(command) {
+                Ok(Some(SlashCommand::Session(arguments))) => assert_eq!(arguments, "new extra"),
+                _ => panic!("{command} dropped its extra argument"),
+            }
         }
     }
 

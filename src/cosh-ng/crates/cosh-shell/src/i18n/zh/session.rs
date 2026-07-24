@@ -35,7 +35,14 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SessionCancelledTitle => "会话管理已关闭",
         MessageId::SessionCancelledBody => "模型会话和持久化文件均未改变。",
         MessageId::SessionUsageBody => {
-            "用法：/session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
+            "用法：/session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
+        }
+        MessageId::SessionNewTitle => "全新会话",
+        MessageId::SessionNewDetachedBody => {
+            "已从模型会话 {id} 分离。\n下一次智能体请求将开启全新对话。\n终端工作目录、历史和设置均未改变。"
+        }
+        MessageId::SessionNewAlreadyFreshBody => {
+            "当前没有绑定的模型会话。\n下一次智能体请求将开启全新对话。\n终端工作目录、历史和设置均未改变。"
         }
         MessageId::SessionNotReadyBody => "会话 {id} 的状态为 {health}，无法恢复，但仍可清理。",
         MessageId::SessionProtectedBody => "活动中或已选择的模型会话受保护，未被清理。",

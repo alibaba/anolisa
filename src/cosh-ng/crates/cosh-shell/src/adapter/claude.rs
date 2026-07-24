@@ -9,10 +9,10 @@ mod driver;
 
 use self::driver::{start_cancellable_claude_process, start_control_protocol_claude_process};
 use super::{
-    commit_pending_session, prompt_from_request, provider_prompt_contract,
-    start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
-    AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, PreparedInvocation,
-    ProviderLineProgress,
+    commit_pending_session, detach_committed_session, prompt_from_request,
+    provider_prompt_contract, start_threaded_adapter_run, AdapterError, AdapterInstance,
+    AgentAdapter, AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser,
+    FreshSessionOutcome, PreparedInvocation, ProviderLineProgress,
 };
 
 #[derive(Debug, Clone)]
@@ -41,6 +41,12 @@ impl ClaudeCodeAdapter {
     pub fn with_model_call(mut self, allow_model_call: bool) -> Self {
         self.allow_model_call = allow_model_call;
         self
+    }
+
+    /// Detaches from the committed provider session so the next invocation
+    /// omits `--resume` and starts a fresh conversation.
+    pub fn start_fresh_session(&self) -> FreshSessionOutcome {
+        detach_committed_session(&self.session_id)
     }
 
     pub fn start_cancellable(
@@ -339,6 +345,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::ClaudeCodeAdapter;
+    use crate::adapter::FreshSessionOutcome;
     use crate::types::{
         AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
     };
@@ -475,6 +482,27 @@ mod tests {
         let inv = adapter.prepare_invocation(&req, CoshApprovalMode::Auto);
         assert!(inv.args.contains(&"--resume".to_string()));
         assert!(inv.args.contains(&"prev-session".to_string()));
+    }
+
+    #[test]
+    fn fresh_session_detaches_claude_resume_id() {
+        let adapter = ClaudeCodeAdapter {
+            program: "claude".to_string(),
+            model: "sonnet".to_string(),
+            max_budget_usd: "1".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(Some("prev-session".to_string()))),
+        };
+
+        assert_eq!(
+            adapter.start_fresh_session(),
+            FreshSessionOutcome::Detached {
+                previous_session_id: Some("prev-session".to_string()),
+            }
+        );
+        let invocation = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Auto);
+        assert!(!invocation.args.contains(&"--resume".to_string()));
+        assert!(!invocation.args.contains(&"prev-session".to_string()));
     }
 
     #[test]

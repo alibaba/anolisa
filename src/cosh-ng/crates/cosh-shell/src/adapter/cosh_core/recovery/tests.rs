@@ -566,6 +566,68 @@ fn failed_selection_invalidates_the_attempt_it_superseded() {
 }
 
 #[test]
+fn start_fresh_session_detaches_bindings_and_invalidates_in_flight_attempts() {
+    let state = selected_state();
+    // An attempt is already resuming the selected session when the user
+    // detaches, mirroring a late-arriving commit from the old conversation.
+    let old_attempt = begin_selected(&state);
+
+    let previous = state.lock().expect("session state").start_fresh_session();
+    // The active committed id is preferred over the pending selection.
+    assert_eq!(previous.as_deref(), Some(ACTIVE_ID));
+    {
+        let state = state.lock().expect("session state");
+        assert_eq!(state.active_session_id(), None);
+        assert_eq!(state.recovery.state, SessionRecoveryState::None);
+        assert_eq!(state.recovery.selected_session_id, None);
+        assert_eq!(state.recovery.selected_workspace_scope, None);
+        assert!(state.recovery.last_error.is_none());
+    }
+
+    // The superseded attempt must commit as stale, never re-binding a session.
+    let outcome = commit_pending_session_for_scope(
+        true,
+        false,
+        &state,
+        &Arc::new(Mutex::new(Some(SELECTED_ID.to_string()))),
+        SCOPE,
+        Some(true),
+        &old_attempt,
+    );
+    assert_eq!(outcome, SessionCommitOutcome::StaleAttempt);
+    assert_eq!(
+        state.lock().expect("session state").active_session_id(),
+        None
+    );
+}
+
+#[test]
+fn start_fresh_session_reports_selection_when_no_session_is_active() {
+    let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
+    {
+        let mut state = state.lock().expect("session state");
+        state.select_session(SELECTED_ID.to_string(), SCOPE.to_string());
+    }
+
+    let previous = state.lock().expect("session state").start_fresh_session();
+    assert_eq!(previous.as_deref(), Some(SELECTED_ID));
+    let state = state.lock().expect("session state");
+    assert_eq!(state.recovery.state, SessionRecoveryState::None);
+    assert_eq!(state.recovery.selected_session_id, None);
+}
+
+#[test]
+fn start_fresh_session_is_idempotent_without_any_binding() {
+    let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
+    let previous = state.lock().expect("session state").start_fresh_session();
+    assert_eq!(previous, None);
+    assert_eq!(
+        state.lock().expect("session state").recovery.state,
+        SessionRecoveryState::None
+    );
+}
+
+#[test]
 fn fresh_attempt_returns_a_superseded_restore_to_selected() {
     let state = selected_state();
     let old_attempt = begin_selected(&state);
