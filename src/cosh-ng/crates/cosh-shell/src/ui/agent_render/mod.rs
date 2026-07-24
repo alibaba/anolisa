@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier},
     text::{Line, Span, Text},
-    widgets::{block::Padding, Block, BorderType, Paragraph, Widget},
+    widgets::{block::Padding, Block, BorderType, Paragraph, Widget, Wrap},
 };
 
 use crate::types::{AgentEvent, GovernedEvent};
@@ -21,6 +21,8 @@ mod consultation;
 mod health;
 mod health_labels;
 mod help;
+#[cfg(test)]
+mod help_tests;
 mod markdown;
 mod notice;
 mod question;
@@ -46,7 +48,7 @@ pub use approval_receipt::ApprovalReceiptPanelModel;
 pub use consultation::ConsultationCardModel;
 pub use health::HealthBannerModel;
 pub(crate) use health::{health_uses_startup_row, primary_health_prompt_suggestion};
-pub use help::{HelpPanelEntry, HelpPanelGroup, HelpPanelModel};
+pub(crate) use help::{HelpPanelEntry, HelpPanelGroup, HelpPanelModel};
 use markdown::MarkdownRenderModel;
 pub use notice::NoticePanelModel;
 pub use question::{
@@ -380,12 +382,20 @@ impl RatatuiInlineRenderer {
         } else {
             Text::from(body)
         };
-        // Callers must pre-wrap styled lines to the inner width. Paragraph must
-        // not re-wrap: ratatui's `Wrap { trim: true }` strips leading
-        // whitespace, which destroys intentional indentation hierarchy.
-        Paragraph::new(text).render(inner, &mut buffer);
+        // `Wrap { trim: false }` keeps leading whitespace intact, so pre-wrapped
+        // callers (help panel) keep their indentation while unwrapped styled
+        // markdown content (plain paragraphs, list items) still wraps instead
+        // of being truncated. `trim: true` must not come back: it strips the
+        // indentation hierarchy.
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .render(inner, &mut buffer);
 
-        buffer_to_styled_lines(&buffer, area)
+        if self.styles_enabled() {
+            buffer_to_styled_lines(&buffer, area)
+        } else {
+            buffer_to_lines(&buffer, area)
+        }
     }
 
     pub(crate) fn panel_standard_width(&self) -> u16 {

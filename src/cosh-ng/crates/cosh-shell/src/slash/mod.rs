@@ -13,6 +13,8 @@ pub(super) mod panel;
 pub(super) mod parser;
 pub(super) mod prompt;
 pub(super) mod recommendations;
+#[cfg(test)]
+mod recommendations_tests;
 pub(crate) mod registry;
 pub(super) mod runtime;
 pub(super) mod session;

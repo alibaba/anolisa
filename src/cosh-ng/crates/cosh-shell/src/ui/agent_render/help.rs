@@ -12,28 +12,28 @@ use super::RatatuiInlineRenderer;
 /// example): group headers are bold + underlined, command names are
 /// highlighted, arguments and scope tags are de-emphasized, and summaries sit
 /// on their own indented line.
-pub struct HelpPanelModel<'a> {
-    pub title: &'a str,
-    pub groups: Vec<HelpPanelGroup<'a>>,
-    pub footer: String,
+pub(crate) struct HelpPanelModel<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) groups: Vec<HelpPanelGroup<'a>>,
+    pub(crate) footer: String,
 }
 
-pub struct HelpPanelGroup<'a> {
-    pub label: &'a str,
-    pub entries: Vec<HelpPanelEntry<'a>>,
+pub(crate) struct HelpPanelGroup<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) entries: Vec<HelpPanelEntry<'a>>,
 }
 
-pub struct HelpPanelEntry<'a> {
-    pub usage: &'a str,
-    pub summary: &'a str,
-    pub scope: &'a str,
+pub(crate) struct HelpPanelEntry<'a> {
+    pub(crate) usage: &'a str,
+    pub(crate) summary: &'a str,
+    pub(crate) scope: &'a str,
 }
 
 const ENTRY_INDENT: &str = "  ";
 const SUMMARY_INDENT: &str = "      ";
 
 impl RatatuiInlineRenderer {
-    pub fn write_help_panel<W: Write>(
+    pub(crate) fn write_help_panel<W: Write>(
         &self,
         output: &mut W,
         model: HelpPanelModel<'_>,

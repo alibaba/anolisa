@@ -2,7 +2,13 @@ use super::*;
 
 #[test]
 fn raw_cli_help_renders_slash_command_reference() {
-    let output = run_raw_cli_with_input("fake", "/help\necho after-help\nexit\n");
+    // Pin the terminal type: the rich-border assertions below depend on the
+    // non-plain render path, which TERM=dumb hosts would downgrade.
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/help\necho after-help\nexit\n",
+        &[("TERM", "xterm-256color")],
+    );
     let normalized = strip_ansi_escape(&output);
 
     assert!(normalized.contains("Slash commands"), "{output}");
