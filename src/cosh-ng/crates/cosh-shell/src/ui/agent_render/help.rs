@@ -1,8 +1,11 @@
 use std::io::{self, Write};
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+use super::reference_style::{
+    reference_body_style, reference_emphasis_style, reference_muted_style, reference_section_style,
+};
 use super::wrap::{display_width, wrap_plain_line, wrap_plain_line_with_prefix};
 use super::RatatuiInlineRenderer;
 
@@ -61,12 +64,10 @@ fn split_usage(usage: &str) -> (&str, &str) {
 }
 
 fn styled_help_lines(model: &HelpPanelModel<'_>, inner: usize) -> Vec<Line<'static>> {
-    let header_style = Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-    let name_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let args_style = Style::default().fg(Color::DarkGray);
-    let summary_style = Style::default().fg(Color::Gray);
+    let header_style = reference_section_style();
+    let name_style = reference_emphasis_style();
+    let args_style = reference_muted_style();
+    let summary_style = reference_body_style();
 
     let mut lines = Vec::new();
     for (group_index, group) in model.groups.iter().enumerate() {

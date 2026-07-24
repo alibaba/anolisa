@@ -23,10 +23,14 @@ mod health_labels;
 mod help;
 #[cfg(test)]
 mod help_tests;
+mod hook_status;
+#[cfg(test)]
+mod hook_status_tests;
 mod markdown;
 mod notice;
 mod question;
 mod recommendation;
+mod reference_style;
 mod status;
 mod stream;
 mod wrap;
@@ -49,6 +53,7 @@ pub use consultation::ConsultationCardModel;
 pub use health::HealthBannerModel;
 pub(crate) use health::{health_uses_startup_row, primary_health_prompt_suggestion};
 pub(crate) use help::{HelpPanelEntry, HelpPanelGroup, HelpPanelModel};
+pub(crate) use hook_status::{AgentHooksView, HookEntryView, HookEventGroup, HookStatusPanelModel};
 use markdown::MarkdownRenderModel;
 pub use notice::NoticePanelModel;
 pub use question::{
