@@ -83,20 +83,72 @@ fn sanitize(text: &str) -> String {
 const ENTRY_INDENT: &str = "    ";
 const ENTRY_HANG: &str = "      ";
 
-/// The rich block renderer caps a panel at 200 buffer rows (borders
-/// included). Grouped agent hooks can exceed that on large registries, and
-/// `Paragraph` would silently drop the overflow — including the footer. Keep
-/// the body within this budget and surface an explicit omission marker
-/// instead; the reserve covers the marker, the pre-footer spacer, and the
-/// footer itself.
-const STYLED_BODY_LINE_BUDGET: usize = 195;
+/// The rich block renderer caps a panel at 200 buffer rows, including borders.
+const STYLED_BODY_LINE_LIMIT: usize = 198;
+
+fn styled_hook_entry_lines(hook: &HookEntryView, inner: usize) -> Vec<Line<'static>> {
+    let emphasis = reference_emphasis_style();
+    let muted = reference_muted_style();
+    let name = sanitize(&hook.name);
+    let extension = sanitize(&hook.extension);
+    if hook.disabled {
+        return wrap_plain_line_with_prefix(
+            &format!("○ {name} (ext: {extension}) [disabled]"),
+            ENTRY_INDENT,
+            ENTRY_HANG,
+            inner,
+        )
+        .into_iter()
+        .map(|segment| Line::from(Span::styled(segment, muted)))
+        .collect();
+    }
+
+    wrap_plain_line_with_prefix(
+        &format!("• {name} (ext: {extension})"),
+        ENTRY_INDENT,
+        ENTRY_HANG,
+        inner,
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(segment_index, segment)| {
+        if segment_index > 0 {
+            return Line::from(Span::styled(segment, muted));
+        }
+
+        // Preserve the enabled-entry emphasis while keeping wrapped metadata muted.
+        let rest = segment
+            .strip_prefix(ENTRY_INDENT)
+            .and_then(|rest| rest.strip_prefix("• "));
+        let Some(rest) = rest else {
+            return Line::from(Span::raw(segment));
+        };
+        let (head, tail) = match rest.find(" (ext:") {
+            Some(split) => rest.split_at(split),
+            None => (rest, ""),
+        };
+        let mut spans = vec![
+            Span::raw(ENTRY_INDENT.to_string()),
+            Span::styled("• ".to_string(), emphasis),
+            Span::raw(head.to_string()),
+        ];
+        if !tail.is_empty() {
+            spans.push(Span::styled(tail.to_string(), muted));
+        }
+        Line::from(spans)
+    })
+    .collect()
+}
 
 fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> Vec<Line<'static>> {
     let section = reference_section_style();
     let group = reference_group_style();
-    let emphasis = reference_emphasis_style();
     let muted = reference_muted_style();
     let body_style = reference_body_style();
+    let footer_lines = wrap_plain_line(&sanitize(&model.footer), inner)
+        .into_iter()
+        .map(|segment| Line::from(Span::styled(segment, body_style)))
+        .collect::<Vec<_>>();
 
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
@@ -124,77 +176,50 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> V
             }
         }
         AgentHooksView::Groups(groups) => {
-            let mut omitted = 0usize;
-            for (index, event_group) in groups.iter().enumerate() {
-                // Stop emitting once the line budget is spent; keep counting
-                // the hooks that will not be shown.
-                if lines.len() >= STYLED_BODY_LINE_BUDGET {
-                    omitted += event_group.hooks.len();
+            let total_hooks: usize = groups
+                .iter()
+                .map(|event_group| event_group.hooks.len())
+                .sum();
+            let marker_reserve = model
+                .omitted_template
+                .replace("{count}", &total_hooks.to_string());
+            let marker_reserve =
+                wrap_plain_line_with_prefix(&sanitize(&marker_reserve), "  ", "  ", inner).len();
+            let tail_reserve = marker_reserve + 1 + footer_lines.len();
+            let mut shown_hooks = 0usize;
+            let mut shown_groups = 0usize;
+
+            'groups: for event_group in groups {
+                if event_group.hooks.is_empty() {
                     continue;
                 }
-                if index > 0 {
-                    lines.push(Line::from(""));
+                let mut group_prefix = Vec::new();
+                if shown_groups > 0 {
+                    group_prefix.push(Line::from(""));
                 }
-                for segment in
+                group_prefix.extend(
                     wrap_plain_line_with_prefix(&sanitize(&event_group.event), "  ", "  ", inner)
-                {
-                    lines.push(Line::from(Span::styled(segment, group)));
-                }
+                        .into_iter()
+                        .map(|segment| Line::from(Span::styled(segment, group))),
+                );
+                let mut group_prefix = Some(group_prefix);
+
                 for hook in &event_group.hooks {
-                    if lines.len() >= STYLED_BODY_LINE_BUDGET {
-                        omitted += 1;
-                        continue;
+                    let hook_lines = styled_hook_entry_lines(hook, inner);
+                    let prefix_len = group_prefix.as_ref().map_or(0, Vec::len);
+                    let required = lines.len() + prefix_len + hook_lines.len() + tail_reserve;
+                    if required > STYLED_BODY_LINE_LIMIT {
+                        break 'groups;
                     }
-                    let name = sanitize(&hook.name);
-                    let extension = sanitize(&hook.extension);
-                    if hook.disabled {
-                        for segment in wrap_plain_line_with_prefix(
-                            &format!("○ {name} (ext: {extension}) [disabled]"),
-                            ENTRY_INDENT,
-                            ENTRY_HANG,
-                            inner,
-                        ) {
-                            lines.push(Line::from(Span::styled(segment, muted)));
-                        }
-                    } else {
-                        let wrapped = wrap_plain_line_with_prefix(
-                            &format!("• {name} (ext: {extension})"),
-                            ENTRY_INDENT,
-                            ENTRY_HANG,
-                            inner,
-                        );
-                        for (segment_index, segment) in wrapped.iter().enumerate() {
-                            if segment_index == 0 {
-                                // First segment: "    " + "• " + name [+ metadata tail].
-                                let rest = segment
-                                    .strip_prefix(ENTRY_INDENT)
-                                    .and_then(|rest| rest.strip_prefix("• "));
-                                match rest {
-                                    Some(rest) => {
-                                        let (head, tail) = match rest.find(" (ext:") {
-                                            Some(split) => rest.split_at(split),
-                                            None => (rest, ""),
-                                        };
-                                        let mut spans = vec![
-                                            Span::raw(ENTRY_INDENT.to_string()),
-                                            Span::styled("• ".to_string(), emphasis),
-                                            Span::raw(head.to_string()),
-                                        ];
-                                        if !tail.is_empty() {
-                                            spans.push(Span::styled(tail.to_string(), muted));
-                                        }
-                                        lines.push(Line::from(spans));
-                                    }
-                                    None => lines.push(Line::from(Span::raw(segment.clone()))),
-                                }
-                            } else {
-                                // Continuation segments carry metadata overflow.
-                                lines.push(Line::from(Span::styled(segment.clone(), muted)));
-                            }
-                        }
+                    if let Some(prefix) = group_prefix.take() {
+                        lines.extend(prefix);
+                        shown_groups += 1;
                     }
+                    lines.extend(hook_lines);
+                    shown_hooks += 1;
                 }
             }
+            let omitted = total_hooks - shown_hooks;
             if omitted > 0 {
                 let marker = model
                     .omitted_template
@@ -203,14 +228,16 @@ fn styled_hook_status_lines(model: &HookStatusPanelModel<'_>, inner: usize) -> V
                     lines.push(Line::from(Span::styled(segment, muted)));
                 }
             }
+            lines.push(Line::from(""));
+            lines.extend(footer_lines);
+            debug_assert!(lines.len() <= STYLED_BODY_LINE_LIMIT);
+            return lines;
         }
     }
     // Spacer before the footer is owned by the styled layout; the plain
     // backend delegates footer spacing to write_block instead.
     lines.push(Line::from(""));
-    for segment in wrap_plain_line(&sanitize(&model.footer), inner) {
-        lines.push(Line::from(Span::styled(segment, body_style)));
-    }
+    lines.extend(footer_lines);
     lines
 }
 

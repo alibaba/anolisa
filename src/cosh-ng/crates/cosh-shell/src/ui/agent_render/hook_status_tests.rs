@@ -235,7 +235,7 @@ fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
             event: format!("Event-{group_index}"),
             hooks: (0..15)
                 .map(|hook_index| HookEntryView {
-                    name: format!("hook-{group_index}-{hook_index}"),
+                    name: format!("observability-hook-{group_index}-{hook_index}"),
                     extension: "agent-sec-core".to_string(),
                     disabled: false,
                 })
@@ -248,11 +248,12 @@ fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
         shell_lines: vec!["Registered: 2; enabled: 2; disabled: 0.".to_string()],
         agent_label: "Agent Hooks",
         agent: AgentHooksView::Groups(groups.clone()),
-        omitted_template: "… {count} more hook(s) not shown".to_string(),
+        omitted_template: "… {count} more hook(s) not shown (full list in plain output)"
+            .to_string(),
         footer: "180 hook(s) registered.".to_string(),
     };
 
-    let renderer = RatatuiInlineRenderer::with_width(80);
+    let renderer = RatatuiInlineRenderer::with_width(40);
     let mut output = Vec::new();
     renderer
         .write_hook_status_panel(&mut output, model)
@@ -264,10 +265,7 @@ fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
     assert!(text.contains("180 hook(s) registered."), "{text}");
     assert!(text.contains("more hook(s) not shown"), "{text}");
     assert!(text.lines().count() <= 200, "{}", text.lines().count());
-    let marker_line = text
-        .lines()
-        .find(|line| line.contains("more hook(s) not shown"))
-        .unwrap();
+    let marker_line = text.lines().find(|line| line.contains('…')).unwrap();
     let omitted: usize = marker_line
         .chars()
         .skip_while(|ch| !ch.is_ascii_digit())
@@ -294,6 +292,39 @@ fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
     assert!(text.contains("hook-11-14"), "{text}");
     assert!(text.contains("180 hook(s) registered."), "{text}");
     assert!(!text.contains("more hook(s) not shown"), "{text}");
+}
+
+#[test]
+fn hook_status_panel_omits_an_entry_that_cannot_fit_atomically() {
+    let model = HookStatusPanelModel {
+        title: "Hook status",
+        shell_label: "Shell Hooks",
+        shell_lines: vec!["Registered: 1; enabled: 1; disabled: 0.".to_string()],
+        agent_label: "Agent Hooks",
+        agent: AgentHooksView::Groups(vec![HookEventGroup {
+            event: "PreToolUse".to_string(),
+            hooks: vec![HookEntryView {
+                name: "x".repeat(8_000),
+                extension: "agent-sec-core".to_string(),
+                disabled: false,
+            }],
+        }]),
+        omitted_template: "… {count} more hook(s) not shown (full list in plain output)"
+            .to_string(),
+        footer: "1 hook(s) registered.".to_string(),
+    };
+
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let mut output = Vec::new();
+    renderer
+        .write_hook_status_panel(&mut output, model)
+        .unwrap();
+
+    let text = strip_ansi_escape(&String::from_utf8(output).unwrap());
+    assert!(text.contains("1 more hook(s) not shown"), "{text}");
+    assert!(text.contains("1 hook(s) registered."), "{text}");
+    assert!(!text.contains(&"x".repeat(20)), "{text}");
+    assert!(text.lines().count() <= 200, "{}", text.lines().count());
 }
 
 #[test]
