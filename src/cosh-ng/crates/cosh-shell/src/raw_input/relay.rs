@@ -330,7 +330,7 @@ fn relay_candidate_line(
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
 ) -> io::Result<bool> {
-    match candidate_line_status(&relay.line_buffer.bytes) {
+    match candidate_line_status(&relay.line_buffer.bytes, &relay.line_buffer.soft_newlines) {
         CandidateLineStatus::Pending => Ok(true),
         CandidateLineStatus::Unsafe if relay.line_buffer.force_agent_intercept => {
             relay.line_buffer.clear();
@@ -446,9 +446,15 @@ fn redraw_candidate_line(
     let original = line_buffer.visible_line_bytes();
     send_shell_input_state(original.is_empty(), input_events);
     let visible = redact_extension_setting_value(original);
-    let hint = std::str::from_utf8(&visible)
-        .ok()
-        .and_then(candidate_inline_hint);
+    // R3 minimal multiline redraw: only the current line is echoed; a line
+    // counter hint stands in for the earlier soft-newline lines (#1721).
+    let hint = if line_buffer.soft_newlines.is_empty() {
+        std::str::from_utf8(&visible)
+            .ok()
+            .and_then(candidate_inline_hint)
+    } else {
+        Some(format!("{} lines", line_buffer.soft_newlines.len() + 1))
+    };
     line_buffer.relayed_len = visible.len();
     let _ = input_events.send(RawInputEvent::CandidateRedraw {
         input: visible,

@@ -8,6 +8,7 @@ mod mode;
 mod pty;
 mod relay;
 mod relay_action;
+mod soft_newline;
 mod spawn;
 
 pub(crate) use event_parser::redact_extension_setting_value;

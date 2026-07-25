@@ -1996,3 +1996,206 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
     assert_eq!(fs::read(&path).expect("read test output"), b"\n");
     fs::remove_file(path).ok();
 }
+
+fn soft_newline_relay(
+    label: &str,
+    conservative: bool,
+) -> (
+    std::path::PathBuf,
+    File,
+    mpsc::Receiver<RawInputEvent>,
+    mpsc::Sender<RawInputEvent>,
+    Arc<Mutex<RawInputMode>>,
+    InputClassifier,
+) {
+    let (path, master) = output_file(label);
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let classifier = if conservative {
+        InputClassifier::conservative()
+    } else {
+        InputClassifier::default()
+    };
+    (path, master, rx, tx, input_mode, classifier)
+}
+
+#[test]
+fn soft_newline_candidate_stays_buffered_and_submits_multiline_prompt() {
+    // #1721 T-03/T-05 relay layer + I3: whitelisted soft-newline sequences
+    // never flush the candidate buffer to the PTY, and the final bare Enter
+    // submits one intercept whose payload keeps the soft newline as \n.
+    let (path, mut master, rx, tx, input_mode, classifier) =
+        soft_newline_relay("soft-newline-candidate", false);
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+    };
+
+    relay_passthrough_input(b"?? hello", &mut relay).expect("buffer first line");
+    relay_passthrough_input(b"\x1b\r", &mut relay).expect("soft newline stays buffered");
+    relay_passthrough_input(b"world", &mut relay).expect("buffer second line");
+    relay_passthrough_input(b"\r", &mut relay).expect("submit multiline prompt");
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RawInputEvent::UserIntercept(input, InterceptReason::AgentMarker)
+            if input == "?? hello\nworld"
+    )));
+    // R3 minimal redraw: after the soft newline only the current line is
+    // echoed and a line-count hint replaces the inline slash hint.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RawInputEvent::CandidateRedraw { input, hint }
+            if input == b"world" && hint.as_deref() == Some("2 lines")
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, RawInputEvent::PtyUserWrite { .. })));
+    assert!(!line_buffer.is_active());
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn soft_newline_in_ghost_intercept_is_not_silently_cleared() {
+    // #1721 T-16 / M16: with force_agent_intercept armed, the pre-fix code
+    // silently cleared the buffer on Alt+Enter (input loss); now the buffer
+    // stays Pending and the final submit carries both lines.
+    let (path, mut master, rx, tx, input_mode, classifier) =
+        soft_newline_relay("soft-newline-ghost", false);
+    let mut line_buffer = CandidateLineBuffer::default();
+    line_buffer.push(b"check disk");
+    line_buffer.force_agent_intercept = true;
+    line_buffer.forced_agent_suggestion_id = Some("suggestion-1".to_string());
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+    };
+
+    relay_passthrough_input(b"\x1b\r", &mut relay).expect("soft newline in ghost intercept");
+    relay_passthrough_input(b"now\r", &mut relay).expect("submit ghost prompt");
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    assert!(!events.contains(&RawInputEvent::CandidateClearLine));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RawInputEvent::PromptGhostIntercept { input, suggestion_id }
+            if input == "check disk\nnow"
+                && suggestion_id.as_deref() == Some("suggestion-1")
+    )));
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn shell_path_passes_soft_newline_sequences_through_byte_exact() {
+    // #1721 T-18 / M18 (I2): without a candidate prefix the whitelisted
+    // sequences are relayed to the PTY byte-for-byte with zero intercepts.
+    for conservative in [false, true] {
+        let label = format!("soft-newline-shell-{conservative}");
+        let (path, mut master, rx, tx, input_mode, classifier) =
+            soft_newline_relay(&label, conservative);
+        let mut line_buffer = CandidateLineBuffer::default();
+        let mut native_line_state = NativeLineState::default();
+        let mut exit_tracker = ExplicitExitTracker::default();
+        let input_generation = UserPtyInputGeneration::default();
+        let mut line_submits = LineSubmitCounter::default();
+        let mut relay = InputRelayContext {
+            master: &mut master,
+            input_classifier: &classifier,
+            input_events: &tx,
+            input_mode: &input_mode,
+            input_generation: &input_generation,
+            line_submits: &mut line_submits,
+            line_buffer: &mut line_buffer,
+            native_line_state: &mut native_line_state,
+            exit_tracker: &mut exit_tracker,
+        };
+
+        relay_passthrough_input(b"echo hi", &mut relay).expect("shell bytes");
+        relay_passthrough_input(b"\x1b\r", &mut relay).expect("alt-enter passthrough");
+        relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("csi-u 13 passthrough");
+        relay_passthrough_input(b"\x1b[27;2u", &mut relay).expect("csi-u 27 passthrough");
+        master.sync_all().expect("sync test output");
+
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(
+            fs::read(&path).expect("read test output"),
+            b"echo hi\x1b\r\x1b[13;2u\x1b[27;2u",
+            "conservative={conservative}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                RawInputEvent::CandidateRedraw { .. }
+                    | RawInputEvent::CandidateCommit(_)
+                    | RawInputEvent::UserIntercept(..)
+            )),
+            "conservative={conservative}"
+        );
+        fs::remove_file(path).ok();
+    }
+}
+
+#[test]
+fn pasted_hard_newline_in_candidate_still_submits_first_line() {
+    // #1721 T-12 / M12 pinning: bracketed-paste hard newlines keep the
+    // pre-fix submit-and-forward-remainder behavior (paste contract stays
+    // with the forerunner SDD).
+    let (path, mut master, rx, tx, input_mode, classifier) =
+        soft_newline_relay("soft-newline-paste", false);
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+    };
+
+    relay_passthrough_input(b"?? a", &mut relay).expect("buffer candidate");
+    relay_passthrough_input(b"\x1b[200~x\ny\x1b[201~", &mut relay).expect("paste");
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RawInputEvent::UserIntercept(input, InterceptReason::AgentMarker) if input == "?? ax"
+    )));
+    assert_eq!(fs::read(&path).expect("read test output"), b"y");
+    fs::remove_file(path).ok();
+}
