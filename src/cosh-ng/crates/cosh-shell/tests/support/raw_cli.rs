@@ -13,8 +13,10 @@ use wait_timeout::ChildExt;
 
 const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 // Shared-mode sessions run concurrently up to this bound. Override with
-// COSH_RAW_CLI_TEST_PARALLELISM to probe higher/lower parallelism locally.
-const RAW_CLI_SHARED_PARALLELISM_DEFAULT: usize = 4;
+// COSH_RAW_CLI_TEST_PARALLELISM to probe higher/lower parallelism locally;
+// 16 measured faster still but oversubscribes 12-core hosts (mock provider
+// sessions start failing), so the default stays at the original design of 8.
+const RAW_CLI_SHARED_PARALLELISM_DEFAULT: usize = 8;
 pub(crate) const RAW_CLI_UNSET_ENV: &str = "__cosh_raw_cli_unset_env__";
 
 fn raw_cli_shared_parallelism() -> usize {
