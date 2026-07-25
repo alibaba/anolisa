@@ -4,6 +4,7 @@ use crate::runtime::prelude::RawInputCapture;
 use crate::runtime::state::InlineState;
 
 use super::delete_confirm::DELETE_CONFIRM_OPTION_COUNT;
+use super::menu::management_entry_count;
 use super::provider_management::{provider_action_options, ExistingProvider};
 use super::runtime::{AuthPhase, RuntimeAuthState};
 
@@ -28,7 +29,7 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
     match &auth.phase {
         AuthPhase::ManagingProviders => Some(RawInputCapture::Question {
             id: auth_capture_id(auth),
-            option_count: auth.existing_providers.len() + 1,
+            option_count: management_entry_count(&auth.sysom, auth.existing_providers.len()),
             allow_free_text: false,
             multiple: false,
             secret: false,
