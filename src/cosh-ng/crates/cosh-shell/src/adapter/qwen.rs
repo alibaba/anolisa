@@ -9,12 +9,13 @@ mod driver;
 
 use self::driver::{start_cancellable_qwen_process, start_control_protocol_qwen_process};
 use super::claude::{join_reader_thread, read_lossy, send_agent_event, terminate_process};
+use super::prompt::provider_prompt_contract_for_request;
 use super::qwen_stream::QwenStreamParser;
 use super::{
     commit_pending_session, detach_committed_session, prompt_from_request,
-    provider_prompt_contract, start_threaded_adapter_run, AdapterError, AdapterInstance,
-    AgentAdapter, AgentBackendCapabilities, AgentRunHandle, FreshSessionOutcome,
-    PreparedInvocation, ProviderLineProgress,
+    start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
+    AgentBackendCapabilities, AgentRunHandle, FreshSessionOutcome, PreparedInvocation,
+    ProviderLineProgress,
 };
 
 #[derive(Debug, Clone)]
@@ -238,7 +239,7 @@ fn qwen_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) -> S
     format!(
         "{}{}",
         prompt_from_request(request),
-        provider_prompt_contract(mode, "run_shell_command")
+        provider_prompt_contract_for_request(request, mode, "run_shell_command")
     )
 }
 
@@ -380,6 +381,30 @@ mod tests {
         );
         assert!(inv.prompt.contains("run_shell_command"), "{}", inv.prompt);
         assert!(!inv.args.contains(&"--allowed-tools".to_string()));
+    }
+
+    #[test]
+    fn shell_handoff_continuation_keeps_plan_args_without_recommend_claim() {
+        let mut request = test_request();
+        request.context_hints = vec![
+            crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
+            format!("{}auto", crate::types::USER_APPROVAL_MODE_HINT_PREFIX),
+        ];
+        let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
+        assert!(inv.args.contains(&"--approval-mode".to_string()));
+        assert!(inv.args.contains(&"plan".to_string()));
+        assert!(!inv.prompt.contains("recommend mode"), "{}", inv.prompt);
+        assert!(
+            inv.prompt
+                .contains("approval mode is auto and has not changed"),
+            "{}",
+            inv.prompt
+        );
+        assert!(
+            inv.prompt.contains("Do not emit tool calls in this turn"),
+            "{}",
+            inv.prompt
+        );
     }
 
     #[test]

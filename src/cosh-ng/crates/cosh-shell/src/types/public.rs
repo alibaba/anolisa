@@ -13,9 +13,10 @@ pub use implementation::{
 
 #[allow(unused_imports)]
 pub(crate) use implementation::{
-    set_request_context_binding, AgentContextBinding, BuiltinFactRecord, BuiltinFindingFacts,
-    EvaluatedHookFinding, HighMemoryProcessFacts, HookProvenance, MemoryPressureFacts,
-    MetricsConfidence, ProcessMemoryFact, ShellEnvironmentSnapshot,
+    request_is_analysis_only_continuation, set_request_context_binding, AgentContextBinding,
+    BuiltinFactRecord, BuiltinFindingFacts, EvaluatedHookFinding, HighMemoryProcessFacts,
+    HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,
+    ShellEnvironmentSnapshot, SHELL_HANDOFF_CONTINUATION_HINT, USER_APPROVAL_MODE_HINT_PREFIX,
 };
 
 pub(crate) use implementation::audit;

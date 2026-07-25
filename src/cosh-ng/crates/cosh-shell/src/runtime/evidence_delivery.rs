@@ -266,7 +266,7 @@ fn shell_handoff_continuation_request(
     let user_input = format!(
         "ShellCommandCompleted evidence\n\
          The foreground shell executed this command after user approval. Treat this as shell evidence, not as a provider-native tool_result.\n\
-         Continue the analysis-only Agent turn from the prior request. Further shell commands require a fresh approval.\n\
+         Continue the analysis-only Agent turn from the prior request. The user's cosh-shell approval mode is unchanged. Further shell commands require a fresh approval.\n\
          original_user_request: {original_user_request}\n\
          approval_id: {approval_id}\n\
          provider_tool: {subject}\n\

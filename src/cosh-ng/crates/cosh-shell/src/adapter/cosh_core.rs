@@ -14,7 +14,7 @@ use super::cosh_core_process::{
     suppress_synthetic_completion_after_transport_failure,
 };
 use super::cosh_core_service::PersistentCoshCoreRuntime;
-use super::prompt::provider_prompt_contract_with_evidence_access;
+use super::prompt::provider_prompt_contract_for_request_with_evidence_access;
 use super::{
     agent_event_is_provider_progress, control_protocol, prompt_from_request_with_evidence_policy,
     record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
@@ -437,7 +437,7 @@ fn cosh_core_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode)
     format!(
         "{}{}",
         request_prompt,
-        provider_prompt_contract_with_evidence_access(mode, "shell", access)
+        provider_prompt_contract_for_request_with_evidence_access(request, mode, "shell", access)
     )
 }
 
