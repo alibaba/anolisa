@@ -14,10 +14,7 @@ pub(crate) fn render_status_command<W: Write>(
     let i18n = state.i18n();
 
     let version = env!("CARGO_PKG_VERSION");
-    let cwd = shell_cwd.unwrap_or_else(|| {
-        // Provide a fallback; the caller will own the buffer.
-        "<unknown>"
-    });
+    let cwd = shell_cwd.unwrap_or("<unknown>");
 
     let body = vec![
         i18n.format(MessageId::SlashStatusVersionLine, &[("version", version)]),
