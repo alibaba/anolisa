@@ -212,6 +212,7 @@ version = "0.8.1"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "agentsight-atif",
  "agentsight-opt",
  "agentsight-opt-store",
  "agentsight-trajectory-collector",

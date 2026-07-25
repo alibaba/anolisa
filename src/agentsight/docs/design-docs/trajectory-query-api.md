@@ -10,7 +10,7 @@ PR #1789 完成了轨迹的**采集 + 持久化**：后台线程把 Qoder/QoderW
 ATIF v1.7 文档，upsert 进 `trajectories.db` 的 `collected_trajectories` 表。但**消费侧缺失**：
 
 - `src/server/` 没有任何 handler 打开 `trajectories.db`；
-- Dashboard 没有浏览入口（现有 "ATIF 查看器" 走的是 eBPF 采集的 v1.6 导出链路，数据源不同）。
+- Dashboard 没有浏览入口（现有 "ATIF 查看器" 走的是 eBPF 采集的导出链路，数据源不同；当时为 v1.6，后续已统一到 v1.7）。
 
 **目标**：新增只读查询 API + Dashboard 页面，使用户能按 project / source / agent 检索采集到的轨迹，
 并查看单条轨迹的完整 ATIF 步骤时间线。
@@ -18,7 +18,7 @@ ATIF v1.7 文档，upsert 进 `trajectories.db` 的 `collected_trajectories` 表
 **非目标**（本期不做）：
 
 - 不改动采集器写入逻辑与表结构；
-- 不统一 v1.6（eBPF 导出）与 v1.7（文件采集）两条 ATIF 链路（后续独立 ADR）；
+- 不统一 v1.6（eBPF 导出）与 v1.7（文件采集）两条 ATIF 链路（后续独立处理；现已统一到 v1.7）；
 - 不做轨迹的编辑/删除/标注（仅只读浏览）。
 
 ## 2. 现状数据流
@@ -219,7 +219,7 @@ export async function fetchTrajectoryFilters(): Promise<TrajectoryFilters>;
 | D3 | DB 路径派生 | 抽 `sibling_db_path()` 共享 helper，读写两端同源（见 §4.2.1） | 避免跨进程手抄表达式漂移导致静默读空库 |
 | D4 | store 缺失语义 | 统一返回空 + 200（非 503） | 采集默认关闭，DB 缺失是正常状态；Dashboard 其他列表页均能容忍空数据，不单独报错，前端无需错误分支 |
 | D5 | 列表是否含 atif_json | 不含，详情接口单独取 | 列表轻量化，避免大 JSON 拖慢首屏 |
-| D6 | v1.6/v1.7 链路 | 本期并存，不统一 | 统一涉及导出链路迁移，范围大，独立 ADR 处理 |
+| D6 | v1.6/v1.7 链路 | 本期并存，不统一（**已在后续变更中统一**：导出链路已迁到 `agentsight-atif` v1.7，两端同 schema） | 统一涉及导出链路迁移，范围大，独立处理 |
 | D7 | 步骤渲染 | 抽取共享组件（级别 2） | 复用而非复制；超 800 行则降级为独立精简实现 |
 
 ## 7. Footprint Ladder 说明

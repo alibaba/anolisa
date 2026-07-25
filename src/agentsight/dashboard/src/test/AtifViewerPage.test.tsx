@@ -7,15 +7,24 @@ import { MemoryRouter } from 'react-router-dom';
 vi.mock('../utils/apiClient', () => ({
   fetchAtifBySession: vi.fn(),
   fetchAtifByConversation: vi.fn(),
+  fetchTrajectoryAtif: vi.fn(),
   fetchSessionSavings: vi.fn(),
 }));
 
-import { fetchAtifBySession, fetchAtifByConversation, fetchSessionSavings } from '../utils/apiClient';
+import {
+  fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
+} from '../utils/apiClient';
 import { AtifViewerPage } from '../pages/AtifViewerPage';
 
 const mockFetchAtifBySession = fetchAtifBySession as ReturnType<typeof vi.fn>;
 const mockFetchAtifByConversation = fetchAtifByConversation as ReturnType<typeof vi.fn>;
+const mockFetchTrajectoryAtif = fetchTrajectoryAtif as ReturnType<typeof vi.fn>;
 const mockFetchSessionSavings = fetchSessionSavings as ReturnType<typeof vi.fn>;
+
+/** Mimic apiClient's ApiRequestError: only `status === 404` triggers fallback. */
+function notFound(): Error & { status: number } {
+  return Object.assign(new Error('API ... -> 404: session not found'), { status: 404 });
+}
 
 function renderPage(route = '/atif') {
   return render(
@@ -80,6 +89,7 @@ const mockAtifDoc = {
 beforeEach(() => {
   mockFetchAtifBySession.mockReset();
   mockFetchAtifByConversation.mockReset();
+  mockFetchTrajectoryAtif.mockReset();
   mockFetchSessionSavings.mockReset();
   mockFetchSessionSavings.mockRejectedValue(new Error('no savings'));
 });
@@ -130,6 +140,36 @@ describe('AtifViewerPage', () => {
     expect(screen.getByText(/Not found/)).toBeInTheDocument();
   });
 
+  it('should fall back to the collected trajectory when the session has no genai events', async () => {
+    mockFetchAtifBySession.mockRejectedValue(notFound());
+    mockFetchTrajectoryAtif.mockResolvedValue({ ...mockAtifDoc, schema_version: 'ATIF-v1.7' });
+    await act(async () => { renderPage(); });
+    const input = screen.getByPlaceholderText('输入 Session ID...');
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'sess-collected-only' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('加载'));
+    });
+    expect(mockFetchTrajectoryAtif).toHaveBeenCalledWith('sess-collected-only');
+    expect(screen.getByText('ATIF-v1.7')).toBeInTheDocument();
+    expect(screen.getByText('交互轨迹')).toBeInTheDocument();
+  });
+
+  it('should report a combined error when neither store has the session', async () => {
+    mockFetchAtifBySession.mockRejectedValue(notFound());
+    mockFetchTrajectoryAtif.mockRejectedValue(notFound());
+    await act(async () => { renderPage(); });
+    const input = screen.getByPlaceholderText('输入 Session ID...');
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'sess-nowhere' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('加载'));
+    });
+    expect(screen.getByText(/既无 eBPF 捕获记录，也无采集轨迹/)).toBeInTheDocument();
+  });
+
   it('should render document after successful load', async () => {
     mockFetchAtifBySession.mockResolvedValue(mockAtifDoc);
     await act(async () => { renderPage(); });
@@ -175,7 +215,7 @@ describe('AtifViewerPage', () => {
   });
 
   it('should render step cards with correct source labels', async () => {
-    // Single-round documents auto-expand, so step details are visible directly.
+    // The first round is auto-selected, so its step details show in the right column.
     mockFetchAtifBySession.mockResolvedValue(mockAtifDoc);
     await act(async () => { renderPage(); });
     const input = screen.getByPlaceholderText('输入 Session ID...');
@@ -191,7 +231,7 @@ describe('AtifViewerPage', () => {
     expect(screen.getByText('Step 2')).toBeInTheDocument();
   });
 
-  it('should group steps into rounds and expand round on click', async () => {
+  it('should group steps into rounds and switch detail on round click', async () => {
     const multiRoundDoc = {
       ...mockAtifDoc,
       steps: [
@@ -206,18 +246,20 @@ describe('AtifViewerPage', () => {
       renderPage('/atif?type=session&id=sess-rounds');
     });
 
-    // Round headers visible; step details collapsed by default
+    // Left column lists both rounds; round 1 is auto-selected in the right column
     expect(screen.getByText('第 1 轮')).toBeInTheDocument();
     expect(screen.getByText('第 2 轮')).toBeInTheDocument();
-    expect(screen.queryByText('Step 1')).not.toBeInTheDocument();
-
-    // Click round 1 header to reveal its step details
-    await act(async () => {
-      fireEvent.click(screen.getByText('第 1 轮'));
-    });
     expect(screen.getByText('Step 1')).toBeInTheDocument();
     expect(screen.getByText('Step 2')).toBeInTheDocument();
     expect(screen.queryByText('Step 3')).not.toBeInTheDocument();
+
+    // Click round 2 in the left list to switch the detail column
+    await act(async () => {
+      fireEvent.click(screen.getByText('第 2 轮'));
+    });
+    expect(screen.getByText('Step 3')).toBeInTheDocument();
+    expect(screen.getByText('Step 4')).toBeInTheDocument();
+    expect(screen.queryByText('Step 1')).not.toBeInTheDocument();
   });
 
   it('should switch to conversation mode', async () => {
@@ -313,6 +355,29 @@ describe('AtifViewerPage', () => {
     expect(mockFetchAtifByConversation).toHaveBeenCalledWith('conv-1');
     expect(screen.getByText('search')).toBeInTheDocument();
     expect(screen.getByText('search result')).toBeInTheDocument();
+  });
+
+  it('should render structured observation content as JSON instead of crashing', async () => {
+    // ATIF allows any JSON for observation content; a producer other than
+    // AgentSight's exporter may send an object rather than a string.
+    const structured = {
+      ...mockAtifDoc,
+      steps: [
+        {
+          ...mockAtifDoc.steps[1],
+          observation: {
+            results: [{ source_call_id: 'tc-1', content: { rows: 2, ok: true } }],
+          },
+        },
+      ],
+    };
+    mockFetchAtifBySession.mockResolvedValue(structured);
+
+    await act(async () => {
+      renderPage('/atif?type=session&id=sess-structured&highlight_call_id=tc-1');
+    });
+
+    expect(screen.getByText(/"rows": 2/)).toBeInTheDocument();
   });
 
   it('should render an empty timeline when steps are missing', async () => {

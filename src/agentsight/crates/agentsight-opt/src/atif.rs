@@ -1,4 +1,9 @@
-//! ATIF v1.6 trajectory model — the sole analysis input format.
+//! ATIF trajectory model — the sole analysis input format.
+//!
+//! A lenient analysis-side reader for the shared ATIF schema (see the
+//! `agentsight-atif` crate, which producers write). Kept separate for now
+//! because the analyzers rely on the accessors below; collapsing the two models
+//! is a follow-up.
 //!
 //! All analyzers (accuracy / perf / cost) consume [`AtifTrajectory`] directly.
 //! See <https://github.com/laude-institute/harbor/blob/main/docs/rfcs/0001-trajectory-format.md>.
@@ -23,7 +28,7 @@ const OBSERVATION_TRIM_CHARS: usize = 80;
 
 // ─── Document types ──────────────────────────────────────────────────────────
 
-/// Root ATIF trajectory document (analysis-side mirror of ATIF v1.6).
+/// Root ATIF trajectory document (analysis-side mirror of the shared schema).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtifTrajectory {
     pub schema_version: String,

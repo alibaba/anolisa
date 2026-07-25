@@ -2394,6 +2394,25 @@ mod tests {
             );
             let body = service_response_json(response).await;
             assert!(body.is_object(), "{uri} should return a JSON document");
+            // The export must speak the shared ATIF schema, same as the
+            // collector-ingested trajectories served by /api/trajectories.
+            assert_eq!(
+                body["schema_version"],
+                agentsight_atif::ATIF_SCHEMA_VERSION,
+                "{uri} should export the shared ATIF schema version"
+            );
+            assert!(
+                body["session_id"].is_string(),
+                "{uri} should carry the queried id as session_id"
+            );
+            assert!(
+                body["steps"].as_array().is_some_and(|s| !s.is_empty()),
+                "{uri} should export at least one step"
+            );
+            // Round-trip through the shared validator: catches field drift and
+            // non-contiguous step_ids that a plain is_object() check would miss.
+            agentsight_atif::validate_trajectory_str(&body.to_string())
+                .unwrap_or_else(|e| panic!("{uri} export failed ATIF validation: {e}"));
         }
 
         for (uri, message) in [
@@ -2741,7 +2760,7 @@ pub async fn restart_agent_health(
 
 /// GET /api/export/atif/trace/{trace_id}
 ///
-/// Exports a single trace as an ATIF v1.6 trajectory document.
+/// Exports a single trace as an ATIF trajectory document (shared v1.7 schema).
 #[get("/export/atif/trace/{trace_id}")]
 pub async fn export_atif_trace(
     data: web::Data<AppState>,
@@ -2780,7 +2799,7 @@ pub async fn export_atif_trace(
 
 /// GET /api/export/atif/session/{session_id}
 ///
-/// Exports a full session (all traces) as an ATIF v1.6 trajectory document.
+/// Exports a full session (all traces) as an ATIF trajectory document (v1.7).
 #[get("/export/atif/session/{session_id}")]
 pub async fn export_atif_session(
     data: web::Data<AppState>,
@@ -2819,7 +2838,7 @@ pub async fn export_atif_session(
 
 /// GET /api/export/atif/conversation/{conversation_id}
 ///
-/// Exports all LLM calls for a conversation as an ATIF v1.6 trajectory document.
+/// Exports all LLM calls for a conversation as an ATIF trajectory document (v1.7).
 #[get("/export/atif/conversation/{conversation_id}")]
 pub async fn export_atif_conversation(
     data: web::Data<AppState>,
