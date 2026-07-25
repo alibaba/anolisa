@@ -25,6 +25,7 @@ use super::{PromptGhostRoute, RawInputEvent, ESC};
 
 mod action;
 mod capture;
+mod prompt_ghost;
 mod reader;
 #[cfg(test)]
 mod tests;
@@ -36,40 +37,15 @@ use capture::{
     relay_input_chunk, CaptureOwnedInput,
 };
 pub(super) use capture::{finish_input_relay, relay_late_capture_input};
+use prompt_ghost::{
+    dismiss_replaced_prompt_ghost, PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix,
+};
 use reader::read_input_chunks;
 
 const PROMPT_GHOST_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 const DELAY_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 // Retain a complete split Shift+Tab sequence while the relay handles ESC.
 const INPUT_READ_AHEAD_CAPACITY: usize = 3;
-
-struct PendingPromptGhostEscape {
-    bytes: Vec<u8>,
-    text: String,
-    route: PromptGhostRoute,
-    deadline: Instant,
-}
-
-struct PendingReplacedPromptGhostSuffix {
-    bytes: Vec<u8>,
-    deadline: Instant,
-    expected_capture_generation: Option<u64>,
-}
-
-impl PendingPromptGhostEscape {
-    fn matches_mode(&self, mode: &RawInputMode) -> bool {
-        matches!(
-            mode,
-            RawInputMode::PromptGhost { text, route }
-                if text == &self.text && route == &self.route
-        )
-    }
-}
-
-fn dismiss_replaced_prompt_ghost(input_events: &Sender<RawInputEvent>) {
-    let _ = input_events.send(RawInputEvent::PromptGhostClear);
-    let _ = input_events.send(RawInputEvent::PromptGhostDismissed);
-}
 
 #[derive(Default)]
 pub(super) struct RawInputRelayState {

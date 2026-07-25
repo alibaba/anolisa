@@ -12,13 +12,11 @@ use nix::libc;
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    set_pty_winsize, signal_foreground_process_group, signal_process_group, update_input_mode,
-    update_locked_input_mode, write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
-    UserPtyInputGeneration,
+    signal_foreground_process_group, update_input_mode, update_locked_input_mode, write_all_pty,
+    RawInputEvent, RawInputMode, RawObserverAction, UserPtyInputGeneration,
 };
 use crate::types::{ShellEvent, ShellEventKind, ShellHandoffRequest};
 
-use super::model::current_terminal_winsize;
 use super::osc::{DisplayCutKind, OscParser};
 use super::prompt_replay::{
     prompt_prefixed_replay_bytes, prompt_replay_bytes, PromptReplayTracker,
@@ -26,11 +24,13 @@ use super::prompt_replay::{
 
 mod input_events;
 mod terminal_recovery;
+mod terminal_size;
 
 use input_events::drain_raw_input_events;
 use terminal_recovery::{
     restore_terminal_after_interrupted_command, PendingTerminalRecovery, TerminalRecoveryOwner,
 };
+use terminal_size::sync_outer_terminal_winsize;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
@@ -511,24 +511,6 @@ fn remember_pending_prompt_restore(
     }
 }
 
-fn sync_outer_terminal_winsize(
-    master_fd: i32,
-    child_pid: u32,
-    last_winsize: &mut Winsize,
-) -> io::Result<()> {
-    let Some(current) = current_terminal_winsize() else {
-        return Ok(());
-    };
-    if same_winsize(&current, last_winsize) {
-        return Ok(());
-    }
-
-    set_pty_winsize(master_fd, current)?;
-    signal_process_group(child_pid, libc::SIGWINCH)?;
-    *last_winsize = current;
-    Ok(())
-}
-
 fn write_handoff_request(path: &Path, command: &str) -> io::Result<()> {
     std::fs::write(path, command.as_bytes())
 }
@@ -700,12 +682,6 @@ fn mark_pending_prompt_replayed(parser: &OscParser, prompt: &[u8], display_start
     }
 }
 
-fn same_winsize(left: &Winsize, right: &Winsize) -> bool {
-    left.ws_row == right.ws_row
-        && left.ws_col == right.ws_col
-        && left.ws_xpixel == right.ws_xpixel
-        && left.ws_ypixel == right.ws_ypixel
-}
 #[cfg(test)]
 #[path = "raw_relay_tests.rs"]
 mod tests;
