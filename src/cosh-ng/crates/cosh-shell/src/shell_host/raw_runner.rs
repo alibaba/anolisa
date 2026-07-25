@@ -1,5 +1,6 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -297,6 +298,7 @@ where
 
 pub fn run_raw_interactive_bash(config: &ShellHostConfig) -> io::Result<ShellHostOutput> {
     let _raw_mode = RawModeGuard::activate_stdin()?;
+    reopen_stdout_blocking()?;
     run_raw_relay_bash(config, std::io::stdin(), std::io::stdout())
 }
 
@@ -308,6 +310,7 @@ where
     F: FnMut(&[ShellEvent], &mut std::io::Stdout) -> io::Result<()>,
 {
     let _raw_mode = RawModeGuard::activate_stdin()?;
+    reopen_stdout_blocking()?;
     run_raw_relay_bash_with_observer(config, std::io::stdin(), std::io::stdout(), event_observer)
 }
 
@@ -319,6 +322,7 @@ where
     F: FnMut(&[ShellEvent], &mut std::io::Stdout) -> io::Result<RawObserverAction>,
 {
     let _raw_mode = RawModeGuard::activate_stdin()?;
+    reopen_stdout_blocking()?;
     run_raw_relay_bash_with_output_control(
         config,
         std::io::stdin(),
@@ -335,12 +339,58 @@ where
     F: FnMut(&[ShellEvent], &mut std::io::Stdout) -> io::Result<RawObserverAction>,
 {
     let _raw_mode = RawModeGuard::activate_stdin()?;
+    reopen_stdout_blocking()?;
     run_raw_relay_zsh_with_output_control(
         config,
         std::io::stdin(),
         std::io::stdout(),
         event_observer,
     )
+}
+
+/// Re-open stdout on a fresh, blocking file description when needed.
+///
+/// On Linux terminals (and SSH sessions), stdin and stdout often share the
+/// same underlying open file description. `RawModeGuard` sets `O_NONBLOCK` on
+/// stdin (fd 0), which therefore also makes stdout (fd 1) non-blocking.
+/// Subsequent writes to stdout can then return `EAGAIN` / `EWOULDBLOCK`.
+///
+/// This function opens `/dev/tty` to obtain a new, independent file
+/// description that is not marked `O_NONBLOCK`, and uses `dup2` to replace
+/// fd 1 with it. The termios configuration is per-device, so the new fd
+/// inherits the raw-mode settings already applied by `RawModeGuard`.
+///
+/// If stdout is not a terminal, or if `/dev/tty` cannot be opened, the
+/// function logs a warning and returns success so that the shell can still
+/// start. In that case the caller retains the original (possibly
+/// non-blocking) stdout behavior.
+fn reopen_stdout_blocking() -> io::Result<()> {
+    if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 0 {
+        // stdout is not a terminal, so the stdin/stdout shared file
+        // description problem does not apply here.
+        return Ok(());
+    }
+    let tty = match OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(tty) => tty,
+        Err(err) => {
+            eprintln!(
+                "cosh-shell: warning: cannot reopen stdout as blocking: {err}; \
+                 EAGAIN risk remains"
+            );
+            return Ok(());
+        }
+    };
+    let tty_fd = tty.as_raw_fd();
+    if unsafe { libc::dup2(tty_fd, libc::STDOUT_FILENO) } < 0 {
+        let err = io::Error::last_os_error();
+        eprintln!(
+            "cosh-shell: warning: cannot reopen stdout as blocking: {err}; \
+             EAGAIN risk remains"
+        );
+    }
+    // `tty` is dropped here, but the duplicated fd remains alive because fd 1
+    // now refers to the same open file description.
+    Ok(())
 }
 
 struct RawModeGuard {
