@@ -198,6 +198,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 // Optimization analysis API routes
                 .service(optimize::run_optimization)
                 .service(optimize::get_optimization_results)
+                .service(optimize::list_optimization_history)
                 .service(optimize::get_optimize_config)
                 .service(optimize::update_optimize_config)
                 // Trajectory collection API routes (filters before the dynamic segment)

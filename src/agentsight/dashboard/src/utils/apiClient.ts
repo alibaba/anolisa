@@ -35,6 +35,10 @@ export interface SessionSummary {
   total_output_tokens: number;
   model: string | null;
   agent_name: string | null;
+  /** Earliest user query in the window (≤ 200 chars, best-effort) */
+  first_user_query?: string | null;
+  /** Latest user query in the window (≤ 200 chars, best-effort) */
+  last_user_query?: string | null;
 }
 
 export interface TraceSummary {
@@ -157,6 +161,37 @@ export async function fetchTraceDetail(traceId: string): Promise<TraceEventDetai
   return apiFetch<TraceEventDetail[]>(
     `${API_BASE}/api/traces/${encodeURIComponent(traceId)}`
   );
+}
+
+// ─── Collected trajectory APIs ───────────────────────────────────────────────
+
+/** Summary row from trajectories.db (log-collected sessions). */
+export interface TrajectorySummary {
+  session_id: string;
+  schema_version: string;
+  agent_name: string;
+  model_name: string | null;
+  num_steps: number;
+  total_prompt_tokens: number | null;
+  total_completion_tokens: number | null;
+  start_time: string | null;
+  end_time: string | null;
+  /** First user-authored message preview (≤ 200 chars) from the ATIF steps */
+  first_user_message?: string | null;
+  /** Last user-authored message preview (≤ 200 chars) from the ATIF steps */
+  last_user_message?: string | null;
+  project: string;
+  source: string;
+  is_subagent: boolean;
+  collected_at_ns: number;
+}
+
+/**
+ * List log-collected trajectories (newest first). Returns an empty list when
+ * trajectory collection has never run (graceful degradation).
+ */
+export async function fetchTrajectories(limit = 1000): Promise<TrajectorySummary[]> {
+  return apiFetch<TrajectorySummary[]>(`${API_BASE}/api/trajectories?limit=${limit}`);
 }
 
 /**
@@ -1239,7 +1274,39 @@ export async function login(token: string): Promise<boolean> {
 
 // ─── Optimization analysis API ───────────────────────────────────────────────
 
-export type OptimizeDimension = 'perf' | 'perf-issues' | 'cost' | 'cost-waste' | 'accuracy';
+export type OptimizeDimension =
+  | 'perf'
+  | 'perf-issues'
+  | 'cost'
+  | 'cost-waste'
+  | 'accuracy'
+  | 'summary';
+
+/** Dimension keys as persisted in optimization.db (underscored, unlike the route form). */
+export type OptimizeHistoryDimension =
+  | 'perf'
+  | 'perf_issues'
+  | 'cost'
+  | 'cost_waste'
+  | 'accuracy'
+  | 'summary';
+
+/** One row of the analysis history list — presence flags only, no payloads. */
+export interface OptimizeHistoryEntry {
+  session_id: string;
+  dimensions: OptimizeHistoryDimension[];
+  created_at_ns: number;
+  updated_at_ns: number;
+}
+
+/**
+ * List previously analyzed sessions, newest first. The server defaults to the
+ * last 30 days and caps `limit` at 200.
+ */
+export async function fetchOptimizeHistory(limit?: number): Promise<OptimizeHistoryEntry[]> {
+  const qs = limit === undefined ? '' : `?limit=${limit}`;
+  return apiFetch<OptimizeHistoryEntry[]>(`${API_BASE}/api/optimize/results${qs}`);
+}
 
 /** Load persisted analysis results for a session (each dimension may be null). */
 export async function fetchOptimizeResults(sessionId: string): Promise<OptimizeSessionResults> {

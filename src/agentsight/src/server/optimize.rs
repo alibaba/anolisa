@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use agentsight_opt::{AnalyzePipeline, AtifTrajectory, LlmClient, TrajectoryRecorder};
 use agentsight_opt_store::{Dimension, OptimizationStore};
+use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
 use super::AppState;
 use crate::storage::sqlite::GenAISqliteStore;
@@ -156,7 +157,15 @@ fn optimize_state(data: &AppState) -> Result<&Arc<OptimizeState>, HttpResponse> 
 /// Load a session's captured events and build the ATIF trajectory that the
 /// analyzers consume. The boundary format is standard ATIF JSON: the export
 /// document is serialized and re-parsed into the opt crate's ATIF model.
-fn load_trajectory(db_path: &Path, session_id: &str) -> Result<AtifTrajectory, HttpResponse> {
+///
+/// When the session has no eBPF-captured events, falls back to the
+/// log-collected trajectory store (trajectories.db), whose rows already hold
+/// ready-made ATIF v1.7 JSON.
+fn load_trajectory(
+    db_path: &Path,
+    trajectory_store: Option<&TrajectoryStore>,
+    session_id: &str,
+) -> Result<AtifTrajectory, HttpResponse> {
     let store = GenAISqliteStore::new_with_path(db_path).map_err(|e| {
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;
@@ -164,8 +173,7 @@ fn load_trajectory(db_path: &Path, session_id: &str) -> Result<AtifTrajectory, H
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;
     if events.is_empty() {
-        return Err(HttpResponse::NotFound()
-            .json(serde_json::json!({"error": "session not found or pruned"})));
+        return load_collected_trajectory(trajectory_store, session_id);
     }
     let doc = crate::atif::convert_session_to_atif(session_id, events).map_err(|e| {
         HttpResponse::UnprocessableEntity().json(serde_json::json!({
@@ -182,6 +190,33 @@ fn load_trajectory(db_path: &Path, session_id: &str) -> Result<AtifTrajectory, H
             "message": e.to_string(),
         }))
     })
+}
+
+/// Fallback for sessions absent from the eBPF capture: load the ATIF JSON
+/// persisted by the trajectory collector (log-collected Qoder/QoderWork
+/// sessions).
+fn load_collected_trajectory(
+    trajectory_store: Option<&TrajectoryStore>,
+    session_id: &str,
+) -> Result<AtifTrajectory, HttpResponse> {
+    let Some(tstore) = trajectory_store else {
+        return Err(HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "session not found or pruned"})));
+    };
+    match tstore.get_atif_json(session_id) {
+        Ok(Some(atif_json)) => AtifTrajectory::from_json(&atif_json).map_err(|e| {
+            HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                "error": "atif_parse_failed",
+                "message": e.to_string(),
+            }))
+        }),
+        Ok(None) => Err(HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "session not found or pruned"}))),
+        Err(e) => {
+            Err(HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()})))
+        }
+    }
 }
 
 /// Serialize an analysis result, persist it, and build the HTTP response.
@@ -215,6 +250,7 @@ fn parse_dimension(raw: &str) -> Option<Dimension> {
         "cost" => Some(Dimension::Cost),
         "cost-waste" => Some(Dimension::CostWaste),
         "accuracy" => Some(Dimension::Accuracy),
+        "summary" => Some(Dimension::Summary),
         _ => None,
     }
 }
@@ -243,7 +279,11 @@ pub async fn run_optimization(
         }));
     };
 
-    let trajectory = match load_trajectory(&data.storage_path, &session_id) {
+    let trajectory = match load_trajectory(
+        &data.storage_path,
+        data.trajectory_store.as_deref(),
+        &session_id,
+    ) {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -259,7 +299,7 @@ pub async fn run_optimization(
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
         },
-        Dimension::PerfIssues | Dimension::CostWaste | Dimension::Accuracy => {
+        Dimension::PerfIssues | Dimension::CostWaste | Dimension::Accuracy | Dimension::Summary => {
             let mut client = match state.build_client() {
                 Ok(c) => c,
                 Err(resp) => return resp,
@@ -286,6 +326,10 @@ pub async fn run_optimization(
                     .run_accuracy(&trajectory, None)
                     .await
                     .and_then(|r| serde_json::to_string(&r).map_err(|e| anyhow::anyhow!(e))),
+                Dimension::Summary => pipeline
+                    .run_summary(&trajectory)
+                    .await
+                    .and_then(|r| serde_json::to_string(&r).map_err(|e| anyhow::anyhow!(e))),
                 // Pure-compute dimensions handled in the outer match.
                 Dimension::Perf | Dimension::Cost => unreachable!(),
             };
@@ -300,6 +344,47 @@ pub async fn run_optimization(
                     .join(&dimension_raw);
                 if let Err(e) = recorder.save_to_dir(&traj_dir) {
                     log::warn!("Failed to save opt LLM trajectory: {e}");
+                }
+
+                // Persist to trajectories.db for Dashboard query.
+                if let Some(ref traj_store) = data.trajectory_store {
+                    let doc = recorder.to_atif();
+                    let atif_json = serde_json::to_string(&doc).unwrap_or_default();
+                    let (first_user_message, last_user_message) =
+                        agentsight_trajectory_collector::store::extract_user_message_previews(
+                            &atif_json,
+                        );
+                    let record = TrajectoryRecord {
+                        session_id: format!("opt_{dimension_raw}_{session_id}"),
+                        schema_version: doc.schema_version.clone(),
+                        agent_name: "agentsight-opt".to_string(),
+                        model_name: doc.agent.model_name.clone(),
+                        num_steps: doc.steps.len() as i64,
+                        total_prompt_tokens: doc
+                            .final_metrics
+                            .as_ref()
+                            .and_then(|m| m.total_prompt_tokens)
+                            .map(|v| v as i64),
+                        total_completion_tokens: doc
+                            .final_metrics
+                            .as_ref()
+                            .and_then(|m| m.total_completion_tokens)
+                            .map(|v| v as i64),
+                        start_time: doc.steps.first().and_then(|s| s.timestamp.clone()),
+                        end_time: doc.steps.last().and_then(|s| s.timestamp.clone()),
+                        first_user_message,
+                        last_user_message,
+                        atif_json,
+                        project: session_id.clone(),
+                        source: "agentsight-opt".to_string(),
+                        is_subagent: false,
+                        file_path: String::new(),
+                        file_size: 0,
+                        file_mtime_ns: 0,
+                    };
+                    if let Err(e) = traj_store.upsert_trajectory(&record) {
+                        log::warn!("Failed to persist opt trajectory to SQLite: {e}");
+                    }
                 }
             }
 
@@ -356,6 +441,7 @@ pub async fn get_optimization_results(
                 "cost": parse(&record.cost),
                 "cost_waste": parse(&record.cost_waste),
                 "accuracy": parse(&record.accuracy),
+                "summary": parse(&record.summary),
                 "created_at_ns": record.created_at_ns,
                 "updated_at_ns": record.updated_at_ns,
             }))
@@ -363,8 +449,89 @@ pub async fn get_optimization_results(
         Ok(None) => HttpResponse::Ok().json(serde_json::json!({
             "session_id": session_id,
             "perf": null, "perf_issues": null, "cost": null,
-            "cost_waste": null, "accuracy": null,
+            "cost_waste": null, "accuracy": null, "summary": null,
         })),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Query parameters for the analysis-history listing.
+#[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+/// Current UNIX time in nanoseconds; 0 if the clock is before the epoch.
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+/// Max rows a single history listing may return.
+const HISTORY_MAX_LIMIT: usize = 200;
+/// Default listing window when the caller passes no range: 30 days.
+const HISTORY_DEFAULT_WINDOW_NS: i64 = 30 * 86_400_000_000_000;
+
+/// GET /api/optimize/results?start_ns=&end_ns=&limit=
+///
+/// Lists previously analyzed sessions, newest first. Only per-dimension
+/// presence flags are returned — never the payloads, which are megabytes of
+/// JSON and are fetched per session via `/optimize/sessions/{id}/results`.
+#[get("/optimize/results")]
+pub async fn list_optimization_history(
+    data: web::Data<AppState>,
+    query: web::Query<HistoryQuery>,
+) -> impl Responder {
+    let state = match optimize_state(&data) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    // Store unavailable → empty list rather than an error: the history table is
+    // a secondary view and should degrade like the trajectory endpoints do.
+    let Some(ref store) = state.store else {
+        return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
+    };
+
+    let end_ns = query.end_ns.unwrap_or_else(now_ns);
+    let start_ns = query
+        .start_ns
+        .unwrap_or_else(|| end_ns.saturating_sub(HISTORY_DEFAULT_WINDOW_NS));
+    let limit = query.limit.unwrap_or(100).clamp(1, HISTORY_MAX_LIMIT);
+
+    match store.list(start_ns, end_ns, limit) {
+        Ok(records) => {
+            let items: Vec<serde_json::Value> = records
+                .iter()
+                .map(|r| {
+                    let mut dimensions = Vec::new();
+                    for (name, value) in [
+                        ("perf", &r.perf),
+                        ("perf_issues", &r.perf_issues),
+                        ("cost", &r.cost),
+                        ("cost_waste", &r.cost_waste),
+                        ("accuracy", &r.accuracy),
+                        ("summary", &r.summary),
+                    ] {
+                        if value.is_some() {
+                            dimensions.push(name);
+                        }
+                    }
+                    serde_json::json!({
+                        "session_id": r.session_id,
+                        "dimensions": dimensions,
+                        "created_at_ns": r.created_at_ns,
+                        "updated_at_ns": r.updated_at_ns,
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(items)
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -487,5 +654,86 @@ mod tests {
         assert_eq!(parse_dimension("cost-waste"), Some(Dimension::CostWaste));
         assert_eq!(parse_dimension("accuracy"), Some(Dimension::Accuracy));
         assert_eq!(parse_dimension("unknown"), None);
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("opt-traj-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn collected_record(session_id: &str, atif_json: &str) -> TrajectoryRecord {
+        TrajectoryRecord {
+            session_id: session_id.to_string(),
+            schema_version: "ATIF-v1.7".to_string(),
+            agent_name: "qoder".to_string(),
+            model_name: None,
+            num_steps: 0,
+            total_prompt_tokens: None,
+            total_completion_tokens: None,
+            start_time: None,
+            end_time: None,
+            first_user_message: None,
+            last_user_message: None,
+            atif_json: atif_json.to_string(),
+            project: "proj".to_string(),
+            source: "qoder".to_string(),
+            is_subagent: false,
+            file_path: String::new(),
+            file_size: 0,
+            file_mtime_ns: 0,
+        }
+    }
+
+    #[test]
+    fn load_trajectory_falls_back_to_collected_store() {
+        let dir = tmp_dir("fallback");
+        let db_path = dir.join("genai.db");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+        let atif = r#"{"schema_version":"ATIF-v1.7","session_id":"log-1","steps":[]}"#;
+        tstore
+            .upsert_trajectory(&collected_record("log-1", atif))
+            .unwrap();
+
+        let trajectory = load_trajectory(&db_path, Some(&tstore), "log-1").unwrap();
+        assert_eq!(trajectory.session_id, "log-1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_trajectory_returns_not_found_when_both_sources_miss() {
+        let dir = tmp_dir("miss");
+        let db_path = dir.join("genai.db");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+
+        // Store present but session absent → 404.
+        let resp = load_trajectory(&db_path, Some(&tstore), "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        // No store at all → 404 as well.
+        let resp = load_trajectory(&db_path, None, "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_trajectory_rejects_corrupt_collected_atif() {
+        let dir = tmp_dir("corrupt");
+        let db_path = dir.join("genai.db");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+        tstore
+            .upsert_trajectory(&collected_record("bad-1", "not json"))
+            .unwrap();
+
+        let resp = load_trajectory(&db_path, Some(&tstore), "bad-1").unwrap_err();
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
