@@ -168,9 +168,35 @@ ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 20
 > **WARNING**: The workspace path configured for ws-ckpt must NOT be:
 > - The root path (`/`)
 > - Inside the daemon's mount_path
+> - An active mount point (see below)
 > - The Agent startup directory or any parent directory (validated at plugin level)
 >
 > These constraints are enforced by the daemon. Attempts to use invalid paths will be rejected.
+
+### The workspace root cannot be a mount point
+
+Initializing a workspace moves the original directory aside as a backup, and
+`rename(2)` fails with `EBUSY` on a directory that is itself a mount point. Any
+filesystem type is affected, not just FUSE.
+
+The common case is an in-place SkillFS mount, where the source and the mountpoint
+are the same directory. Unmount it first:
+
+```bash
+skillfs stop /path/to/workspace      # in-place SkillFS mount
+fusermount3 -u /path/to/workspace    # any other FUSE mount
+```
+
+This applies to `init` and to the first `checkpoint` on an unmanaged path, which
+auto-initializes. Once a workspace is initialized, later `checkpoint`, `rollback`,
+`list`, and `diff` operations are unaffected.
+
+Only the workspace root itself is rejected. A mount nested *inside* the workspace
+does not block `init`, but the outcome is rarely what you want: the mount stays
+attached to the backup directory that `init` moves aside, while the new workspace
+receives a plain copy of the mount's contents — subsequent writes land in the
+copy, not on the mounted filesystem, and the two silently diverge. Unmount nested
+mounts before initializing, or keep mount points outside the workspace tree.
 
 ---
 

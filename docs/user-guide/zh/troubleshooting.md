@@ -187,6 +187,35 @@ ws-ckpt config set workspace.path /home/user/projects/my-project
 
 ---
 
+**现象**：`ws-ckpt checkpoint` 或 `init` 失败，提示 "workspace root is an active
+mount point"，旧版本上表现为 "failed to rename original directory to backup:
+Device or resource busy (os error 16)"
+
+**原因**：初始化工作区要把原目录改名后作为备份，而 `rename(2)` 对「自身是挂载点」的
+目录会返回 `EBUSY`。最常见的触发方式是先用 in-place 模式挂载了 SkillFS，再对同一路径
+打快照。
+
+**解决**：先确认该路径是不是挂载点，卸载后重试：
+
+```bash
+# 确认是否为挂载点
+findmnt /path/to/workspace
+
+# in-place SkillFS 挂载
+skillfs stop /path/to/workspace
+
+# 其他 FUSE 挂载
+fusermount3 -u /path/to/workspace
+
+ws-ckpt checkpoint -w /path/to/workspace -s my-snapshot
+```
+
+被拒绝的只有工作区根目录本身。工作区内部的嵌套挂载不会阻止 `init`，但挂载会留在初始化
+时改名移走的备份目录上，新工作区里只有其内容的普通副本 —— 初始化前先卸载嵌套挂载，或让
+挂载点保持在工作区目录树之外。工作区初始化完成后再挂载 SkillFS 不影响后续快照。
+
+---
+
 ### SkillFS 问题
 
 **现象**：`skillfs mount` 失败，提示 "FUSE not available"
