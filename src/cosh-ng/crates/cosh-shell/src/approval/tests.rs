@@ -997,3 +997,80 @@ fn command_matches_trust_key_empty_set() {
     let trusted = HashSet::new();
     assert!(!command_matches_trust_key("npm test", &trusted));
 }
+
+fn card_focus_event(input: &str) -> crate::runtime::prelude::ShellEvent {
+    use crate::runtime::prelude::{ShellEvent, ShellEventKind};
+    ShellEvent {
+        kind: ShellEventKind::UserInputIntercepted,
+        session_id: "session-1".to_string(),
+        command_id: None,
+        command: None,
+        cwd: None,
+        end_cwd: None,
+        exit_code: None,
+        started_at_ms: Some(1),
+        ended_at_ms: None,
+        duration_ms: None,
+        terminal_output_ref: None,
+        terminal_output_bytes: None,
+        input: Some(input.to_string()),
+        component: Some("card".to_string()),
+        message: Some("focus".to_string()),
+        command_origin: None,
+        shell_environment_generation: None,
+        audit_identity: None,
+        routing: None,
+        capture: None,
+    }
+}
+
+#[test]
+fn infix_hook_marker_in_subject_keeps_normal_approval_actions() {
+    let mut spoofed = provider_tool_request("run_shell_command", None);
+    spoofed.subject = "tool HOOK: spoof".to_string();
+    let event = card_focus_event("req-1: 1");
+
+    let (id, action) = crate::approval::panel::approval_focus_from_event(&event, &[spoofed])
+        .expect("focus action");
+
+    assert_eq!(id, "req-1");
+    assert_eq!(
+        action,
+        crate::runtime::prelude::ApprovalPanelAction::AlwaysTrust
+    );
+}
+
+#[test]
+fn hook_prefixed_subject_resolves_hook_approval_actions() {
+    let mut hook_request = provider_tool_request("shell", None);
+    hook_request.subject = "HOOK:sandbox-guard".to_string();
+    let event = card_focus_event("req-1: 1");
+
+    let (id, action) = crate::approval::panel::approval_focus_from_event(&event, &[hook_request])
+        .expect("focus action");
+
+    assert_eq!(id, "req-1");
+    assert_eq!(action, crate::runtime::prelude::ApprovalPanelAction::Deny);
+}
+
+#[test]
+fn pending_card_capture_flags_hook_only_for_prefixed_subject() {
+    use crate::runtime::controller::pending_card_capture;
+    use crate::runtime::prelude::RawInputCapture;
+
+    let mut state = InlineState::default();
+    let mut spoofed = provider_tool_request("run_shell_command", None);
+    spoofed.subject = "tool HOOK: spoof".to_string();
+    state.approvals.requests.push(spoofed);
+
+    match pending_card_capture(&state) {
+        Some(RawInputCapture::Approval { is_hook, .. }) => assert!(!is_hook),
+        other => panic!("expected approval capture, got {other:?}"),
+    }
+
+    state.approvals.requests[0].subject = "HOOK:sandbox-guard".to_string();
+    match pending_card_capture(&state) {
+        Some(RawInputCapture::Approval { is_hook, .. }) => assert!(is_hook),
+        other => panic!("expected approval capture, got {other:?}"),
+    }
+}
