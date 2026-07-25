@@ -12,6 +12,8 @@ pub mod discovery;
 pub mod qoder;
 pub mod store;
 
+pub use store::{TrajectoryFilters, TrajectoryRecord, TrajectoryStore, TrajectorySummary};
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
@@ -19,7 +21,6 @@ use std::time::{Duration, UNIX_EPOCH};
 use anyhow::{Context, Result};
 
 use discovery::DiscoveredSession;
-use store::{TrajectoryRecord, TrajectoryStore};
 
 /// Collector runtime configuration (resolved by the main crate from
 /// `agentsight.json`).

@@ -99,7 +99,7 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
 | **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate（采集链路使用；主 crate `src/atif` 仍为 v1.6 导出链路） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
-| **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭） | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
+| **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
 ## 5. Critical Code Paths
 
@@ -232,6 +232,9 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/sessions/{id}/{dim}` | POST | 运行单维度优化分析，`dim` ∈ `perf` / `perf-issues` / `cost` / `cost-waste` / `accuracy`（后三者需 LLM 配置，10–60s） |
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
+| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
+| `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
+| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON |
 
 ## 9. Frontend
 

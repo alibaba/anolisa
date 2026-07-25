@@ -37,7 +37,7 @@ use crate::interruption::{DetectorConfig, InterruptionDetector, recover_oom_even
 use crate::parser::Parser;
 use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
-use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
+use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore, sibling_db_path};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
 use crate::tokenizer::LlmTokenizer;
 
@@ -463,10 +463,7 @@ impl AgentSight {
         // Initialize interruption store only when interruption detection is enabled.
         let interruption_store: Option<Arc<InterruptionStore>> =
             if config.features.interruption_detection_enabled {
-                let db_path = GenAISqliteStore::default_path()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                    .join("interruption_events.db");
+                let db_path = sibling_db_path("interruption_events.db");
                 match InterruptionStore::new_with_path(&db_path) {
                     Ok(store) => {
                         log::info!("Interruption events store initialized at {db_path:?}");
@@ -526,10 +523,7 @@ impl AgentSight {
                     .trajectory_scan_dirs
                     .as_ref()
                     .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
-                db_path: GenAISqliteStore::default_path()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                    .join("trajectories.db"),
+                db_path: sibling_db_path("trajectories.db"),
             };
             let stop = Arc::clone(&running);
             std::thread::Builder::new()

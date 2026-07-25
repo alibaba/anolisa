@@ -317,6 +317,7 @@ dependencies = [
  "anyhow",
  "log 0.4.29",
  "rusqlite",
+ "serde",
  "serde_json",
 ]
 

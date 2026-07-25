@@ -941,6 +941,7 @@ mod tests {
                 std::path::Path::new("/tmp"),
             )),
             optimize: None,
+            trajectory_store: None,
         }
     }
 

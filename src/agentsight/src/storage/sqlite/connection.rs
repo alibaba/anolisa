@@ -11,6 +11,20 @@ pub fn default_base_path() -> PathBuf {
     crate::config::default_base_path()
 }
 
+/// Path of a sibling database that lives next to `genai_events.db`
+/// (i.e. under [`default_base_path`]): `trajectories.db`,
+/// `interruption_events.db`, etc.
+///
+/// Single source of truth for cross-process DB path derivation: the
+/// collector (`agentsight trace`) writes and the API server
+/// (`agentsight serve`) reads must resolve the exact same file, otherwise
+/// the reader silently opens an empty database. Deriving from
+/// `default_base_path()` (instead of `GenAISqliteStore::default_path().parent()`)
+/// also avoids a `connection` → `genai` intra-module dependency cycle.
+pub fn sibling_db_path(filename: &str) -> PathBuf {
+    default_base_path().join(filename)
+}
+
 /// Create a new SQLite connection with common settings
 ///
 /// This function:

@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 /// A row of `collected_trajectories` ready for upsert.
 #[derive(Debug, Clone)]
@@ -32,6 +33,35 @@ pub struct TrajectoryRecord {
     pub file_path: String,
     pub file_size: i64,
     pub file_mtime_ns: i64,
+}
+
+/// Lightweight list row of `collected_trajectories` — deliberately excludes
+/// the (potentially large) `atif_json` column; fetch it via
+/// [`TrajectoryStore::get_atif_json`] for the detail view.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrajectorySummary {
+    pub session_id: String,
+    pub schema_version: String,
+    pub agent_name: String,
+    pub model_name: Option<String>,
+    pub num_steps: i64,
+    pub total_prompt_tokens: Option<i64>,
+    pub total_completion_tokens: Option<i64>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub project: String,
+    /// Which product wrote the file: "qoder" or "qoderwork".
+    pub source: String,
+    pub is_subagent: bool,
+    pub collected_at_ns: i64,
+}
+
+/// Distinct filter values for the trajectory list UI dropdowns.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TrajectoryFilters {
+    pub projects: Vec<String>,
+    pub sources: Vec<String>,
+    pub agent_names: Vec<String>,
 }
 
 /// Thread-safe store over a dedicated `trajectories.db`.
@@ -189,6 +219,106 @@ impl TrajectoryStore {
         Ok(n)
     }
 
+    /// Lists trajectory summaries (without `atif_json`), newest first.
+    ///
+    /// All filters are optional equality matches; `limit` caps the row count.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn list_summaries(
+        &self,
+        project: Option<&str>,
+        source: Option<&str>,
+        agent_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TrajectorySummary>> {
+        let conn = self.lock_conn()?;
+        let mut sql = String::from(
+            "SELECT session_id, schema_version, agent_name, model_name, num_steps,
+                    total_prompt_tokens, total_completion_tokens, start_time, end_time,
+                    project, source, is_subagent, collected_at_ns
+             FROM collected_trajectories",
+        );
+        let mut clauses: Vec<String> = Vec::new();
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(p) = project {
+            clauses.push("project = ?".to_string());
+            args.push(Box::new(p.to_string()));
+        }
+        if let Some(s) = source {
+            clauses.push("source = ?".to_string());
+            args.push(Box::new(s.to_string()));
+        }
+        if let Some(a) = agent_name {
+            clauses.push("agent_name = ?".to_string());
+            args.push(Box::new(a.to_string()));
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        // `limit` is bound as a parameter (never interpolated) to stay injection-free.
+        sql.push_str(&format!(
+            " ORDER BY collected_at_ns DESC LIMIT ?{}",
+            args.len() + 1
+        ));
+        args.push(Box::new(limit));
+
+        let params_ref: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            Ok(TrajectorySummary {
+                session_id: row.get(0)?,
+                schema_version: row.get(1)?,
+                agent_name: row.get(2)?,
+                model_name: row.get(3)?,
+                num_steps: row.get(4)?,
+                total_prompt_tokens: row.get(5)?,
+                total_completion_tokens: row.get(6)?,
+                start_time: row.get(7)?,
+                end_time: row.get(8)?,
+                project: row.get(9)?,
+                source: row.get(10)?,
+                is_subagent: row.get::<_, i64>(11)? != 0,
+                collected_at_ns: row.get(12)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Returns the stored ATIF v1.7 JSON for one session, if present.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn get_atif_json(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        let json = conn
+            .query_row(
+                "SELECT atif_json FROM collected_trajectories WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(json)
+    }
+
+    /// Returns distinct project / source / agent_name values for UI filters.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn list_filters(&self) -> Result<TrajectoryFilters> {
+        let conn = self.lock_conn()?;
+        Ok(TrajectoryFilters {
+            projects: distinct_column(&conn, "project")?,
+            sources: distinct_column(&conn, "source")?,
+            agent_names: distinct_column(&conn, "agent_name")?,
+        })
+    }
+
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
@@ -201,6 +331,19 @@ fn now_ns() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// SELECT DISTINCT on a fixed column name (hard-coded, never user input).
+fn distinct_column(conn: &Connection, column: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT {column} FROM collected_trajectories ORDER BY {column}"
+    ))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -264,5 +407,88 @@ mod tests {
             store.get_file_state(&rec.file_path).unwrap(),
             Some((1024, 42))
         );
+    }
+
+    #[test]
+    fn test_list_summaries_filters_and_limit() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("list")).unwrap();
+        let mut a = sample_record();
+        a.session_id = "a".into();
+        a.project = "p1".into();
+        a.source = "qoder".into();
+        a.agent_name = "qoder".into();
+        store.upsert_trajectory(&a).unwrap();
+
+        let mut b = sample_record();
+        b.session_id = "b".into();
+        b.project = "p2".into();
+        b.source = "qoderwork".into();
+        b.agent_name = "qoder".into();
+        b.file_path = "/root/.qoderwork/projects/x/b.jsonl".into();
+        store.upsert_trajectory(&b).unwrap();
+
+        // No filter → both rows.
+        assert_eq!(
+            store.list_summaries(None, None, None, 100).unwrap().len(),
+            2
+        );
+        // project filter
+        let p1 = store.list_summaries(Some("p1"), None, None, 100).unwrap();
+        assert_eq!(p1.len(), 1);
+        assert_eq!(p1[0].session_id, "a");
+        // source filter
+        let qw = store
+            .list_summaries(None, Some("qoderwork"), None, 100)
+            .unwrap();
+        assert_eq!(qw.len(), 1);
+        assert_eq!(qw[0].session_id, "b");
+        // combined filters (AND)
+        assert_eq!(
+            store
+                .list_summaries(Some("p1"), Some("qoderwork"), None, 100)
+                .unwrap()
+                .len(),
+            0
+        );
+        // limit caps the result
+        assert_eq!(store.list_summaries(None, None, None, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_get_atif_json_hit_and_miss() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("atif")).unwrap();
+        store.upsert_trajectory(&sample_record()).unwrap();
+        assert_eq!(
+            store.get_atif_json("s-1").unwrap().as_deref(),
+            Some("{\"schema_version\":\"ATIF-v1.7\"}")
+        );
+        assert!(store.get_atif_json("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_list_filters_distinct() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("filters")).unwrap();
+        let mut a = sample_record();
+        a.session_id = "a".into();
+        a.project = "p1".into();
+        a.source = "qoder".into();
+        a.agent_name = "qoder".into();
+        store.upsert_trajectory(&a).unwrap();
+
+        let mut b = sample_record();
+        b.session_id = "b".into();
+        b.project = "p1".into();
+        b.source = "qoderwork".into();
+        b.agent_name = "qoder".into();
+        b.file_path = "/root/.qoderwork/projects/x/b.jsonl".into();
+        store.upsert_trajectory(&b).unwrap();
+
+        let f = store.list_filters().unwrap();
+        assert_eq!(f.projects, vec!["p1".to_string()]);
+        assert_eq!(
+            f.sources,
+            vec!["qoder".to_string(), "qoderwork".to_string()]
+        );
+        assert_eq!(f.agent_names, vec!["qoder".to_string()]);
     }
 }

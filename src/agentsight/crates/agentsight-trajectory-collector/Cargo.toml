@@ -8,4 +8,5 @@ agentsight-atif = { path = "../agentsight-atif" }
 anyhow = { workspace = true }
 log = { workspace = true }
 rusqlite = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
