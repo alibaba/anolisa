@@ -51,9 +51,9 @@ fn question_capture_custom_option_waits_for_text_before_submit() {
 }
 
 #[test]
-fn question_capture_preserves_answer_for_delivery_retry() {
+fn question_capture_clears_free_text_after_submit() {
     let capture = RawInputCapture::Question {
-        id: "q-retry".to_string(),
+        id: "q-clear".to_string(),
         option_count: 0,
         allow_free_text: true,
         multiple: false,
@@ -66,9 +66,11 @@ fn question_capture_preserves_answer_for_delivery_retry() {
         state.consume(&capture, b"main\n").last(),
         Some(&RawInputEvent::CardAnswer("main".to_string()))
     );
+    // free_text is cleared after submit; a second Enter must NOT replay the
+    // previous answer.
     assert_eq!(
         state.consume(&capture, b"\n"),
-        vec![RawInputEvent::CardAnswer("main".to_string())]
+        vec![RawInputEvent::QuestionSubmitAttempt("q-clear".to_string())]
     );
 }
 
@@ -95,7 +97,7 @@ fn question_capture_emits_one_submission_per_input_batch() {
     );
     assert_eq!(
         state.consume(&capture, b"\n"),
-        vec![RawInputEvent::CardAnswer("main".to_string())]
+        vec![RawInputEvent::QuestionSubmitAttempt("q-burst".to_string())]
     );
 }
 
@@ -766,5 +768,121 @@ fn evidence_capture_sends_ignores_and_cancels() {
     assert_eq!(
         state.consume(&capture, &[0x03]),
         vec![RawInputEvent::EvidenceCancel("evidence-1".to_string())]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// free_text must not carry over across capture switches or repeated submits
+// ---------------------------------------------------------------------------
+
+/// Helper: create a free-text Question capture with the given ID.
+fn text_question(id: &str, secret: bool) -> RawInputCapture {
+    RawInputCapture::Question {
+        id: id.to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret,
+    }
+}
+
+#[test]
+fn submit_clears_free_text_for_next_capture() {
+    // After submitting an answer on one capture and switching to a new
+    // capture, the new capture must start with an empty free_text buffer.
+    let cap_a = text_question("q-a", false);
+    let cap_b = text_question("q-b", false);
+    let mut state = CardInputState::default();
+
+    state.apply_capture(&cap_a);
+    let events = state.consume(&cap_a, b"answer-a\n");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardAnswer("answer-a".to_string()))
+    );
+
+    // reset() is called by consume_captured_input on release
+    state.reset();
+
+    state.apply_capture(&cap_b);
+    let events = state.consume(&cap_b, b"x");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardInput(
+            "q-b".to_string(),
+            "x".to_string()
+        ))
+    );
+}
+
+#[test]
+fn apply_capture_clears_free_text_when_id_changes_without_reset() {
+    // apply_capture alone (without reset) must clear free_text when the
+    // capture ID changes. This covers the direct Capture→Capture transition
+    // path in mode.rs where reset() is NOT called.
+    let cap_a = text_question("q-a", false);
+    let cap_b = text_question("q-b", false);
+    let mut state = CardInputState::default();
+
+    state.apply_capture(&cap_a);
+    state.consume(&cap_a, b"answer-a");
+    // Do NOT call reset() — simulate direct Capture→Capture transition
+    state.apply_capture(&cap_b);
+    let events = state.consume(&cap_b, b"x");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardInput(
+            "q-b".to_string(),
+            "x".to_string()
+        ))
+    );
+}
+
+#[test]
+fn second_submit_on_same_capture_yields_empty_attempt() {
+    // After submitting on a capture, a second Enter must produce an
+    // empty submit attempt, not a replay of the previous answer.
+    let capture = text_question("q-a", false);
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, remainder) = state.consume_split(&capture, b"answer-a\n");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardAnswer("answer-a".to_string()))
+    );
+    assert!(remainder.is_empty());
+
+    // free_text must be empty after submit — second Enter yields an attempt
+    let (events, _) = state.consume_split(&capture, b"\n");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::QuestionSubmitAttempt("q-a".to_string()))
+    );
+}
+
+#[test]
+fn secret_submit_clears_free_text_for_next_capture() {
+    // Secret captures must also clear free_text after submit.
+    let cap_secret = text_question("q-secret", true);
+    let cap_next = text_question("q-next", false);
+    let mut state = CardInputState::default();
+
+    state.apply_capture(&cap_secret);
+    let events = state.consume(&cap_secret, b"sk-secret\n");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardSecretAnswer("sk-secret".to_string()))
+    );
+
+    state.reset();
+    state.apply_capture(&cap_next);
+    let events = state.consume(&cap_next, b"plain");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardInput(
+            "q-next".to_string(),
+            "plain".to_string()
+        ))
     );
 }
