@@ -160,14 +160,17 @@ impl RatatuiInlineRenderer {
         // `{subject} · {risk badge}[ · queue N/M]`, optional High-risk
         // continuation line, preview, optional next, actions; key hints and
         // policy only when expanded.
+        let risk_label = risk_level_label(model.risk, i18n);
+        let queue_suffix = queue_meta_suffix(&model, i18n);
+        let subject = metadata_subject(
+            model.subject,
+            self.content_width(),
+            &risk_label,
+            &queue_suffix,
+        );
         let mut lines = vec![
             i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
-            format!(
-                "{} · {}{}",
-                model.subject,
-                risk_level_label(model.risk, i18n),
-                queue_meta_suffix(&model, i18n)
-            ),
+            format!("{subject} · {risk_label}{queue_suffix}"),
         ];
         if let Some(reason) = model.reason {
             lines.push(approval_reason_line(reason, i18n));
@@ -333,19 +336,27 @@ fn render_approval_panel(
 
     // Metadata row: `{subject} · {risk badge}[ · queue N/M]` — the badge is
     // localized (ARP-R7); High keeps the border color, low/medium are dimmed.
+    // The subject is ellipsized so the risk badge and queue info always keep
+    // their reserved width (review follow-up: long MCP tool names must never
+    // push the risk signal out of view).
     let risk_style = if model.risk == "high" {
         Style::default().fg(border)
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let risk_label = risk_level_label(model.risk, i18n);
+    let queue_suffix = queue_meta_suffix(&model, i18n);
+    let subject = metadata_subject(
+        model.subject,
+        inner.width.saturating_sub(2) as usize,
+        &risk_label,
+        &queue_suffix,
+    );
     Paragraph::new(Line::from(vec![
-        Span::styled(model.subject.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(subject, Style::default().fg(Color::Cyan)),
         Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-        Span::styled(risk_level_label(model.risk, i18n), risk_style),
-        Span::styled(
-            queue_meta_suffix(&model, i18n),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(risk_label, risk_style),
+        Span::styled(queue_suffix, Style::default().fg(Color::DarkGray)),
     ]))
     .render(chunks[0], buffer);
 
@@ -777,6 +788,38 @@ fn queue_meta_suffix(model: &ApprovalPanelModel<'_>, i18n: crate::I18n) -> Strin
             ("total", model.queue_total.to_string().as_str()),
         ],
     )
+}
+
+/// Ellipsize the metadata-row subject so the risk badge and queue suffix
+/// always fit: unbounded custom/MCP tool names must never push the risk
+/// signal past the row end (review follow-up on #1786).
+fn metadata_subject(
+    subject: &str,
+    content_width: usize,
+    risk_label: &str,
+    queue_suffix: &str,
+) -> String {
+    const SEPARATOR_WIDTH: usize = 3; // " · "
+    const MIN_SUBJECT_WIDTH: usize = 8;
+    let reserved = SEPARATOR_WIDTH + display_width(risk_label) + display_width(queue_suffix);
+    let budget = content_width
+        .saturating_sub(reserved)
+        .max(MIN_SUBJECT_WIDTH);
+    if display_width(subject) <= budget {
+        return subject.to_string();
+    }
+    let mut truncated = String::new();
+    let mut width = 0;
+    for ch in subject.chars() {
+        let ch_width = char_width(ch);
+        if width + ch_width > budget.saturating_sub(1) {
+            break;
+        }
+        truncated.push(ch);
+        width += ch_width;
+    }
+    truncated.push('\u{2026}');
+    truncated
 }
 
 fn approval_action_label(action: ApprovalPanelAction, i18n: crate::I18n) -> &'static str {

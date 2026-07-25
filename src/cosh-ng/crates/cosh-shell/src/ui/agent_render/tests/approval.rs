@@ -131,6 +131,36 @@ fn approval_panel_high_risk_continuation_wraps_within_narrow_width() {
 }
 
 #[test]
+fn approval_panel_long_subject_never_hides_risk_badge() {
+    // Review follow-up (#1786): unbounded custom/MCP tool names are
+    // ellipsized so the risk badge and queue info keep their reserved width
+    // even on a 40-column terminal.
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-9",
+            kind: "tool request",
+            risk: "medium",
+            reason: None,
+            subject: "mcp__server__extremely_long_custom_tool_name",
+            preview_label: "Tool input",
+            preview: "echo hi",
+            queue_position: 2,
+            queue_total: 3,
+            next_label: None,
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: false,
+            hook_warnings: Vec::new(),
+        })
+        .join("\n");
+
+    assert!(text.contains("\u{2026} · medium risk"), "{text}");
+    assert!(text.contains("queue 2/3"), "{text}");
+    assert!(!text.contains("extremely_long_custom_tool_name"), "{text}");
+    assert_rendered_width(&text, 40);
+}
+
+#[test]
 fn approval_panel_unknown_risk_value_falls_back_to_localized_label() {
     // Review follow-up: values outside the closed legacy_risk() domain must
     // render a neutral localized badge instead of leaking the raw string
