@@ -12,10 +12,10 @@ use nix::libc;
 use nix::pty::Winsize;
 
 use crate::raw_input::{
-    signal_foreground_process_group, update_input_mode, update_locked_input_mode, write_all_pty,
-    RawInputEvent, RawInputMode, RawObserverAction, UserPtyInputGeneration,
+    update_input_mode, update_locked_input_mode, RawInputEvent, RawInputMode, RawObserverAction,
+    UserPtyInputGeneration,
 };
-use crate::types::{ShellEvent, ShellEventKind, ShellHandoffRequest};
+use crate::types::{ShellEvent, ShellEventKind};
 
 use super::osc::{DisplayCutKind, OscParser};
 use super::prompt_replay::{
@@ -23,14 +23,35 @@ use super::prompt_replay::{
 };
 
 mod input_events;
+mod pty_emit;
 mod terminal_recovery;
 mod terminal_size;
 
 use input_events::drain_raw_input_events;
-use terminal_recovery::{
-    restore_terminal_after_interrupted_command, PendingTerminalRecovery, TerminalRecoveryOwner,
-};
+use pty_emit::resolve_pty_emit;
+#[cfg(test)]
+use pty_emit::restore_prompt_display_before_handoff;
+use terminal_recovery::{restore_terminal_after_interrupted_command, PendingTerminalRecovery};
 use terminal_size::sync_outer_terminal_winsize;
+
+pub(super) struct RawActionWatchdog {
+    driver_done: Arc<Mutex<Option<Instant>>>,
+    grace: Duration,
+}
+
+impl RawActionWatchdog {
+    pub(super) fn new(driver_done: Arc<Mutex<Option<Instant>>>, grace: Duration) -> Self {
+        Self { driver_done, grace }
+    }
+
+    fn expired(&self) -> bool {
+        self.driver_done
+            .lock()
+            .ok()
+            .and_then(|done| *done)
+            .is_some_and(|done| done.elapsed() > self.grace)
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
@@ -47,6 +68,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     prompt: &str,
     recovery_request_file: &Path,
     handoff_request_file: &Path,
+    watchdog: Option<&RawActionWatchdog>,
 ) -> io::Result<()>
 where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
@@ -252,6 +274,16 @@ where
                 &mut prompt_replay,
             )?;
             return Ok(());
+        }
+        if let Some(watchdog) = watchdog {
+            if watchdog.expired() {
+                child.kill()?;
+                child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "raw action relay watchdog: shell did not exit after the trailing exit was relayed",
+                ));
+            }
         }
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
@@ -509,168 +541,6 @@ fn remember_pending_prompt_restore(
     if matches!(action, RawObserverAction::RestorePrompt { .. }) {
         *pending = Some(action.clone());
     }
-}
-
-fn write_handoff_request(path: &Path, command: &str) -> io::Result<()> {
-    std::fs::write(path, command.as_bytes())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_pty_emit<W: Write>(
-    master: &mut File,
-    child_pid: u32,
-    terminal_fd: i32,
-    parser: &mut OscParser,
-    output: &mut W,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-    action: RawObserverAction,
-    display_start: &mut usize,
-    prompt_replay: &mut PromptReplayTracker,
-    pending_terminal_restore: &mut PendingTerminalRecovery,
-    recovery_request_file: &Path,
-    handoff_request_file: &Path,
-) -> io::Result<RawObserverAction> {
-    match action {
-        RawObserverAction::EmitToPty(request) => {
-            emit_to_pty(
-                master,
-                terminal_fd,
-                parser,
-                output,
-                request,
-                display_start,
-                prompt_replay,
-                pending_terminal_restore,
-                handoff_request_file,
-                false,
-            )?;
-            Ok(RawObserverAction::RawPassthrough)
-        }
-        RawObserverAction::EmitToPtyWithPromptRestore(request) => {
-            emit_to_pty(
-                master,
-                terminal_fd,
-                parser,
-                output,
-                request,
-                display_start,
-                prompt_replay,
-                pending_terminal_restore,
-                handoff_request_file,
-                true,
-            )?;
-            Ok(RawObserverAction::RawPassthrough)
-        }
-        RawObserverAction::InterruptForeground => {
-            output.flush()?;
-            pending_terminal_restore
-                .mark_owner(TerminalRecoveryOwner::CoshTimeoutInterrupt, terminal_fd);
-            signal_foreground_process_group(
-                master.as_raw_fd(),
-                terminal_fd,
-                child_pid,
-                libc::SIGINT,
-            )?;
-            pending_terminal_restore.restore_modes(terminal_fd)?;
-            pending_terminal_restore.request_shell_recovery(recovery_request_file)?;
-            parser.push_control_event("timeout_interrupt");
-            Ok(RawObserverAction::Continue)
-        }
-        RawObserverAction::RestorePrompt {
-            ghost_text,
-            ghost_route,
-        } => {
-            output.flush()?;
-            let raw_prompt = parser.last_prompt_display();
-            let prompt = prompt_replay_bytes(raw_prompt);
-            if prompt.is_empty() {
-                return Ok(RawObserverAction::RestorePrompt {
-                    ghost_text,
-                    ghost_route,
-                });
-            }
-            if parser.display.len() > *display_start {
-                write_pending_display(parser, output, display_start, prompt_replay)?;
-            } else {
-                output.write_all(prompt)?;
-                mark_pending_prompt_replayed(parser, raw_prompt, display_start);
-                prompt_replay.arm_for_replay(raw_prompt);
-            }
-            if let Some(text) = &ghost_text {
-                let selection = matches!(
-                    ghost_route,
-                    crate::raw_input::PromptGhostRoute::AgentSelection { .. }
-                );
-                if let Ok(mut mode) = input_mode.lock() {
-                    *mode = RawInputMode::PromptGhost {
-                        text: text.clone(),
-                        route: ghost_route,
-                    };
-                }
-                write_prompt_ghost(output, text, selection)?;
-            }
-            output.flush()?;
-            Ok(RawObserverAction::Continue)
-        }
-        other => Ok(other),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_to_pty<W: Write>(
-    master: &mut File,
-    terminal_fd: i32,
-    parser: &mut OscParser,
-    output: &mut W,
-    request: ShellHandoffRequest,
-    display_start: &mut usize,
-    prompt_replay: &mut PromptReplayTracker,
-    pending_terminal_restore: &mut PendingTerminalRecovery,
-    handoff_request_file: &Path,
-    restore_prompt: bool,
-) -> io::Result<()> {
-    output.flush()?;
-    if restore_prompt {
-        restore_prompt_display_before_handoff(parser, output, display_start, prompt_replay)?;
-    }
-    let bytes = request.pty_bytes().map_err(|message| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("blocked shell handoff: {message}"),
-        )
-    })?;
-    pending_terminal_restore.record_intervention_start(terminal_fd);
-    parser.register_pending_handoff_origin(&request);
-    write_handoff_request(handoff_request_file, &request.command)?;
-    if let Err(err) = write_all_pty(master, &bytes) {
-        let _ = std::fs::remove_file(handoff_request_file);
-        return Err(err);
-    }
-    Ok(())
-}
-
-fn restore_prompt_display_before_handoff<W: Write>(
-    parser: &OscParser,
-    output: &mut W,
-    display_start: &mut usize,
-    prompt_replay: &mut PromptReplayTracker,
-) -> io::Result<()> {
-    if parser.display.len() > *display_start {
-        write_pending_display(parser, output, display_start, prompt_replay)?;
-        output.flush()?;
-        return Ok(());
-    }
-
-    let raw_prompt = parser.last_prompt_display();
-    let prompt = prompt_replay_bytes(raw_prompt);
-    if prompt.is_empty() {
-        return Ok(());
-    }
-    output.write_all(prompt)?;
-    output.flush()?;
-    mark_pending_prompt_replayed(parser, raw_prompt, display_start);
-    prompt_replay.arm_for_replay(raw_prompt);
-    Ok(())
 }
 
 fn mark_pending_prompt_replayed(parser: &OscParser, prompt: &[u8], display_start: &mut usize) {

@@ -175,6 +175,34 @@ fn transparent_ctrl_backslash_is_not_synthesized_from_ctrl_c() {
 }
 
 #[test]
+fn raw_relay_action_watchdog_turns_swallowed_exit_into_timeout_error() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-watchdog-timeout-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("watchdog-timeout-test", &work_dir);
+    config.raw_action_watchdog = Duration::from_secs(5);
+    let mut rendered = Vec::new();
+    let err = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line(
+                "bash -c 'trap \"\" INT QUIT TERM; while IFS= read -r _; do :; done'",
+            ),
+            RawRelayAction::wait(Duration::from_millis(300)),
+        ],
+        &mut rendered,
+    )
+    .expect_err("watchdog must turn a swallowed trailing exit into an error");
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+}
+
+#[test]
 fn raw_relay_host_preserves_user_tty_mutation_after_interrupt() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;

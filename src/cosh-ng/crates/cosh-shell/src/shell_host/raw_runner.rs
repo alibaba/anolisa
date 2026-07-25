@@ -2,8 +2,8 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use nix::libc;
 
@@ -18,7 +18,7 @@ use super::bootstrap::{start_bash_session, start_zsh_session, PtySession};
 use super::io_loop::{read_until_streaming, wait_child};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
 use super::model::{ShellHostConfig, ShellHostOutput};
-use super::raw_relay::read_raw_until_exit;
+use super::raw_relay::{read_raw_until_exit, RawActionWatchdog};
 
 pub fn run_raw_relay_bash<R, W>(
     config: &ShellHostConfig,
@@ -67,6 +67,7 @@ where
         output,
         event_observer,
         config.input_classifier.clone(),
+        None,
         |master, _, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_input_relay(
                 input,
@@ -97,6 +98,7 @@ where
         output,
         event_observer,
         config.input_classifier.clone(),
+        None,
         |master, _, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_input_relay(
                 input,
@@ -135,6 +137,7 @@ where
         output,
         |_, _| Ok(RawObserverAction::Continue),
         config.input_classifier.clone(),
+        Some(config.raw_action_watchdog),
         |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_action_relay(
                 actions,
@@ -169,6 +172,7 @@ where
             Ok(RawObserverAction::Continue)
         },
         config.input_classifier.clone(),
+        Some(config.raw_action_watchdog),
         |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_action_relay(
                 actions,
@@ -199,6 +203,7 @@ where
         output,
         event_observer,
         config.input_classifier.clone(),
+        Some(config.raw_action_watchdog),
         |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
             spawn_raw_action_relay(
                 actions,
@@ -219,6 +224,7 @@ fn run_raw_relay_with_driver<W, F, D>(
     mut output: W,
     mut event_observer: F,
     input_classifier: InputClassifier,
+    action_watchdog: Option<Duration>,
     spawn_driver: D,
 ) -> io::Result<ShellHostOutput>
 where
@@ -254,7 +260,7 @@ where
     let (input_event_sender, input_event_receiver) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let input_generation = UserPtyInputGeneration::default();
-    let _input_thread = spawn_driver(
+    let driver_thread = spawn_driver(
         input_master,
         session.child.id(),
         input_event_sender,
@@ -262,6 +268,17 @@ where
         Arc::clone(&input_mode),
         input_generation.clone(),
     );
+    let watchdog = action_watchdog.map(|grace| {
+        let driver_done = Arc::new(Mutex::new(None));
+        let done_slot = Arc::clone(&driver_done);
+        thread::spawn(move || {
+            let _ = driver_thread.join();
+            if let Ok(mut done) = done_slot.lock() {
+                *done = Some(Instant::now());
+            }
+        });
+        RawActionWatchdog::new(driver_done, grace)
+    });
     let mut last_winsize = config.winsize;
     let relay_prompt = if config.native_mode {
         ""
@@ -282,6 +299,7 @@ where
         relay_prompt,
         &session.recovery_request_file,
         &session.handoff_request_file,
+        watchdog.as_ref(),
     )?;
     let display_start = session.parser.display.len();
     session.parser.flush_pending();
