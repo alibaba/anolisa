@@ -122,11 +122,14 @@ impl SessionStore {
         self.parse_content(session_id, content, modified_at_ms)
     }
 
-    /// Atomically commits a session if its generation is current.
+    /// Atomically commits a session if its generation is current and its
+    /// compaction revision clock does not move backwards.
     ///
     /// # Errors
     ///
     /// Returns a typed validation, conflict, serialization, or I/O error.
+    /// [`SessionError::Conflict`] also covers a stored compaction revision
+    /// higher than the one being written.
     pub fn persist(&self, session: &mut PersistedSession) -> Result<(), SessionError> {
         if session.schema_version != CURRENT_SCHEMA_VERSION {
             return Err(SessionError::IncompatibleVersion {
@@ -157,7 +160,7 @@ impl SessionStore {
         } else {
             self.lock_legacy_session(&session.session_id)?
         };
-        let current_generation = match scoped_file {
+        let (current_generation, revision_floor) = match scoped_file {
             Some(file) => {
                 let modified_at_ms = open_file_time_ms(&file);
                 let bytes = read_bounded_open_session_file(
@@ -167,11 +170,23 @@ impl SessionStore {
                 )?;
                 let content = decode_session_content(&session.session_id, &bytes)?;
                 let current = self.parse_content(&session.session_id, content, modified_at_ms)?;
-                current.generation
+                (current.generation, current.compaction_revision)
             }
-            None => 0,
+            None => (0, 0),
         };
         if current_generation != session.generation {
+            return Err(SessionError::Conflict {
+                session_id: session.session_id.to_string(),
+            });
+        }
+        // The durable compaction clock may never move backwards. The
+        // generation check above cannot catch an envelope rewritten in place
+        // without bumping it, and the clock exists precisely to survive such
+        // untrusted on-disk edits: writing a lower value would let a later
+        // commit republish a revision this session already used. Failing with
+        // Conflict keeps the caller on its existing recovery path — reload,
+        // observe the higher floor, and retry above it.
+        if session.compaction_revision < revision_floor {
             return Err(SessionError::Conflict {
                 session_id: session.session_id.to_string(),
             });
@@ -193,6 +208,12 @@ impl SessionStore {
         let mut next = session.clone();
         next.generation = next_generation;
         next.updated_at_ms = now_ms();
+        // Hold the same invariant `load` restores: the stored clock is never
+        // below the revision of the projection stored beside it, so no writer
+        // can persist a projection whose revision the clock would forget.
+        if let Some(state) = next.compaction.as_ref() {
+            next.compaction_revision = next.compaction_revision.max(state.revision);
+        }
         // Redact only the on-disk copy; the caller's in-memory turn context
         // keeps the original text for the current provider conversation.
         let mut envelope = next.clone();
@@ -431,6 +452,7 @@ impl SessionStore {
                 generation: 0,
                 messages,
                 compaction: None,
+                compaction_revision: 0,
             });
         }
 
@@ -473,9 +495,17 @@ impl SessionStore {
         // cannot replay an oversized string into init payloads or provider
         // state that the 256-byte summary bound already refuses to carry.
         session.model = bounded_summary_text(&session.model, MAX_SUMMARY_MODEL_BYTES);
+        // Raise the durable revision floor from the stored projection *before*
+        // sanitization can drop it. Pre-`compaction_revision` envelopes carry
+        // the clock only inside the projection, and a projection about to be
+        // rejected still proves that its revision was published once.
+        if let Some(state) = session.compaction.as_ref() {
+            session.compaction_revision = session.compaction_revision.max(state.revision);
+        }
         // A damaged or out-of-contract projection degrades to the complete
         // transcript instead of failing the load; the transcript is always a
-        // safe effective context.
+        // safe effective context. The revision clock survives regardless, so
+        // the next commit cannot reuse a revision that was already published.
         if let Some(state) = session.compaction.take() {
             session.compaction = crate::compaction::sanitize_loaded_state(state, &session.messages);
         }

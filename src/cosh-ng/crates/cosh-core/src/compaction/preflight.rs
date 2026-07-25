@@ -50,6 +50,7 @@ pub(crate) async fn run_context_preflight<W: Write>(
     let candidate = compact_in_memory(
         messages,
         runtime.state(),
+        runtime.revision(),
         provider,
         model,
         config,

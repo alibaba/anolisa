@@ -116,9 +116,10 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     );
     engine.extra_params = extra_params;
     engine.messages = session.record.messages.clone();
-    engine
-        .compaction
-        .load_state(session.record.compaction.clone());
+    engine.compaction.load_state(
+        session.record.compaction.clone(),
+        session.record.compaction_revision,
+    );
     if !session.record.model.is_empty() {
         engine.model = session.record.model.clone();
     }
@@ -535,6 +536,9 @@ impl SessionRuntime {
         // Emergency in-run compaction updates the projection in memory; it
         // commits together with the transcript it belongs to.
         self.record.compaction = engine.compaction.state().cloned();
+        // The revision clock is persisted even when no projection survives, so
+        // the next commit cannot reuse an already published revision.
+        self.record.compaction_revision = engine.compaction.revision();
         store.persist(&mut self.record)
     }
 
@@ -568,12 +572,10 @@ impl SessionRuntime {
         if !budget.over_trigger(history_tokens) {
             return;
         }
-        let projection_revision = self
-            .record
-            .compaction
-            .as_ref()
-            .map(|state| state.revision)
-            .unwrap_or(0);
+        // Bind to the durable revision clock, not the live projection: this
+        // recommendation is emitted right after a persist, and a projection
+        // that sanitization later rejects must not make it look stale.
+        let projection_revision = engine.compaction.revision();
         // Versioned protocol: the shell must be able to bind the recommendation
         // to the exact session and context revision it was emitted for, and
         // reject anything malformed. Field order is fixed:
