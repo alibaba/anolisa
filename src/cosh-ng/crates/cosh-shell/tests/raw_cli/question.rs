@@ -2,12 +2,16 @@ use super::*;
 
 #[test]
 fn raw_cli_agent_question_accepts_card_answer_choice() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask question\n"),
+            ("Left/Right move", b"\x1b[C\n"),
+            ("Got your answer: Blue", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -48,14 +52,16 @@ fn raw_cli_agent_question_accepts_card_answer_choice() {
 
 #[test]
 fn raw_cli_agent_question_uses_zh_language_env() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "zh-CN")],
-        vec![
-            (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask question\n"),
+            ("Enter \u{53d1}\u{9001}", b"\x1b[C\n"),
+            ("Got your answer: Blue", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -107,13 +113,16 @@ fn raw_cli_agent_question_answer_slash_is_ignored() {
 
 #[test]
 fn raw_cli_agent_free_text_question_echoes_input_before_submit() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? ask free question\n".to_vec(), Duration::ZERO),
-            (b"feature/x".to_vec(), Duration::from_millis(800)),
-            (vec![0x03], Duration::from_millis(300)),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask free question\n"),
+            ("Tell me the branch name to inspect", b"feature/x"),
+            ("Answer: feature/x", b"\x03"),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -219,6 +228,9 @@ fn raw_cli_agent_multiple_accepts_custom_only_answer() {
 
 #[test]
 fn raw_cli_agent_question_ctrl_c_cancels_card_without_answer_turn() {
+    // Keep delayed input: after Ctrl-C cancels the card the prompt repaints
+    // before input ownership returns to the shell, so a marker-gated echo
+    // right after cancellation can be silently dropped (ownership gap).
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -277,12 +289,16 @@ fn raw_cli_zsh_question_card_capture_does_not_leak_to_shell() {
 
 #[test]
 fn raw_cli_agent_question_answer_drops_stale_held_text() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? stream stale question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[B\n".to_vec(), Duration::from_millis(800)),
-            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? stream stale question\n"),
+            ("Left/Right move", b"\x1b[B\n"),
+            ("Got your answer: Blue", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -301,12 +317,16 @@ fn raw_cli_agent_question_answer_drops_stale_held_text() {
 
 #[test]
 fn raw_cli_agent_question_accepts_multiple_card_answers() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? ask multi question\n".to_vec(), Duration::ZERO),
-            (b" \t \n".to_vec(), Duration::from_millis(800)),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask multi question\n"),
+            ("Space toggle", b" \t \n"),
+            ("Got your answer: Lint, Unit tests", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -337,12 +357,16 @@ fn raw_cli_agent_question_accepts_multiple_card_answers() {
 
 #[test]
 fn raw_cli_agent_question_accepts_multiple_answers_with_custom_card_answer() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? ask multi question\n".to_vec(), Duration::ZERO),
-            (b" \t\t\tDocs\n".to_vec(), Duration::from_millis(800)),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask multi question\n"),
+            ("Space toggle", b" \t\t\tDocs\n"),
+            ("Got your answer: Lint, Docs", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -365,15 +389,16 @@ fn raw_cli_agent_question_accepts_multiple_answers_with_custom_card_answer() {
 
 #[test]
 fn raw_cli_agent_question_accepts_natural_language_answer() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (
-                "\u{7eff}\u{8272}\n".as_bytes().to_vec(),
-                Duration::from_millis(1_200),
-            ),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask question\n"),
+            ("Left/Right move", "\u{7eff}\u{8272}\n".as_bytes()),
+            ("Got your answer: \u{7eff}\u{8272}", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -398,15 +423,16 @@ fn raw_cli_agent_question_accepts_natural_language_answer() {
 
 #[test]
 fn raw_cli_agent_question_accepts_custom_card_answer() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (
-                "\t\t\t\u{7ea2}\u{8272}\n".as_bytes().to_vec(),
-                Duration::from_millis(800),
-            ),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask question\n"),
+            ("Left/Right move", "\t\t\t\u{7ea2}\u{8272}\n".as_bytes()),
+            ("Got your answer: \u{7ea2}\u{8272}", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -435,15 +461,19 @@ fn raw_cli_agent_question_accepts_custom_card_answer() {
 
 #[test]
 fn raw_cli_agent_question_accepts_free_text_only_answer() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"?? ask free question\n".to_vec(), Duration::ZERO),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? ask free question\n"),
             (
-                "\u{7279}\u{6027}\u{5206}\u{652f}\n".as_bytes().to_vec(),
-                Duration::from_millis(1_400),
+                "Tell me the branch name to inspect",
+                "\u{7279}\u{6027}\u{5206}\u{652f}\n".as_bytes(),
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+            ("Got your answer: \u{7279}\u{6027}\u{5206}\u{652f}", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 

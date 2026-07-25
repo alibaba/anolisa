@@ -188,7 +188,7 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
     let cwd = temp_shell_home("startup-health-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -203,7 +203,7 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -266,7 +266,7 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
     let cwd = temp_shell_home("startup-health-critical-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -281,7 +281,7 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -377,7 +377,7 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
     let cwd = temp_shell_home("startup-health-no-color");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -393,7 +393,7 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -420,7 +420,7 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
     let cwd = temp_shell_home("startup-health-dumb");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -434,7 +434,7 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
             ("TERM", "dumb"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Mem used", b"exit\n")],
     );
 
     assert!(output.contains("Health check:"), "{output}");
@@ -469,12 +469,12 @@ fn raw_cli_startup_health_suppresses_all_three_visible_try_items() {
         ("COSH_SHELL_ISOLATED", "0"),
     ];
 
-    let first = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let first = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &env,
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
     assert!(first.contains("Suggested prompts"), "{first}");
     assert!(!first.contains("Next:"), "{first}");
@@ -522,7 +522,7 @@ fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
         "hidden health scan should not persist suppression"
     );
 
-    let shown = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let shown = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -537,7 +537,7 @@ fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(shown.contains("Health check"), "{shown}");
@@ -549,7 +549,7 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
     let cwd = temp_shell_home("startup-health-ghost-tab");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -566,9 +566,12 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![
-            (b"\t\n".to_vec(), Duration::from_millis(1400)),
-            (b"exit\n".to_vec(), Duration::from_millis(700)),
+        &[
+            (
+                " › Analyze memory pressure and identify top consumers",
+                b"\t\n",
+            ),
+            ("Received shell prompt request", b"exit\n"),
         ],
     );
 
@@ -938,7 +941,7 @@ fn raw_cli_startup_hooks_no_findings_use_zh_language_env() {
 fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
     let home = temp_shell_home("default-agent-auto");
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -946,12 +949,11 @@ fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
             ("COSH_SHELL_STARTUP_BANNER", "1"),
             ("COSH_SHELL_LANG", "en-US"),
         ],
-        vec![
-            (
-                b"?? request tool approval\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? request tool approval\n"),
+            ("Deferred req-1", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
