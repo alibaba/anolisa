@@ -51,12 +51,66 @@ fn expand_pattern(
 
     let glob_pattern = if candidate.is_dir() {
         join_glob(&candidate, "**/*")?
-    } else if Path::new(pattern).is_absolute() {
-        pattern.to_string()
+    } else if candidate.is_absolute() {
+        let (base_str, glob_suffix) = split_path_pattern(pattern);
+        let base = resolve_path(base_str, cwd);
+        let escaped = Pattern::escape(
+            base.to_str()
+                .ok_or_else(|| format!("file pattern is not valid UTF-8: {}", base.display()))?,
+        );
+        if glob_suffix.is_empty() {
+            escaped
+        } else {
+            let sep = if escaped.ends_with(std::path::MAIN_SEPARATOR) {
+                ""
+            } else {
+                std::path::MAIN_SEPARATOR_STR
+            };
+            format!("{escaped}{sep}{glob_suffix}")
+        }
     } else {
         join_glob(cwd, pattern)?
     };
     expand_glob(&glob_pattern, matches, max_matches)
+}
+
+/// Split a user-supplied pattern into `(literal_base, glob_suffix)`.
+///
+/// Splits the pattern at the first path segment that contains glob
+/// metacharacters (`*`, `?`, `[`, `]`).  Everything above that segment
+/// becomes the literal base (to be resolved and escaped); everything
+/// from that segment onward is the glob suffix (preserved verbatim).
+///
+/// If no segment contains glob metacharacters, the entire pattern is
+/// the literal base and the glob suffix is empty.
+fn split_path_pattern(pattern: &str) -> (&str, String) {
+    let sep = std::path::MAIN_SEPARATOR;
+    let sep_len = sep.len_utf8();
+    let is_glob_char = |c: char| matches!(c, '*' | '?' | '[' | ']');
+
+    let Some(glob_index) = pattern
+        .split(sep)
+        .position(|segment| segment.chars().any(is_glob_char))
+    else {
+        return (pattern, String::new());
+    };
+    if glob_index == 0 {
+        return ("", pattern.to_string());
+    }
+
+    let suffix_start = pattern
+        .split(sep)
+        .take(glob_index)
+        .map(|segment| segment.len() + sep_len)
+        .sum::<usize>();
+    let base_end = suffix_start.saturating_sub(sep_len);
+    // A leading separator forms the literal base when the first path component is a glob.
+    let base = if base_end == 0 && pattern.starts_with(sep) {
+        std::path::MAIN_SEPARATOR_STR
+    } else {
+        &pattern[..base_end]
+    };
+    (base, pattern[suffix_start..].to_string())
 }
 
 fn join_glob(base: &Path, pattern: &str) -> Result<String, String> {
@@ -112,14 +166,9 @@ fn insert_match(matches: &mut BTreeSet<PathBuf>, path: PathBuf, max_matches: usi
     false
 }
 
-pub(super) fn resolve_path(path: &str, cwd: &Path) -> PathBuf {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
-}
+// resolve_path is provided by the parent module (super::resolve_path)
+// and supports ~ expansion.
+pub(super) use super::resolve_path;
 
 #[cfg(test)]
 mod tests {
@@ -171,5 +220,40 @@ mod tests {
         let matches = expand_file_patterns(&["*.rs".to_string()], &base, 10).unwrap();
 
         assert_eq!(matches.paths, [base.join("lib.rs")]);
+    }
+
+    #[test]
+    fn root_absolute_glob_preserves_literal_base() {
+        assert_eq!(split_path_pattern("/*.rs"), ("/", "*.rs".to_string()));
+        assert_eq!(
+            split_path_pattern("/tmp*/file"),
+            ("/", "tmp*/file".to_string())
+        );
+    }
+
+    #[test]
+    fn absolute_glob_uses_resolved_literal_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("lib.rs"), "lib").unwrap();
+        std::fs::write(sub.join("main.rs"), "main").unwrap();
+        std::fs::write(dir.path().join("readme.md"), "readme").unwrap();
+
+        let abs_glob = dir.path().join("src").join("*.rs");
+        let pattern = abs_glob.to_str().unwrap().to_string();
+
+        let matches = expand_file_patterns(&[pattern], &PathBuf::from("/nonexistent"), 10).unwrap();
+
+        assert_eq!(matches.paths.len(), 2);
+        for p in &matches.paths {
+            assert!(
+                p.starts_with(&sub),
+                "path {:?} should be under {:?}",
+                p,
+                sub
+            );
+            assert!(p.extension().is_some_and(|e| e == "rs"));
+        }
     }
 }

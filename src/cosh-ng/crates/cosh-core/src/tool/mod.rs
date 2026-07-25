@@ -24,6 +24,48 @@ use serde_json::Value;
 use crate::provider::ToolDeclaration;
 use crate::skill::{SkillConfig, SkillManager};
 
+/// Expand `~`, `~/...`, or `~user/...` to the appropriate home directory.
+///
+/// - `~` or `~/foo` → current user's home directory
+/// - `~user/foo` → specified user's home directory (via passwd lookup)
+/// - If the user is not found, falls back to treating the path as-is.
+pub(super) fn expand_tilde(path_str: &str) -> PathBuf {
+    if path_str == "~" {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from(path_str))
+    } else if let Some(rest) = path_str.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|home| home.join(rest.trim_start_matches(std::path::MAIN_SEPARATOR)))
+            .unwrap_or_else(|| PathBuf::from(path_str))
+    } else if let Some(user_path) = path_str.strip_prefix('~') {
+        // ~user or ~user/rest
+        let (username, rest) = match user_path.find('/') {
+            Some(idx) => (&user_path[..idx], Some(&user_path[idx + 1..])),
+            None => (user_path, None),
+        };
+        let home = nix::unistd::User::from_name(username)
+            .ok()
+            .flatten()
+            .map(|u| u.dir);
+        match (home, rest) {
+            (Some(h), Some(r)) => h.join(r.trim_start_matches(std::path::MAIN_SEPARATOR)),
+            (Some(h), None) => h,
+            (None, _) => PathBuf::from(path_str),
+        }
+    } else {
+        PathBuf::from(path_str)
+    }
+}
+
+/// Resolve a path string, expanding `~` and relative paths against `cwd`.
+pub(super) fn resolve_path(path_str: &str, cwd: &std::path::Path) -> PathBuf {
+    let expanded = expand_tilde(path_str);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolKind {
     ReadOnly,
@@ -262,6 +304,12 @@ impl ToolRegistry {
 mod tests {
     use super::*;
 
+    fn current_user() -> Option<nix::unistd::User> {
+        nix::unistd::User::from_uid(nix::unistd::Uid::current())
+            .ok()
+            .flatten()
+    }
+
     struct DummyTool;
 
     #[async_trait]
@@ -441,5 +489,85 @@ mod tests {
         let err = ToolResult::error("failed");
         assert!(err.is_error);
         assert_eq!(err.output, "failed");
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde() {
+        let result = expand_tilde("~");
+        let home = dirs::home_dir().expect("home dir should exist");
+        assert_eq!(result, home);
+    }
+
+    #[test]
+    fn expand_tilde_with_subpath() {
+        let result = expand_tilde("~/foo/bar");
+        let home = dirs::home_dir().expect("home dir should exist");
+        assert_eq!(result, home.join("foo/bar"));
+        assert_eq!(expand_tilde("~/src/*.rs"), home.join("src/*.rs"));
+    }
+
+    #[test]
+    fn expand_tilde_with_repeated_separator() {
+        let result = expand_tilde("~//tmp/file");
+        let home = dirs::home_dir().expect("home dir should exist");
+        assert_eq!(result, home.join("tmp/file"));
+    }
+
+    #[test]
+    fn expand_tilde_user_root() {
+        if let Some(user) = current_user() {
+            let tilde_user = format!("~{}", user.name);
+            let result = expand_tilde(&tilde_user);
+            assert_eq!(result, user.dir);
+        }
+    }
+
+    #[test]
+    fn expand_tilde_user_with_subpath() {
+        if let Some(user) = current_user() {
+            let tilde_user = format!("~{}/documents/file.txt", user.name);
+            let result = expand_tilde(&tilde_user);
+            assert_eq!(result, user.dir.join("documents/file.txt"));
+        }
+    }
+
+    #[test]
+    fn expand_tilde_user_with_repeated_separator() {
+        if let Some(user) = current_user() {
+            let tilde_user = format!("~{}//tmp/file", user.name);
+            let result = expand_tilde(&tilde_user);
+            assert_eq!(result, user.dir.join("tmp/file"));
+        }
+    }
+
+    #[test]
+    fn expand_tilde_unknown_user_falls_back() {
+        let result = expand_tilde("~nonexistent_user_xyz_12345/file.txt");
+        assert_eq!(
+            result,
+            PathBuf::from("~nonexistent_user_xyz_12345/file.txt")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde_passthrough() {
+        let result = expand_tilde("relative/path");
+        assert_eq!(result, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn resolve_path_tilde_is_absolute() {
+        let cwd = std::path::Path::new("/tmp");
+        let result = resolve_path("~/test.rs", cwd);
+        assert!(result.is_absolute());
+        assert!(!result.starts_with(cwd));
+        assert!(result.ends_with("test.rs"));
+    }
+
+    #[test]
+    fn resolve_path_relative_joins_cwd() {
+        let cwd = std::path::Path::new("/workspace");
+        let result = resolve_path("src/main.rs", cwd);
+        assert_eq!(result, PathBuf::from("/workspace/src/main.rs"));
     }
 }

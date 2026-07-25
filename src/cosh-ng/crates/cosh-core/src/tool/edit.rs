@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -108,14 +106,9 @@ impl Tool for EditTool {
     }
 }
 
-fn resolve_path(path_str: &str, cwd: &Path) -> std::path::PathBuf {
-    let p = std::path::Path::new(path_str);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    }
-}
+// resolve_path is provided by the parent module (super::resolve_path)
+// and supports ~ expansion.
+use super::resolve_path;
 
 #[cfg(test)]
 mod tests {
