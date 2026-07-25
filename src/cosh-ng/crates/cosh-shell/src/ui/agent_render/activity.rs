@@ -629,6 +629,9 @@ fn activity_status_label<'a>(i18n: &crate::I18n, status: &'a str) -> &'a str {
         "requested" => i18n.t(crate::MessageId::ActivityStatusRequested),
         "captured" => i18n.t(crate::MessageId::ActivityStatusCaptured),
         "completed" => i18n.t(crate::MessageId::ActivityStatusCompleted),
+        crate::types::SHELL_HANDOFF_UNTRACKED_STATUS => {
+            i18n.t(crate::MessageId::ActivityStatusCompletedUntracked)
+        }
         "error" => i18n.t(crate::MessageId::ActivityStatusError),
         "interrupted" => i18n.t(crate::MessageId::ActivityStatusInterrupted),
         _ => status,

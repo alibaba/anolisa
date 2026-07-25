@@ -44,7 +44,7 @@ fn render_raw_inline_events<W: Write>(
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(snapshot.events().len())
     {
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
@@ -411,7 +411,7 @@ mod tests {
         state
             .control
             .shell_handoff_mut()
-            .emit_next_approved()
+            .emit_next_approved(0)
             .expect("emit handoff");
         state
             .control
@@ -451,7 +451,7 @@ mod tests {
         state
             .control
             .shell_handoff_mut()
-            .emit_next_approved()
+            .emit_next_approved(0)
             .expect("emit handoff");
         state
             .control
