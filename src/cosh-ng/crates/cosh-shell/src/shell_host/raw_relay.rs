@@ -32,6 +32,25 @@ use terminal_recovery::{
 };
 use terminal_size::sync_outer_terminal_winsize;
 
+pub(super) struct RawActionWatchdog {
+    driver_done: Arc<Mutex<Option<Instant>>>,
+    grace: Duration,
+}
+
+impl RawActionWatchdog {
+    pub(super) fn new(driver_done: Arc<Mutex<Option<Instant>>>, grace: Duration) -> Self {
+        Self { driver_done, grace }
+    }
+
+    fn expired(&self) -> bool {
+        self.driver_done
+            .lock()
+            .ok()
+            .and_then(|done| *done)
+            .is_some_and(|done| done.elapsed() > self.grace)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
     master: &mut File,
@@ -47,6 +66,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     prompt: &str,
     recovery_request_file: &Path,
     handoff_request_file: &Path,
+    watchdog: Option<&RawActionWatchdog>,
 ) -> io::Result<()>
 where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
@@ -252,6 +272,16 @@ where
                 &mut prompt_replay,
             )?;
             return Ok(());
+        }
+        if let Some(watchdog) = watchdog {
+            if watchdog.expired() {
+                child.kill()?;
+                child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "raw action relay watchdog: shell did not exit after the trailing exit was relayed",
+                ));
+            }
         }
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
