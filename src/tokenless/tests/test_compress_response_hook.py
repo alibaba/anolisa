@@ -17,6 +17,7 @@ import os
 import stat
 import subprocess
 import sys
+import shutil
 import tempfile
 import textwrap
 import unittest
@@ -164,6 +165,10 @@ class TestReplacementProtocol(unittest.TestCase):
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
         self.mock_claude = _create_mock_claude(self.tmpdir)
 
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
+
     def test_claude_code_uses_updated_tool_output(self):
         """Claude Code adapter should use updatedToolOutput, not additionalContext."""
         large_payload = _make_large_json_payload()
@@ -253,19 +258,23 @@ class TestReplacementProtocol(unittest.TestCase):
         else:
             self.fail(f"updatedToolOutput unexpected type: {type(replacement)}")
 
-        # Verify stdout field was compressed (truncated to 20 chars by mock)
+        # Verify stdout field was compressed to exactly 20 chars by mock
+        # (mock truncates strings > 20 to their first 20 chars).
         self.assertIn("stdout", compressed_data,
                        "Compressed output should preserve stdout key")
-        self.assertLessEqual(len(compressed_data["stdout"]), 20,
-                             "stdout should be compressed to <= 20 chars")
+        self.assertEqual(compressed_data["stdout"], "x" * 20,
+                         "stdout should be truncated to exactly 'x' * 20")
 
-        # Verify schema fields are preserved
-        self.assertIn("exit_code", compressed_data)
-        self.assertIn("interrupted", compressed_data)
+        # Verify schema fields are preserved with correct values
+        self.assertEqual(compressed_data["exit_code"], 0)
+        self.assertEqual(compressed_data["interrupted"], False)
 
     def test_no_duplicate_content(self):
         """The original sentinel must not appear alongside compressed output."""
         sentinel = "UNIQUE_SENTINEL_12345"
+        # Mock truncates strings > 20 chars; sentinel is 21 chars,
+        # so truncated form is first 20 chars.
+        truncated_sentinel = sentinel[:20]
         payload = {"stdout": sentinel * 30, "stderr": "", "exit_code": 0, "interrupted": False}
 
         result = _run_hook(
@@ -289,18 +298,26 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertNotIn(sentinel, additional,
                          "additionalContext must not contain compressed content")
 
-        # updatedToolOutput should exist and contain compressed (truncated) sentinel
+        # updatedToolOutput should exist and contain the truncated sentinel
         self.assertIn("updatedToolOutput", hso,
                        "Claude Code should use updatedToolOutput")
         updated = hso["updatedToolOutput"]
+        if isinstance(updated, str):
+            updated_data = json.loads(updated)
+        else:
+            updated_data = updated
+
+        # The mock truncates the sentinel (21 chars) to its first 20 chars.
+        # Assert the truncated form IS present (proves content wasn't lost).
+        self.assertIn("stdout", updated_data,
+                       "updatedToolOutput should contain stdout field")
+        self.assertEqual(updated_data["stdout"], truncated_sentinel,
+                         "stdout should be the truncated sentinel (first 20 chars)")
+
+        # Full sentinel must NOT appear (proves content wasn't duplicated)
         updated_str = json.dumps(updated) if isinstance(updated, (dict, list)) else str(updated)
         self.assertNotIn(sentinel * 30, updated_str,
                          "updatedToolOutput must not contain the full original sentinel")
-
-        # Verify sentinel appears at most once (truncated) in the replacement
-        sentinel_count = updated_str.count(sentinel)
-        self.assertLessEqual(sentinel_count, 1,
-                             f"Sentinel should appear at most once in replacement, found {sentinel_count}")
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
@@ -312,6 +329,10 @@ class TestPassthrough(unittest.TestCase):
         self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "no-savings")
         self.mock_claude = _create_mock_claude(self.tmpdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
 
     def test_skip_when_no_compression_savings(self):
         """When compression does not reduce size, output should be empty (skip)."""
@@ -344,6 +365,10 @@ class TestSkipTools(unittest.TestCase):
         self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
         self.mock_claude = _create_mock_claude(self.tmpdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
 
     def test_skip_tools_no_replacement(self):
         """Skip-tools (Read) should not use updatedToolOutput."""
@@ -379,6 +404,10 @@ class TestNonReplacementAdapters(unittest.TestCase):
         self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
         self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
         self.mock_claude = _create_mock_claude(self.tmpdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
 
     def test_qwencode_uses_additional_context(self):
         """Qwen Code should use additionalContext (legacy path)."""
