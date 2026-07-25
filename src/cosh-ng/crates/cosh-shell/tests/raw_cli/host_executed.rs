@@ -41,7 +41,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "qwen",
         &[],
         &[
@@ -49,18 +49,14 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
             ("PATH", &path),
             ("COSH_SHELL_DEBUG", "1"),
         ],
-        vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+        &[
+            ("cosh-osc$ ", b"/mode approval auto\n"),
+            ("Mode set to auto.", b"?? provider-host-executed-shell\n"),
             (
-                b"?? provider-host-executed-shell\n".to_vec(),
-                Duration::from_millis(500),
+                "Host-executed shell result received in same provider turn.",
+                b"",
             ),
-            (
-                b"/details handoff-1\n".to_vec(),
-                Duration::from_millis(6_000),
-            ),
-            (b"/debug session\n".to_vec(), Duration::from_millis(1_000)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+            ("cosh-osc$ ", b"/details handoff-1\n/debug session\nexit\n"),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -142,17 +138,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "qwen",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
-            (
-                b"?? host-executed-stream-order\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b"exit\n".to_vec(), Duration::from_millis(4_000)),
+        &[
+            ("cosh-osc$ ", b"/mode approval auto\n"),
+            ("Mode set to auto.", b"?? host-executed-stream-order\n"),
+            ("HOST EXECUTED POST TEXT WAITS", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -214,22 +208,22 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-manual-ho
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "qwen",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+        &[
+            ("cosh-osc$ ", b"/mode approval auto\n"),
             (
-                b"?? manual-provider-host-executed-shell\n".to_vec(),
-                Duration::from_millis(300),
+                "Mode set to auto.",
+                b"?? manual-provider-host-executed-shell\n",
             ),
-            (b"\n".to_vec(), Duration::from_millis(4_000)),
+            ("req-1", b"\n"),
             (
-                b"/details handoff-1\n".to_vec(),
-                Duration::from_millis(8_000),
+                "Manual host-executed shell result received in same provider turn.",
+                b"",
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+            ("cosh-osc$ ", b"/details handoff-1\nexit\n"),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -300,22 +294,20 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "qwen",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/mode approval auto\n"),
+            ("Mode set to auto.", b"?? provider-host-executed-nonzero\n"),
+            ("req-1", b"\n"),
             (
-                b"?? provider-host-executed-nonzero\n".to_vec(),
-                Duration::from_millis(500),
+                "Host-executed nonzero result received as normal tool result.",
+                b"",
             ),
-            (b"\n".to_vec(), Duration::from_millis(2_000)),
-            (
-                b"/details handoff-1\n".to_vec(),
-                Duration::from_millis(6_000),
-            ),
-            (b"true\nexit\n".to_vec(), Duration::from_millis(500)),
+            ("cosh-osc$ ", b"/details handoff-1\ntrue\nexit\n"),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -385,22 +377,23 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "qwen",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/mode approval auto\n"),
             (
-                b"?? provider-host-executed-interrupt\n".to_vec(),
-                Duration::from_millis(500),
+                "Mode set to auto.",
+                b"?? provider-host-executed-interrupt\n",
             ),
-            (b"\n".to_vec(), Duration::from_millis(2_000)),
+            ("req-1", b"\n"),
             (
-                b"/details handoff-1\n".to_vec(),
-                Duration::from_millis(6_000),
+                "Host-executed interrupt result received as normal tool result.",
+                b"",
             ),
-            (b"true\nexit\n".to_vec(), Duration::from_millis(500)),
+            ("cosh-osc$ ", b"/details handoff-1\ntrue\nexit\n"),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -563,6 +556,8 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
+    // Keep delayed input: the provider dies mid-turn here, so there is no
+    // completion-text anchor before the recovery path finishes.
     let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "qwen",
         &[],
