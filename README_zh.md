@@ -1,8 +1,22 @@
 <div align="center">
 
-<img src="docs/images/readme/agentic-os.png" alt="ANOLISA Agentic OS" width="360"/>
+<picture>
+  <source
+    media="(prefers-color-scheme: dark)"
+    srcset="docs/images/brand/anolisa-lockup-dark.svg"
+  >
+  <source
+    media="(prefers-color-scheme: light)"
+    srcset="docs/images/brand/anolisa-lockup-light.svg"
+  >
+  <img
+    src="docs/images/brand/anolisa-lockup-light.svg"
+    alt="ANOLISA"
+    width="320"
+  >
+</picture>
 
-# ANOLISA
+<sub>**A**gentic **N**exus **O**perating **L**ayer & **I**nterface **S**ystem **A**rchitecture</sub>
 
 **面向 Agent 工作负载的操作系统层。**
 
