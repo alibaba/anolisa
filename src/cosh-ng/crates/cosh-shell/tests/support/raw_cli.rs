@@ -471,7 +471,41 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_marker_input(
     current_dir: &Path,
     steps: &[(&str, &[u8])],
 ) -> String {
-    let _run_guard = raw_cli_shared_run_guard();
+    run_raw_cli_marker_input_inner(
+        adapter,
+        extra_args,
+        envs,
+        current_dir,
+        steps,
+        RawCliRunMode::Shared,
+    )
+}
+
+pub(crate) fn run_raw_cli_serial_with_args_env_and_marker_input(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    steps: &[(&str, &[u8])],
+) -> String {
+    run_raw_cli_marker_input_inner(
+        adapter,
+        extra_args,
+        envs,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        steps,
+        RawCliRunMode::Exclusive,
+    )
+}
+
+fn run_raw_cli_marker_input_inner(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+    steps: &[(&str, &[u8])],
+    run_mode: RawCliRunMode,
+) -> String {
+    let _run_guard = raw_cli_run_guard(run_mode);
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut command = Command::new(binary);
     command
