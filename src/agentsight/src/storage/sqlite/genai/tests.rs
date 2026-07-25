@@ -1403,3 +1403,285 @@ fn test_token_usage_by_process_type() {
 
     std::fs::remove_file(&path).ok();
 }
+
+// ─── token_usage_by_process_type follow-up tests (PR #661) ────────────────────
+
+/// Build a completed LLMCall with the given process_type and token usage,
+/// mirroring the construction pattern of test_token_usage_by_process_type.
+fn make_ptype_call(
+    call_id: &str,
+    start_ns: u64,
+    process_type: Option<&str>,
+    tokens: (u32, u32, u32),
+) -> LLMCall {
+    let mut call = LLMCall::new(
+        call_id.to_string(),
+        start_ns,
+        "openai".to_string(),
+        "gpt-4".to_string(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        },
+        100,
+        "agent".to_string(),
+    );
+    call.process_type = process_type.map(str::to_string);
+    call.token_usage = Some(crate::genai::semantic::TokenUsage {
+        input_tokens: tokens.0,
+        output_tokens: tokens.1,
+        total_tokens: tokens.2,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+    call.end_timestamp_ns = start_ns + 1000;
+    call.duration_ns = 1000;
+    call
+}
+
+fn temp_db_path(prefix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+/// Legacy rows written before the v9 migration have process_type = NULL.
+/// The aggregation must fold them into an 'unknown' group via COALESCE
+/// instead of dropping them or returning a NULL group key.
+#[test]
+fn test_token_by_type_null_process_type_coalesce() {
+    let path = temp_db_path("test_ptype_coalesce");
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+    // NULL process_type (legacy row) + one classified 'agent' row
+    store
+        .store_event(&GenAISemanticEvent::LLMCall(make_ptype_call(
+            "c-null",
+            1000,
+            None,
+            (10, 5, 15),
+        )))
+        .unwrap();
+    store
+        .store_event(&GenAISemanticEvent::LLMCall(make_ptype_call(
+            "c-agent",
+            2000,
+            Some("agent"),
+            (100, 50, 150),
+        )))
+        .unwrap();
+
+    let result = store.token_usage_by_process_type(0, 10_000).unwrap();
+    assert_eq!(
+        result.len(),
+        2,
+        "NULL process_type must form its own 'unknown' group, not vanish"
+    );
+    let unknown = result
+        .iter()
+        .find(|r| r.0 == "unknown")
+        .expect("NULL process_type rows must be COALESCEd into 'unknown'");
+    assert_eq!(unknown.1, 1); // call_count
+    assert_eq!(unknown.2, 10); // input_tokens
+    assert_eq!(unknown.3, 5); // output_tokens
+    assert_eq!(unknown.4, 15); // total_tokens
+    let agent = result.iter().find(|r| r.0 == "agent").unwrap();
+    assert_eq!(agent.4, 150);
+
+    cleanup_db(&path);
+}
+
+/// Rows must be returned sorted by aggregated total_tokens in descending
+/// order (ORDER BY ... DESC), regardless of insertion order.
+#[test]
+fn test_token_by_type_order_desc() {
+    let path = temp_db_path("test_ptype_order");
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+    // Insert in ascending token order to rule out incidental ordering
+    store
+        .store_event(&GenAISemanticEvent::LLMCall(make_ptype_call(
+            "c-tool",
+            1000,
+            Some("tool"),
+            (30, 10, 40),
+        )))
+        .unwrap();
+    store
+        .store_event(&GenAISemanticEvent::LLMCall(make_ptype_call(
+            "c-agent",
+            2000,
+            Some("agent"),
+            (100, 50, 150),
+        )))
+        .unwrap();
+    store
+        .store_event(&GenAISemanticEvent::LLMCall(make_ptype_call(
+            "c-sub",
+            3000,
+            Some("sub_agent"),
+            (400, 100, 500),
+        )))
+        .unwrap();
+
+    let result = store.token_usage_by_process_type(0, 10_000).unwrap();
+    assert_eq!(result.len(), 3);
+    let order: Vec<&str> = result.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["sub_agent", "agent", "tool"],
+        "rows must be sorted by total_tokens DESC"
+    );
+    assert_eq!(result[0].4, 500);
+    assert_eq!(result[1].4, 150);
+    assert_eq!(result[2].4, 40);
+
+    cleanup_db(&path);
+}
+
+/// Upgrade path: a v8-era database (all columns up to pending_match_key,
+/// no process_type) must be migrated by init_tables (via ensure_col!,
+/// schema.rs v9 block) so that:
+///   1. the process_type column exists afterwards,
+///   2. legacy rows keep process_type = NULL and stay readable,
+///   3. the aggregation folds them into the 'unknown' group,
+///   4. re-running the migration is idempotent.
+#[test]
+fn test_schema_v9_migration_from_v8() {
+    let path = temp_db_path("test_v8_to_v9");
+    cleanup_db(&path);
+
+    // Hand-build a v8-shape database: the base CREATE TABLE from
+    // schema.rs init_tables (columns id..created_at, which already contains
+    // every v2-v8 column except tool_call_ids) plus the v5 tool_call_ids
+    // column added by ensure_col!. Only the v9 process_type column is absent.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE genai_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'complete',
+                call_id TEXT,
+                trace_id TEXT,
+                conversation_id TEXT,
+                session_id TEXT,
+                instance TEXT,
+                start_timestamp_ns INTEGER NOT NULL,
+                end_timestamp_ns INTEGER,
+                duration_ns INTEGER,
+                pid INTEGER,
+                process_name TEXT,
+                agent_name TEXT,
+                operation_name TEXT,
+                provider TEXT,
+                model TEXT,
+                request_model TEXT,
+                response_model TEXT,
+                temperature REAL,
+                max_tokens INTEGER,
+                top_p REAL,
+                frequency_penalty REAL,
+                presence_penalty REAL,
+                finish_reasons TEXT,
+                server_address TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                cache_creation_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                system_instructions TEXT,
+                input_messages TEXT,
+                output_messages TEXT,
+                user_query TEXT,
+                http_method TEXT,
+                http_path TEXT,
+                status_code INTEGER,
+                is_sse INTEGER,
+                sse_event_count INTEGER,
+                interruption_type TEXT,
+                call_kind TEXT NOT NULL DEFAULT 'main',
+                pending_origin TEXT NOT NULL DEFAULT 'request_capture',
+                pending_match_key TEXT,
+                tool_call_ids TEXT,
+                event_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (
+                event_type, status, call_id, start_timestamp_ns,
+                input_tokens, output_tokens, total_tokens, event_json
+             ) VALUES ('llm_call', 'complete', 'legacy-1', 1000, 10, 5, 15, '{}')",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Real migration entry point: new_with_path -> init_tables -> ensure_col!
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        let col_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('genai_events') \
+                 WHERE name = 'process_type'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col_count, 1, "v9 migration must add process_type column");
+        let pt: Option<String> = conn
+            .query_row(
+                "SELECT process_type FROM genai_events WHERE call_id = 'legacy-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(pt.is_none(), "legacy row must keep process_type = NULL");
+    }
+
+    // Legacy data must flow through the aggregation as 'unknown'
+    let result = store.token_usage_by_process_type(0, 10_000).unwrap();
+    assert_eq!(result, vec![("unknown".to_string(), 1, 10, 5, 15)]);
+    drop(store);
+
+    // Idempotency: opening again re-runs init_tables on a v9 database
+    let store2 = GenAISqliteStore::new_with_path(&path)
+        .expect("second migration run must not fail (idempotent)");
+    {
+        let conn = store2.conn.lock().unwrap();
+        let col_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('genai_events') \
+                 WHERE name = 'process_type'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col_count, 1, "re-migration must not duplicate the column");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM genai_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "re-migration must not touch existing rows");
+    }
+
+    cleanup_db(&path);
+}

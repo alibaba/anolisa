@@ -3027,4 +3027,118 @@ mod tests {
         });
         assert!(!events_are_empty_llm(&[empty, tool]));
     }
+
+    // ── Tests for crash-routing decision helpers ─────────────────────────────
+
+    use crate::interruption::Severity;
+    use crate::lineage::{LineageTree, ProcessType};
+
+    /// Build a lineage tree with a root Agent (pid 100, "openclaw"), a
+    /// SubAgent child (pid 200) and a Tool child (pid 300).
+    fn crash_routing_tree() -> LineageTree {
+        let mut tree = LineageTree::new();
+        assert_eq!(
+            tree.insert_and_classify(
+                100,
+                1,
+                "openclaw",
+                Some("openclaw".to_string()),
+                false,
+                true
+            ),
+            ProcessType::Agent
+        );
+        assert_eq!(
+            tree.insert_and_classify(
+                200,
+                100,
+                "openclaw",
+                Some("openclaw".to_string()),
+                false,
+                true
+            ),
+            ProcessType::SubAgent
+        );
+        assert_eq!(
+            tree.insert_and_classify(300, 100, "grep", None, false, false),
+            ProcessType::Tool
+        );
+        tree
+    }
+
+    #[test]
+    fn test_subagent_signal_crash_reports() {
+        let tree = crash_routing_tree();
+        // SIGKILL(9) on a SubAgent: reported under the root Agent's name.
+        assert_eq!(
+            child_crash_agent_name(&tree, 200, 9),
+            Some("openclaw".to_string())
+        );
+        // The root Agent itself is never routed through the child-crash path.
+        assert_eq!(child_crash_agent_name(&tree, 100, 9), None);
+    }
+
+    #[test]
+    fn test_child_abnormal_exit_not_reported() {
+        let tree = crash_routing_tree();
+        // exit_code=256 == exit(1): AbnormalExit on a child is normal cleanup
+        // after the parent dies, not a crash — must not be reported.
+        assert_eq!(child_crash_agent_name(&tree, 200, 256), None);
+        assert_eq!(child_crash_agent_name(&tree, 300, 256), None);
+    }
+
+    #[test]
+    fn test_agent_signal_crash_severity_critical() {
+        // Agent crashes keep their original severity — no downgrade.
+        assert_eq!(
+            downgrade_severity(Severity::Critical, ProcessType::Agent),
+            Severity::Critical
+        );
+    }
+
+    #[test]
+    fn test_severity_downgrade_by_process_type() {
+        // SubAgent: only Critical is downgraded (to High).
+        assert_eq!(
+            downgrade_severity(Severity::Critical, ProcessType::SubAgent),
+            Severity::High
+        );
+        assert_eq!(
+            downgrade_severity(Severity::High, ProcessType::SubAgent),
+            Severity::High
+        );
+        // Tool: always Medium, whatever the classification said.
+        assert_eq!(
+            downgrade_severity(Severity::Critical, ProcessType::Tool),
+            Severity::Medium
+        );
+        assert_eq!(
+            downgrade_severity(Severity::High, ProcessType::Tool),
+            Severity::Medium
+        );
+        assert_eq!(
+            downgrade_severity(Severity::Low, ProcessType::Tool),
+            Severity::Medium
+        );
+    }
+
+    #[test]
+    fn test_blast_radius_mapping() {
+        assert_eq!(blast_radius_for(ProcessType::Agent), "total_session_loss");
+        assert_eq!(blast_radius_for(ProcessType::SubAgent), "partial");
+        assert_eq!(blast_radius_for(ProcessType::Tool), "recoverable");
+        assert_eq!(blast_radius_for(ProcessType::Unknown), "unknown");
+    }
+
+    #[test]
+    fn test_proctrace_exit_defers_lineage_removal() {
+        let mut tree = crash_routing_tree();
+        // proctrace Exit must NOT remove the node — otherwise a proctrace exit
+        // racing ahead of procmon exit would silently drop the crash event.
+        defer_proctrace_exit_removal(&mut tree, 200);
+        assert!(tree.get(200).is_some());
+        // The authoritative removal happens in the procmon Exit handler.
+        assert!(tree.remove(200).is_some());
+        assert!(tree.get(200).is_none());
+    }
 }
