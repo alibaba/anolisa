@@ -130,7 +130,7 @@ pub enum RawInputCapture {
     },
     Approval {
         id: String,
-        is_hook: bool,
+        action_set: crate::ui::ApprovalActionSet,
     },
     Mode {
         id: String,

@@ -23,9 +23,14 @@ pub(crate) fn apply_approval_decision(
     kind: ApprovalCommandKind,
 ) -> Option<AppliedApprovalDecision> {
     let mut trust_key = None;
-    let (status, mut title) = match kind {
+    let (status, title) = match kind {
         ApprovalCommandKind::Approve => {
             approval_status_for_allowed_request(&state.approvals.requests[request_index])
+        }
+        ApprovalCommandKind::ApproveTurn => {
+            let (status, _) =
+                approval_status_for_allowed_request(&state.approvals.requests[request_index]);
+            (status, MessageId::ApprovalResolutionTurnApprovedTitle)
         }
         ApprovalCommandKind::AlwaysTrust => {
             let (status, _) =
@@ -44,7 +49,68 @@ pub(crate) fn apply_approval_decision(
         ApprovalCommandKind::Details => return None,
         ApprovalCommandKind::SendToShell => return None,
     };
+    let grant_turn_consent = kind == ApprovalCommandKind::ApproveTurn;
+    let actor = if grant_turn_consent {
+        "user_batch"
+    } else {
+        "user"
+    };
 
+    finalize_approval_decision(
+        state,
+        request_index,
+        status,
+        title,
+        trust_key,
+        grant_turn_consent,
+        actor,
+    )
+}
+
+/// Batch-consent sweep resolution: same pipeline as a user decision, but
+/// journalled as `batch_consent` and never (re-)granting turn consent.
+pub(crate) fn apply_batch_consent_decision(
+    state: &mut InlineState,
+    request_index: usize,
+) -> Option<AppliedApprovalDecision> {
+    let (status, _) = approval_status_for_allowed_request(&state.approvals.requests[request_index]);
+    finalize_approval_decision(
+        state,
+        request_index,
+        status,
+        MessageId::ApprovalResolutionTurnApprovedTitle,
+        None,
+        false,
+        "batch_consent",
+    )
+}
+
+/// Turn-scope batch consent covers pending, non-hook, non-high-risk
+/// executable bash tool requests from the consented run (issue #1773).
+///
+/// Contract: `run_id` must be a run the user has explicitly consented to
+/// (`ControlState::run_batch_consent`, or the run of the just-approved
+/// `ApproveTurn` request). The predicate deliberately does not read the
+/// live consent state: the user-path sweep must keep covering the
+/// consented run even when delivering an entry stops the run (which
+/// clears the consent). Callers must never pass an unconsented run id.
+pub(crate) fn batch_consent_covers_request(request: &RuntimeApprovalRequest, run_id: &str) -> bool {
+    request.status == ApprovalRequestStatus::Pending
+        && request_is_executable_bash_tool(request)
+        && !request.hook_requires_approval
+        && request.risk != "high"
+        && request.run_id == run_id
+}
+
+fn finalize_approval_decision(
+    state: &mut InlineState,
+    request_index: usize,
+    status: ApprovalRequestStatus,
+    mut title: MessageId,
+    trust_key: Option<String>,
+    grant_turn_consent: bool,
+    actor: &'static str,
+) -> Option<AppliedApprovalDecision> {
     state.approvals.requests[request_index].status = status;
     let outcome = approval_outcome_for_request(state, &state.approvals.requests[request_index]);
     let metadata = approval_execution_metadata(
@@ -84,11 +150,16 @@ pub(crate) fn apply_approval_decision(
         if let Some(key) = trust_key {
             state.control.trust_session_command(key);
         }
+        if grant_turn_consent {
+            state
+                .control
+                .grant_run_batch_consent(request.run_id.clone());
+        }
     }
     state
         .approvals
         .journal
-        .push(approval_journal_entry(&request, "user"));
+        .push(approval_journal_entry(&request, actor));
     let run_approved_tool = request.status == ApprovalRequestStatus::Approved
         && request_is_executable_bash_tool(&request);
 

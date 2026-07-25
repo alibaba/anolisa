@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
 
-use super::actions::{ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
+use super::actions::{pack_action_rows, ApprovalActionSet, ApprovalPanelAction};
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, char_width, display_width, RatatuiInlineRenderer,
@@ -29,6 +29,9 @@ pub struct ApprovalPanelModel<'a> {
     pub next_label: Option<&'a str>,
     pub selected_action: ApprovalPanelAction,
     pub expanded: bool,
+    /// Offer the turn-scope batch consent action (issue #1773): true when
+    /// the run already has ≥ 2 approval requests (queued or resolved).
+    pub turn_consent: bool,
     pub hook_warnings: Vec<HookWarningView<'a>>,
 }
 
@@ -59,7 +62,7 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_panel_height(&model, width);
+        let height = approval_panel_height(&model, width, self.i18n());
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_approval_panel(model, self.i18n(), area, &mut buffer);
@@ -72,7 +75,7 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_panel_height(&model, width);
+        let height = approval_panel_height(&model, width, self.i18n());
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_approval_panel(model, self.i18n(), area, &mut buffer);
@@ -120,7 +123,12 @@ impl RatatuiInlineRenderer {
                 }
                 lines.push(queue);
             }
-            lines.push(approval_action_line(model.selected_action, i18n));
+            lines.extend(approval_action_plain_rows(
+                model_action_set(&model),
+                model.selected_action,
+                i18n,
+                self.content_width(),
+            ));
             if model.expanded {
                 lines.push(
                     i18n.t(crate::MessageId::ApprovalCommandDefaultPolicy)
@@ -189,7 +197,12 @@ impl RatatuiInlineRenderer {
                 i18n.t(crate::MessageId::ApprovalNextLabel)
             ));
         }
-        lines.push(approval_action_line(model.selected_action, i18n));
+        lines.extend(approval_action_plain_rows(
+            model_action_set(&model),
+            model.selected_action,
+            i18n,
+            self.content_width(),
+        ));
         if model.expanded {
             lines.push(
                 i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)
@@ -205,8 +218,10 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
+fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16, i18n: crate::I18n) -> u16 {
     let content_width = approval_content_width(width);
+    let action_rows =
+        approval_action_row_count(model_action_set(model), i18n, content_width) as u16;
     let hook_warning_rows = model
         .hook_warnings
         .iter()
@@ -215,7 +230,7 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
     if is_hook_approval_request(model) {
         // heading + hook_warnings + queue(opt) + actions + keys + border(2)
         let queue_rows = u16::from(model.queue_total > 1);
-        return 4 + hook_warning_rows + queue_rows;
+        return 3 + action_rows + hook_warning_rows + queue_rows;
     }
     if is_command_approval_request(model) {
         let command_rows = command_preview_rows(
@@ -238,7 +253,13 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
             })
             .unwrap_or(0);
         let expanded_rows = if model.expanded { 2 } else { 0 };
-        return 4 + command_rows + queue_rows + reason_rows + expanded_rows + hook_warning_rows;
+        return 3
+            + action_rows
+            + command_rows
+            + queue_rows
+            + reason_rows
+            + expanded_rows
+            + hook_warning_rows;
     }
 
     let preview_rows = wrapped_preview_rows(
@@ -260,10 +281,10 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
             .len() as u16
         })
         .unwrap_or(0);
-    // V6a slim generic card: border(2) + metadata(1) + actions(1) + content;
+    // V6a slim generic card: border(2) + metadata(1) + actions(N) + content;
     // keys(1) + policy(2) only when expanded (ARP-R8).
     let expanded_rows = if model.expanded { 3 } else { 0 };
-    4 + preview_rows + next_rows + reason_rows + expanded_rows + hook_warning_rows
+    3 + action_rows + preview_rows + next_rows + reason_rows + expanded_rows + hook_warning_rows
 }
 
 fn render_approval_panel(
@@ -320,13 +341,19 @@ fn render_approval_panel(
     // V6a slim generic card: metadata row, optional continuation line,
     // hook warnings, preview, optional next, actions; keys + policy only
     // when expanded (ARP-R8).
+    let action_lines = approval_action_styled_rows(
+        model_action_set(&model),
+        model.selected_action,
+        i18n,
+        inner.width as usize,
+    );
     let mut constraints = vec![
         Constraint::Length(1),
         Constraint::Length(reason_height),
         Constraint::Length(hook_warning_height),
         Constraint::Length(preview_height),
         Constraint::Length(next_height),
-        Constraint::Length(1),
+        Constraint::Length(action_lines.len() as u16),
     ];
     if model.expanded {
         constraints.push(Constraint::Length(1));
@@ -410,7 +437,7 @@ fn render_approval_panel(
         .render(chunks[4], buffer);
     }
 
-    Paragraph::new(approval_action_spans(model.selected_action, i18n)).render(chunks[5], buffer);
+    Paragraph::new(Text::from(action_lines)).render(chunks[5], buffer);
 
     if model.expanded {
         Paragraph::new(Line::from(vec![
@@ -469,13 +496,19 @@ fn render_command_tool_approval_panel(
         .map(|w| 1 + w.message.lines().count())
         .sum::<usize>() as u16;
     let queue_height = u16::from(model.queue_total > 1);
+    let action_lines = approval_action_styled_rows(
+        model_action_set(&model),
+        model.selected_action,
+        i18n,
+        inner.width as usize,
+    );
     let mut constraints = vec![
         Constraint::Length(1),
         Constraint::Length(hook_warning_height),
         Constraint::Length(reason_rows.len() as u16),
         Constraint::Length(command_rows.len().max(1) as u16),
         Constraint::Length(queue_height),
-        Constraint::Length(1),
+        Constraint::Length(action_lines.len() as u16),
     ];
     if model.expanded {
         constraints.push(Constraint::Length(1));
@@ -550,8 +583,7 @@ fn render_command_tool_approval_panel(
         .render(chunks[4], buffer);
     }
 
-    Paragraph::new(approval_action_spans(model.selected_action, i18n))
-        .render(chunks[action_index], buffer);
+    Paragraph::new(Text::from(action_lines)).render(chunks[action_index], buffer);
 
     if model.expanded {
         Paragraph::new(Line::from(vec![
@@ -660,10 +692,7 @@ fn render_hook_approval_panel(
 fn hook_approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) -> Line<'static> {
     let mut spans = Vec::new();
     let mut first = true;
-    for descriptor in APPROVAL_PANEL_ACTIONS.iter() {
-        if descriptor.action == ApprovalPanelAction::AlwaysTrust {
-            continue;
-        }
+    for descriptor in ApprovalActionSet::Hook.descriptors() {
         if !first {
             spans.push(Span::raw("  "));
         }
@@ -679,9 +708,9 @@ fn hook_approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) 
 
 /// Plain-text action line excluding "Always trust" for hook approval panels.
 fn hook_approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -> String {
-    APPROVAL_PANEL_ACTIONS
+    ApprovalActionSet::Hook
+        .descriptors()
         .iter()
-        .filter(|d| d.action != ApprovalPanelAction::AlwaysTrust)
         .map(|descriptor| {
             let label = approval_action_label(descriptor.action, i18n);
             if descriptor.action == selected {
@@ -694,34 +723,97 @@ fn hook_approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -
         .join("  ")
 }
 
-fn approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (idx, descriptor) in APPROVAL_PANEL_ACTIONS.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(action_span(
-            approval_action_label(descriptor.action, i18n),
-            descriptor.action,
-            selected == descriptor.action,
-        ));
+/// Action set offered by this card (single source of truth mirrors
+/// `approval_action_set_for` on the request side, issue #1773).
+fn model_action_set(model: &ApprovalPanelModel<'_>) -> ApprovalActionSet {
+    if is_hook_approval_request(model) {
+        ApprovalActionSet::Hook
+    } else if model.turn_consent {
+        ApprovalActionSet::TurnConsent
+    } else {
+        ApprovalActionSet::Standard
     }
-    Line::from(spans)
 }
 
-fn approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -> String {
-    APPROVAL_PANEL_ACTIONS
+/// Pack the set's actions into display rows by label width; callers
+/// pre-wrap so `Paragraph::wrap` never touches action rows.
+fn packed_approval_actions(
+    set: ApprovalActionSet,
+    i18n: crate::I18n,
+    content_width: usize,
+) -> Vec<Vec<ApprovalPanelAction>> {
+    let descriptors = set.descriptors();
+    let widths = descriptors
         .iter()
-        .map(|descriptor| {
-            let label = approval_action_label(descriptor.action, i18n);
-            if descriptor.action == selected {
-                format!("[{label}]")
-            } else {
-                label.to_string()
-            }
+        .map(|descriptor| display_width(approval_action_label(descriptor.action, i18n)))
+        .collect::<Vec<_>>();
+    pack_action_rows(&widths, content_width)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|index| descriptors[index].action)
+                .collect()
         })
-        .collect::<Vec<_>>()
-        .join("  ")
+        .collect()
+}
+
+fn approval_action_row_count(
+    set: ApprovalActionSet,
+    i18n: crate::I18n,
+    content_width: usize,
+) -> usize {
+    packed_approval_actions(set, i18n, content_width)
+        .len()
+        .max(1)
+}
+
+fn approval_action_styled_rows(
+    set: ApprovalActionSet,
+    selected: ApprovalPanelAction,
+    i18n: crate::I18n,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    packed_approval_actions(set, i18n, content_width)
+        .into_iter()
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (position, action) in row.into_iter().enumerate() {
+                if position > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(action_span(
+                    approval_action_label(action, i18n),
+                    action,
+                    selected == action,
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn approval_action_plain_rows(
+    set: ApprovalActionSet,
+    selected: ApprovalPanelAction,
+    i18n: crate::I18n,
+    content_width: usize,
+) -> Vec<String> {
+    packed_approval_actions(set, i18n, content_width)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|action| {
+                    let label = approval_action_label(action, i18n);
+                    if action == selected {
+                        format!("[{label}]")
+                    } else {
+                        label.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+        })
+        .collect()
 }
 
 /// V6a continuation line under the metadata row: `└ 风险: <phrase>`.
@@ -825,6 +917,7 @@ fn metadata_subject(
 fn approval_action_label(action: ApprovalPanelAction, i18n: crate::I18n) -> &'static str {
     match action {
         ApprovalPanelAction::Approve => i18n.t(crate::MessageId::ApprovalActionAllowOnce),
+        ApprovalPanelAction::ApproveTurn => i18n.t(crate::MessageId::ApprovalActionApproveTurn),
         ApprovalPanelAction::AlwaysTrust => i18n.t(crate::MessageId::ApprovalActionAlwaysTrust),
         ApprovalPanelAction::Deny => i18n.t(crate::MessageId::ApprovalActionDeny),
         ApprovalPanelAction::Details => i18n.t(crate::MessageId::ApprovalActionDetails),
@@ -842,6 +935,7 @@ fn action_span(label: &str, action: ApprovalPanelAction, selected: bool) -> Span
 fn selected_action_style(action: ApprovalPanelAction) -> Style {
     let background = match action {
         ApprovalPanelAction::Approve => Color::Green,
+        ApprovalPanelAction::ApproveTurn => Color::Green,
         ApprovalPanelAction::AlwaysTrust => Color::Cyan,
         ApprovalPanelAction::Deny => Color::Red,
         ApprovalPanelAction::Details => Color::Blue,

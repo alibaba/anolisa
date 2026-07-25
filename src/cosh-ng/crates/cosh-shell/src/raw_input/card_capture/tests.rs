@@ -301,7 +301,7 @@ fn question_capture_ignores_removed_answer_slash() {
 fn approval_capture_ignores_removed_decision_slashes() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),
-        is_hook: false,
+        action_set: crate::ui::ApprovalActionSet::Standard,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -581,11 +581,111 @@ fn session_clear_confirmation_accepts_and_cancels() {
     );
 }
 
+/// TurnConsent 动作集（issue #1773）：线性索引到达 index 1 时回车产生
+/// CardApproveTurn；max index 为 4（Details），不受渲染折行影响。
+#[test]
+fn approval_capture_turn_consent_selects_approve_turn_and_details() {
+    let capture = RawInputCapture::Approval {
+        id: "req-1".to_string(),
+        action_set: crate::ui::ApprovalActionSet::TurnConsent,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x1b[C\n"),
+        vec![
+            RawInputEvent::CardFocus("req-1".to_string(), 1),
+            RawInputEvent::CardApproveTurn("req-1".to_string())
+        ]
+    );
+
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+    // 右移 6 次在 max index 4（Details）处饱和。
+    let events = state.consume(&capture, b"\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C\n");
+    assert_eq!(
+        events.last(),
+        Some(&RawInputEvent::CardDetails("req-1".to_string()))
+    );
+}
+
+/// 已有焦点后新请求到达（Standard -> TurnConsent）：选择索引按动作值重映射，
+/// 回车提交的仍是切换前高亮的动作，而不是新动作集里同索引的动作。
+#[test]
+fn approval_capture_remaps_selection_when_action_set_switches() {
+    let standard = RawInputCapture::Approval {
+        id: "req-1".to_string(),
+        action_set: crate::ui::ApprovalActionSet::Standard,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&standard);
+    // 右移两次到 Deny（Standard index 2）。
+    state.consume(&standard, b"\x1b[C\x1b[C");
+
+    // 第二个同 run 请求到达，同一张卡切到 TurnConsent（Deny 变为 index 3）。
+    let turn = RawInputCapture::Approval {
+        id: "req-1".to_string(),
+        action_set: crate::ui::ApprovalActionSet::TurnConsent,
+    };
+    state.apply_capture(&turn);
+    assert_eq!(
+        state.consume(&turn, b"\n"),
+        vec![RawInputEvent::CardDeny("req-1".to_string())]
+    );
+}
+
+/// 反向收缩（TurnConsent -> Standard）：原选中动作在新动作集缺失
+/// （ApproveTurn）时回退到 Approve，与渲染侧 focus 回退一致。
+#[test]
+fn approval_capture_action_set_shrink_falls_back_to_approve() {
+    let turn = RawInputCapture::Approval {
+        id: "req-1".to_string(),
+        action_set: crate::ui::ApprovalActionSet::TurnConsent,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&turn);
+    // 右移到 ApproveTurn（TurnConsent index 1）。
+    state.consume(&turn, b"\x1b[C");
+
+    let standard = RawInputCapture::Approval {
+        id: "req-1".to_string(),
+        action_set: crate::ui::ApprovalActionSet::Standard,
+    };
+    state.apply_capture(&standard);
+    assert_eq!(
+        state.consume(&standard, b"\n"),
+        vec![RawInputEvent::CardApprove("req-1".to_string())]
+    );
+}
+
+/// 不同 id 的审批卡切换不走重映射：选择照常重置。
+#[test]
+fn approval_capture_new_card_resets_selection() {
+    let first = RawInputCapture::Approval {
+        id: "req-1".to_string(),
+        action_set: crate::ui::ApprovalActionSet::TurnConsent,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&first);
+    state.consume(&first, b"\x1b[C\x1b[C\x1b[C");
+
+    let second = RawInputCapture::Approval {
+        id: "req-2".to_string(),
+        action_set: crate::ui::ApprovalActionSet::Standard,
+    };
+    state.apply_capture(&second);
+    assert_eq!(
+        state.consume(&second, b"\n"),
+        vec![RawInputEvent::CardApprove("req-2".to_string())]
+    );
+}
+
 #[test]
 fn approval_capture_handles_split_escape_arrow_sequence() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),
-        is_hook: false,
+        action_set: crate::ui::ApprovalActionSet::Standard,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -604,7 +704,7 @@ fn approval_capture_handles_split_escape_arrow_sequence() {
 fn approval_capture_escape_then_enter_cancels_without_submit() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),
-        is_hook: false,
+        action_set: crate::ui::ApprovalActionSet::Standard,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);

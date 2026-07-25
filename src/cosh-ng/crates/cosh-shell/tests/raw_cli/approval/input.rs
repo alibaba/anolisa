@@ -71,3 +71,42 @@ fn raw_cli_approval_application_cursor_arrow_updates_focus() {
     assert!(!output.contains("Approved"));
     assert!(!output.contains("bash:"));
 }
+
+/// Turn-scope batch consent (issue #1773): a multi-request turn offers
+/// "Allow all this turn" and selecting it sweeps the queued requests
+/// through the same resolution pipeline without further cards.
+#[test]
+fn raw_cli_turn_batch_consent_sweeps_queued_requests() {
+    let output = run_raw_cli_ask_with_delayed_input(vec![
+        (b"?? stream batch tool approval\n".to_vec(), Duration::ZERO),
+        // Move to "Allow all this turn" (index 1) once the card is up.
+        (b"\x1b[C".to_vec(), Duration::from_millis(5_000)),
+        (b"\n".to_vec(), Duration::from_millis(200)),
+        (b"exit\n".to_vec(), Duration::from_millis(3_000)),
+    ]);
+
+    assert!(output.contains("Allow all this turn"), "{output}");
+    assert!(output.contains("Approved for this turn req-1"), "{output}");
+    assert!(output.contains("Approved for this turn req-2"), "{output}");
+    assert!(output.contains("Approved for this turn req-3"), "{output}");
+    // The swept requests never present their own cards.
+    assert!(!output.contains("Approval req-2"), "{output}");
+    assert!(!output.contains("Approval req-3"), "{output}");
+    assert!(!output.contains("bash:"));
+}
+
+/// Single-request turns keep the standard card contract: no turn-scope
+/// batch action is offered (issue #1773 zero-noise guarantee).
+#[test]
+fn raw_cli_single_request_turn_keeps_standard_actions() {
+    let output = run_raw_cli_ask_with_delayed_input(vec![
+        (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
+        (b"\n".to_vec(), Duration::from_millis(5_000)),
+        (b"exit\n".to_vec(), Duration::from_millis(1_000)),
+    ]);
+
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("Always trust"), "{output}");
+    assert!(!output.contains("Allow all this turn"), "{output}");
+    assert!(!output.contains("Approved for this turn"), "{output}");
+}

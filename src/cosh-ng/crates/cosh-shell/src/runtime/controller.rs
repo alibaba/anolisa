@@ -254,7 +254,10 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
         .find(|request| request.status == ApprovalRequestStatus::Pending)
         .map(|request| RawInputCapture::Approval {
             id: request.id.clone(),
-            is_hook: request.subject.contains("HOOK:"),
+            action_set: crate::approval::panel::approval_action_set_for(
+                request,
+                &state.approvals.requests,
+            ),
         })
 }
 

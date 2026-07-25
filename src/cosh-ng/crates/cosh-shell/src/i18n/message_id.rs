@@ -86,4 +86,5 @@ collect_message_ids!([
     approval_reason_ids,
     routing_insight_ids,
     activity_untracked_ids,
+    approval_turn_consent_ids,
 ],);

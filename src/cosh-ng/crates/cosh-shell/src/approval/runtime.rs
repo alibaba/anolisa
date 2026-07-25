@@ -8,7 +8,8 @@ use crate::approval::panel::{
 };
 use crate::approval::provider::{mark_provider_approval_resolved, provider_approval_response};
 use crate::approval::resolution::{
-    apply_approval_decision, approval_outcome_for_request, approval_resolution_agent_request,
+    apply_approval_decision, apply_batch_consent_decision, approval_outcome_for_request,
+    approval_resolution_agent_request, batch_consent_covers_request,
     request_can_receive_host_executed_result, should_send_approval_resolution_to_agent,
 };
 use crate::runtime::details::agent_request_from_details_input;
@@ -141,101 +142,181 @@ pub(crate) fn render_approval_actions<W: Write>(
         }
 
         if let Some(decision) = apply_approval_decision(state, request_index, command.kind) {
-            if let Some(ref ctrl_request_id) = decision.request.request_id {
-                let outcome = approval_outcome_for_request(state, &decision.request);
-                if outcome == ApprovalOutcome::ProviderNativeShellFallback {
-                    let response = provider_approval_response(&decision.request, ctrl_request_id);
-                    let delivery =
-                        respond_provider_approval_to_owner(state, &decision.request, response);
-                    if delivery == ProviderApprovalDelivery::Responded {
-                        mark_provider_approval_resolved(state);
-                    }
-                    clear_active_approval_panel(state, output)?;
-                    render_approval_resolution(state, &decision.request, decision.title, output)?;
-                    render_current_approval_request(state, output)?;
-                    if delivery == ProviderApprovalDelivery::Responded {
-                        flush_held_agent_events(state, output)?;
-                    } else {
-                        recover_undelivered_provider_approval(
-                            delivery,
-                            &decision.request,
-                            event_index,
-                            adapter,
-                            state,
-                            output,
-                        )?;
-                    }
-                    continue;
-                }
-
-                if outcome == ApprovalOutcome::ForegroundShellHandoff {
-                    render_approval_resolution(state, &decision.request, decision.title, output)?;
-                    let active_owner = state.agent_run.active.as_ref().is_some_and(|run| {
-                        active_run_owns_provider_approval(run, &decision.request)
-                    });
-                    if decision.request.status == ApprovalRequestStatus::Approved && active_owner {
-                        mark_provider_approval_resolved(state);
-                    }
-                    if active_owner
-                        && !request_can_receive_host_executed_result(state, &decision.request)
-                    {
-                        stop_active_agent_run_without_rendering(state, output)?;
-                    }
-                    queue_approved_shell_handoff(state, &decision.request);
-                    render_current_approval_request(state, output)?;
-                    continue;
-                }
-
-                let response = provider_approval_response(&decision.request, ctrl_request_id);
-                let delivery =
-                    respond_provider_approval_to_owner(state, &decision.request, response);
-                if decision.request.status == ApprovalRequestStatus::Approved
-                    && delivery == ProviderApprovalDelivery::Responded
-                {
-                    mark_provider_approval_resolved(state);
-                }
-                clear_active_approval_panel(state, output)?;
-                render_approval_resolution(state, &decision.request, decision.title, output)?;
-                render_current_approval_request(state, output)?;
-                if delivery == ProviderApprovalDelivery::Responded {
-                    flush_held_agent_events(state, output)?;
-                } else {
-                    recover_undelivered_provider_approval(
-                        delivery,
-                        &decision.request,
-                        event_index,
-                        adapter,
-                        state,
-                        output,
-                    )?;
-                }
-            } else {
-                render_approval_resolution(state, &decision.request, decision.title, output)?;
-                if decision.run_approved_tool {
-                    mark_provider_approval_resolved(state);
-                    stop_active_agent_run_without_rendering(state, output)?;
-                    queue_approved_shell_handoff(state, &decision.request);
-                } else if should_send_approval_resolution_to_agent(state, &decision.request) {
-                    stop_active_agent_run_without_rendering(state, output)?;
-                    let request = approval_resolution_agent_request(&decision.request);
-                    // The approval was already resolved (state, journal, and
-                    // possibly trust updated); this continuation must not be
-                    // rejected by a full queue, so it is guaranteed a slot.
-                    start_agent_run_control_response(
-                        &request,
-                        decision.request.origin,
-                        adapter,
-                        state,
-                        output,
-                        Some(event_index),
-                    )?;
-                }
-                render_current_approval_request(state, output)?;
+            // Capture the consented run before delivery: fallback handoff
+            // paths may stop the run (clearing the consent state) while the
+            // remaining queued requests of this turn still must be swept.
+            let sweep_run_id = (command.kind == ApprovalCommandKind::ApproveTurn
+                && decision.request.status == ApprovalRequestStatus::Approved)
+                .then(|| decision.request.run_id.clone());
+            // When a sweep follows, it owns the final next-card repaint so
+            // requests it is about to resolve never flash their own card.
+            let render_next_card = sweep_run_id.is_none();
+            deliver_approval_decision(
+                decision,
+                Some(event_index),
+                adapter,
+                state,
+                output,
+                render_next_card,
+            )?;
+            if let Some(run_id) = sweep_run_id {
+                // Swept resolutions are not tied to the user's input event:
+                // pass None so any recovery/continuation run they spawn does
+                // not anchor selectable-command state to an unrelated event
+                // index (review note on PR #1825).
+                sweep_batch_consented_requests(&run_id, None, adapter, state, output)?;
             }
         }
         output.flush()?;
     }
 
+    Ok(())
+}
+
+/// Deliver a resolved approval decision to its provider/handoff path and
+/// refresh the card panel. Shared by user decisions and the batch-consent
+/// sweep so both go through the exact same delivery pipeline; the sweep
+/// suppresses next-card rendering until it finishes so requests it is
+/// about to resolve never flash their own card.
+fn deliver_approval_decision<W: Write>(
+    decision: crate::approval::resolution::AppliedApprovalDecision,
+    event_index: Option<usize>,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+    render_next_card: bool,
+) -> std::io::Result<()> {
+    if let Some(ref ctrl_request_id) = decision.request.request_id {
+        let outcome = approval_outcome_for_request(state, &decision.request);
+        if outcome == ApprovalOutcome::ProviderNativeShellFallback {
+            let response = provider_approval_response(&decision.request, ctrl_request_id);
+            let delivery = respond_provider_approval_to_owner(state, &decision.request, response);
+            if delivery == ProviderApprovalDelivery::Responded {
+                mark_provider_approval_resolved(state);
+            }
+            clear_active_approval_panel(state, output)?;
+            render_approval_resolution(state, &decision.request, decision.title, output)?;
+            if render_next_card {
+                render_current_approval_request(state, output)?;
+            }
+            if delivery == ProviderApprovalDelivery::Responded {
+                flush_held_agent_events(state, output)?;
+            } else {
+                recover_undelivered_provider_approval(
+                    delivery,
+                    &decision.request,
+                    event_index,
+                    adapter,
+                    state,
+                    output,
+                )?;
+            }
+            return Ok(());
+        }
+
+        if outcome == ApprovalOutcome::ForegroundShellHandoff {
+            render_approval_resolution(state, &decision.request, decision.title, output)?;
+            let active_owner = state
+                .agent_run
+                .active
+                .as_ref()
+                .is_some_and(|run| active_run_owns_provider_approval(run, &decision.request));
+            if decision.request.status == ApprovalRequestStatus::Approved && active_owner {
+                mark_provider_approval_resolved(state);
+            }
+            if active_owner && !request_can_receive_host_executed_result(state, &decision.request) {
+                stop_active_agent_run_without_rendering(state, output)?;
+            }
+            queue_approved_shell_handoff(state, &decision.request);
+            if render_next_card {
+                render_current_approval_request(state, output)?;
+            }
+            return Ok(());
+        }
+
+        let response = provider_approval_response(&decision.request, ctrl_request_id);
+        let delivery = respond_provider_approval_to_owner(state, &decision.request, response);
+        if decision.request.status == ApprovalRequestStatus::Approved
+            && delivery == ProviderApprovalDelivery::Responded
+        {
+            mark_provider_approval_resolved(state);
+        }
+        clear_active_approval_panel(state, output)?;
+        render_approval_resolution(state, &decision.request, decision.title, output)?;
+        if render_next_card {
+            render_current_approval_request(state, output)?;
+        }
+        if delivery == ProviderApprovalDelivery::Responded {
+            flush_held_agent_events(state, output)?;
+        } else {
+            recover_undelivered_provider_approval(
+                delivery,
+                &decision.request,
+                event_index,
+                adapter,
+                state,
+                output,
+            )?;
+        }
+    } else {
+        render_approval_resolution(state, &decision.request, decision.title, output)?;
+        if decision.run_approved_tool {
+            mark_provider_approval_resolved(state);
+            stop_active_agent_run_without_rendering(state, output)?;
+            queue_approved_shell_handoff(state, &decision.request);
+        } else if should_send_approval_resolution_to_agent(state, &decision.request) {
+            stop_active_agent_run_without_rendering(state, output)?;
+            let request = approval_resolution_agent_request(&decision.request);
+            // The approval was already resolved (state, journal, and
+            // possibly trust updated); this continuation must not be
+            // rejected by a full queue, so it is guaranteed a slot.
+            start_agent_run_control_response(
+                &request,
+                decision.request.origin,
+                adapter,
+                state,
+                output,
+                event_index,
+            )?;
+        }
+        if render_next_card {
+            render_current_approval_request(state, output)?;
+        }
+    }
+    Ok(())
+}
+
+/// After the user grants turn-scope batch consent, sweep the queue: resolve
+/// every remaining pending request of the consented run that the consent
+/// covers, each through the same resolution + delivery pipeline as a user
+/// decision (issue #1773). Entries that would need a control-queue slot when
+/// none is available stay pending and fall back to the regular card flow.
+pub(crate) fn sweep_batch_consented_requests<W: Write>(
+    run_id: &str,
+    event_index: Option<usize>,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    while let Some(request_index) = state
+        .approvals
+        .requests
+        .iter()
+        .position(|request| batch_consent_covers_request(request, run_id))
+    {
+        if approval_resolution_needs_queue_slot(state, &state.approvals.requests[request_index])
+            && !control_queue_has_capacity(state)
+        {
+            break;
+        }
+        let Some(decision) = apply_batch_consent_decision(state, request_index) else {
+            break;
+        };
+        deliver_approval_decision(decision, event_index, adapter, state, output, false)?;
+    }
+    // Render whatever is still pending (high risk, hooks, foreign runs)
+    // exactly once after the sweep settles.
+    render_current_approval_request(state, output)?;
     Ok(())
 }
 
@@ -325,7 +406,7 @@ fn approval_resolution_needs_queue_slot(
 fn recover_undelivered_provider_approval<W: Write>(
     delivery: ProviderApprovalDelivery,
     request: &RuntimeApprovalRequest,
-    event_index: usize,
+    event_index: Option<usize>,
     adapter: &AdapterInstance,
     state: &mut InlineState,
     output: &mut W,
@@ -343,7 +424,7 @@ fn recover_undelivered_provider_approval<W: Write>(
         adapter,
         state,
         output,
-        Some(event_index),
+        event_index,
     )
     .map(|_disposition| ())
 }

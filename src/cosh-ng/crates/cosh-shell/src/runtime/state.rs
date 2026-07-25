@@ -440,6 +440,7 @@ pub(crate) struct ControlState {
     selectable_commands: Vec<String>,
     selectable_after_event_index: Option<usize>,
     session_trusted_commands: HashSet<String>,
+    run_batch_consent: Option<String>,
     event_cursor: ShellEventCursor,
 }
 
@@ -748,6 +749,15 @@ impl ControlState {
     }
     pub(crate) fn session_trusted_commands(&self) -> &HashSet<String> {
         &self.session_trusted_commands
+    }
+    pub(crate) fn grant_run_batch_consent(&mut self, run_id: String) {
+        self.run_batch_consent = Some(run_id);
+    }
+    pub(crate) fn clear_run_batch_consent(&mut self) {
+        self.run_batch_consent = None;
+    }
+    pub(crate) fn run_batch_consent(&self) -> Option<&str> {
+        self.run_batch_consent.as_deref()
     }
     pub(crate) fn event_cursor(&self) -> ShellEventCursor {
         self.event_cursor

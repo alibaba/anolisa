@@ -116,6 +116,8 @@ fn cancel_active_agent_run<W: Write>(
     let Some(mut active_run) = state.agent_run.active.take() else {
         return Ok(());
     };
+    // Turn-scope batch consent never outlives its run (issue #1773).
+    state.control.clear_run_batch_consent();
 
     let cancellation_details_id = state.provider_cancellation_artifacts.record_cancelled_run(
         active_run.request.id.clone(),

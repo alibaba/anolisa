@@ -63,3 +63,23 @@ constant, so typos fail to compile).
 
 Stability: the literal value is frozen; renaming it is a
 projection-format change and requires a dedicated SDD.
+
+## D15: ApprovalActionSet lives in ui/agent_render/actions.rs (owner note)
+
+`ApprovalActionSet` (Hook / Standard / TurnConsent) is a presentation
+contract: it enumerates which action labels a card renders, in which
+order, and how linear indices map to actions. It is defined next to the
+`*_PANEL_ACTIONS` descriptor tables it selects between, because the two
+must evolve together (adding an action means adding a descriptor).
+
+The policy decision — which request gets which set — is owned by
+`approval/panel.rs::approval_action_set_for` (approval owner).
+`raw_input/` and `runtime/` consume the enum only to interpret or relay
+already-decided sets; they never decide. This keeps standard.md §2
+satisfied: `ui/` holds no policy, and the cross-owner references are
+reads of a display contract, mirroring how `ApprovalPanelAction` has
+always been shared.
+
+Revisit trigger: if a non-UI consumer ever needs to construct or branch
+on sets without rendering context, move the enum to `types/` as an
+explicit cross-module contract in a dedicated refactor.

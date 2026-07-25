@@ -1,5 +1,5 @@
 use crate::question::choices::question_choice_count as shared_question_choice_count;
-use crate::ui::{ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
+use crate::ui::{ApprovalActionSet, ApprovalPanelAction};
 
 use super::{RawInputCapture, RawInputEvent};
 
@@ -23,6 +23,7 @@ pub(super) fn releases_capture(event: &RawInputEvent) -> bool {
     matches!(
         event,
         RawInputEvent::CardApprove(_)
+            | RawInputEvent::CardApproveTurn(_)
             | RawInputEvent::CardAlwaysTrust(_)
             | RawInputEvent::CardDeny(_)
             | RawInputEvent::CardCancel(_)
@@ -64,8 +65,13 @@ pub(super) fn is_csi_final_byte(byte: u8) -> bool {
     (0x40..=0x7e).contains(&byte)
 }
 
-pub(super) fn approval_action_max_index() -> usize {
-    APPROVAL_PANEL_ACTIONS.len().saturating_sub(1)
+/// Action set carried by an approval capture; non-approval card captures
+/// fall back to the standard list.
+pub(super) fn capture_action_set(capture: &RawInputCapture) -> ApprovalActionSet {
+    match capture {
+        RawInputCapture::Approval { action_set, .. } => *action_set,
+        _ => ApprovalActionSet::Standard,
+    }
 }
 
 pub(super) fn selected_options_answer(selected_options: &[usize]) -> String {
@@ -89,6 +95,7 @@ pub(super) fn is_removed_question_answer_slash_fragment(answer: &str) -> bool {
 pub(super) fn approval_event_for_action(id: &str, action: ApprovalPanelAction) -> RawInputEvent {
     match action {
         ApprovalPanelAction::Approve => RawInputEvent::CardApprove(id.to_string()),
+        ApprovalPanelAction::ApproveTurn => RawInputEvent::CardApproveTurn(id.to_string()),
         ApprovalPanelAction::AlwaysTrust => RawInputEvent::CardAlwaysTrust(id.to_string()),
         ApprovalPanelAction::Deny => RawInputEvent::CardDeny(id.to_string()),
         ApprovalPanelAction::Details => RawInputEvent::CardDetails(id.to_string()),

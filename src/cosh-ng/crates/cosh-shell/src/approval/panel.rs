@@ -1,5 +1,32 @@
 use crate::runtime::prelude::*;
 
+/// Single source of truth for which action list an approval request offers
+/// (issue #1773): hook requests keep the hook list; a request whose run
+/// already has ≥ 2 approval requests (queued or resolved) offers turn-scope
+/// batch consent; everything else keeps the standard list.
+///
+/// Counting invariant: the requests vec is append-only — the
+/// `approval/runtime.rs` request lifecycle only appends entries and flips
+/// their status, never removes them — so the same-run count is monotonic
+/// within a run. Pinned by `approval_action_set_matrix`.
+pub(crate) fn approval_action_set_for(
+    request: &RuntimeApprovalRequest,
+    requests: &[RuntimeApprovalRequest],
+) -> ApprovalActionSet {
+    if request.subject.contains("HOOK:") {
+        return ApprovalActionSet::Hook;
+    }
+    let same_run = requests
+        .iter()
+        .filter(|other| other.run_id == request.run_id)
+        .count();
+    if same_run >= 2 {
+        ApprovalActionSet::TurnConsent
+    } else {
+        ApprovalActionSet::Standard
+    }
+}
+
 pub(crate) fn render_approval_requests<W: Write>(
     state: &mut InlineState,
     approval_ids: &[String],
@@ -62,13 +89,19 @@ pub(crate) fn render_current_approval_request<W: Write>(
         ApprovalRequestKind::ShellCommand => i18n.t(MessageId::ApprovalCommandLabel),
     };
     let next_label = next_pending.map(|next| format!("{} {}", next.id, next.subject));
+    let action_set = approval_action_set_for(request, &state.approvals.requests);
     let selected_action = state
         .approvals
         .focus
         .get(&request.id)
         .copied()
+        // A focused action can fall out of the card's current set when the
+        // pending queue shrinks (TurnConsent -> Standard); fall back to
+        // Approve so the highlight matches what input will submit.
+        .filter(|action| action_set.action_index(*action).is_some())
         .unwrap_or(ApprovalPanelAction::Approve);
     let expanded = state.approvals.expanded_cards.contains(&request.id);
+    let turn_consent = action_set == ApprovalActionSet::TurnConsent;
     // Card-facing reason policy (ARP): only High risk with a whitelisted
     // primary reason yields a natural-language phrase; everything else is
     // fail-quiet. Raw codes stay in details/journal only.
@@ -92,6 +125,7 @@ pub(crate) fn render_current_approval_request<W: Write>(
                 next_label: next_label.as_deref(),
                 selected_action,
                 expanded,
+                turn_consent,
                 hook_warnings: request
                     .hook_warnings
                     .iter()
@@ -163,13 +197,11 @@ pub(crate) fn approval_focus_from_event(
 
     let (id, selected) = event.input.as_deref()?.split_once(':')?;
     let index = selected.trim().parse::<usize>().ok()?;
-    let is_hook = requests
+    let action_set = requests
         .iter()
-        .any(|r| r.id == id.trim() && r.subject.contains("HOOK:"));
-    let action = if is_hook {
-        hook_approval_action_at(index)?
-    } else {
-        approval_action_at(index)?
-    };
+        .find(|request| request.id == id.trim())
+        .map(|request| approval_action_set_for(request, requests))
+        .unwrap_or(ApprovalActionSet::Standard);
+    let action = action_set.action_at(index)?;
     Some((id.trim().to_string(), action))
 }
