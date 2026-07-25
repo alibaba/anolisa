@@ -1,6 +1,110 @@
 use super::*;
 use crate::ui::CommandAssessmentSummaryModel;
 
+fn turn_consent_model(next_label: Option<&str>) -> ApprovalPanelModel<'_> {
+    ApprovalPanelModel {
+        id: "req-2",
+        kind: "tool request",
+        risk: "medium",
+        reason: None,
+        subject: "tool Bash",
+        preview_label: "Tool input",
+        preview: "journalctl -u nginx -n 50",
+        queue_position: 1,
+        queue_total: 2,
+        next_label,
+        selected_action: ApprovalPanelAction::Approve,
+        expanded: false,
+        turn_consent: true,
+        hook_warnings: Vec::new(),
+    }
+}
+
+/// 批量场景（turn_consent）才展示"本轮全部允许"；Standard 卡零变化
+/// （SC7/SC8/V8/N8，issue #1773）。
+#[test]
+fn approval_panel_turn_consent_offers_batch_action_standard_does_not() {
+    let renderer = RatatuiInlineRenderer::with_width(120);
+    let turn = renderer
+        .approval_panel_lines(turn_consent_model(Some("req-3 tool Bash")))
+        .join("\n");
+    assert!(turn.contains("Allow all this turn"), "{turn}");
+    assert!(turn.contains("Always trust"), "{turn}");
+    assert_rendered_width(&turn, 120);
+
+    let mut standard_model = turn_consent_model(None);
+    standard_model.turn_consent = false;
+    standard_model.queue_total = 1;
+    let standard = renderer.approval_panel_lines(standard_model).join("\n");
+    assert!(!standard.contains("Allow all this turn"), "{standard}");
+    assert!(standard.contains("Always trust"), "{standard}");
+}
+
+/// 80 列 EN：5 动作自动折成 2 行，无截断；面板宽度契约保持（D8/V8）。
+#[test]
+fn approval_panel_turn_consent_wraps_actions_at_narrow_width() {
+    let renderer = RatatuiInlineRenderer::with_width(80);
+    let lines = renderer.approval_panel_lines(turn_consent_model(None));
+    let text = lines.join("\n");
+    assert!(text.contains("Allow all this turn"), "{text}");
+    assert!(text.contains("Always trust"), "{text}");
+    assert!(text.contains("Deny"), "{text}");
+    assert!(text.contains("Details"), "{text}");
+    assert_rendered_width(&text, 80);
+    // Deny/Details 折到第二行：不与首行动作同居一行。
+    let deny_line = lines
+        .iter()
+        .find(|line| line.contains("Deny"))
+        .expect("deny line");
+    assert!(!deny_line.contains("Allow all this turn"), "{deny_line}");
+}
+
+/// 宽终端（≥120 列）单行容纳 5 动作（D8）。
+#[test]
+fn approval_panel_turn_consent_single_row_on_wide_terminal() {
+    let renderer = RatatuiInlineRenderer::with_width(140);
+    let lines = renderer.approval_panel_lines(turn_consent_model(None));
+    let action_line = lines
+        .iter()
+        .find(|line| line.contains("Allow all this turn"))
+        .expect("action line");
+    assert!(action_line.contains("Details"), "{action_line}");
+}
+
+/// pack_action_rows 贪心打包：边界行为 + 单项超宽不截断（D8）。
+#[test]
+fn pack_action_rows_greedy_packing_contract() {
+    use crate::ui::pack_action_rows;
+    // EN TurnConsent 宽度：10/19/12/4/7，content 76 → [0,1,2] + [3,4]。
+    assert_eq!(
+        pack_action_rows(&[10, 19, 12, 4, 7], 76),
+        vec![vec![0, 1, 2], vec![3, 4]]
+    );
+    // 宽终端：单行。
+    assert_eq!(
+        pack_action_rows(&[10, 19, 12, 4, 7], 116),
+        vec![vec![0, 1, 2, 3, 4]]
+    );
+    // ZH TurnConsent 宽度：8/12/14/4/4，content 76 → 前 4 项 + 详情。
+    assert_eq!(
+        pack_action_rows(&[8, 12, 14, 4, 4], 76),
+        vec![vec![0, 1, 2, 3], vec![4]]
+    );
+    // 单项超宽：独占一行，不截断。
+    assert_eq!(pack_action_rows(&[100], 20), vec![vec![0]]);
+    assert_eq!(pack_action_rows(&[], 76), Vec::<Vec<usize>>::new());
+    // 极端 i18n 长文案（如未来 CJK 长 label）：折成三行仍保持顺序与
+    // 完整性，高度与渲染同源，只增高不截断（评审 P2 边界回归）。
+    assert_eq!(
+        pack_action_rows(&[30, 30, 30, 30, 30], 76),
+        vec![vec![0, 1], vec![2, 3], vec![4]]
+    );
+    assert_eq!(
+        pack_action_rows(&[70, 70, 4], 76),
+        vec![vec![0], vec![1], vec![2]]
+    );
+}
+
 #[test]
 fn approval_panel_renders_active_request_with_queue_summary() {
     let renderer = RatatuiInlineRenderer::with_width(140);
@@ -19,6 +123,7 @@ fn approval_panel_renders_active_request_with_queue_summary() {
             next_label: Some("req-2 tool Bash"),
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -68,6 +173,7 @@ fn approval_panel_high_risk_shows_reason_continuation_line() {
             next_label: None,
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -121,6 +227,7 @@ fn approval_panel_high_risk_continuation_wraps_within_narrow_width() {
                 next_label: None,
                 selected_action: ApprovalPanelAction::Approve,
                 expanded: false,
+                turn_consent: false,
                 hook_warnings: Vec::new(),
             })
             .join("\n");
@@ -150,6 +257,7 @@ fn approval_panel_long_subject_never_hides_risk_badge() {
             next_label: None,
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -180,6 +288,7 @@ fn approval_panel_unknown_risk_value_falls_back_to_localized_label() {
             next_label: None,
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -206,6 +315,7 @@ fn approval_panel_uses_zh_labels_without_translating_command() {
             next_label: Some("req-2 tool Bash"),
             selected_action: ApprovalPanelAction::Approve,
             expanded: true,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -243,7 +353,7 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
             queue_total: 1,
             next_label: None,
             selected_action: ApprovalPanelAction::Deny,
-            expanded: false,
+            expanded: false, turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -271,7 +381,7 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
             queue_total: 3,
             next_label: Some("req-2 tool Bash"),
             selected_action: ApprovalPanelAction::Details,
-            expanded: true,
+            expanded: true, turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -301,6 +411,7 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
             next_label: None,
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -345,6 +456,7 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
                 next_label: None,
                 selected_action: ApprovalPanelAction::Deny,
                 expanded: false,
+                turn_consent: false,
                 hook_warnings: Vec::new(),
             },
         )
@@ -381,6 +493,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             next_label: None,
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         },
     )
@@ -409,6 +522,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             next_label: None,
             selected_action: ApprovalPanelAction::Details,
             expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         },
     )
@@ -439,6 +553,7 @@ fn plain_approval_panel_keeps_queue_before_actions() {
         next_label: Some("req-2 shell command"),
         selected_action: ApprovalPanelAction::Approve,
         expanded: false,
+        turn_consent: false,
         hook_warnings: Vec::new(),
     });
     let text = lines.join("\n");

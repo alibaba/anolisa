@@ -140,6 +140,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 parser.push_secret_card_event("input", &format!("{id}:{text}"))
             }
             RawInputEvent::CardApprove(id) => parser.push_card_event("approve", &id),
+            RawInputEvent::CardApproveTurn(id) => parser.push_card_event("approve_turn", &id),
             RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
             RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
             RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),

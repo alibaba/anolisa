@@ -76,6 +76,7 @@ pub(crate) enum RawInputEvent {
     CardInput(String, String),
     CardSecretInput(String, String),
     CardApprove(String),
+    CardApproveTurn(String),
     CardAlwaysTrust(String),
     CardDeny(String),
     CardDetails(String),

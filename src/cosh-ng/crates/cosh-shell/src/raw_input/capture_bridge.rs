@@ -34,7 +34,21 @@ pub(super) fn consume_captured_input(
             ..
         } if active == capture && *active_generation == generation
     ) {
-        card_state.reset();
+        // A stale snapshot must not wipe live selection state: when the
+        // live mode still captures a card (e.g. the same approval card
+        // re-armed under a new generation after an action-set switch),
+        // re-align the card state to the live capture so apply_capture's
+        // remap keeps the highlighted action; a different card resets
+        // inside apply_capture, and only a non-capture mode drops the
+        // state entirely.
+        if let RawInputMode::Capture {
+            capture: active, ..
+        } = &*mode
+        {
+            card_state.apply_capture(active);
+        } else {
+            card_state.reset();
+        }
         return CaptureConsumeResult {
             generation: None,
             remainder: bytes.to_vec(),
@@ -88,6 +102,7 @@ fn releases_mode_capture(event: &RawInputEvent) -> bool {
     matches!(
         event,
         RawInputEvent::CardApprove(_)
+            | RawInputEvent::CardApproveTurn(_)
             | RawInputEvent::CardAlwaysTrust(_)
             | RawInputEvent::CardDeny(_)
             | RawInputEvent::CardCancel(_)
@@ -146,6 +161,45 @@ mod tests {
             &*input_mode.lock().expect("input mode"),
             RawInputMode::Capture { generation: 7, .. }
         ));
+    }
+
+    /// Stale-generation 竞态回归（评审 P1 追加）：旧 generation 的 Standard
+    /// snapshot 到达时，live 模式已把同一张卡切到 TurnConsent。mismatch
+    /// 分支必须对齐到 live capture（重映射保留选择）而不是清空，否则重试
+    /// 后回车会从 index 0 发出 CardApprove，与仍高亮 Deny 的卡面错位。
+    #[test]
+    fn stale_approval_snapshot_realigns_to_live_action_set() {
+        let standard = RawInputCapture::Approval {
+            id: "req-1".to_string(),
+            action_set: crate::ui::ApprovalActionSet::Standard,
+        };
+        let turn = RawInputCapture::Approval {
+            id: "req-1".to_string(),
+            action_set: crate::ui::ApprovalActionSet::TurnConsent,
+        };
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+            capture: turn.clone(),
+            generation: 8,
+            installed_at: std::time::Instant::now(),
+        }));
+        let (sender, receiver) = mpsc::channel();
+        let mut state = CardInputState::default();
+        // 在旧 generation 的 Standard 快照下选中 Deny（index 2）。
+        state.apply_capture(&standard);
+        state.consume(&standard, b"\x1b[C\x1b[C");
+
+        // 旧快照到达：mismatch 分支对齐到 live TurnConsent，不清选择。
+        let result = consume_captured_input(&mut state, &standard, 7, b"\n", &sender, &input_mode);
+        assert!(result.retry);
+
+        // 重试换用 live 快照：回车提交的仍是重映射后的 Deny。
+        let result = consume_captured_input(&mut state, &turn, 8, b"\n", &sender, &input_mode);
+        assert!(!result.retry);
+        let events: Vec<_> = receiver.try_iter().collect();
+        assert!(
+            events.contains(&RawInputEvent::CardDeny("req-1".to_string())),
+            "expected remapped Deny, got {events:?}"
+        );
     }
 
     #[test]

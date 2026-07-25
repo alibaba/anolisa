@@ -91,6 +91,21 @@ pub(crate) fn render_agent_structured_events<W: Write>(
         origin,
         ignore_tool_calls,
     );
+    // Turn-scope batch consent (issue #1773): newly recorded requests from
+    // the consented run are resolved through the same pipeline as a user
+    // decision before the next card is presented; anything left pending
+    // (high risk, hooks, other runs) falls through to the card flow.
+    if let Some(run_id) = state.control.run_batch_consent().map(str::to_string) {
+        crate::approval::runtime::sweep_batch_consented_requests(
+            &run_id, None, adapter, state, output,
+        )?;
+    }
+    // New arrivals can change the active card's contract (queue counter,
+    // turn-consent action set): repaint it so the user always decides on
+    // the current queue state.
+    if !approval_ids.is_empty() && state.approvals.active_panel_id.is_some() {
+        crate::approval::panel::redraw_current_approval_request(state, output)?;
+    }
     render_approval_requests(state, &approval_ids, output)?;
     Ok(())
 }

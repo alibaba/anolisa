@@ -1,9 +1,8 @@
 use super::{RawInputCapture, RawInputEvent, CTRL_C};
 use crate::question::choices::toggle_question_option;
-use crate::ui::{approval_action_at, hook_approval_action_at};
 
 use events::{
-    approval_action_max_index, approval_event_for_action, cancel_event, card_answer_event,
+    approval_event_for_action, cancel_event, capture_action_set, card_answer_event,
     empty_question_submission, is_csi_final_byte, is_removed_question_answer_slash,
     is_removed_question_answer_slash_fragment, question_choice_count, releases_capture,
     selected_options_answer,
@@ -32,6 +31,7 @@ enum CardInputKind {
     },
     Approval {
         id: String,
+        action_set: crate::ui::ApprovalActionSet,
     },
     Mode {
         id: String,
@@ -71,9 +71,14 @@ impl CardInputState {
                 multiple: *multiple,
                 secret: *secret,
             },
-            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                CardInputKind::Approval { id: id.clone() }
-            }
+            RawInputCapture::Approval { id, action_set } => CardInputKind::Approval {
+                id: id.clone(),
+                action_set: *action_set,
+            },
+            RawInputCapture::Consultation { id } => CardInputKind::Approval {
+                id: id.clone(),
+                action_set: crate::ui::ApprovalActionSet::Standard,
+            },
             RawInputCapture::Mode {
                 id, option_count, ..
             } => CardInputKind::Mode {
@@ -105,6 +110,32 @@ impl CardInputState {
             RawInputCapture::Evidence { id } => CardInputKind::Evidence { id: id.clone() },
         };
         if self.active_kind.as_ref() != Some(&kind) {
+            // Same approval card switching action sets (Standard <-> TurnConsent
+            // as the pending queue grows or shrinks): remap the selection to the
+            // previously highlighted action so Enter keeps submitting what the
+            // card shows, instead of reinterpreting the stale index against the
+            // new set. Actions missing from the new set fall back to Approve,
+            // matching the render-side focus fallback.
+            if let (
+                Some(CardInputKind::Approval {
+                    id: previous_id,
+                    action_set: previous_set,
+                }),
+                CardInputKind::Approval { id, action_set },
+            ) = (self.active_kind.as_ref(), &kind)
+            {
+                if previous_id == id {
+                    let previous_action = previous_set.action_at(self.selected);
+                    self.selected = previous_action
+                        .and_then(|action| action_set.action_index(action))
+                        .or_else(|| {
+                            action_set.action_index(crate::ui::ApprovalPanelAction::Approve)
+                        })
+                        .unwrap_or(0);
+                    self.active_kind = Some(kind);
+                    return;
+                }
+            }
             let selected = match capture {
                 RawInputCapture::Mode {
                     selected,
@@ -524,11 +555,7 @@ impl CardInputState {
                 if !self.free_text.trim().is_empty() {
                     return None;
                 }
-                let action = if matches!(capture, RawInputCapture::Approval { is_hook: true, .. }) {
-                    hook_approval_action_at(self.selected)
-                } else {
-                    approval_action_at(self.selected)
-                };
+                let action = capture_action_set(capture).action_at(self.selected);
                 action.map(|a| approval_event_for_action(id, a))
             }
             RawInputCapture::Mode {

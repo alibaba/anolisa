@@ -24,6 +24,8 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     let Some(mut active_run) = state.agent_run.active.take() else {
         return Ok(());
     };
+    // Turn-scope batch consent never outlives its run (issue #1773).
+    state.control.clear_run_batch_consent();
 
     cleanup_question_for_terminal_owner(state, output, &active_run.request.id)?;
     active_run.status_animation.clear(output)?;
