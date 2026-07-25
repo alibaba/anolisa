@@ -11,8 +11,8 @@ mod serialization;
 pub use serialization::{
     serialize_answer, serialize_auth_response, serialize_claude_allow, serialize_co_allow,
     serialize_deny, serialize_host_executed_shell_result, serialize_initialize,
-    serialize_shell_evidence_result, serialize_user_message, HostExecutedShellMetadata,
-    HostExecutedShellResult,
+    serialize_shell_evidence_result, serialize_user_message, serialize_user_message_with_context,
+    HostExecutedShellMetadata, HostExecutedShellResult,
 };
 
 const SHELL_HANDOFF_EVIDENCE_PROMPT_MARKER: &str = "ShellCommandCompleted";

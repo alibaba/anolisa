@@ -270,6 +270,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
         let writer_thread = QuestionWriter {
             stdin,
             prompt: prompt_for_loop.clone(),
+            cwd: session_scope_for_thread.clone(),
             approval_rx,
             auth_rx,
             done: Arc::clone(&writer_done),
