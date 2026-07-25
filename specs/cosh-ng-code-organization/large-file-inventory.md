@@ -43,6 +43,7 @@ new over-threshold file appears that is not listed here.
 | 823 | `src/i18n/zh.rs` | i18n | Chinese catalog; pre-existing. Partition by message domain. |
 | 805 | `src/shell_host/osc.rs` | shell_host | OSC sequence handling; pre-existing. Split sequence kinds. |
 | 788 | `src/runtime/shell_evidence.rs` | runtime | Shell evidence runtime; pre-existing. Extract capture from rendering. |
+| 787 | `src/raw_input/mode.rs` | raw_input | Raw input mode state machine; pre-existing. Split mode transitions from capture lifecycle. |
 | 786 | `src/tools/display.rs` | tools | Tool display formatting; pre-existing. Split per-tool formatters. |
 | 778 | `src/ui/agent_render/activity.rs` | ui | Activity card rendering; pre-existing. Split per-activity renderers. |
 | 770 | `src/diagnostics/health/recommendation.rs` | diagnostics | Health recommendations; pre-existing. Split rule families. |
@@ -51,4 +52,6 @@ new over-threshold file appears that is not listed here.
 | 724 | `src/runtime/hooks.rs` | runtime | Runtime hook dispatch; pre-existing. Split per-hook-type handling. |
 | 722 | `src/i18n/message_id_all.rs` | i18n | `MessageId::ALL` mirror of the enum; near-threshold historical file (main baseline 699, zero headroom). The compaction feature added 23 required user-facing message ids, crossing the threshold. Split plan: generate the enum + `ALL` array from a single macro so new ids do not grow either file. |
 | 722 | `src/i18n/message_id.rs` | i18n | `MessageId` enum; near-threshold historical file (main baseline 699, zero headroom). The compaction feature added 23 required user-facing message ids, crossing the threshold. Split plan: partition `MessageId` into domain sub-enums (or macro-generate it) as a follow-up i18n refactor. |
+| 715 | `src/raw_input/spawn.rs` | raw_input | Input reader thread spawn; pre-existing. Split thread lifecycle from byte processing. |
+| 711 | `src/shell_host/raw_relay.rs` | shell_host | PTY relay between parent and child; pre-existing. Split read loop from write loop. |
 | 710 | `src/slash/hooks.rs` | slash | Slash hook command; pre-existing. Split subcommands. |
