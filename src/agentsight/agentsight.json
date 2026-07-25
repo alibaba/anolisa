@@ -36,7 +36,11 @@
     },
     "audit": true,
     "token_consumption": false,
-    "sls_logtail": false
+    "sls_logtail": false,
+    "trajectory_collection": {
+      "enabled": false,
+      "scan_interval_secs": 30
+    }
   },
   "runtime_limits": {
     "event_channel_capacity": 10000,

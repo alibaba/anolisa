@@ -214,6 +214,7 @@ dependencies = [
  "actix-web",
  "agentsight-opt",
  "agentsight-opt-store",
+ "agentsight-trajectory-collector",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -277,6 +278,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentsight-atif"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agentsight-opt"
 version = "0.1.0"
 dependencies = [
@@ -298,6 +307,17 @@ dependencies = [
  "rusqlite",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "agentsight-trajectory-collector"
+version = "0.1.0"
+dependencies = [
+ "agentsight-atif",
+ "anyhow",
+ "log 0.4.29",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

@@ -516,6 +516,30 @@ impl AgentSight {
             crate::background::start_stale_scanner(Arc::clone(sqlite_store), Arc::clone(&running));
         }
 
+        // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
+        // Feature-gated (default off); the thread shares `running` as stop flag.
+        if config.features.trajectory_collection_enabled {
+            let collector_config = agentsight_trajectory_collector::CollectorConfig {
+                scan_interval_secs: config.features.trajectory_scan_interval_secs,
+                scan_dirs: config
+                    .features
+                    .trajectory_scan_dirs
+                    .as_ref()
+                    .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
+                db_path: GenAISqliteStore::default_path()
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+                    .join("trajectories.db"),
+            };
+            let stop = Arc::clone(&running);
+            std::thread::Builder::new()
+                .name("trajectory-collector".to_string())
+                .spawn(move || {
+                    agentsight_trajectory_collector::run_collector_loop(&collector_config, &stop);
+                })
+                .ok();
+        }
+
         Ok(AgentSight {
             probes,
             parser: Parser::new(),

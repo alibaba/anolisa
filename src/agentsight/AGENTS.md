@@ -98,6 +98,8 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
 | **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
+| **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate（采集链路使用；主 crate `src/atif` 仍为 v1.6 导出链路） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
+| **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭） | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
 ## 5. Critical Code Paths
 
@@ -272,6 +274,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 | 审计 | `features.audit` | `true` | LLM 调用审计持久化 |
 | Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
 | SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
+| 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描 Qoder/QoderWork 会话目录，JSONL 转 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描目录） |
 
 ### 运行时资源上限（`runtime_limits`）
 
