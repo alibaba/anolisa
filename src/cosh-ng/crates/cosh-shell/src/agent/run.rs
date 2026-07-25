@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use crate::agent::continuation::provider_mode_for_agent_run;
+use crate::agent::continuation::{
+    annotate_continuation_user_approval_mode, provider_mode_for_agent_run,
+};
 use crate::agent::poll::poll_active_agent_run;
 use crate::agent::queue::enqueue;
 use crate::agent::skill_context::finalize_agent_request_skill_context;
@@ -358,6 +360,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
     attach_continuity_prompt_hint(&mut request, state);
     finalize_agent_request_skill_context(&mut request, state.startup_health.report.as_ref());
     enforce_insight_context_budget(&mut request);
+    annotate_continuation_user_approval_mode(&mut request, state.approval_mode);
     let provider_mode = provider_mode_for_agent_run(&request, state.approval_mode);
     let handle = adapter.start_cancellable(request.clone(), provider_mode);
     record_started_agent_request(state, &request);

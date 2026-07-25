@@ -279,7 +279,7 @@ pub fn format_context_prompt_with_policy(
         }
     }
     let access_text = if !allow_output_requests {
-        "\nterminal-output:// refs are cosh-shell evidence ids, not files. In recommend mode, do not request shell output automatically; state when output evidence is needed."
+        "\nterminal-output:// refs are cosh-shell evidence ids, not files. In this turn, do not request shell output automatically; state when output evidence is needed."
     } else {
         match access {
             ShellEvidenceAccess::ControlProtocolTool => {

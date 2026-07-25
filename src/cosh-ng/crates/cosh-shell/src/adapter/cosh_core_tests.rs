@@ -250,6 +250,30 @@ fn prepare_invocation_approval_modes() {
 }
 
 #[test]
+fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
+    let mut request = test_request();
+    request.context_hints = vec![
+        crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
+        format!("{}auto", crate::types::USER_APPROVAL_MODE_HINT_PREFIX),
+    ];
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
+
+    assert!(inv.args.contains(&"strict".to_string()));
+    assert!(!inv.prompt.contains("recommend mode"), "{}", inv.prompt);
+    assert!(
+        inv.prompt
+            .contains("approval mode is auto and has not changed"),
+        "{}",
+        inv.prompt
+    );
+    assert!(
+        inv.prompt.contains("Do not emit tool calls in this turn"),
+        "{}",
+        inv.prompt
+    );
+}
+
+#[test]
 fn prepare_invocation_prompt_includes_cosh_shell_contract() {
     let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
 

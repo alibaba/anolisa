@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 pub mod audit;
+mod continuation;
 pub mod hooks;
 mod shell_event_metadata;
+
+pub(crate) use continuation::*;
 
 pub(crate) use hooks::BuiltinFactRecord;
 pub use hooks::{

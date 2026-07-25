@@ -380,6 +380,68 @@ pub fn provider_prompt_contract(mode: CoshApprovalMode, shell_tool_name: &str) -
     )
 }
 
+pub fn provider_prompt_contract_for_request(
+    request: &AgentRequest,
+    mode: CoshApprovalMode,
+    shell_tool_name: &str,
+) -> String {
+    provider_prompt_contract_for_request_with_evidence_access(
+        request,
+        mode,
+        shell_tool_name,
+        ShellEvidenceAccess::FencedRequestFallback,
+    )
+}
+
+pub fn provider_prompt_contract_for_request_with_evidence_access(
+    request: &AgentRequest,
+    mode: CoshApprovalMode,
+    shell_tool_name: &str,
+    access: ShellEvidenceAccess,
+) -> String {
+    if crate::types::request_is_analysis_only_continuation(request) {
+        return analysis_continuation_contract_prompt(request, mode, shell_tool_name, access);
+    }
+    provider_prompt_contract_with_evidence_access(mode, shell_tool_name, access)
+}
+
+fn analysis_continuation_contract_prompt(
+    request: &AgentRequest,
+    mode: CoshApprovalMode,
+    shell_tool_name: &str,
+    access: ShellEvidenceAccess,
+) -> String {
+    let user_mode_name = request
+        .context_hints
+        .iter()
+        .find_map(|hint| hint.strip_prefix(crate::types::USER_APPROVAL_MODE_HINT_PREFIX))
+        .unwrap_or(match mode {
+            CoshApprovalMode::Recommend => "recommend",
+            CoshApprovalMode::Auto => "auto",
+            CoshApprovalMode::Trust => "trust",
+        });
+    let target_mode = if user_mode_name == "recommend" {
+        "recommend"
+    } else {
+        "agent"
+    };
+    let mode_instruction = format!(
+        "This invocation is an analysis-only continuation after a foreground shell handoff: \
+         the user's cosh-shell approval mode is {user_mode_name} and has not changed. \
+         Do not emit tool calls in this turn; analyze the completed command's shell evidence \
+         and state the conclusion. This restriction applies only to this turn; later turns may \
+         use tools again."
+    );
+    invariant_contract_prompt(
+        target_mode,
+        &mode_instruction,
+        shell_tool_name,
+        provider_language_hint(crate::language_config_status().effective),
+        access,
+        false,
+    )
+}
+
 pub fn provider_prompt_contract_for_language(
     mode: CoshApprovalMode,
     shell_tool_name: &str,
@@ -403,6 +465,7 @@ pub fn provider_prompt_contract_for_language(
         shell_tool_name,
         language_hint,
         ShellEvidenceAccess::FencedRequestFallback,
+        target_mode == "agent",
     )
 }
 
@@ -412,12 +475,19 @@ fn invariant_contract_prompt(
     shell_tool_name: &str,
     language_hint: &str,
     access: ShellEvidenceAccess,
+    allow_output_requests: bool,
 ) -> String {
-    let output_access = output_access_instruction_for_mode(access, target_mode);
+    let output_access = if allow_output_requests {
+        output_access_instruction(access, true)
+    } else {
+        RESTRICTED_OUTPUT_ACCESS_INSTRUCTION
+    };
     format!(
         "\n\ncosh-shell Agent contract:\n\
          - User modes: recommend and agent.\n\
          - Mode: {target_mode}. {mode_instruction}\n\
+         - Mode is an internal invocation contract; it does not change the user's cosh-shell \
+         approval mode, and you must never tell the user their approval mode changed.\n\
          - Use `{shell_tool_name}` for live shell evidence when tool use is needed.\n\
          - Always emit a provider permission request for `{shell_tool_name}` before any shell command executes, even read-only commands in auto approval mode. \
          cosh-shell may auto-approve safe commands, but it still needs the request so the exact command can run in the foreground shell transcript. \
@@ -450,15 +520,18 @@ pub fn provider_prompt_contract_with_evidence_access(
         shell_tool_name,
         provider_language_hint(crate::language_config_status().effective),
         access,
+        target_mode == "agent",
     )
 }
+
+const RESTRICTED_OUTPUT_ACCESS_INSTRUCTION: &str = "In this turn, do not request shell output automatically; state when output evidence is needed for a reliable answer.";
 
 fn output_access_instruction(
     access: ShellEvidenceAccess,
     allow_output_requests: bool,
 ) -> &'static str {
     if !allow_output_requests {
-        return "In recommend mode, do not request shell output automatically; state when output evidence is needed for a reliable answer.";
+        return RESTRICTED_OUTPUT_ACCESS_INSTRUCTION;
     }
     match access {
         ShellEvidenceAccess::ControlProtocolTool => {
@@ -470,22 +543,12 @@ fn output_access_instruction(
     }
 }
 
-fn output_access_instruction_for_mode(
-    access: ShellEvidenceAccess,
-    target_mode: &str,
-) -> &'static str {
-    if target_mode == "recommend" {
-        return "In recommend mode, do not request shell output automatically; state when output evidence is needed for a reliable answer.";
-    }
-    output_access_instruction(access, true)
-}
-
 fn history_access_instruction(
     access: ShellEvidenceAccess,
     allow_output_requests: bool,
 ) -> &'static str {
     if !allow_output_requests {
-        return "Recent shell history is not included by default. In recommend mode, say when shell evidence is needed instead of requesting it automatically.";
+        return "Recent shell history is not included by default. In this turn, say when shell evidence is needed instead of requesting it automatically.";
     }
     match access {
         ShellEvidenceAccess::ControlProtocolTool => {
@@ -524,10 +587,8 @@ fn runtime_frame_prompt(
     let cwd = provider_safe_command_facts(&request.command_block).cwd;
     format!(
         "\n\nruntime_frame:\n\
-         cwd: {}\n\
-         mode: {:?}{}{}",
+         cwd: {}{}{}",
         cwd,
-        request.mode,
         rich_context_prompt(request, access, allow_output_requests),
         runtime_context_hints_prompt(request)
     )

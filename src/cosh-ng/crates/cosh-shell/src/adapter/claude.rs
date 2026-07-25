@@ -8,11 +8,12 @@ use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 mod driver;
 
 use self::driver::{start_cancellable_claude_process, start_control_protocol_claude_process};
+use super::prompt::provider_prompt_contract_for_request;
 use super::{
     commit_pending_session, detach_committed_session, prompt_from_request,
-    provider_prompt_contract, start_threaded_adapter_run, AdapterError, AdapterInstance,
-    AgentAdapter, AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser,
-    FreshSessionOutcome, PreparedInvocation, ProviderLineProgress,
+    start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
+    AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, FreshSessionOutcome,
+    PreparedInvocation, ProviderLineProgress,
 };
 
 #[derive(Debug, Clone)]
@@ -143,7 +144,7 @@ fn claude_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) ->
     format!(
         "{}{}",
         prompt_from_request(request),
-        provider_prompt_contract(mode, "Bash")
+        provider_prompt_contract_for_request(request, mode, "Bash")
     )
 }
 
@@ -427,6 +428,31 @@ mod tests {
         );
         assert!(inv.prompt.contains("Bash"), "{}", inv.prompt);
         assert!(!inv.args.contains(&"--permission-prompt-tool".to_string()));
+    }
+
+    #[test]
+    fn shell_handoff_continuation_keeps_plan_args_without_recommend_claim() {
+        let adapter = test_adapter();
+        let mut req = test_request();
+        req.context_hints = vec![
+            crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
+            format!("{}auto", crate::types::USER_APPROVAL_MODE_HINT_PREFIX),
+        ];
+        let inv = adapter.prepare_invocation(&req, CoshApprovalMode::Recommend);
+        assert!(inv.args.contains(&"--permission-mode".to_string()));
+        assert!(inv.args.contains(&"plan".to_string()));
+        assert!(!inv.prompt.contains("recommend mode"), "{}", inv.prompt);
+        assert!(
+            inv.prompt
+                .contains("approval mode is auto and has not changed"),
+            "{}",
+            inv.prompt
+        );
+        assert!(
+            inv.prompt.contains("Do not emit tool calls in this turn"),
+            "{}",
+            inv.prompt
+        );
     }
 
     #[test]
