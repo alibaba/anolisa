@@ -79,7 +79,10 @@ for target in sorted(target["name"] for target in package["targets"] if "test" i
 run_shell_integrations() {
   cargo test --locked -p cosh-shell --test logic
   cargo test --locked -p cosh-shell --test protocol -- --test-threads=4
-  cargo test --locked -p cosh-shell --test raw_cli -- --test-threads=1
+  # raw_cli concurrency is governed by the in-tree shared/exclusive gate
+  # (RAW_CLI_SHARED_PARALLELISM / COSH_RAW_CLI_TEST_PARALLELISM); give
+  # libtest enough threads so that gate, not the runner, is the limiter.
+  cargo test --locked -p cosh-shell --test raw_cli -- --test-threads=8
   cargo test --locked -p cosh-shell --test shell_host -- --test-threads=1
 }
 
