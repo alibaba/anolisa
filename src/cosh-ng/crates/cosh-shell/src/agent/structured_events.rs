@@ -95,7 +95,7 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     // the consented run are resolved through the same pipeline as a user
     // decision before the next card is presented; anything left pending
     // (high risk, hooks, other runs) falls through to the card flow.
-    if let Some(run_id) = state.control.run_batch_consent().map(str::to_string) {
+    if let Some(run_id) = state.control.trust.run_batch_consent().map(str::to_string) {
         crate::approval::runtime::sweep_batch_consented_requests(
             &run_id, None, adapter, state, output,
         )?;

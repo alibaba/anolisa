@@ -1034,15 +1034,19 @@ fn approve_turn_covers_other_commands_in_same_run() {
     let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
         .expect("approval decision");
     assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
-    assert_eq!(state.control.run_batch_consent(), Some("run-1"));
+    assert_eq!(state.control.trust.run_batch_consent(), Some("run-1"));
     assert_eq!(
         state.approvals.journal.last().map(|entry| entry.actor),
         Some("user_batch")
     );
-    assert!(state.control.session_trusted_commands().is_empty());
+    assert!(state.control.trust.session_trusted_commands().is_empty());
 
     let other = turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium");
-    let consented_run = state.control.run_batch_consent().expect("consent granted");
+    let consented_run = state
+        .control
+        .trust
+        .run_batch_consent()
+        .expect("consent granted");
     assert!(
         batch_consent_covers_request(&other, consented_run),
         "a different command from the same run should be covered by batch consent"
@@ -1075,9 +1079,12 @@ fn run_batch_consent_covers_is_fail_closed() {
 
     // 未授权（consent 已清除）时，到达路径根本不会进入清扫。
     let mut state = InlineState::default();
-    state.control.grant_run_batch_consent("run-1".to_string());
-    state.control.clear_run_batch_consent();
-    assert_eq!(state.control.run_batch_consent(), None);
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
+    state.control.trust.clear_run_batch_consent();
+    assert_eq!(state.control.trust.run_batch_consent(), None);
 }
 
 /// Blocked 的请求不能授予轮次同意（V4/C2）。
@@ -1094,7 +1101,7 @@ fn approve_turn_blocked_request_does_not_grant_consent() {
     let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
         .expect("approval decision");
     assert_eq!(decision.request.status, ApprovalRequestStatus::Blocked);
-    assert_eq!(state.control.run_batch_consent(), None);
+    assert_eq!(state.control.trust.run_batch_consent(), None);
 }
 
 /// 批量清扫决策复用同一管线，journal 逐条留痕 actor=batch_consent，
@@ -1102,7 +1109,10 @@ fn approve_turn_blocked_request_does_not_grant_consent() {
 #[test]
 fn batch_consent_decision_journals_batch_actor() {
     let mut state = InlineState::default();
-    state.control.grant_run_batch_consent("run-1".to_string());
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
     state.approvals.requests.push(turn_request(
         "req-2",
         "run-1",
@@ -1118,8 +1128,8 @@ fn batch_consent_decision_journals_batch_actor() {
     assert_eq!(entry.preview, "$ journalctl -u nginx -n 50");
     assert_eq!(entry.risk, "medium");
     // Sweep resolutions never (re-)grant or widen consent scope.
-    assert_eq!(state.control.run_batch_consent(), Some("run-1"));
-    assert!(state.control.session_trusted_commands().is_empty());
+    assert_eq!(state.control.trust.run_batch_consent(), Some("run-1"));
+    assert!(state.control.trust.session_trusted_commands().is_empty());
 }
 
 /// run 结束（stop 出口）即清除授权，不跨 run 泄漏（N2/G3/I4）。
@@ -1128,11 +1138,14 @@ fn stopping_active_run_clears_batch_consent() {
     let mut state = InlineState::default();
     let (dir, active_run) = active_run_for_approval_test();
     state.agent_run.active = Some(active_run);
-    state.control.grant_run_batch_consent("run-1".to_string());
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
 
     let mut output = Vec::new();
     stop_active_agent_run_without_rendering(&mut state, &mut output).expect("stop run");
-    assert_eq!(state.control.run_batch_consent(), None);
+    assert_eq!(state.control.trust.run_batch_consent(), None);
     let _ = std::fs::remove_dir_all(dir);
 }
 

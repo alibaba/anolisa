@@ -30,3 +30,4 @@ mod state_prelude;
 #[cfg(test)]
 mod state_tests;
 pub(crate) mod terminal;
+pub(crate) mod trust_state;

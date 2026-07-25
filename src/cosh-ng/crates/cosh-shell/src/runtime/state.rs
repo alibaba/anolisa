@@ -25,6 +25,7 @@ pub(crate) use crate::runtime::state_prelude::CoshApprovalMode;
 use crate::runtime::state_prelude::{
     first_program_token, ApprovalPanelAction, CommandBlock, GovernedEvent, I18n, Language,
 };
+use crate::runtime::trust_state::ApprovalTrustState;
 use crate::slash::session::SessionControlState;
 use crate::types::AgentContextBinding;
 
@@ -439,8 +440,7 @@ pub(crate) struct ControlState {
     shell_handoff: ShellHandoffState,
     selectable_commands: Vec<String>,
     selectable_after_event_index: Option<usize>,
-    session_trusted_commands: HashSet<String>,
-    run_batch_consent: Option<String>,
+    pub(crate) trust: ApprovalTrustState,
     event_cursor: ShellEventCursor,
 }
 
@@ -743,21 +743,6 @@ impl ControlState {
     }
     pub(crate) fn has_selectable_commands(&self) -> bool {
         !self.selectable_commands.is_empty()
-    }
-    pub(crate) fn trust_session_command(&mut self, key: String) {
-        self.session_trusted_commands.insert(key);
-    }
-    pub(crate) fn session_trusted_commands(&self) -> &HashSet<String> {
-        &self.session_trusted_commands
-    }
-    pub(crate) fn grant_run_batch_consent(&mut self, run_id: String) {
-        self.run_batch_consent = Some(run_id);
-    }
-    pub(crate) fn clear_run_batch_consent(&mut self) {
-        self.run_batch_consent = None;
-    }
-    pub(crate) fn run_batch_consent(&self) -> Option<&str> {
-        self.run_batch_consent.as_deref()
     }
     pub(crate) fn event_cursor(&self) -> ShellEventCursor {
         self.event_cursor

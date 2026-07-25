@@ -13,6 +13,7 @@ use crate::types::{AgentEvent, GovernedEvent};
 mod actions;
 mod activity;
 mod approval;
+mod approval_actions;
 mod approval_details;
 mod approval_journal;
 mod approval_reason;
