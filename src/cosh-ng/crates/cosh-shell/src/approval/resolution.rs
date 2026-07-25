@@ -89,7 +89,7 @@ pub(crate) fn apply_batch_consent_decision(
 /// executable bash tool requests from the consented run (issue #1773).
 ///
 /// Contract: `run_id` must be a run the user has explicitly consented to
-/// (`ControlState::run_batch_consent`, or the run of the just-approved
+/// (`ApprovalTrustState::run_batch_consent`, or the run of the just-approved
 /// `ApproveTurn` request). The predicate deliberately does not read the
 /// live consent state: the user-path sweep must keep covering the
 /// consented run even when delivering an entry stops the run (which
@@ -148,11 +148,12 @@ fn finalize_approval_decision(
     }
     if request.status == ApprovalRequestStatus::Approved {
         if let Some(key) = trust_key {
-            state.control.trust_session_command(key);
+            state.control.trust.trust_session_command(key);
         }
         if grant_turn_consent {
             state
                 .control
+                .trust
                 .grant_run_batch_consent(request.run_id.clone());
         }
     }

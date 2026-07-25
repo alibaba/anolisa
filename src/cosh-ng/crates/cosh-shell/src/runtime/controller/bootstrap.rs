@@ -198,7 +198,7 @@ pub(crate) fn run_raw(
     inline_state.approval_mode = approval_mode_from_config(&cosh_config.approval_mode);
     for cmd in &cosh_config.trusted_commands {
         if let Some(key) = trust_key_from_command(cmd) {
-            inline_state.control.trust_session_command(key);
+            inline_state.control.trust.trust_session_command(key);
         }
     }
     apply_readonly_config(&cosh_config);

@@ -461,7 +461,7 @@ pub(crate) fn stop_active_agent_run_without_rendering<W: Write>(
         return Ok(());
     };
     // Turn-scope batch consent never outlives its run (issue #1773).
-    state.control.clear_run_batch_consent();
+    state.control.trust.clear_run_batch_consent();
 
     active_run.handle.cancel();
     active_run.status_animation.clear(output)?;

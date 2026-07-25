@@ -353,7 +353,8 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
             queue_total: 1,
             next_label: None,
             selected_action: ApprovalPanelAction::Deny,
-            expanded: false, turn_consent: false,
+            expanded: false,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -381,7 +382,8 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
             queue_total: 3,
             next_label: Some("req-2 tool Bash"),
             selected_action: ApprovalPanelAction::Details,
-            expanded: true, turn_consent: false,
+            expanded: true,
+            turn_consent: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");

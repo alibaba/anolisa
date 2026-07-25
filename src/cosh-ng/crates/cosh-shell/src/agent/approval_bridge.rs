@@ -174,7 +174,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             .unwrap_or(&request.preview);
 
         if request_is_executable_bash_tool(&request)
-            && command_matches_trust_key(raw_cmd, state.control.session_trusted_commands())
+            && command_matches_trust_key(raw_cmd, state.control.trust.session_trusted_commands())
         {
             if defer_fallback_bash_tool(state, request.clone(), output)? {
                 return Ok(true);
