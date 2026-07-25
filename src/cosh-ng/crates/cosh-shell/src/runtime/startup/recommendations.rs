@@ -54,6 +54,12 @@ pub(crate) fn render_startup_banner<W: Write>(
     let recommendation_notice = append_recommendation_notice(state, &mut body);
     state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
     let suggestions = prepare_startup_suggestions(state, cwd);
+    if let Some(report) = state.startup_health.report.as_ref() {
+        if health_uses_startup_row(report) {
+            body.push(renderer.startup_section_separator_line());
+            body.extend(renderer.health_startup_row_lines(HealthBannerModel::new(report)));
+        }
+    }
     if let Some(markdown) = startup_hook.markdown {
         body.push(String::new());
         body.push(startup_hook.summary);
@@ -199,17 +205,14 @@ pub(crate) fn render_startup_health_banner<W: Write>(
         .and_then(|path| path.to_str().map(str::to_string))
         .unwrap_or_else(|| ".".to_string());
     let suggestions = prepare_startup_suggestions(state, &cwd);
-    let show_health = !health_uses_startup_row(&report);
-    if !show_health && suggestions.candidates.is_empty() {
-        return Ok(());
-    }
     write!(output, "\r\x1b[2K")?;
-    if show_health {
-        let mut facts = report.clone();
-        facts.try_items.clear();
-        renderer.write_health_banner(output, HealthBannerModel::new(&facts))?;
-        writeln!(output)?;
-    }
+    // Late all-green reports still surface the compact startup row here;
+    // `write_health_banner` renders the row shape for `ok` reports and the
+    // attention panel otherwise, so both stay visible after the banner.
+    let mut facts = report.clone();
+    facts.try_items.clear();
+    renderer.write_health_banner(output, HealthBannerModel::new(&facts))?;
+    writeln!(output)?;
     write_startup_suggestion_card(
         state,
         &renderer,

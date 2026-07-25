@@ -222,6 +222,24 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
 }
 
 #[test]
+fn raw_cli_startup_health_disabled_renders_no_row() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_HEALTH_SCAN", "disabled"),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+        ],
+    );
+
+    assert!(output.contains("/help"), "{output}");
+    assert!(!output.contains("Health: ok"), "{output}");
+    assert!(!output.contains("Health check"), "{output}");
+}
+
+#[test]
 fn raw_cli_startup_health_cards_share_configured_width() {
     let cwd = temp_shell_home("startup-health-card-width");
     let suppression_store = cwd.join("health-suppression");
@@ -344,7 +362,7 @@ fn raw_cli_startup_health_degraded_fixture_is_read_only() {
 }
 
 #[test]
-fn raw_cli_startup_health_healthy_fixture_keeps_only_default_startup_card() {
+fn raw_cli_startup_health_healthy_fixture_renders_startup_row_in_banner() {
     let cwd = temp_shell_home("startup-health-healthy-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
@@ -366,7 +384,9 @@ fn raw_cli_startup_health_healthy_fixture_keeps_only_default_startup_card() {
     );
 
     assert!(output.contains("cosh-shell"), "{output}");
-    assert!(!output.contains("Health:"), "{output}");
+    assert!(output.contains("Health: ok"), "{output}");
+    assert!(output.contains("Mem used"), "{output}");
+    assert!(output.contains("Disk"), "{output}");
     assert!(!output.contains("Health check"), "{output}");
     assert!(!output.contains("Suggested prompts"), "{output}");
     assert_inline_before_followup(&output, "╭ cosh-shell", "exit");
