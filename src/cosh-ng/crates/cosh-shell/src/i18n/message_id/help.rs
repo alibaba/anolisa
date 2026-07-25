@@ -5,6 +5,7 @@ macro_rules! help_core_ids {
             $($ids,)*
             HelpTitle,
             HelpFooter,
+            HelpSoftNewlineHint,
             HelpGroupConfig,
             HelpGroupHealth,
             HelpGroupModes,

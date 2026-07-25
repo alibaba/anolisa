@@ -4,6 +4,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
         MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
+        MessageId::HelpSoftNewlineHint => {
+            "提示输入：Alt+Enter 插入换行；Shift+Enter 需终端支持 CSI-u（不支持时等同提交）。Enter/Ctrl+J 提交。"
+        }
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",

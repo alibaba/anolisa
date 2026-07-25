@@ -4,6 +4,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash commands",
         MessageId::HelpFooter => "Mode: {mode}. Strategy: {strategy}.",
+        MessageId::HelpSoftNewlineHint => {
+            "Prompt input: Alt+Enter inserts a newline; Shift+Enter needs CSI-u terminal support (submits elsewhere). Enter/Ctrl+J submit."
+        }
         MessageId::HelpGroupConfig => "Config",
         MessageId::HelpGroupHealth => "Health",
         MessageId::HelpGroupModes => "Modes",

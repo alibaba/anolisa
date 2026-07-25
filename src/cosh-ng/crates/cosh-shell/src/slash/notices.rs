@@ -106,12 +106,16 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
         HelpPanelModel {
             title: i18n.t(MessageId::HelpTitle),
             groups,
-            footer: i18n.format(
-                MessageId::HelpFooter,
-                &[
-                    ("mode", state.approval_mode.label()),
-                    ("strategy", state.analysis_mode.label()),
-                ],
+            footer: format!(
+                "{}\n{}",
+                i18n.t(MessageId::HelpSoftNewlineHint),
+                i18n.format(
+                    MessageId::HelpFooter,
+                    &[
+                        ("mode", state.approval_mode.label()),
+                        ("strategy", state.analysis_mode.label()),
+                    ],
+                )
             ),
         },
     )
@@ -270,6 +274,50 @@ mod tests {
             language: Language::ZhCn,
             ..InlineState::default()
         }
+    }
+
+    /// Collapses panel borders and wrapping so hint assertions survive both
+    /// styled and plain renderers (validation T-help).
+    fn normalized_panel_text(output: &[u8]) -> String {
+        String::from_utf8_lossy(output)
+            .chars()
+            .filter(|ch| *ch != '│' && !ch.is_whitespace())
+            .collect()
+    }
+
+    #[test]
+    fn help_panel_shows_soft_newline_hint_in_english() {
+        let state = InlineState::default();
+        let mut output = Vec::new();
+
+        render_help(&state, &mut output).expect("render help");
+
+        let text = normalized_panel_text(&output);
+        assert!(
+            text.contains("Promptinput:Alt+Enterinsertsanewline"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Shift+EnterneedsCSI-uterminalsupport"),
+            "{text}"
+        );
+        assert!(text.contains("Enter/Ctrl+Jsubmit."), "{text}");
+    }
+
+    #[test]
+    fn help_panel_shows_soft_newline_hint_in_chinese() {
+        let state = zh_state();
+        let mut output = Vec::new();
+
+        render_help(&state, &mut output).expect("render help");
+
+        let text = normalized_panel_text(&output);
+        assert!(text.contains("提示输入：Alt+Enter插入换行"), "{text}");
+        assert!(
+            text.contains("Shift+Enter需终端支持CSI-u（不支持时等同提交）"),
+            "{text}"
+        );
+        assert!(text.contains("Enter/Ctrl+J提交。"), "{text}");
     }
 
     #[test]
