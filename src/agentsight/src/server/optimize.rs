@@ -617,6 +617,34 @@ pub async fn update_optimize_config(
 mod tests {
     use super::*;
 
+    /// The eBPF export feeds the optimizer through JSON, so the shared-schema
+    /// document must survive the analyzer's parser with tokens and per-step
+    /// timing intact — the same contract the collected v1.7 trajectories rely on.
+    #[test]
+    fn converted_export_parses_into_analyzer_trajectory() {
+        let events = crate::atif::converter::tests::two_call_chain();
+        let doc = crate::atif::convert_session_to_atif("session-1", events).unwrap();
+        let json = serde_json::to_string(&doc).unwrap();
+
+        let traj = AtifTrajectory::from_json(&json).expect("analyzer must accept the export");
+        assert_eq!(traj.session_id, "session-1");
+        assert_eq!(traj.model_name(), "claude-opus-5");
+
+        let agent_steps: Vec<_> = traj.steps.iter().filter(|s| s.is_agent()).collect();
+        assert_eq!(agent_steps.len(), 2);
+        // start_ts comes from extra.start_timestamp, end_ts from timestamp;
+        // losing either one silently zeroes out the perf dimension.
+        assert!(agent_steps[0].start_ts().is_some());
+        assert!(agent_steps[0].end_ts() > agent_steps[0].start_ts());
+        assert_eq!(agent_steps[0].results().len(), 1);
+        assert_eq!(
+            traj.final_metrics
+                .as_ref()
+                .and_then(|m| m.total_prompt_tokens),
+            Some(200)
+        );
+    }
+
     #[test]
     fn config_prefers_explicit_values_and_masks_key() {
         let config = OptLlmConfig {

@@ -91,14 +91,14 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Discovery** | `src/discovery/` | Agent 进程发现 | `AgentScanner`, `AgentMatcher`, `known_agents` |
 | **Health** | `src/health/` | Agent 健康检查 | `HealthChecker`, `HealthStore` |
 | **Tokenizer** | `src/tokenizer/` | LLM Token 计数 | `LlmTokenizer`, `MultiModelTokenizer` |
-| **ATIF** | `src/atif/` | 轨迹格式导出 | `AtifDocument`, `convert_trace_to_atif` |
+| **ATIF** | `src/atif/` | 轨迹格式导出（转换逻辑；数据模型来自 `agentsight-atif`） | `convert_trace_to_atif`, `convert_session_to_atif` |
 | **Server** | `src/server/` | HTTP API + 嵌入式前端 | `AppState`, `run_server` |
 | **Container** | `src/container.rs` | 容器 ID 提取（/proc/pid/cgroup） | `extract_container_id`, `parse_container_id_from_cgroup` |
 | **Config** | `src/config.rs` | 统一配置 | `AgentsightConfig` |
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
 | **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
-| **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate（采集链路使用；主 crate `src/atif` 仍为 v1.6 导出链路） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
+| **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate，唯一的 ATIF 数据模型（采集链路 + 主 crate 导出链路共用） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
 | **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
 ## 5. Critical Code Paths

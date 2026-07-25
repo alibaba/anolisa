@@ -3,7 +3,9 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
 } from '../types';
-import { fetchAtifBySession, fetchAtifByConversation, fetchSessionSavings } from '../utils/apiClient';
+import {
+  fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
+} from '../utils/apiClient';
 import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -26,6 +28,17 @@ function fmtTimestamp(iso?: string): string {
 
 function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '\u2026' : id;
+}
+
+/** Observation content is any JSON per the ATIF schema; render it as text. */
+function asText(content: unknown): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  try {
+    return JSON.stringify(content, null, 2);
+  } catch {
+    return String(content);
+  }
 }
 
 function highlightedSections(doc: AtifDocument, callId: string | null): Set<string> {
@@ -74,18 +87,17 @@ function groupIntoRounds(steps: AtifStep[]): Round[] {
   return rounds;
 }
 
-/** Rounds that should auto-expand for a set of highlighted section keys. */
-function roundsForSections(rounds: Round[], sections: Set<string>): Set<number> {
-  const open = new Set<number>();
-  if (rounds.length === 1) open.add(rounds[0].key);
+/** Round to auto-select: prefer the highlighted round, else the first round. */
+function initialRound(rounds: Round[], sections: Set<string>): number | null {
+  if (rounds.length === 0) return null;
   if (sections.size > 0) {
     const stepIds = new Set<number>();
     sections.forEach(k => stepIds.add(parseInt(k, 10)));
     for (const round of rounds) {
-      if (round.steps.some(s => stepIds.has(s.step_id))) open.add(round.key);
+      if (round.steps.some(s => stepIds.has(s.step_id))) return round.key;
     }
   }
-  return open;
+  return rounds[0].key;
 }
 
 // ─── Strategy label config (shared with TokenSavingsPage) ────────────────────
@@ -284,22 +296,25 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                   onToggle={() => toggle('observation')}
                 >
                   <div className="space-y-2">
-                    {step.observation!.results.map((r, i) => (
-                      <div key={i} className="border border-teal-100 rounded-lg overflow-hidden">
-                        {r.source_call_id && (
-                          <div className="px-3 py-1 bg-teal-50 border-b border-teal-100">
-                            <span className="text-xs text-gray-400 font-mono">call: {shortId(r.source_call_id, 16)}</span>
-                          </div>
-                        )}
-                        {r.content ? (
-                          <div className="p-2">
-                            <ExpandableText text={r.content} className="text-xs text-gray-700 bg-teal-50 font-mono" />
-                          </div>
-                        ) : (
-                          <div className="px-3 py-2 text-xs text-gray-400 italic">无输出内容</div>
-                        )}
-                      </div>
-                    ))}
+                    {step.observation!.results.map((r, i) => {
+                      const content = asText(r.content);
+                      return (
+                        <div key={i} className="border border-teal-100 rounded-lg overflow-hidden">
+                          {r.source_call_id && (
+                            <div className="px-3 py-1 bg-teal-50 border-b border-teal-100">
+                              <span className="text-xs text-gray-400 font-mono">call: {shortId(r.source_call_id, 16)}</span>
+                            </div>
+                          )}
+                          {content ? (
+                            <div className="p-2">
+                              <ExpandableText text={content} className="text-xs text-gray-700 bg-teal-50 font-mono" />
+                            </div>
+                          ) : (
+                            <div className="px-3 py-2 text-xs text-gray-400 italic">无输出内容</div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </Collapsible>
               )}
@@ -373,78 +388,119 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, Optimi
   );
 };
 
-// ─── RoundCard ────────────────────────────────────────────────────────────────
+// ─── Round list item (left column) ──────────────────────────────────────────
 
-interface RoundCardProps {
-  round: Round;
-  isOpen: boolean;
-  onToggle: () => void;
-  expandedSections: Set<string>;
-  onToggleSection: (key: string) => void;
-  savingsMap?: Map<string, OptimizationItem>;
+interface RoundStats {
+  toolCallCount: number;
+  promptSum: number;
+  completionSum: number;
+  firstTs?: string;
+  preview: string;
 }
 
-const RoundCard: React.FC<RoundCardProps> = ({
-  round, isOpen, onToggle, expandedSections, onToggleSection, savingsMap,
-}) => {
-  const toolCallCount = round.steps.reduce((n, s) => n + (s.tool_calls?.length ?? 0), 0);
-  let promptSum = 0, completionSum = 0;
+function roundStats(round: Round): RoundStats {
+  let toolCallCount = 0, promptSum = 0, completionSum = 0;
   for (const s of round.steps) {
+    toolCallCount += s.tool_calls?.length ?? 0;
     promptSum += s.metrics?.prompt_tokens ?? 0;
     completionSum += s.metrics?.completion_tokens ?? 0;
   }
-  const firstTs = round.steps.find(s => s.timestamp)?.timestamp;
   const preview = (round.userStep?.message ?? round.steps.find(s => s.message)?.message ?? '')
     .replace(/\s+/g, ' ')
     .trim();
+  return { toolCallCount, promptSum, completionSum, firstTs: round.steps.find(s => s.timestamp)?.timestamp, preview };
+}
+
+interface RoundListItemProps {
+  round: Round;
+  isActive: boolean;
+  onSelect: () => void;
+}
+
+const RoundListItem: React.FC<RoundListItemProps> = ({ round, isActive, onSelect }) => {
+  const stats = roundStats(round);
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-3">
-      {/* Round summary header — click to expand round details */}
-      <button
-        onClick={onToggle}
-        className="w-full px-5 py-3.5 flex items-center gap-3 text-left hover:bg-gray-50 transition-colors"
-      >
+    <button
+      onClick={onSelect}
+      className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${
+        isActive
+          ? 'bg-blue-50 border-blue-300 shadow-sm'
+          : 'bg-white border-gray-200 hover:bg-gray-50'
+      }`}
+    >
+      <div className="flex items-center gap-2 mb-1">
         <span className={`flex-shrink-0 px-2 py-0.5 rounded-full text-xs font-medium ${
           round.userStep ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
         }`}>
           {round.label}
         </span>
-        <span className="flex-1 min-w-0 text-sm text-gray-800 truncate">
-          {preview || <span className="text-gray-400 italic">无消息内容</span>}
-        </span>
-        <span className="hidden sm:flex items-center gap-2 flex-shrink-0 text-xs">
-          {firstTs && <span className="text-gray-400">{fmtTimestamp(firstTs)}</span>}
-          <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded">{round.steps.length} 步</span>
-          {toolCallCount > 0 && (
-            <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded">🔧 {toolCallCount}</span>
-          )}
-          {(promptSum > 0 || completionSum > 0) && (
-            <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded">
-              {fmtTokens(promptSum)} in / {fmtTokens(completionSum)} out
-            </span>
-          )}
-        </span>
-        <span className="flex-shrink-0 text-gray-400 text-xs">{isOpen ? '\u25b2' : '\u25bc'}</span>
-      </button>
+        {stats.firstTs && <span className="text-xs text-gray-400">{fmtTimestamp(stats.firstTs)}</span>}
+      </div>
+      <p
+        className="text-sm text-gray-800"
+        style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+      >
+        {stats.preview || <span className="text-gray-400 italic">无消息内容</span>}
+      </p>
+      <div className="flex items-center gap-1.5 mt-1.5 text-xs flex-wrap">
+        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded">{round.steps.length} 步</span>
+        {stats.toolCallCount > 0 && (
+          <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded">🔧 {stats.toolCallCount}</span>
+        )}
+        {(stats.promptSum > 0 || stats.completionSum > 0) && (
+          <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded">
+            {fmtTokens(stats.promptSum)} in / {fmtTokens(stats.completionSum)} out
+          </span>
+        )}
+      </div>
+    </button>
+  );
+};
 
-      {/* Expanded round detail: step timeline within the round */}
-      {isOpen && (
-        <div className="border-t border-gray-100 px-5 py-4">
-          <div className="relative pl-4">
-            <div className="absolute left-[5px] top-4 bottom-4 w-0.5 bg-gray-200" />
-            {round.steps.map(step => (
-              <StepCard
-                key={step.step_id}
-                step={step}
-                expandedSections={expandedSections}
-                onToggleSection={onToggleSection}
-                savingsMap={savingsMap}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+// ─── Round detail (right column) ─────────────────────────────────────────────
+
+interface RoundDetailProps {
+  round: Round;
+  expandedSections: Set<string>;
+  onToggleSection: (key: string) => void;
+  savingsMap?: Map<string, OptimizationItem>;
+}
+
+const RoundDetail: React.FC<RoundDetailProps> = ({
+  round, expandedSections, onToggleSection, savingsMap,
+}) => {
+  const stats = roundStats(round);
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      {/* Detail header */}
+      <div className="flex items-center gap-3 flex-wrap pb-4 border-b border-gray-100">
+        <h3 className="text-sm font-semibold text-gray-900">{round.label} · 对话详情</h3>
+        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{round.steps.length} 步</span>
+        {stats.toolCallCount > 0 && (
+          <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded text-xs">🔧 {stats.toolCallCount} 次工具调用</span>
+        )}
+        {(stats.promptSum > 0 || stats.completionSum > 0) && (
+          <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">
+            {fmtTokens(stats.promptSum)} in / {fmtTokens(stats.completionSum)} out
+          </span>
+        )}
+      </div>
+
+      {/* Step timeline within the round */}
+      <div className="relative pl-4 pt-4">
+        <div className="absolute left-[5px] top-8 bottom-4 w-0.5 bg-gray-200" />
+        {round.steps.map(step => (
+          <StepCard
+            key={step.step_id}
+            step={step}
+            expandedSections={expandedSections}
+            onToggleSection={onToggleSection}
+            savingsMap={savingsMap}
+          />
+        ))}
+      </div>
     </div>
   );
 };
@@ -485,6 +541,28 @@ const MetricCard: React.FC<{ label: string; value: string; color: string; sub?: 
   </div>
 );
 
+// ─── Session loading (two stores) ─────────────────────────────────────────────
+// A session lives in either store: eBPF-captured genai events (genai_events.db)
+// or a collector-ingested log trajectory (trajectories.db). Both now serve the
+// same ATIF schema, so only the lookup differs — try the export first, since it
+// carries token metrics, then fall back for sessions never seen on the wire.
+
+async function loadSessionDoc(sessionId: string): Promise<AtifDocument> {
+  try {
+    return await fetchAtifBySession(sessionId);
+  } catch (e: any) {
+    if (e?.status !== 404) throw e;
+    try {
+      return await fetchTrajectoryAtif(sessionId);
+    } catch (fallbackErr: any) {
+      if (fallbackErr?.status === 404) {
+        throw new Error(`未找到该 Session：${sessionId}（既无 eBPF 捕获记录，也无采集轨迹）`);
+      }
+      throw fallbackErr;
+    }
+  }
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export const AtifViewerPage: React.FC = () => {
@@ -516,20 +594,11 @@ export const AtifViewerPage: React.FC = () => {
 
   // UI state
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
-  const [expandedRounds, setExpandedRounds] = useState<Set<number>>(new Set());
+  const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const toggleSection = useCallback((key: string) => {
     setExpandedSections(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }, []);
-
-  const toggleRound = useCallback((key: number) => {
-    setExpandedRounds(prev => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -556,19 +625,19 @@ export const AtifViewerPage: React.FC = () => {
     setError(null);
     setDoc(null);
     setExpandedSections(new Set());
-    setExpandedRounds(new Set());
+    setSelectedRound(null);
 
     try {
       let data: AtifDocument;
       if (t === 'conversation') {
         data = await fetchAtifByConversation(i.trim());
       } else {
-        data = await fetchAtifBySession(i.trim());
+        data = await loadSessionDoc(i.trim());
       }
       setDoc(data);
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
       setExpandedSections(sections);
-      setExpandedRounds(roundsForSections(groupIntoRounds(data.steps ?? []), sections));
+      setSelectedRound(initialRound(groupIntoRounds(data.steps ?? []), sections));
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
@@ -610,7 +679,7 @@ export const AtifViewerPage: React.FC = () => {
         setError(null);
         setQueryId(parsed.session_id ?? '');
         setExpandedSections(new Set());
-        setExpandedRounds(roundsForSections(groupIntoRounds(parsed.steps ?? []), new Set()));
+        setSelectedRound(initialRound(groupIntoRounds(parsed.steps ?? []), new Set()));
       } catch {
         setError('JSON 解析失败，请检查文件格式');
       }
@@ -626,7 +695,7 @@ export const AtifViewerPage: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `atif-${doc.session_id.slice(0, 16)}.json`;
+    a.download = `atif-${(doc.session_id ?? 'trajectory').slice(0, 16)}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }, [doc]);
@@ -634,6 +703,7 @@ export const AtifViewerPage: React.FC = () => {
   // Compute metrics (fallback when final_metrics is partial)
   const steps = doc?.steps ?? [];
   const rounds = React.useMemo(() => groupIntoRounds(doc?.steps ?? []), [doc]);
+  const activeRound = rounds.find(r => r.key === selectedRound) ?? null;
   const computedMetrics = doc ? (() => {
     const fm = doc.final_metrics;
     let promptSum = 0, completionSum = 0, cachedSum = 0;
@@ -845,7 +915,7 @@ export const AtifViewerPage: React.FC = () => {
               </div>
             )}
 
-            {/* Round Timeline */}
+            {/* Round master-detail: left = round list, right = round detail */}
             <div>
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
                 交互轨迹
@@ -860,18 +930,34 @@ export const AtifViewerPage: React.FC = () => {
                   <p className="text-gray-400">该轨迹暂无步骤数据</p>
                 </div>
               ) : (
-                <div>
-                  {rounds.map(round => (
-                    <RoundCard
-                      key={round.key}
-                      round={round}
-                      isOpen={expandedRounds.has(round.key)}
-                      onToggle={() => toggleRound(round.key)}
-                      expandedSections={expandedSections}
-                      onToggleSection={toggleSection}
-                      savingsMap={savingsMap}
-                    />
-                  ))}
+                <div className="grid grid-cols-1 lg:grid-cols-[minmax(280px,1fr)_2fr] gap-4 items-start">
+                  {/* Left: round list */}
+                  <div className="space-y-2 lg:max-h-[calc(100vh-200px)] lg:overflow-y-auto lg:sticky lg:top-4 pr-1">
+                    {rounds.map(round => (
+                      <RoundListItem
+                        key={round.key}
+                        round={round}
+                        isActive={round.key === selectedRound}
+                        onSelect={() => setSelectedRound(round.key)}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Right: selected round detail */}
+                  <div>
+                    {activeRound ? (
+                      <RoundDetail
+                        round={activeRound}
+                        expandedSections={expandedSections}
+                        onToggleSection={toggleSection}
+                        savingsMap={savingsMap}
+                      />
+                    ) : (
+                      <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                        <p className="text-gray-400">点击左侧轮次查看详情</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

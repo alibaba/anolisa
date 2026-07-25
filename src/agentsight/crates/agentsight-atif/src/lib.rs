@@ -4,10 +4,9 @@
 //! implementation). Schema follows:
 //! <https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>
 //!
-//! This is a leaf crate (serde/serde_json only) shared by trajectory
-//! producers (e.g. `agentsight-trajectory-collector`) and future consumers.
-//! The main crate's `src/atif` (v1.6 export path) is unrelated and will be
-//! migrated in a follow-up.
+//! This is a leaf crate (serde/serde_json only) and the single ATIF data model
+//! for the workspace: the log collector (`agentsight-trajectory-collector`) and
+//! the eBPF export path (`agentsight::atif`) both produce these types.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

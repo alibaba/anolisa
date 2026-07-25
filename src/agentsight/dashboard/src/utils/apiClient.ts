@@ -516,7 +516,7 @@ export async function fetchSessionSavings(
 }
 
 /**
- * Export a single trace as an ATIF v1.6 trajectory document.
+ * Export a single trace as an ATIF trajectory document (shared v1.7 schema).
  */
 export async function fetchAtifByTrace(traceId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
@@ -525,7 +525,7 @@ export async function fetchAtifByTrace(traceId: string): Promise<AtifDocument> {
 }
 
 /**
- * Export a full session (all traces) as an ATIF v1.6 trajectory document.
+ * Export a full session (all traces) as an ATIF trajectory document (v1.7).
  */
 export async function fetchAtifBySession(sessionId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
@@ -534,11 +534,21 @@ export async function fetchAtifBySession(sessionId: string): Promise<AtifDocumen
 }
 
 /**
- * Export a conversation (all LLM calls for a user query) as an ATIF v1.6 trajectory document.
+ * Export a conversation (all LLM calls for a user query) as an ATIF document (v1.7).
  */
 export async function fetchAtifByConversation(conversationId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
     `${API_BASE}/api/export/atif/conversation/${encodeURIComponent(conversationId)}`
+  );
+}
+
+/**
+ * Read the stored ATIF v1.7 document of a log-collected trajectory.
+ * 404s when trajectory collection never ran or the session was not collected.
+ */
+export async function fetchTrajectoryAtif(sessionId: string): Promise<AtifDocument> {
+  return apiFetch<AtifDocument>(
+    `${API_BASE}/api/trajectories/${encodeURIComponent(sessionId)}`
   );
 }
 
