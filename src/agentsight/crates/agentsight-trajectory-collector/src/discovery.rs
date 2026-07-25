@@ -138,6 +138,14 @@ fn discover_in_project_dir(
         let name = entry.file_name().to_string_lossy().to_string();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
+        // Newer Qoder versions store sessions under a `transcript/` subdir;
+        // recurse one level so both layouts are covered (a transcript dir
+        // never nests another transcript dir).
+        if is_dir && name == "transcript" {
+            sessions.extend(discover_in_project_dir(&path, project, source));
+            continue;
+        }
+
         // Main session files: <uuid>.jsonl
         if !is_dir && name.ends_with(".jsonl") {
             let stem = name.trim_end_matches(".jsonl");
@@ -311,6 +319,27 @@ mod tests {
 
         let sub = sessions.iter().find(|s| s.is_subagent).unwrap();
         assert_eq!(sub.session_id, format!("{UUID_A}:subagent:{UUID_B}"));
+
+        let _ = std::fs::remove_dir_all(&projects);
+    }
+
+    #[test]
+    fn test_discover_transcript_subdir_layout() {
+        let projects = tmp_projects_dir("transcript");
+        let proj = projects.join("-data-myapp");
+        // Newer Qoder layout: sessions under <project>/transcript/
+        let transcript = proj.join("transcript");
+        std::fs::create_dir_all(&transcript).unwrap();
+        std::fs::write(transcript.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
+        // Old layout in the same project still works
+        std::fs::write(proj.join(format!("{UUID_B}.jsonl")), "{}\n").unwrap();
+
+        let sessions = discover_sessions(Some(std::slice::from_ref(&projects)));
+        assert_eq!(sessions.len(), 2, "transcript + root layout: {sessions:?}");
+        assert!(sessions
+            .iter()
+            .any(|s| s.session_id == UUID_A && s.path.to_string_lossy().contains("/transcript/")));
+        assert!(sessions.iter().any(|s| s.session_id == UUID_B));
 
         let _ = std::fs::remove_dir_all(&projects);
     }

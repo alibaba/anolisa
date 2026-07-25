@@ -141,6 +141,9 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
     extra.extend(private);
 
     let atif_json = serde_json::to_string(&trajectory.to_json_value()?)?;
+    // Derived preview columns reuse the same extractor as the legacy-row
+    // backfill so both code paths always agree.
+    let (first_user_message, last_user_message) = store::extract_user_message_previews(&atif_json);
     let record = TrajectoryRecord {
         session_id: session.session_id.clone(),
         schema_version: trajectory.schema_version.clone(),
@@ -163,6 +166,8 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
             .iter()
             .rev()
             .find_map(|s| s.timestamp.clone()),
+        first_user_message,
+        last_user_message,
         atif_json,
         project: session.project.clone(),
         source: session.source.clone(),
