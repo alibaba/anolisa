@@ -726,6 +726,7 @@ fn approval_details_panel_renders_structured_request_context() {
                 output_stability: "stable-snapshot",
                 output_exposure: "may-contain-command-line",
             }),
+            audit_ref: None,
         })
         .join("\n");
 
@@ -784,6 +785,7 @@ fn approval_details_panel_uses_zh_catalog_labels() {
                 output_stability: "stable-snapshot",
                 output_exposure: "may-contain-command-line",
             }),
+            audit_ref: None,
         })
         .join("\n");
 
@@ -833,6 +835,7 @@ fn approval_details_panel_keeps_cjk_and_emoji_borders_aligned() {
             command_block_id: None,
             redaction_status: None,
             assessment: None,
+            audit_ref: None,
         })
         .join("\n");
 
@@ -841,6 +844,268 @@ fn approval_details_panel_keeps_cjk_and_emoji_borders_aligned() {
     assert!(text.contains("中文-smoke.txt"), "{text}");
     assert_rendered_width(&text, 54);
     assert_box_lines_aligned(&text, 54);
+}
+
+#[test]
+fn approval_details_panel_renders_audit_reference_inside_panel() {
+    let renderer = RatatuiInlineRenderer::with_width(70);
+    let text = renderer
+        .approval_details_panel_lines(ApprovalDetailsPanelModel {
+            id: "req-7",
+            run_id: "run-12",
+            source: "agent",
+            kind: "tool request",
+            status: "approved",
+            risk: "medium",
+            subject: "tool Bash",
+            preview_label: "Tool input",
+            preview: "ls -la",
+            request_id: Some("ctrl-7"),
+            tool_use_id: Some("toolu-7"),
+            execution_path: Some("foreground_shell_pty"),
+            command_block_id: Some("cmd-7"),
+            redaction_status: Some("ref_only"),
+            assessment: None,
+            audit_ref: Some("audit-event-1"),
+        })
+        .join("\n");
+
+    assert!(text.contains("audit_ref: audit-event-1"), "{text}");
+    // The reference must live inside the panel body, never after the closing border.
+    let closing_border = text.lines().next_back().unwrap_or_default();
+    assert!(closing_border.contains('└'), "{text}");
+    assert!(!closing_border.contains("audit_ref"), "{text}");
+    assert!(text.contains("ls -la"), "{text}");
+    assert!(text.contains("Policy: user approval is required"), "{text}");
+    assert_rendered_width(&text, 70);
+    assert_box_lines_aligned(&text, 70);
+}
+
+/// Real audit event ids are UUIDs, so `audit_ref: <uuid>` is 47 columns wide.
+const UUID_AUDIT_REF: &str = "cd8a7e91-a95d-4c4f-bb0f-646f4b154310";
+
+/// Strips borders and padding so a wrapped reference can be matched as one value.
+fn panel_content_without_layout(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_whitespace() && !"│┌┐└┘─".contains(*ch))
+        .collect()
+}
+
+#[test]
+fn approval_details_panel_wraps_audit_reference_at_minimum_width() {
+    // The 40-column minimum panel is narrower than `audit_ref: <uuid>`; the id
+    // must wrap instead of being clipped, or it cannot be traced in the audit log.
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let model = ApprovalDetailsPanelModel {
+        id: "req-7",
+        run_id: "run-12",
+        source: "agent",
+        kind: "tool request",
+        status: "approved",
+        risk: "medium",
+        subject: "tool Bash",
+        preview_label: "Tool input",
+        preview: "ls -la",
+        request_id: None,
+        tool_use_id: None,
+        execution_path: None,
+        command_block_id: None,
+        redaction_status: None,
+        assessment: None,
+        audit_ref: Some(UUID_AUDIT_REF),
+    };
+    let with_ref = renderer.approval_details_panel_lines(model.clone());
+    let without_ref = renderer.approval_details_panel_lines(ApprovalDetailsPanelModel {
+        audit_ref: None,
+        ..model
+    });
+    let text = with_ref.join("\n");
+
+    assert!(
+        panel_content_without_layout(&text).contains(&format!("audit_ref:{UUID_AUDIT_REF}")),
+        "{text}"
+    );
+    assert!(!text.contains(" ..."), "{text}");
+    // The wrapped rows must be budgeted, not stolen from the rows below.
+    assert_eq!(with_ref.len(), without_ref.len() + 2, "{text}");
+    assert!(text.contains("Policy:"), "{text}");
+    assert_rendered_width(&text, 40);
+    assert_box_lines_aligned(&text, 40);
+}
+
+#[test]
+fn approval_journal_panel_wraps_audit_reference_at_minimum_width() {
+    // The journal body is a wrapping Paragraph, so a reference that spans two
+    // rows must be counted twice in the panel height or the trailing entry rows
+    // (actor, preview hash, subject, preview) get clipped.
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let mut entries = audit_ref_journal_entries();
+    entries[0].audit_ref = Some(UUID_AUDIT_REF);
+    let with_ref =
+        renderer.approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries });
+    entries[0].audit_ref = None;
+    let without_ref =
+        renderer.approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries });
+    let text = with_ref.join("\n");
+
+    assert!(
+        panel_content_without_layout(&text).contains(&format!("audit_ref:{UUID_AUDIT_REF}")),
+        "{text}"
+    );
+    assert!(!text.contains(" ..."), "{text}");
+    assert_eq!(with_ref.len(), without_ref.len() + 2, "{text}");
+    assert_rendered_width(&text, 40);
+    assert_box_lines_aligned(&text, 40);
+}
+
+#[test]
+fn approval_details_panel_keeps_borders_aligned_with_uuid_audit_reference() {
+    // Real audit event ids are UUIDs; the widest realistic reference must still
+    // fit the narrow-terminal panel without breaking the border.
+    let renderer = RatatuiInlineRenderer::with_width(54).with_language(crate::Language::ZhCn);
+    let text = renderer
+        .approval_details_panel_lines(ApprovalDetailsPanelModel {
+            id: "req-宽",
+            run_id: "run-中文-1",
+            source: "agent",
+            kind: "tool request",
+            status: "approved",
+            risk: "medium",
+            subject: "tool Bash",
+            preview_label: "Tool 输入",
+            preview: "cat /tmp/cosh-shell-中文-smoke.txt && echo 🧪",
+            request_id: None,
+            tool_use_id: None,
+            execution_path: None,
+            command_block_id: None,
+            redaction_status: None,
+            assessment: None,
+            audit_ref: Some("cd8a7e91-a95d-4c4f-bb0f-646f4b154310"),
+        })
+        .join("\n");
+
+    assert!(
+        text.contains("audit_ref: cd8a7e91-a95d-4c4f-bb0f-646f4b154310"),
+        "{text}"
+    );
+    assert!(text.contains("中文-smoke.txt"), "{text}");
+    assert_rendered_width(&text, 54);
+    assert_box_lines_aligned(&text, 54);
+}
+
+#[test]
+fn styled_approval_details_write_keeps_audit_reference_inside_panel() {
+    let renderer = RatatuiInlineRenderer {
+        width: 70,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let mut output = Vec::new();
+
+    renderer
+        .write_approval_details_panel(
+            &mut output,
+            ApprovalDetailsPanelModel {
+                id: "req-7",
+                run_id: "run-12",
+                source: "agent",
+                kind: "tool request",
+                status: "approved",
+                risk: "medium",
+                subject: "tool Bash",
+                preview_label: "Tool input",
+                preview: "ls -la",
+                request_id: None,
+                tool_use_id: None,
+                execution_path: None,
+                command_block_id: None,
+                redaction_status: None,
+                assessment: None,
+                audit_ref: Some("audit-event-1"),
+            },
+        )
+        .expect("render approval details panel");
+
+    let text = String::from_utf8(output).expect("utf8 panel");
+    let clean = strip_ansi_escape(&text);
+    assert!(text.contains("\x1b["), "{text:?}");
+    assert!(clean.contains("audit_ref: audit-event-1"), "{clean}");
+    let closing_border = clean.trim_end().lines().next_back().unwrap_or_default();
+    assert!(closing_border.contains('└'), "{clean}");
+    assert!(!closing_border.contains("audit_ref"), "{clean}");
+}
+
+#[test]
+fn approval_details_panel_omits_audit_reference_when_absent() {
+    let renderer = RatatuiInlineRenderer::with_width(70);
+    let model = ApprovalDetailsPanelModel {
+        id: "req-7",
+        run_id: "run-12",
+        source: "agent",
+        kind: "tool request",
+        status: "approved",
+        risk: "medium",
+        subject: "tool Bash",
+        preview_label: "Tool input",
+        preview: "ls -la",
+        request_id: Some("ctrl-7"),
+        tool_use_id: Some("toolu-7"),
+        execution_path: Some("foreground_shell_pty"),
+        command_block_id: Some("cmd-7"),
+        redaction_status: Some("ref_only"),
+        assessment: None,
+        audit_ref: None,
+    };
+    let without_ref = renderer.approval_details_panel_lines(model.clone());
+    let with_ref = renderer.approval_details_panel_lines(ApprovalDetailsPanelModel {
+        audit_ref: Some("audit-event-1"),
+        ..model
+    });
+
+    let text = without_ref.join("\n");
+    assert!(!text.contains("audit_ref"), "{text}");
+    // A missing reference must not leave a blank placeholder row behind.
+    assert_eq!(without_ref.len() + 1, with_ref.len(), "{text}");
+    assert_rendered_width(&text, 70);
+    assert_box_lines_aligned(&text, 70);
+}
+
+#[test]
+fn plain_approval_details_panel_keeps_audit_reference() {
+    let renderer = RatatuiInlineRenderer::plain_with_width(70);
+    let model = ApprovalDetailsPanelModel {
+        id: "req-7",
+        run_id: "run-12",
+        source: "agent",
+        kind: "tool request",
+        status: "approved",
+        risk: "medium",
+        subject: "tool Bash",
+        preview_label: "Tool input",
+        preview: "ls -la",
+        request_id: None,
+        tool_use_id: None,
+        execution_path: None,
+        command_block_id: None,
+        redaction_status: None,
+        assessment: None,
+        audit_ref: Some("audit-event-1"),
+    };
+    let text = renderer
+        .approval_details_panel_lines(model.clone())
+        .join("\n");
+
+    assert!(text.contains("audit_ref: audit-event-1"), "{text}");
+    assert!(!text.contains('┌'), "{text}");
+
+    let without_ref = renderer
+        .approval_details_panel_lines(ApprovalDetailsPanelModel {
+            audit_ref: None,
+            ..model
+        })
+        .join("\n");
+    assert!(!without_ref.contains("audit_ref"), "{without_ref}");
 }
 
 #[test]
@@ -873,6 +1138,7 @@ fn approval_journal_panel_renders_decision_history() {
                 output_stability: "stable-snapshot",
                 output_exposure: "normal",
             }),
+            audit_ref: None,
         },
         ApprovalJournalEntryModel {
             id: "req-2",
@@ -891,6 +1157,7 @@ fn approval_journal_panel_renders_decision_history() {
             command_block_id: None,
             redaction_status: None,
             assessment: None,
+            audit_ref: None,
         },
     ];
     let text = renderer
@@ -942,6 +1209,7 @@ fn approval_journal_panel_uses_zh_catalog_labels() {
         command_block_id: Some("cmd-1"),
         redaction_status: Some("ref_only"),
         assessment: None,
+        audit_ref: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
@@ -984,6 +1252,7 @@ fn approval_journal_panel_keeps_cjk_and_emoji_borders_aligned() {
         command_block_id: None,
         redaction_status: None,
         assessment: None,
+        audit_ref: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
@@ -995,6 +1264,132 @@ fn approval_journal_panel_keeps_cjk_and_emoji_borders_aligned() {
     assert!(text.contains("中文-smoke.txt"), "{text}");
     assert_rendered_width(&text, 54);
     assert_box_lines_aligned(&text, 54);
+}
+
+fn audit_ref_journal_entries() -> Vec<ApprovalJournalEntryModel<'static>> {
+    vec![
+        ApprovalJournalEntryModel {
+            id: "req-1",
+            run_id: "run-1",
+            source: "agent",
+            decision: "approved",
+            kind: "tool request",
+            risk: "medium",
+            subject: "tool shell",
+            preview: "git status",
+            preview_hash: "fnv1a64:test0001",
+            request_id: Some("ctrl-1"),
+            tool_use_id: Some("toolu-1"),
+            actor: "agent-auto",
+            execution_path: Some("foreground_shell_pty"),
+            command_block_id: Some("cmd-1"),
+            redaction_status: Some("ref_only"),
+            assessment: None,
+            audit_ref: Some("audit-event-1"),
+        },
+        ApprovalJournalEntryModel {
+            id: "req-2",
+            run_id: "run-1",
+            source: "agent",
+            decision: "denied",
+            kind: "shell command request",
+            risk: "high",
+            subject: "shell command",
+            preview: "rm -rf /tmp/cosh-shell-should-not-run",
+            preview_hash: "fnv1a64:test0002",
+            request_id: None,
+            tool_use_id: None,
+            actor: "user",
+            execution_path: Some("not_executed_denied"),
+            command_block_id: None,
+            redaction_status: None,
+            assessment: None,
+            audit_ref: None,
+        },
+    ]
+}
+
+/// Splits the rendered journal at the `req-2` header so each entry's rows can be
+/// asserted independently.
+fn split_journal_entries(text: &str) -> (String, String) {
+    let lines = text.lines().collect::<Vec<_>>();
+    let boundary = lines
+        .iter()
+        .position(|line| line.contains("req-2"))
+        .expect("req-2 entry header");
+    (lines[..boundary].join("\n"), lines[boundary..].join("\n"))
+}
+
+#[test]
+fn approval_journal_panel_scopes_audit_reference_to_owning_entry() {
+    let renderer = RatatuiInlineRenderer::with_width(88);
+    let entries = audit_ref_journal_entries();
+    let lines =
+        renderer.approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries });
+    let text = lines.join("\n");
+
+    assert_eq!(text.matches("audit_ref").count(), 1, "{text}");
+    let (first, second) = split_journal_entries(&text);
+    assert!(first.contains("audit_ref: audit-event-1"), "{first}");
+    assert!(!second.contains("audit_ref"), "{second}");
+    // Nothing may trail the closing border of the panel.
+    assert!(
+        lines.last().is_some_and(|line| line.contains('└')),
+        "{text}"
+    );
+    assert!(
+        second.contains("rm -rf /tmp/cosh-shell-should-not-run"),
+        "{second}"
+    );
+    assert_rendered_width(&text, 88);
+    assert_box_lines_aligned(&text, 88);
+}
+
+#[test]
+fn styled_approval_journal_write_scopes_audit_reference_to_owning_entry() {
+    let renderer = RatatuiInlineRenderer {
+        width: 88,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let entries = audit_ref_journal_entries();
+    let mut output = Vec::new();
+
+    renderer
+        .write_approval_journal_panel(&mut output, ApprovalJournalPanelModel { entries: &entries })
+        .expect("render approval journal panel");
+
+    let text = String::from_utf8(output).expect("utf8 panel");
+    let clean = strip_ansi_escape(&text);
+    assert!(text.contains("\x1b["), "{text:?}");
+    assert_eq!(clean.matches("audit_ref").count(), 1, "{clean}");
+    let (first, second) = split_journal_entries(clean.trim_end());
+    assert!(first.contains("audit_ref: audit-event-1"), "{first}");
+    assert!(!second.contains("audit_ref"), "{second}");
+    assert!(
+        second
+            .trim_end()
+            .lines()
+            .next_back()
+            .is_some_and(|line| line.contains('└')),
+        "{clean}"
+    );
+}
+
+#[test]
+fn plain_approval_journal_panel_scopes_audit_reference_to_owning_entry() {
+    let renderer = RatatuiInlineRenderer::plain_with_width(88);
+    let entries = audit_ref_journal_entries();
+    let text = renderer
+        .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })
+        .join("\n");
+
+    assert_eq!(text.matches("audit_ref").count(), 1, "{text}");
+    let (first, second) = split_journal_entries(&text);
+    assert!(first.contains("audit_ref: audit-event-1"), "{first}");
+    assert!(!second.contains("audit_ref"), "{second}");
+    assert!(!text.contains('┌'), "{text}");
 }
 
 #[test]
@@ -1017,6 +1412,7 @@ fn plain_approval_journal_panel_keeps_decision_history() {
         command_block_id: None,
         redaction_status: None,
         assessment: None,
+        audit_ref: None,
     }];
     let text = renderer
         .approval_journal_panel_lines(ApprovalJournalPanelModel { entries: &entries })

@@ -856,6 +856,31 @@ pub(super) fn approval_content_width(width: u16) -> usize {
     width.saturating_sub(4).max(20) as usize
 }
 
+/// Renders the `audit_ref` row for the approval details and journal panels.
+///
+/// Both surfaces must derive their panel height from the same row count, so the
+/// reference is wrapped here instead of at each call site. Event ids are longer
+/// than the 40-column minimum panel, and a truncated id cannot be traced back to
+/// the audit log — so the row wraps rather than clipping at the border.
+///
+/// Returns an empty vec when no reference exists, which keeps the panel height
+/// unchanged and avoids a placeholder row.
+pub(super) fn audit_ref_rows(audit_ref: Option<&str>, content_width: usize) -> Vec<String> {
+    let Some(audit_ref) = audit_ref else {
+        return Vec::new();
+    };
+    let text = audit_ref_line(audit_ref);
+    // One row beyond the worst case keeps `wrapped_preview_rows` from
+    // ellipsizing an id that must stay verbatim.
+    let max_rows = display_width(&text).div_ceil(content_width.max(20)) + 1;
+    wrapped_preview_rows(&text, content_width, max_rows)
+}
+
+/// Field name is a stable technical identifier shared with `/audit`; never localize it.
+pub(super) fn audit_ref_line(audit_ref: &str) -> String {
+    format!("audit_ref: {audit_ref}")
+}
+
 fn max_preview_rows(expanded: bool) -> usize {
     if expanded {
         6
