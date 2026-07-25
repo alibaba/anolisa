@@ -1,4 +1,3 @@
-use crate::runtime::evidence_delivery::record_shell_handoff_completion;
 use crate::runtime::state::PendingInteractiveShellHandoff;
 use crate::tools::display::{presentation_for_tool, ToolPresentation};
 
@@ -8,6 +7,9 @@ use super::runtime_output::tool_output_detail;
 pub(crate) use super::runtime_output::write_tool_output_ref;
 pub(crate) use super::runtime_render::{
     render_activity_details_by_id, render_activity_rows, render_provider_native_shell_transcript,
+};
+pub(crate) use super::shell_handoff::{
+    close_untracked_shell_handoffs, record_approved_shell_handoff_blocks,
 };
 use super::tool_invocation::{
     complete_tool_invocation, control_tool_invocation_id, first_error_line,
@@ -679,136 +681,6 @@ fn legacy_activity_summary_preview(value: &str, max_chars: usize) -> String {
     truncate_activity_preview(&value.replace('\n', "\\n"), max_chars)
 }
 
-pub(crate) fn record_approved_shell_handoff_blocks(
-    state: &mut InlineState,
-    blocks: &[CommandBlock],
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    while let Some(handoff) = state.control.shell_handoff().pending_front() {
-        let request = handoff.request();
-        let Some(block) = blocks
-            .iter()
-            .find(|block| shell_handoff_block_matches_request(block, request))
-        else {
-            break;
-        };
-
-        let handoff = state
-            .control
-            .shell_handoff_mut()
-            .pop_pending()
-            .expect("front handoff exists");
-        let handoff_request = handoff.request();
-        let id = next_shell_handoff_activity_id(state, &handoff_request.approval_id);
-        let status = classify_shell_handoff_command_outcome(
-            block.exit_code,
-            &block.command,
-            handoff.timeout_interrupt_sent(),
-        )
-        .status();
-        state
-            .approvals
-            .mark_foreground_shell_execution(&handoff_request.approval_id, &block.id);
-        state
-            .control
-            .mark_provider_foreground_shell_command(&block.command);
-        let evidence = record_shell_handoff_completion(state, handoff_request, block, status);
-        if let Some(tool_use_id) = handoff_request.tool_use_id.as_deref() {
-            state
-                .control
-                .mark_provider_shell_transcript_seen(&handoff_request.run_id, tool_use_id);
-            if let Some(active_run) = state.agent_run.active.as_mut() {
-                if active_run.request.id == handoff_request.run_id {
-                    active_run.mark_host_completed_tool(tool_use_id);
-                }
-            }
-        } else if let Some(request_id) = handoff_request.request_id.as_deref() {
-            if let Some(active_run) = state.agent_run.active.as_mut() {
-                if active_run.request.id == handoff_request.run_id {
-                    active_run.mark_host_completed_tool(request_id);
-                }
-            }
-        }
-        state
-            .analyzed_blocks
-            .insert(evidence.command_block_id.clone());
-        state.activity.rows.push(RuntimeActivityRow {
-            id: id.clone(),
-            audit_ref: None,
-            run_id: handoff_request.run_id.clone(),
-            kind: ActivityKind::ShellHandoff,
-            status: evidence.status.to_string(),
-            subject: evidence.approval_id.clone().unwrap_or_default(),
-            summary: legacy_activity_summary_message(
-                state,
-                MessageId::ActivityShellHandoffSentSummary,
-                &[("approval", &handoff_request.approval_id)],
-            ),
-            detail: format!(
-                "evidence: ShellCommandCompleted\napproval: {}\nexecution_path: foreground_shell_pty\nselected_shell_execution_path: {}\npath_selection_reason: {}\nprovider_result_delivery_status: {}\nrecovery_reason: {}\ncommand_block: {}\ncommand: {}\ncwd: {}\nend_cwd: {}\npreview: {}\npreview_hash: {}\nactor: {}\nsource: {}\nrequest_id: {}\ntool_use_id: {}\nstatus: {}\nexit_code: {}\nduration_ms: {}\nredaction_status: {}\noutput_id: {}",
-                evidence.approval_id.as_deref().unwrap_or("<none>"),
-                evidence.selected_execution_path(),
-                evidence.path_selection_reason(),
-                evidence.provider_result_delivery_status,
-                evidence.recovery_reason.unwrap_or("<none>"),
-                evidence.command_block_id,
-                evidence.command,
-                evidence.cwd,
-                evidence.end_cwd,
-                handoff_request.exact_preview,
-                handoff_request.preview_hash,
-                handoff_request.actor,
-                handoff_request.source,
-                handoff_request.request_id.as_deref().unwrap_or("<none>"),
-                handoff_request.tool_use_id.as_deref().unwrap_or("<none>"),
-                evidence.status,
-                evidence.exit_code,
-                evidence.duration_ms,
-                evidence.redaction_status,
-                evidence.terminal_output_ref.as_ref().map_or_else(
-                    || "<none>".to_string(),
-                    |_| crate::evidence::output_policy::terminal_output_id(
-                        &evidence.shell_session_id,
-                        &evidence.command_block_id
-                    )
-                )
-            ),
-            presentation: None,
-        });
-        ids.push(id);
-    }
-    ids
-}
-
-fn shell_handoff_block_matches_request(
-    block: &CommandBlock,
-    request: &ShellHandoffRequest,
-) -> bool {
-    block.command == request.command && block.origin == expected_handoff_origin(request)
-}
-
-fn expected_handoff_origin(request: &ShellHandoffRequest) -> CommandOrigin {
-    match request.source.as_str() {
-        "send_to_shell" => CommandOrigin::UserSendToShell,
-        "user_analysis_action" => CommandOrigin::UserAnalysisAction,
-        "approved_provider_shell_tool" => CommandOrigin::ProviderTool,
-        "approved_fallback" => CommandOrigin::AgentHandoff,
-        "validation" => CommandOrigin::ShellInternal,
-        _ => CommandOrigin::Unknown,
-    }
-}
-
-fn next_shell_handoff_activity_id(state: &InlineState, approval_id: &str) -> String {
-    if approval_id.starts_with("handoff-")
-        && !state.activity.rows.iter().any(|row| row.id == approval_id)
-    {
-        return approval_id.to_string();
-    }
-
-    let reserved_handoff_ids = state.control.interactive_shell_handoff_ids();
-    next_activity_id_excluding(state, "handoff", reserved_handoff_ids)
-}
-
 fn tool_output_row(
     state: &mut InlineState,
     run_id: &str,
@@ -854,7 +726,7 @@ pub(crate) fn next_activity_id(state: &InlineState, prefix: &str) -> String {
     next_activity_id_excluding(state, prefix, std::iter::empty())
 }
 
-fn next_activity_id_excluding<'a>(
+pub(super) fn next_activity_id_excluding<'a>(
     state: &'a InlineState,
     prefix: &str,
     excluded_ids: impl IntoIterator<Item = &'a str>,
@@ -879,7 +751,7 @@ fn next_activity_id_excluding<'a>(
     }
 }
 
-fn legacy_activity_summary_message(
+pub(super) fn legacy_activity_summary_message(
     state: &InlineState,
     id: MessageId,
     args: &[(&str, &str)],

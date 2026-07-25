@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use crate::activity::runtime::{record_approved_shell_handoff_blocks, render_activity_rows};
+use crate::activity::runtime::{
+    close_untracked_shell_handoffs, record_approved_shell_handoff_blocks, render_activity_rows,
+};
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
     block_end_event_index, collect_failed_command_insights, failed_command_candidate,
@@ -207,8 +209,14 @@ fn render_inline_guidance_from_batch<W: Write>(
         event_index_base,
     )?;
     let card_capture_pending = pending_card_capture(state).is_some();
-    let activity_actions =
-        ActivityConsumer::consume(&ledger.blocks, adapter, state, output, card_capture_pending)?;
+    let activity_actions = ActivityConsumer::consume(
+        events,
+        &ledger.blocks,
+        adapter,
+        state,
+        output,
+        card_capture_pending,
+    )?;
     RuntimeDispatcher::apply_actions(activity_actions, state);
     let findings = findings_from_blocks(&ledger.blocks);
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
@@ -440,13 +448,17 @@ impl EvidenceRequestConsumer {
 
 impl ActivityConsumer {
     pub(crate) fn consume<W: Write>(
+        events: &[ShellEvent],
         blocks: &[CommandBlock],
         adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         card_capture_pending: bool,
     ) -> std::io::Result<Vec<RuntimeAction>> {
-        let handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
+        let mut handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
+        // Fallback: close emitted handoffs that reached a prompt boundary
+        // without ever producing command tracking (lost preexec marker).
+        handoff_activity_ids.extend(close_untracked_shell_handoffs(state, events));
         render_activity_rows(state, &handoff_activity_ids, output)?;
         if !card_capture_pending && state.agent_run.active.is_none() {
             for (request, origin) in shell_handoff_continuation_requests(state) {

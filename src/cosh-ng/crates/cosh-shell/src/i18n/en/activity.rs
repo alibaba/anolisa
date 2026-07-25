@@ -22,6 +22,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ActivityStatusRequested => "requested",
         MessageId::ActivityStatusCaptured => "captured",
         MessageId::ActivityStatusCompleted => "completed",
+        MessageId::ActivityStatusCompletedUntracked => "completed (untracked)",
         MessageId::ActivityStatusError => "error",
         MessageId::ActivityStatusInterrupted => "interrupted",
         MessageId::ActivityToolCalledSummary => "{tool} called: {preview}",

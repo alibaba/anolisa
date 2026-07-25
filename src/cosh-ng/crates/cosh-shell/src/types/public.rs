@@ -16,7 +16,8 @@ pub(crate) use implementation::{
     request_is_analysis_only_continuation, set_request_context_binding, AgentContextBinding,
     BuiltinFactRecord, BuiltinFindingFacts, EvaluatedHookFinding, HighMemoryProcessFacts,
     HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,
-    ShellEnvironmentSnapshot, SHELL_HANDOFF_CONTINUATION_HINT, USER_APPROVAL_MODE_HINT_PREFIX,
+    ShellEnvironmentSnapshot, SHELL_HANDOFF_CONTINUATION_HINT, SHELL_HANDOFF_UNTRACKED_STATUS,
+    USER_APPROVAL_MODE_HINT_PREFIX,
 };
 
 pub(crate) use implementation::audit;

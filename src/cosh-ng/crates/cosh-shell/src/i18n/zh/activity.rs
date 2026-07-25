@@ -22,6 +22,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ActivityStatusRequested => "请求审批",
         MessageId::ActivityStatusCaptured => "已捕获",
         MessageId::ActivityStatusCompleted => "已完成",
+        MessageId::ActivityStatusCompletedUntracked => "已完成（未跟踪）",
         MessageId::ActivityStatusError => "错误",
         MessageId::ActivityStatusInterrupted => "已中断",
         MessageId::ActivityToolCalledSummary => "{tool} 已调用：{preview}",
