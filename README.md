@@ -6,21 +6,34 @@
 
 **The operating system layer for Agent workloads.**
 
+Let Agents drive the system straight from your terminal, and strip the tool
+responses that reach the model before they cost you — while keeping the Shell,
+Agent framework, and sandbox you already run.
+
 [中文版](README_zh.md) · [Website](https://agentic-os.sh/) ·
 [Quick Start](docs/QUICKSTART.md) ·
 [User Guide](docs/user-guide/en/README.md) ·
 [Contributing](CONTRIBUTING.md)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](docs/user-guide/en/installation.md)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](docs/user-guide/en/installation.md)
 
 </div>
+
+---
 
 ANOLISA is a server-side operating layer for AI Agent workloads. It addresses
 three practical constraints of Agent execution: terminal entry, Token cost, and
 execution environments. Keep the Shell, Agent framework, and sandbox you
 already use. ANOLISA CLI provides a single installation entry point, while each
 capability can be enabled independently.
+
+<p align="center">
+  <img
+    src="docs/images/readme/highlights.png"
+    alt="ANOLISA product highlights"
+  />
+</p>
 
 ## What it solves
 
@@ -38,14 +51,32 @@ system work into the existing terminal workflow.
 
 <h3 align="center">See where Tokens go and cut waste before it reaches the model</h3>
 
-Token-less removes redundancy from tool schemas, responses, and command output.
-Agent Memory reuses context across sessions, while AgentSight records where
-Tokens are spent.
+Token-less removes redundancy from tool schemas and responses.
+[Agent Memory](src/agent-memory/README.md) reuses context across sessions,
+[SkillFS](src/skillfs/README.md) exposes Skills as views and mounts them on
+demand so only the relevant ones enter the context, and
+[AgentSight](src/agentsight/README.md) records where Tokens are actually spent.
 
-| Tool responses | Tool schemas | Command output | Full pipeline |
-|----------------|--------------|----------------|---------------|
-| **65.8% fewer Tokens** | **47.3% fewer Tokens** | **58.6–98.6% less output** | **62.9% fewer Tokens** |
-| ResponseCompressor · 46.85 µs | SchemaCompressor · 11.44 µs | RTK · 3 commands tested | 198.91 µs |
+<p align="center">
+  <img
+    src="docs/images/readme/tokenless-response.png"
+    alt="Token-less response compression in the terminal"
+  />
+</p>
+
+`debug` and `trace` are dropped by the field blacklist, `metadata` as null, and
+`tags` / `extra` as empty values. Compression runs between the Agent and the
+model, so no Agent framework code changes. Dropped array items stay retrievable
+through a `<<tokenless:KEY>>` marker, which keeps the compression reversible.
+
+| Tool responses | Tool schemas | Full pipeline |
+|----------------|--------------|---------------|
+| **65.8% fewer Tokens** | **47.3% fewer Tokens** | **62.9% fewer Tokens** |
+| ResponseCompressor · 46.85 µs | SchemaCompressor · 11.44 µs | 198.91 µs |
+
+Savings apply to the tool responses entering the context, not to the whole
+session bill — the [Token-less README](src/tokenless/README.md) explains how to
+estimate the effect for a given workload.
 
 [Get started with Token-less →](docs/user-guide/en/token-saving/tokenless/QUICKSTART.md)
 
@@ -54,11 +85,8 @@ Tokens are spent.
 <h3 align="center">Give every Agent execution a boundary and a way back</h3>
 
 ANOLISA is building out the Agent execution environment:
-[Blaze](src/blaze/README.md) manages sandbox orchestration,
-[Agent Sec Core](src/agent-sec-core/README.md)
-isolates risky operations, [ws-ckpt](src/ws-ckpt/README.md)
-keeps recovery points for workspace changes, and
-[SkillFS](src/skillfs/README.md) mounts Skills on demand.
+[Agent Sec Core](src/agent-sec-core/README.md) isolates risky operations, and
+[ws-ckpt](src/ws-ckpt/README.md) keeps recovery points for workspace changes.
 
 [Start with ANOLISA CLI →](docs/user-guide/en/user-entrypoint/anolisa-cli.md)
 
@@ -73,6 +101,9 @@ curl -fsSL https://agentic-os.sh/install.sh | bash
 anolisa install cosh-ng
 anolisa install tokenless
 ```
+
+Run `cosh-ng` to enter the Agent-native shell, or point any existing Agent at
+it — Token-less applies to tool calls without further configuration.
 
 [Read the Quick Start →](docs/QUICKSTART.md)
 
