@@ -21,6 +21,30 @@ mod stream_markdown;
 mod stream_state;
 mod stream_tool_approval;
 
+/// Pacing delay between streamed fake events. Defaults to zero so the fake
+/// provider settles as fast as the runtime consumes events; set
+/// `COSH_FAKE_STREAM_PACING_MS` to restore a human-visible streaming rhythm
+/// (for demos or manual TTY runs). Semantic delays that create deliberate
+/// cancellation/approval race windows do NOT go through this helper.
+fn fake_stream_pacing() -> std::time::Duration {
+    use std::sync::OnceLock;
+    static PACING: OnceLock<std::time::Duration> = OnceLock::new();
+    *PACING.get_or_init(|| {
+        let millis = std::env::var("COSH_FAKE_STREAM_PACING_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        std::time::Duration::from_millis(millis)
+    })
+}
+
+fn fake_stream_pacing_sleep() {
+    let pacing = fake_stream_pacing();
+    if !pacing.is_zero() {
+        std::thread::sleep(pacing);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct FakeAgentAdapter;
 
