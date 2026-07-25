@@ -1292,8 +1292,8 @@ fn shell_host_bash_unexports_bashopts_while_keeping_extdebug_local() {
 
     // BASHOPTS arrives exported from the environment: bash keeps the export
     // attribute, which is exactly the leak precondition from issue #1782.
-    let config = ShellHostConfig::new("bashopts-unexport-test", &work_dir)
-        .with_env("BASHOPTS", "cdspell");
+    let config =
+        ShellHostConfig::new("bashopts-unexport-test", &work_dir).with_env("BASHOPTS", "cdspell");
     let output = run_scripted_bash(
         &config,
         &[
