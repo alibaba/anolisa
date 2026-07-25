@@ -28,7 +28,7 @@ describe('NavBar', () => {
     expect(screen.getByText('Agent 可观测')).toBeInTheDocument();
     expect(screen.getByText('Token 节省')).toBeInTheDocument();
     expect(screen.getByText('安全可观测')).toBeInTheDocument();
-    expect(screen.getByText('ATIF 查看器')).toBeInTheDocument();
+    expect(screen.getByText('轨迹查看')).toBeInTheDocument();
   });
 
   it('should highlight active link for root path', () => {
