@@ -27,6 +27,7 @@ pub enum Dimension {
     Cost,
     CostWaste,
     Accuracy,
+    Summary,
 }
 
 impl Dimension {
@@ -39,6 +40,7 @@ impl Dimension {
             Dimension::Cost => "cost",
             Dimension::CostWaste => "cost_waste",
             Dimension::Accuracy => "accuracy",
+            Dimension::Summary => "summary",
         }
     }
 }
@@ -52,6 +54,7 @@ pub struct OptimizationRecord {
     pub cost: Option<String>,
     pub cost_waste: Option<String>,
     pub accuracy: Option<String>,
+    pub summary: Option<String>,
     pub created_at_ns: i64,
     pub updated_at_ns: i64,
 }
@@ -79,14 +82,46 @@ impl OptimizationStore {
                 cost TEXT,
                 cost_waste TEXT,
                 accuracy TEXT,
+                summary TEXT,
                 created_at_ns INTEGER NOT NULL,
                 updated_at_ns INTEGER NOT NULL
             )",
             [],
         )?;
+        Self::migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Add columns missing from databases created by an earlier version.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` is a no-op once the table exists, so new
+    /// dimension columns must be added explicitly. Idempotent: each column is
+    /// only added when `PRAGMA table_info` says it is absent.
+    fn migrate(conn: &Connection) -> Result<(), OptStoreError> {
+        let existing = Self::column_names(conn)?;
+        // (column, DDL) pairs — append here when a new dimension is introduced.
+        for (column, ddl) in [(
+            "summary",
+            "ALTER TABLE optimization_results ADD COLUMN summary TEXT",
+        )] {
+            if !existing.iter().any(|c| c == column) {
+                conn.execute(ddl, [])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Column names currently present on `optimization_results`.
+    fn column_names(conn: &Connection) -> Result<Vec<String>, OptStoreError> {
+        let mut stmt = conn.prepare("PRAGMA table_info(optimization_results)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut names = Vec::new();
+        for row in rows {
+            names.push(row?);
+        }
+        Ok(names)
     }
 
     /// Upserts one dimension result (JSON string) for a session.
@@ -119,7 +154,7 @@ impl OptimizationStore {
         let conn = self.conn.lock().map_err(|_| OptStoreError::Poisoned)?;
         let record = conn
             .query_row(
-                "SELECT session_id, perf, perf_issues, cost, cost_waste, accuracy,
+                "SELECT session_id, perf, perf_issues, cost, cost_waste, accuracy, summary,
                         created_at_ns, updated_at_ns
                  FROM optimization_results WHERE session_id = ?1",
                 params![session_id],
@@ -141,7 +176,7 @@ impl OptimizationStore {
     ) -> Result<Vec<OptimizationRecord>, OptStoreError> {
         let conn = self.conn.lock().map_err(|_| OptStoreError::Poisoned)?;
         let mut stmt = conn.prepare(
-            "SELECT session_id, perf, perf_issues, cost, cost_waste, accuracy,
+            "SELECT session_id, perf, perf_issues, cost, cost_waste, accuracy, summary,
                     created_at_ns, updated_at_ns
              FROM optimization_results
              WHERE updated_at_ns >= ?1 AND updated_at_ns <= ?2
@@ -176,8 +211,9 @@ impl OptimizationStore {
             cost: row.get(3)?,
             cost_waste: row.get(4)?,
             accuracy: row.get(5)?,
-            created_at_ns: row.get(6)?,
-            updated_at_ns: row.get(7)?,
+            summary: row.get(6)?,
+            created_at_ns: row.get(7)?,
+            updated_at_ns: row.get(8)?,
         })
     }
 }
@@ -238,6 +274,9 @@ mod tests {
         store
             .save_dimension("s1", Dimension::Accuracy, "accuracy-json")
             .unwrap();
+        store
+            .save_dimension("s1", Dimension::Summary, "summary-json")
+            .unwrap();
 
         let rec = store.get("s1").unwrap().unwrap();
         assert_eq!(rec.perf.as_deref(), Some("perf-json"));
@@ -245,6 +284,81 @@ mod tests {
         assert_eq!(rec.cost.as_deref(), Some("cost-json"));
         assert_eq!(rec.cost_waste.as_deref(), Some("cost-waste-json"));
         assert_eq!(rec.accuracy.as_deref(), Some("accuracy-json"));
+        assert_eq!(rec.summary.as_deref(), Some("summary-json"));
+    }
+
+    /// Schema created before the `summary` column existed. `CREATE TABLE IF NOT
+    /// EXISTS` is a no-op on such a database, so only the ALTER TABLE migration
+    /// can make it usable — this is the regression guard for that path.
+    fn create_legacy_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute(
+            "CREATE TABLE optimization_results (
+                session_id TEXT PRIMARY KEY,
+                perf TEXT,
+                perf_issues TEXT,
+                cost TEXT,
+                cost_waste TEXT,
+                accuracy TEXT,
+                created_at_ns INTEGER NOT NULL,
+                updated_at_ns INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO optimization_results (session_id, perf, created_at_ns, updated_at_ns)
+             VALUES ('legacy', 'legacy-perf', 1, 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("opt-store-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{tag}-{:?}.db", std::time::Instant::now()))
+    }
+
+    #[test]
+    fn migrates_legacy_db_adding_summary_column() {
+        let path = temp_path("legacy");
+        create_legacy_db(&path);
+
+        let store = OptimizationStore::new_with_path(&path).unwrap();
+
+        // Pre-existing row survives the migration untouched.
+        let legacy = store.get("legacy").unwrap().unwrap();
+        assert_eq!(legacy.perf.as_deref(), Some("legacy-perf"));
+        assert!(legacy.summary.is_none());
+
+        // And the new dimension is now writable/readable.
+        store
+            .save_dimension("legacy", Dimension::Summary, "fresh-summary")
+            .unwrap();
+        assert_eq!(
+            store.get("legacy").unwrap().unwrap().summary.as_deref(),
+            Some("fresh-summary")
+        );
+        // list() selects the new column too.
+        assert_eq!(store.list(0, i64::MAX, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_is_idempotent_across_reopens() {
+        let path = temp_path("idem");
+        create_legacy_db(&path);
+        for _ in 0..3 {
+            let store = OptimizationStore::new_with_path(&path).unwrap();
+            store
+                .save_dimension("legacy", Dimension::Summary, "s")
+                .unwrap();
+        }
+        let store = OptimizationStore::new_with_path(&path).unwrap();
+        assert_eq!(
+            store.get("legacy").unwrap().unwrap().summary.as_deref(),
+            Some("s")
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use crate::atif::AtifTrajectory;
 use crate::llm::LlmClient;
+use crate::summary::TrajectorySummary;
 use crate::types::{AccuracyResult, AnalysisReport, CostStats, PerfReport, PerfStats, WasteReport};
 use crate::{accuracy, cost, perf};
 
@@ -54,6 +55,11 @@ impl<'a> AnalyzePipeline<'a> {
     /// Cost waste identification: Rust candidates + LLM judgment, 10-30s.
     pub async fn run_cost_waste(&self, trajectory: &AtifTrajectory) -> Result<WasteReport> {
         cost::llm::identify_waste(self.client, trajectory).await
+    }
+
+    /// Narrative summary (goal / process / outcome): one LLM call, a few seconds.
+    pub async fn run_summary(&self, trajectory: &AtifTrajectory) -> Result<TrajectorySummary> {
+        crate::summary::summarize(self.client, trajectory).await
     }
 
     /// Accuracy analysis (extraction + orthogonal attribution): LLM-backed, 30-60s.
