@@ -1705,6 +1705,8 @@ mod tests {
             total_completion_tokens: Some(20),
             start_time: Some("2026-07-25T10:00:00Z".to_string()),
             end_time: Some("2026-07-25T10:00:05Z".to_string()),
+            first_user_message: Some("修个 bug".to_string()),
+            last_user_message: Some("跑下测试".to_string()),
             atif_json: format!(
                 "{{\"schema_version\":\"ATIF-v1.7\",\"session_id\":\"{session_id}\"}}"
             ),
