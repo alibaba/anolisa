@@ -63,6 +63,7 @@ mod tests {
         "recommendation",
         "session",
         "startup",
+        "status",
     ];
 
     fn catalog_modules(directory: &str) -> Vec<String> {

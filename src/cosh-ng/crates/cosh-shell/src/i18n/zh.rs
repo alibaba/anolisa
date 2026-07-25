@@ -15,6 +15,7 @@ mod question;
 mod recommendation;
 mod session;
 mod startup;
+mod status;
 
 pub(super) fn message(id: MessageId) -> &'static str {
     startup::message(id)
@@ -32,5 +33,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         .or_else(|| question::message(id))
         .or_else(|| approval::message(id))
         .or_else(|| session::message(id))
+        .or_else(|| status::message(id))
         .unwrap_or_else(|| super::en::message(id))
 }

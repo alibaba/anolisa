@@ -28,6 +28,8 @@ mod question;
 mod approval;
 #[macro_use]
 mod session;
+#[macro_use]
+mod status;
 
 macro_rules! define_message_id {
     ($($id:ident,)*) => {
@@ -87,4 +89,5 @@ collect_message_ids!([
     routing_insight_ids,
     activity_untracked_ids,
     approval_turn_consent_ids,
+    status_command_ids,
 ],);
