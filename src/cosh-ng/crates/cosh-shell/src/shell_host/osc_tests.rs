@@ -119,15 +119,18 @@ fn bash_extdebug_does_not_leak_via_exported_bashopts() {
     // extdebug lands in BASHOPTS; when BASHOPTS arrived exported from the
     // environment it stays exported (readonly keeps -x), leaking extdebug to
     // every child bash which then fails to load bashdb on hosts without it.
+    // The user rcfile runs before this hook setup, so its DEBUG trap is live
+    // in between: the export attribute must be dropped *before* extdebug is
+    // enabled, or a trap-spawned child inherits the leak.
     let shopt = script
         .find("shopt -s extdebug")
         .expect("extdebug setup should exist");
     let unexport = script
         .find("export -n BASHOPTS 2>/dev/null || true")
-        .expect("BASHOPTS export attribute must be dropped after enabling extdebug");
+        .expect("BASHOPTS export attribute must be dropped before enabling extdebug");
     assert!(
-        unexport > shopt,
-        "export -n BASHOPTS must follow shopt -s extdebug"
+        unexport < shopt,
+        "export -n BASHOPTS must precede shopt -s extdebug"
     );
 
     // The unexport must land in the same hook-setup block, before the DEBUG

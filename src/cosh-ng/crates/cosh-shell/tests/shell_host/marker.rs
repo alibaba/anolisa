@@ -1320,3 +1320,69 @@ fn shell_host_bash_unexports_bashopts_while_keeping_extdebug_local() {
     assert!(terminal.contains("child-extdebug-rc=1"), "{terminal}");
     assert!(!terminal.contains("bashdb"), "{terminal}");
 }
+
+#[test]
+fn shell_host_bash_debug_trap_children_never_see_exported_extdebug() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    // Same BASHOPTS-import gate as the leak test above.
+    let bashopts_supported = Command::new("bash")
+        .env("BASHOPTS", "cdspell")
+        .args(["--noprofile", "--norc", "-c", "shopt -q cdspell"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !bashopts_supported {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bashopts-trap-window-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    // A user rcfile runs before the marker's hook setup, so its DEBUG trap
+    // is live while the marker enables extdebug. The trap records every
+    // BASHOPTS frame and pipes child-bash stderr into evidence files; the
+    // trailing ':' keeps the handler's exit status at 0 so it can never
+    // suppress commands under extdebug. The leak detector is the exported
+    // extdebug frame plus the child's bashdb load failure, because a leaking
+    // child disables extdebug before shopt state could be probed.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "trap 'declare -p BASHOPTS >> \"$HOME/trap-log\" 2>/dev/null; bash -c \":\" 2>> \"$HOME/trap-err\"; :' DEBUG\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("bashopts-trap-window-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("BASHOPTS", "cdspell");
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("printf 'shell-alive-%s\\n' ok"),
+            ScriptedInput::user_line(
+                "leak=trap-child-extdebug-leaked; clean=window-clean; \
+                 if grep -q \"^declare -[^ ]*x[^ ]* BASHOPTS=.*extdebug\" \"$HOME/trap-log\" || \
+                    [[ -s \"$HOME/trap-err\" ]]; \
+                 then echo \"__${leak}__\"; else echo \"trap-${clean}-ok\"; fi",
+            ),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    // The marker must drop the BASHOPTS export attribute before enabling
+    // extdebug, so no DEBUG trap firing in between can leak it to children.
+    // Markers only appear after runtime expansion, so the echoed input line
+    // cannot satisfy either assertion by itself.
+    assert!(
+        !terminal.contains("__trap-child-extdebug-leaked__"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("trap-window-clean-ok"), "{terminal}");
+    assert!(terminal.contains("shell-alive-ok"), "{terminal}");
+}
