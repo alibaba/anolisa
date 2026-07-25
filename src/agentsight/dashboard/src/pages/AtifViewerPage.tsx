@@ -43,6 +43,51 @@ function highlightedSections(doc: AtifDocument, callId: string | null): Set<stri
   return sections;
 }
 
+// ─── Round grouping ───────────────────────────────────────────────────────────
+// A "round" starts at each user step and spans the following agent/system steps,
+// mirroring the round-based trajectory view in agentopt.
+
+interface Round {
+  key: number;
+  label: string;
+  userStep: AtifStep | null;
+  steps: AtifStep[];
+}
+
+function groupIntoRounds(steps: AtifStep[]): Round[] {
+  const rounds: Round[] = [];
+  let userRoundCount = 0;
+  for (const step of steps) {
+    if (step.source === 'user' || rounds.length === 0) {
+      const isUser = step.source === 'user';
+      if (isUser) userRoundCount++;
+      rounds.push({
+        key: rounds.length,
+        label: isUser ? `第 ${userRoundCount} 轮` : '前置',
+        userStep: isUser ? step : null,
+        steps: [step],
+      });
+    } else {
+      rounds[rounds.length - 1].steps.push(step);
+    }
+  }
+  return rounds;
+}
+
+/** Rounds that should auto-expand for a set of highlighted section keys. */
+function roundsForSections(rounds: Round[], sections: Set<string>): Set<number> {
+  const open = new Set<number>();
+  if (rounds.length === 1) open.add(rounds[0].key);
+  if (sections.size > 0) {
+    const stepIds = new Set<number>();
+    sections.forEach(k => stepIds.add(parseInt(k, 10)));
+    for (const round of rounds) {
+      if (round.steps.some(s => stepIds.has(s.step_id))) open.add(round.key);
+    }
+  }
+  return open;
+}
+
 // ─── Strategy label config (shared with TokenSavingsPage) ────────────────────
 
 const STRATEGY_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -328,6 +373,82 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, Optimi
   );
 };
 
+// ─── RoundCard ────────────────────────────────────────────────────────────────
+
+interface RoundCardProps {
+  round: Round;
+  isOpen: boolean;
+  onToggle: () => void;
+  expandedSections: Set<string>;
+  onToggleSection: (key: string) => void;
+  savingsMap?: Map<string, OptimizationItem>;
+}
+
+const RoundCard: React.FC<RoundCardProps> = ({
+  round, isOpen, onToggle, expandedSections, onToggleSection, savingsMap,
+}) => {
+  const toolCallCount = round.steps.reduce((n, s) => n + (s.tool_calls?.length ?? 0), 0);
+  let promptSum = 0, completionSum = 0;
+  for (const s of round.steps) {
+    promptSum += s.metrics?.prompt_tokens ?? 0;
+    completionSum += s.metrics?.completion_tokens ?? 0;
+  }
+  const firstTs = round.steps.find(s => s.timestamp)?.timestamp;
+  const preview = (round.userStep?.message ?? round.steps.find(s => s.message)?.message ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-3">
+      {/* Round summary header — click to expand round details */}
+      <button
+        onClick={onToggle}
+        className="w-full px-5 py-3.5 flex items-center gap-3 text-left hover:bg-gray-50 transition-colors"
+      >
+        <span className={`flex-shrink-0 px-2 py-0.5 rounded-full text-xs font-medium ${
+          round.userStep ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+        }`}>
+          {round.label}
+        </span>
+        <span className="flex-1 min-w-0 text-sm text-gray-800 truncate">
+          {preview || <span className="text-gray-400 italic">无消息内容</span>}
+        </span>
+        <span className="hidden sm:flex items-center gap-2 flex-shrink-0 text-xs">
+          {firstTs && <span className="text-gray-400">{fmtTimestamp(firstTs)}</span>}
+          <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded">{round.steps.length} 步</span>
+          {toolCallCount > 0 && (
+            <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded">🔧 {toolCallCount}</span>
+          )}
+          {(promptSum > 0 || completionSum > 0) && (
+            <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded">
+              {fmtTokens(promptSum)} in / {fmtTokens(completionSum)} out
+            </span>
+          )}
+        </span>
+        <span className="flex-shrink-0 text-gray-400 text-xs">{isOpen ? '\u25b2' : '\u25bc'}</span>
+      </button>
+
+      {/* Expanded round detail: step timeline within the round */}
+      {isOpen && (
+        <div className="border-t border-gray-100 px-5 py-4">
+          <div className="relative pl-4">
+            <div className="absolute left-[5px] top-4 bottom-4 w-0.5 bg-gray-200" />
+            {round.steps.map(step => (
+              <StepCard
+                key={step.step_id}
+                step={step}
+                expandedSections={expandedSections}
+                onToggleSection={onToggleSection}
+                savingsMap={savingsMap}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── AgentInfoCard ────────────────────────────────────────────────────────────
 
 const AgentInfoCard: React.FC<{ doc: AtifDocument }> = ({ doc }) => {
@@ -395,10 +516,20 @@ export const AtifViewerPage: React.FC = () => {
 
   // UI state
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [expandedRounds, setExpandedRounds] = useState<Set<number>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const toggleSection = useCallback((key: string) => {
     setExpandedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const toggleRound = useCallback((key: number) => {
+    setExpandedRounds(prev => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -425,6 +556,7 @@ export const AtifViewerPage: React.FC = () => {
     setError(null);
     setDoc(null);
     setExpandedSections(new Set());
+    setExpandedRounds(new Set());
 
     try {
       let data: AtifDocument;
@@ -434,7 +566,9 @@ export const AtifViewerPage: React.FC = () => {
         data = await fetchAtifBySession(i.trim());
       }
       setDoc(data);
-      setExpandedSections(highlightedSections(data, nextParams.highlight_call_id ?? null));
+      const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
+      setExpandedSections(sections);
+      setExpandedRounds(roundsForSections(groupIntoRounds(data.steps ?? []), sections));
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
@@ -475,6 +609,8 @@ export const AtifViewerPage: React.FC = () => {
         setDoc(parsed as AtifDocument);
         setError(null);
         setQueryId(parsed.session_id ?? '');
+        setExpandedSections(new Set());
+        setExpandedRounds(roundsForSections(groupIntoRounds(parsed.steps ?? []), new Set()));
       } catch {
         setError('JSON 解析失败，请检查文件格式');
       }
@@ -497,6 +633,7 @@ export const AtifViewerPage: React.FC = () => {
 
   // Compute metrics (fallback when final_metrics is partial)
   const steps = doc?.steps ?? [];
+  const rounds = React.useMemo(() => groupIntoRounds(doc?.steps ?? []), [doc]);
   const computedMetrics = doc ? (() => {
     const fm = doc.final_metrics;
     let promptSum = 0, completionSum = 0, cachedSum = 0;
@@ -528,7 +665,7 @@ export const AtifViewerPage: React.FC = () => {
             ← 返回
           </button>
           <div className="flex-1 min-w-0">
-            <h1 className="text-lg font-bold text-gray-900">ATIF 轨迹查看器</h1>
+            <h1 className="text-lg font-bold text-gray-900">轨迹查看</h1>
             {doc && (
               <div className="flex items-center gap-2 mt-0.5">
                 <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
@@ -708,12 +845,12 @@ export const AtifViewerPage: React.FC = () => {
               </div>
             )}
 
-            {/* Step Timeline */}
+            {/* Round Timeline */}
             <div>
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
                 交互轨迹
                 <span className="ml-2 text-sm font-normal text-gray-400">
-                  共 {steps.length} 步
+                  共 {rounds.length} 轮对话 · {steps.length} 步
                 </span>
               </h2>
 
@@ -723,14 +860,13 @@ export const AtifViewerPage: React.FC = () => {
                   <p className="text-gray-400">该轨迹暂无步骤数据</p>
                 </div>
               ) : (
-                <div className="relative pl-4">
-                  {/* Vertical line */}
-                  <div className="absolute left-[5px] top-4 bottom-4 w-0.5 bg-gray-200" />
-
-                  {steps.map(step => (
-                    <StepCard
-                      key={step.step_id}
-                      step={step}
+                <div>
+                  {rounds.map(round => (
+                    <RoundCard
+                      key={round.key}
+                      round={round}
+                      isOpen={expandedRounds.has(round.key)}
+                      onToggle={() => toggleRound(round.key)}
                       expandedSections={expandedSections}
                       onToggleSection={toggleSection}
                       savingsMap={savingsMap}

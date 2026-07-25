@@ -87,7 +87,7 @@ beforeEach(() => {
 describe('AtifViewerPage', () => {
   it('should show empty state with instructions', async () => {
     await act(async () => { renderPage(); });
-    expect(screen.getByText('ATIF 轨迹查看器')).toBeInTheDocument();
+    expect(screen.getByText('轨迹查看')).toBeInTheDocument();
     expect(screen.getByText('请输入 Session 或 Conversation ID，然后点击「加载」')).toBeInTheDocument();
     expect(screen.getByText('或导入本地 ATIF JSON 文件')).toBeInTheDocument();
   });
@@ -143,7 +143,7 @@ describe('AtifViewerPage', () => {
     // Check document is rendered
     expect(screen.getByText('ATIF-1.0')).toBeInTheDocument();
     expect(screen.getByText('交互轨迹')).toBeInTheDocument();
-    expect(screen.getByText('共 2 步')).toBeInTheDocument();
+    expect(screen.getByText('第 1 轮')).toBeInTheDocument();
   });
 
   it('should show agent info card', async () => {
@@ -175,6 +175,7 @@ describe('AtifViewerPage', () => {
   });
 
   it('should render step cards with correct source labels', async () => {
+    // Single-round documents auto-expand, so step details are visible directly.
     mockFetchAtifBySession.mockResolvedValue(mockAtifDoc);
     await act(async () => { renderPage(); });
     const input = screen.getByPlaceholderText('输入 Session ID...');
@@ -188,6 +189,35 @@ describe('AtifViewerPage', () => {
     expect(screen.getByText('Agent')).toBeInTheDocument();
     expect(screen.getByText('Step 1')).toBeInTheDocument();
     expect(screen.getByText('Step 2')).toBeInTheDocument();
+  });
+
+  it('should group steps into rounds and expand round on click', async () => {
+    const multiRoundDoc = {
+      ...mockAtifDoc,
+      steps: [
+        { step_id: 1, source: 'user', message: 'first question', timestamp: '2024-01-01T10:00:00Z' },
+        { step_id: 2, source: 'agent', message: 'first answer', timestamp: '2024-01-01T10:00:05Z' },
+        { step_id: 3, source: 'user', message: 'second question', timestamp: '2024-01-01T10:01:00Z' },
+        { step_id: 4, source: 'agent', message: 'second answer', timestamp: '2024-01-01T10:01:05Z' },
+      ],
+    };
+    mockFetchAtifBySession.mockResolvedValue(multiRoundDoc);
+    await act(async () => {
+      renderPage('/atif?type=session&id=sess-rounds');
+    });
+
+    // Round headers visible; step details collapsed by default
+    expect(screen.getByText('第 1 轮')).toBeInTheDocument();
+    expect(screen.getByText('第 2 轮')).toBeInTheDocument();
+    expect(screen.queryByText('Step 1')).not.toBeInTheDocument();
+
+    // Click round 1 header to reveal its step details
+    await act(async () => {
+      fireEvent.click(screen.getByText('第 1 轮'));
+    });
+    expect(screen.getByText('Step 1')).toBeInTheDocument();
+    expect(screen.getByText('Step 2')).toBeInTheDocument();
+    expect(screen.queryByText('Step 3')).not.toBeInTheDocument();
   });
 
   it('should switch to conversation mode', async () => {
@@ -296,7 +326,6 @@ describe('AtifViewerPage', () => {
       renderPage('/atif?type=session&id=sess-without-steps');
     });
 
-    expect(screen.getByText('共 0 步')).toBeInTheDocument();
     expect(screen.getByText('该轨迹暂无步骤数据')).toBeInTheDocument();
   });
 

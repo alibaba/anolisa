@@ -8,6 +8,8 @@ import { TokenSavingsPage } from './pages/TokenSavingsPage';
 import { SkillMetricsPage } from './pages/SkillMetricsPage';
 import { SecurityObservabilityPage } from './pages/SecurityObservabilityPage';
 import { OptimizationPage } from './pages/OptimizationPage';
+import { AgentSessionsPage } from './pages/AgentSessionsPage';
+import { SettingsPage } from './pages/SettingsPage';
 import { LoginPage } from './pages/LoginPage';
 import { fetchAuthStatus, fetchAuthVerify, login } from './utils/apiClient';
 
@@ -104,12 +106,14 @@ const App: React.FC = () => {
                 <main className="flex-1 overflow-auto">
                   <Routes>
                     <Route path="/" element={<ConversationList />} />
+                    <Route path="/sessions" element={<AgentSessionsPage />} />
                     <Route path="/savings" element={<TokenSavingsPage />} />
                     <Route path="/optimization" element={<OptimizationPage />} />
                     <Route path="/optimization/:sessionId" element={<OptimizationPage />} />
                     <Route path="/skills" element={<SkillMetricsPage />} />
                     <Route path="/security" element={<SecurityObservabilityPage />} />
                     <Route path="/atif" element={<AtifViewerPage />} />
+                    <Route path="/settings" element={<SettingsPage />} />
                   </Routes>
                 </main>
                 <AgentHealthSidebar />
