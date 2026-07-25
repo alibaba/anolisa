@@ -21,7 +21,10 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
                 AuthField {
                     name: "api_key".to_string(),
                     label: "API Key".to_string(),
-                    hint: Some("获取地址: https://dashscope.console.aliyun.com/apiKey".to_string()),
+                    hint: Some(
+                        "获取地址: https://bailian.console.aliyun.com/?tab=model#/api-key"
+                            .to_string(),
+                    ),
                     secret: true,
                     required: true,
                     placeholder: None,
