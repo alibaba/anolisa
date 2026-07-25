@@ -289,9 +289,15 @@ fn wait_for_raw_cli_marker_from(
     cursor: usize,
     marker: &str,
 ) -> Result<usize, String> {
+    if cursor > observed.len() {
+        return Err(format!(
+            "raw CLI marker cursor {cursor} is past the observed transcript ({} bytes)",
+            observed.len()
+        ));
+    }
     let deadline = std::time::Instant::now() + RAW_CLI_TIMEOUT;
     loop {
-        let window = &observed[cursor.min(observed.len())..];
+        let window = &observed[cursor..];
         if let Some(found) = find_subslice(window, marker.as_bytes()) {
             return Ok(cursor + found + marker.len());
         }
@@ -299,9 +305,15 @@ fn wait_for_raw_cli_marker_from(
         if remaining.is_zero() {
             return Err(format!("raw CLI marker was not visible: {marker}"));
         }
-        let chunk = receiver
-            .recv_timeout(remaining)
-            .map_err(|_| format!("raw CLI closed or timed out before marker: {marker}"))?;
+        let chunk = match receiver.recv_timeout(remaining) {
+            Ok(chunk) => chunk,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(format!("raw CLI timed out before marker: {marker}"));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!("raw CLI closed before marker: {marker}"));
+            }
+        };
         observed.extend(chunk);
     }
 }
@@ -776,6 +788,10 @@ fn configure_raw_cli_command(command: &mut Command) {
         .env("COSH_SHELL_BOOTSTRAP_PATH", "0")
         .env("COSH_SHELL_HEALTH_SCAN", "disabled")
         .env("COSH_RECOMMENDATIONS_ENABLED", "0")
+        // Pin the renderer: markers such as approval request IDs only exist
+        // in rich output, so tests must not inherit the caller's TERM.
+        // Plain/dumb-renderer tests override TERM explicitly per case.
+        .env("TERM", "xterm-256color")
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
         .env("HOME", home)
