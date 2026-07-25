@@ -198,19 +198,17 @@ impl CardInputState {
                 b'\r' | b'\n' => {
                     let event = self.submit(capture);
                     let submitted = event.is_some();
-                    let preserve_for_retry = matches!(
-                        (&event, capture),
-                        (
-                            Some(RawInputEvent::CardAnswer(_)),
-                            RawInputCapture::Question { secret: false, .. }
-                        )
-                    );
                     if let Some(event) = event {
                         events.push(event);
                     }
-                    if !preserve_for_retry {
-                        self.free_text.clear();
-                    }
+                    // Always clear free_text after a submit attempt so that a
+                    // subsequent capture (e.g. the next auth field) starts with
+                    // a clean buffer.  The outer consume_captured_input also
+                    // calls reset() on release, but clearing here covers any
+                    // non-release submit (e.g. QuestionSubmitAttempt) and
+                    // eliminates reliance on preserve_for_retry which could
+                    // leak text across captures when reset() is bypassed.
+                    self.free_text.clear();
                     idx += 1;
                     if submitted {
                         // State transitions are applied by the main loop; suppress a burst of
