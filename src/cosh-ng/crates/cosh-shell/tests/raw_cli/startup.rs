@@ -385,6 +385,9 @@ fn raw_cli_startup_health_healthy_fixture_renders_startup_row_in_banner() {
 
     assert!(output.contains("cosh-shell"), "{output}");
     assert!(output.contains("Health: ok"), "{output}");
+    // The banner path marks the report rendered, so the deferred path must
+    // not emit the row a second time.
+    assert_eq!(output.matches("Health: ok").count(), 1, "{output}");
     assert!(output.contains("Mem used"), "{output}");
     assert!(output.contains("Disk"), "{output}");
     assert!(!output.contains("Health check"), "{output}");
