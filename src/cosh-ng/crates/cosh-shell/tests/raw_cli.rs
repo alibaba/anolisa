@@ -18,6 +18,8 @@ mod animation;
 mod approval;
 #[path = "raw_cli/audit.rs"]
 mod audit;
+#[path = "raw_cli/auth.rs"]
+mod auth;
 #[path = "raw_cli/cancellation.rs"]
 mod cancellation;
 #[path = "raw_cli/compaction.rs"]

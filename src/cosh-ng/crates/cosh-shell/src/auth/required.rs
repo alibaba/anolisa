@@ -6,8 +6,9 @@ use std::io::{self, Write};
 use crate::runtime::prelude::{AgentEvent, GovernedEvent, NoticePanelModel, RatatuiInlineRenderer};
 use crate::runtime::state::InlineState;
 
+use super::prompt::render_current_auth_panel;
 use super::provider_display::auth_required_providers_for_display;
-use super::runtime::{render_current_auth_panel, AuthBackend, AuthPhase, RuntimeAuthState};
+use super::runtime::{AuthBackend, AuthPhase, RuntimeAuthState};
 
 pub(crate) fn record_auth_required(
     state: &mut InlineState,
@@ -38,6 +39,7 @@ pub(crate) fn record_auth_required(
                 current_field: 0,
                 collected_values: HashMap::new(),
                 field_input: String::new(),
+                field_error: None,
                 existing_providers: Vec::new(),
                 editing_provider_name: None,
                 error_message: error_message.clone(),

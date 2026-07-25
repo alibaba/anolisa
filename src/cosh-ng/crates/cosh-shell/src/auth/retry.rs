@@ -7,6 +7,7 @@ pub(super) fn restore_after_failed_submission(auth: &mut RuntimeAuthState) {
     auth.current_field = 0;
     auth.collected_values.clear();
     auth.field_input.clear();
+    auth.field_error = None;
     if let Some(provider_id) = auth.editing_provider_name.clone() {
         let fields = &auth.providers[auth.selected_provider].fields;
         // Slash auth prepends provider_id before edit mode, so retries preserve that identity.

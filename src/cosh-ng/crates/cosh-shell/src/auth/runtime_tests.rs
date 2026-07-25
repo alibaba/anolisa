@@ -1,5 +1,6 @@
 use super::retry::restore_after_failed_submission;
 use super::runtime::*;
+use super::validation::{record_field_edit, record_field_submission, FieldSubmission};
 use crate::runtime::prelude::{
     AgentEvent, AuthFieldInfo, AuthProviderInfo, GovernanceDecision, GovernancePolicyDecision,
     GovernedEvent, InlineState, RawInputCapture,
@@ -135,6 +136,109 @@ fn pending_auth_capture_isolates_each_auth_field() {
     };
 
     assert_ne!(first_id, second_id);
+}
+
+fn openai_compat_with_provider_id_field() -> AuthProviderInfo {
+    let mut provider = provider("openai_compat", "OpenAI Compatible");
+    provider.fields = vec![
+        AuthFieldInfo {
+            name: "provider_id".to_string(),
+            label: "Provider ID".to_string(),
+            hint: None,
+            secret: false,
+            required: true,
+            placeholder: None,
+        },
+        AuthFieldInfo {
+            name: "base_url".to_string(),
+            label: "Base URL".to_string(),
+            hint: None,
+            secret: false,
+            required: true,
+            placeholder: None,
+        },
+    ];
+    provider
+}
+
+fn filling_provider_id_state() -> InlineState {
+    let mut state = InlineState::default();
+    record_auth_required(
+        &mut state,
+        &[governed_auth_required(vec![
+            openai_compat_with_provider_id_field(),
+        ])],
+    );
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::FillingField;
+    auth.current_field = 0;
+    state
+}
+
+#[test]
+fn dotted_provider_id_submission_stays_on_the_provider_id_field() {
+    let mut state = filling_provider_id_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    let field = auth.providers[0].fields[0].clone();
+
+    let outcome = record_field_submission(auth, Some(&field), "qwen3.7-max".to_string());
+
+    assert_eq!(outcome, FieldSubmission::Rejected);
+    // Still on Provider ID: Base URL / API Key / Model are never reached.
+    assert_eq!(auth.current_field, 0);
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert_eq!(auth.field_input, "qwen3.7-max");
+    assert!(!auth.collected_values.contains_key("provider_id"));
+    let error = auth.field_error.as_deref().expect("inline error recorded");
+    assert!(error.contains("letters, digits"), "{error}");
+}
+
+#[test]
+fn empty_and_non_ascii_provider_id_submissions_are_rejected() {
+    for value in ["", "\u{6a21}\u{578b}", "bad.provider"] {
+        let mut state = filling_provider_id_state();
+        let auth = state.auth.state.as_mut().unwrap();
+        let field = auth.providers[0].fields[0].clone();
+
+        let outcome = record_field_submission(auth, Some(&field), value.to_string());
+
+        assert_eq!(outcome, FieldSubmission::Rejected, "value={value:?}");
+        assert_eq!(auth.current_field, 0, "value={value:?}");
+        assert!(auth.collected_values.is_empty(), "value={value:?}");
+        assert!(auth.field_error.is_some(), "value={value:?}");
+    }
+}
+
+#[test]
+fn valid_provider_id_submission_is_recorded_without_error() {
+    for value in ["qwen-prod", "qwen_prod", "Qwen37"] {
+        let mut state = filling_provider_id_state();
+        let auth = state.auth.state.as_mut().unwrap();
+        let field = auth.providers[0].fields[0].clone();
+
+        let outcome = record_field_submission(auth, Some(&field), value.to_string());
+
+        assert_eq!(outcome, FieldSubmission::Accepted, "value={value:?}");
+        assert_eq!(
+            auth.collected_values.get("provider_id").map(String::as_str),
+            Some(value)
+        );
+        assert!(auth.field_error.is_none(), "value={value:?}");
+    }
+}
+
+#[test]
+fn editing_the_field_again_clears_the_previous_error() {
+    let mut state = filling_provider_id_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    let field = auth.providers[0].fields[0].clone();
+    record_field_submission(auth, Some(&field), "qwen3.7-max".to_string());
+    assert!(auth.field_error.is_some());
+
+    record_field_edit(auth, "qwen3-7-max");
+
+    assert!(auth.field_error.is_none());
+    assert_eq!(auth.field_input, "qwen3-7-max");
 }
 
 #[test]

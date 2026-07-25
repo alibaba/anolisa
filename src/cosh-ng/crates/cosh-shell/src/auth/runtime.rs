@@ -5,21 +5,25 @@ use serde_json::json;
 
 use crate::adapter::AdapterInstance;
 use crate::auth::active_submission::finish_active_submission;
-use crate::auth::capture::{auth_capture_id, matches_auth_capture};
+use crate::auth::capture::matches_auth_capture;
 use crate::auth::completion::finish_auth_configuration;
 use crate::auth::delete_confirm::{
-    begin_delete_confirmation, focus_delete_confirmation, render_delete_confirmation,
-    render_delete_outcome, submit_delete_confirmation,
+    begin_delete_confirmation, focus_delete_confirmation, render_delete_outcome,
+    submit_delete_confirmation,
 };
+use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
 use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
-    provider_action_options, ExistingProvider, ProviderAction,
+    ExistingProvider, ProviderAction,
 };
 use crate::auth::retry::restore_after_failed_submission;
+use crate::auth::validation::{
+    record_field_edit, record_field_submission, FieldSubmission, PROVIDER_ID_HINT,
+};
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
-    AuthFieldInfo, AuthProviderInfo, AuthResponse, NoticePanelModel, QuestionInputFeedback,
-    QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer, ShellEvent, ShellEventKind,
+    AuthFieldInfo, AuthProviderInfo, AuthResponse, NoticePanelModel, RatatuiInlineRenderer,
+    ShellEvent, ShellEventKind,
 };
 use crate::runtime::state::InlineState;
 
@@ -37,6 +41,8 @@ pub(crate) struct RuntimeAuthState {
     pub(crate) current_field: usize,
     pub(crate) collected_values: HashMap<String, String>,
     pub(crate) field_input: String,
+    /// Inline validation error for the field being filled; cleared on the next edit.
+    pub(crate) field_error: Option<String>,
     /// Existing providers loaded from config.toml (for ManagingProviders phase)
     pub(crate) existing_providers: Vec<ExistingProvider>,
     /// The section name of the provider being edited (None = new provider)
@@ -72,11 +78,11 @@ pub(crate) enum AuthPhase {
 }
 
 impl RuntimeAuthState {
-    fn current_provider(&self) -> &AuthProviderInfo {
+    pub(super) fn current_provider(&self) -> &AuthProviderInfo {
         &self.providers[self.selected_provider]
     }
 
-    fn current_field_info(&self) -> Option<&AuthFieldInfo> {
+    pub(super) fn current_field_info(&self) -> Option<&AuthFieldInfo> {
         self.current_provider().fields.get(self.current_field)
     }
 
@@ -169,6 +175,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         current_field: 0,
         collected_values: HashMap::new(),
         field_input: String::new(),
+        field_error: None,
         existing_providers,
         editing_provider_name: None,
         error_message: None,
@@ -231,7 +238,7 @@ fn providers_with_provider_id_field(providers: Vec<AuthProviderInfo>) -> Vec<Aut
                 AuthFieldInfo {
                     name: "provider_id".to_string(),
                     label: "Provider ID".to_string(),
-                    hint: Some("Unique config id, e.g. qwen-prod".to_string()),
+                    hint: Some(PROVIDER_ID_HINT.to_string()),
                     secret: false,
                     required: true,
                     placeholder: Some(provider.id.clone()),
@@ -294,7 +301,7 @@ fn handle_auth_input<W: std::io::Write>(
         return Ok(false);
     }
     if auth.phase == AuthPhase::FillingField {
-        auth.field_input = text.to_string();
+        record_field_edit(auth, text);
         clear_active_auth_panel(state, output)?;
         render_current_auth_panel(state, output)?;
     }
@@ -486,8 +493,11 @@ fn handle_auth_answer<W: std::io::Write>(
                 raw_answer.to_string()
             };
             let field = auth.current_field_info().cloned();
-            if let Some(field) = field.clone() {
-                auth.collected_values.insert(field.name.clone(), value);
+            // Reject invalid input before any downstream work so the other fields survive.
+            if record_field_submission(auth, field.as_ref(), value) == FieldSubmission::Rejected {
+                clear_active_auth_panel(state, output)?;
+                render_current_auth_panel(state, output)?;
+                return Ok(true);
             }
             if should_apply_aliyun_prepare_after_field(
                 auth.backend,
@@ -663,202 +673,6 @@ fn send_auth_response<W: std::io::Write>(
     finish_auth_configuration(state, output, &provider_label)
 }
 
-pub(super) fn render_current_auth_panel<W: std::io::Write>(
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    let Some(auth) = &state.auth.state else {
-        return Ok(());
-    };
-    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    let panel_id = auth_capture_id(auth);
-
-    match auth.phase {
-        AuthPhase::ManagingProviders => {
-            let mut options: Vec<String> = auth
-                .existing_providers
-                .iter()
-                .map(|ep| {
-                    let active_mark = if ep.is_active { "* [active] " } else { "  " };
-                    let model_info = if ep.model.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" - {}", ep.model)
-                    };
-                    let source_info = if ep.source == "system" {
-                        " [system]"
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "{}{} - \"{}\"{}{}",
-                        active_mark, ep.label, ep.name, model_info, source_info
-                    )
-                })
-                .collect();
-            options.push("  + Add new provider".to_string());
-
-            let model = QuestionPanelModel {
-                id: &panel_id,
-                question: "\u{1f511} Provider Management \u{2014} Select your AI provider:",
-                options: &options,
-                selected_option: auth.selected_provider,
-                selected_options: &[],
-                custom_answer: "",
-                allow_free_text: false,
-                selection_mode: QuestionSelectionMode::Single,
-                input_feedback: QuestionInputFeedback::Disabled,
-            };
-            let height = renderer.write_question_panel(output, model)?;
-            state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(panel_id.clone());
-        }
-        AuthPhase::ProviderAction { provider_idx } => {
-            let ep = &auth.existing_providers[provider_idx];
-            let title = format!("\u{1f511} {} \u{2014} \"{}\":", ep.label, ep.name);
-            let options = provider_action_options(ep.is_active, ep.editable, ep.deletable());
-            let model = QuestionPanelModel {
-                id: &panel_id,
-                question: &title,
-                options: &options,
-                selected_option: auth.selected_provider,
-                selected_options: &[],
-                custom_answer: "",
-                allow_free_text: false,
-                selection_mode: QuestionSelectionMode::Single,
-                input_feedback: QuestionInputFeedback::Disabled,
-            };
-            let height = renderer.write_question_panel(output, model)?;
-            state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(panel_id.clone());
-        }
-        AuthPhase::ConfirmDelete { provider_idx } => {
-            let height =
-                render_delete_confirmation(auth, provider_idx, &panel_id, &renderer, output)?;
-            state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(panel_id.clone());
-        }
-        AuthPhase::SelectingProvider => {
-            let options: Vec<String> = auth.providers.iter().map(|p| p.label.clone()).collect();
-            let model = QuestionPanelModel {
-                id: &panel_id,
-                question: "\u{1f511} Authentication Required \u{2014} Select your AI provider:",
-                options: &options,
-                selected_option: auth.selected_provider,
-                selected_options: &[],
-                custom_answer: "",
-                allow_free_text: false,
-                selection_mode: QuestionSelectionMode::Single,
-                input_feedback: QuestionInputFeedback::Disabled,
-            };
-            let height = renderer.write_question_panel(output, model)?;
-            state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(panel_id.clone());
-        }
-        AuthPhase::FillingField => {
-            let field = auth.current_field_info();
-            let label = field.map(|f| f.label.as_str()).unwrap_or("Value");
-            let is_secret = field.map(|f| f.secret).unwrap_or(false);
-            let hint_text = field.and_then(|f| f.hint.as_deref()).unwrap_or("");
-            let provider = auth.current_provider();
-            let is_editing = auth.editing_provider_name.is_some();
-            let action = if is_editing { "Edit" } else { "Enter" };
-            let mut question = format!(
-                "\u{1f511} {} \u{2014} {} {}:",
-                provider.label, action, label
-            );
-            if !hint_text.is_empty() {
-                question.push_str(&format!("\n  hint: {}", hint_text));
-            }
-            if is_editing && !auth.field_input.is_empty() {
-                question.push_str("\n  (Enter to keep current value)");
-            }
-            if !auth.field_input.is_empty() {
-                let display = if is_secret {
-                    "\u{2022}".repeat(auth.field_input.len())
-                } else {
-                    auth.field_input.clone()
-                };
-                question.push_str(&format!("\n  > {}", display));
-            } else {
-                question.push_str("\n  > ");
-            }
-            let model = QuestionPanelModel {
-                id: &panel_id,
-                question: &question,
-                options: &[],
-                selected_option: 0,
-                selected_options: &[],
-                custom_answer: "",
-                allow_free_text: true,
-                selection_mode: QuestionSelectionMode::Single,
-                input_feedback: QuestionInputFeedback::Disabled,
-            };
-            let height = renderer.write_question_panel(output, model)?;
-            state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(panel_id.clone());
-        }
-        AuthPhase::AliyunEcsChallenge {
-            ref instance_id,
-            ref console_url,
-        } => {
-            let mut question = format!(
-                "\u{1f511} Aliyun Authentication \u{2014} Authorize ECS RAM Role\n  ECS Instance ID: {instance_id}\n  URL: {console_url}"
-            );
-            if let Some(qr) = generate_qr_text(console_url) {
-                question.push_str("\n\n");
-                question.push_str(&qr);
-            }
-            let options = vec!["I have authorized this ECS instance".to_string()];
-            let model = QuestionPanelModel {
-                id: &panel_id,
-                question: &question,
-                options: &options,
-                selected_option: 0,
-                selected_options: &[],
-                custom_answer: "",
-                allow_free_text: false,
-                selection_mode: QuestionSelectionMode::Single,
-                input_feedback: QuestionInputFeedback::Disabled,
-            };
-            let height = renderer.write_question_panel(output, model)?;
-            state.questions.active_panel_height = height;
-            state.questions.active_panel_id = Some(panel_id);
-        }
-    }
-    output.flush()?;
-    Ok(())
-}
-
-fn clear_active_auth_panel<W: std::io::Write>(
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    let height = state.questions.active_panel_height;
-    if height == 0 {
-        state.questions.active_panel_id = None;
-        state.questions.active_panel_cursor_row = None;
-        state.questions.active_panel_width = None;
-        return Ok(());
-    }
-    write!(output, "\x1b[{height}A")?;
-    for row in 0..height {
-        write!(output, "\r\x1b[2K")?;
-        if row + 1 < height {
-            write!(output, "\x1b[1B")?;
-        }
-    }
-    if height > 1 {
-        write!(output, "\x1b[{}A", height - 1)?;
-    }
-    write!(output, "\r")?;
-    state.questions.active_panel_id = None;
-    state.questions.active_panel_height = 0;
-    state.questions.active_panel_cursor_row = None;
-    state.questions.active_panel_width = None;
-    Ok(())
-}
-
 fn cancel_auth_panel<W: std::io::Write>(
     state: &mut InlineState,
     output: &mut W,
@@ -963,56 +777,6 @@ fn parse_card_id_usize(event: &ShellEvent) -> Option<(String, usize)> {
 fn parse_card_id_text(event: &ShellEvent) -> Option<(String, String)> {
     let (id, text) = event.input.as_deref()?.split_once(':')?;
     Some((id.trim().to_string(), text.to_string()))
-}
-
-fn generate_qr_text(data: &str) -> Option<String> {
-    use qrcode::QrCode;
-
-    let code = QrCode::new(data.as_bytes()).ok()?;
-    let width = code.width();
-    let colors = code.to_colors();
-    let margin = 2usize;
-    let total_width = width + 2 * margin;
-    let light_row: String = "\u{2588}".repeat(total_width);
-    let mut result = String::new();
-
-    for _ in 0..margin {
-        result.push_str(&light_row);
-        result.push('\n');
-    }
-
-    let mut y = 0;
-    while y < width {
-        for _ in 0..margin {
-            result.push('\u{2588}');
-        }
-        for x in 0..width {
-            let top_dark = colors[y * width + x] == qrcode::Color::Dark;
-            let bottom_dark = if y + 1 < width {
-                colors[(y + 1) * width + x] == qrcode::Color::Dark
-            } else {
-                false
-            };
-            result.push(match (top_dark, bottom_dark) {
-                (true, true) => ' ',
-                (true, false) => '\u{2584}',
-                (false, true) => '\u{2580}',
-                (false, false) => '\u{2588}',
-            });
-        }
-        for _ in 0..margin {
-            result.push('\u{2588}');
-        }
-        result.push('\n');
-        y += 2;
-    }
-
-    for _ in 0..margin {
-        result.push_str(&light_row);
-        result.push('\n');
-    }
-
-    Some(result)
 }
 
 #[cfg(test)]
