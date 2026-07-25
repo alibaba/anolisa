@@ -12,11 +12,21 @@ use ratatui::text::Span;
 use wait_timeout::ChildExt;
 
 const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(target_os = "linux")]
-const RAW_CLI_SHARED_PARALLELISM: usize = 4;
-#[cfg(not(target_os = "linux"))]
-const RAW_CLI_SHARED_PARALLELISM: usize = 1;
+// Shared-mode sessions run concurrently up to this bound. Override with
+// COSH_RAW_CLI_TEST_PARALLELISM to probe higher/lower parallelism locally.
+const RAW_CLI_SHARED_PARALLELISM_DEFAULT: usize = 4;
 pub(crate) const RAW_CLI_UNSET_ENV: &str = "__cosh_raw_cli_unset_env__";
+
+fn raw_cli_shared_parallelism() -> usize {
+    static PARALLELISM: OnceLock<usize> = OnceLock::new();
+    *PARALLELISM.get_or_init(|| {
+        std::env::var("COSH_RAW_CLI_TEST_PARALLELISM")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value >= 1)
+            .unwrap_or(RAW_CLI_SHARED_PARALLELISM_DEFAULT)
+    })
+}
 
 static RAW_CLI_GIT_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
 static RAW_CLI_RUN_GATE: OnceLock<RawCliRunGate> = OnceLock::new();
@@ -265,18 +275,40 @@ fn wait_for_raw_cli_marker(
     observed: &mut Vec<u8>,
     marker: &str,
 ) -> Result<(), String> {
+    wait_for_raw_cli_marker_from(receiver, observed, 0, marker).map(|_| ())
+}
+
+// Incremental variant: only text at or after `cursor` matches, and the
+// returned cursor points past the match so repeated markers (for example a
+// repainted shell prompt) can gate successive steps.
+fn wait_for_raw_cli_marker_from(
+    receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+    observed: &mut Vec<u8>,
+    cursor: usize,
+    marker: &str,
+) -> Result<usize, String> {
     let deadline = std::time::Instant::now() + RAW_CLI_TIMEOUT;
-    while !String::from_utf8_lossy(observed).contains(marker) {
+    loop {
+        let window = &observed[cursor.min(observed.len())..];
+        if let Some(found) = find_subslice(window, marker.as_bytes()) {
+            return Ok(cursor + found + marker.len());
+        }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             return Err(format!("raw CLI marker was not visible: {marker}"));
         }
         let chunk = receiver
             .recv_timeout(remaining)
-            .map_err(|_| format!("raw CLI closed before marker: {marker}"))?;
+            .map_err(|_| format!("raw CLI closed or timed out before marker: {marker}"))?;
         observed.extend(chunk);
     }
-    Ok(())
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn wait_for_raw_cli_marker_or_retry(
@@ -459,10 +491,14 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_marker_input(
     let (output_receiver, stdout_reader) = read_pipe_with_chunks(stdout);
     let stderr_reader = read_pipe(stderr);
     let mut observed = Vec::new();
+    let mut cursor = 0usize;
 
     for (marker, input) in steps {
-        if let Err(error) = wait_for_raw_cli_marker(&output_receiver, &mut observed, marker) {
-            abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
+        match wait_for_raw_cli_marker_from(&output_receiver, &mut observed, cursor, marker) {
+            Ok(next_cursor) => cursor = next_cursor,
+            Err(error) => {
+                abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error)
+            }
         }
         stdin.write_all(input).expect("write marker-gated input");
         stdin.flush().expect("flush marker-gated input");
@@ -647,7 +683,7 @@ impl RawCliRunGate {
             RawCliRunMode::Shared => {
                 while state.exclusive_active
                     || state.exclusive_waiting > 0
-                    || state.active_shared >= RAW_CLI_SHARED_PARALLELISM
+                    || state.active_shared >= raw_cli_shared_parallelism()
                 {
                     state = self
                         .changed
