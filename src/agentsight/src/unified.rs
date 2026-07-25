@@ -968,29 +968,11 @@ impl AgentSight {
                     let agent_name = agent.agent_info.name.clone();
                     self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
-                } else if matches!(
-                    crate::lineage::classify_exit(*exit_code as i32),
-                    crate::lineage::ExitClassification::SignalCrash { .. }
-                ) {
-                    // SubAgent/Tool signal crash only (not AbnormalExit — child
-                    // exit(1) after parent dies is normal cleanup, not a crash).
-                    let child_crash_name = self.lineage_tree.read().ok().and_then(|tree| {
-                        tree.get(*pid).and_then(|node| {
-                            if matches!(
-                                node.process_type,
-                                crate::lineage::ProcessType::SubAgent
-                                    | crate::lineage::ProcessType::Tool
-                            ) {
-                                Some(
-                                    tree.root_agent_ancestor(*pid)
-                                        .and_then(|a| a.agent_name.clone())
-                                        .unwrap_or_else(|| node.comm.clone()),
-                                )
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                } else {
+                    let child_crash_name =
+                        self.lineage_tree.read().ok().and_then(|tree| {
+                            child_crash_agent_name(&tree, *pid, *exit_code as i32)
+                        });
                     if let Some(agent_name) = child_crash_name {
                         self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
                     }
@@ -1043,15 +1025,9 @@ impl AgentSight {
                 }
             }
             VariableEvent::Exit { header, .. } => {
-                // Do NOT remove from lineage tree here — procmon Exit handler
-                // does the authoritative remove (line ~884). Removing here first
-                // would race: if proctrace exit arrives before procmon exit for
-                // the same PID, tree.get(pid) in the procmon SubAgent/Tool crash
-                // detection branch returns None, silently dropping the crash event.
-                log::debug!(
-                    "Lineage: proctrace exit pid={} (deferred to procmon handler)",
-                    header.pid,
-                );
+                if let Ok(mut tree) = self.lineage_tree.write() {
+                    defer_proctrace_exit_removal(&mut tree, header.pid);
+                }
             }
             _ => {}
         }
@@ -2298,15 +2274,7 @@ fn record_agent_crash_interruptions(
         Severity::High
     };
     if let Some(node) = lineage.and_then(|tree| tree.get(pid)) {
-        match node.process_type {
-            crate::lineage::ProcessType::Tool => severity = Severity::Medium,
-            crate::lineage::ProcessType::SubAgent => {
-                if severity == Severity::Critical {
-                    severity = Severity::High;
-                }
-            }
-            _ => {}
-        }
+        severity = downgrade_severity(severity, node.process_type);
     }
 
     // Group by (session_id, conversation_id) to produce one event per conversation
@@ -2342,12 +2310,7 @@ fn record_agent_crash_interruptions(
             }
             if let Some(node) = tree.get(pid) {
                 detail["process_type"] = serde_json::json!(node.process_type.as_str());
-                detail["blast_radius"] = serde_json::json!(match node.process_type {
-                    crate::lineage::ProcessType::Agent => "total_session_loss",
-                    crate::lineage::ProcessType::SubAgent => "partial",
-                    crate::lineage::ProcessType::Tool => "recoverable",
-                    _ => "unknown",
-                });
+                detail["blast_radius"] = serde_json::json!(blast_radius_for(node.process_type));
             }
         }
         let mut event = InterruptionEvent::new(
@@ -2387,6 +2350,89 @@ fn record_agent_crash_interruptions(
             log::warn!("[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}");
         }
     }
+}
+
+// ─── Crash-routing decision helpers ──────────────────────────────────────────
+//
+// Pure functions extracted from AgentSight's event-loop methods so the crash
+// routing / severity / blast-radius decisions are unit-testable without the
+// BPF pipeline. Verbatim moves — behavior must stay identical to the inline
+// originals.
+
+/// Decide whether a non-scanner-tracked process exit should be reported as a
+/// child crash, and under which agent name.
+///
+/// SubAgent/Tool signal crash only (not AbnormalExit — child
+/// exit(1) after parent dies is normal cleanup, not a crash).
+/// Returns the root Agent ancestor's name (falling back to the node's comm)
+/// or `None` when the exit must not be reported.
+fn child_crash_agent_name(
+    tree: &crate::lineage::LineageTree,
+    pid: u32,
+    exit_code: i32,
+) -> Option<String> {
+    if !matches!(
+        crate::lineage::classify_exit(exit_code),
+        crate::lineage::ExitClassification::SignalCrash { .. }
+    ) {
+        return None;
+    }
+    tree.get(pid).and_then(|node| {
+        if matches!(
+            node.process_type,
+            crate::lineage::ProcessType::SubAgent | crate::lineage::ProcessType::Tool
+        ) {
+            Some(
+                tree.root_agent_ancestor(pid)
+                    .and_then(|a| a.agent_name.clone())
+                    .unwrap_or_else(|| node.comm.clone()),
+            )
+        } else {
+            None
+        }
+    })
+}
+
+/// Downgrade severity for SubAgent/Tool crashes (recoverable).
+/// Agent (and Unknown/Skill) crashes keep their original severity.
+fn downgrade_severity(
+    severity: crate::interruption::Severity,
+    process_type: crate::lineage::ProcessType,
+) -> crate::interruption::Severity {
+    use crate::interruption::Severity;
+    match process_type {
+        crate::lineage::ProcessType::Tool => Severity::Medium,
+        crate::lineage::ProcessType::SubAgent => {
+            if severity == Severity::Critical {
+                Severity::High
+            } else {
+                severity
+            }
+        }
+        _ => severity,
+    }
+}
+
+/// Map a crashing process's type to the blast-radius label recorded in the
+/// agent_crash detail payload.
+fn blast_radius_for(process_type: crate::lineage::ProcessType) -> &'static str {
+    match process_type {
+        crate::lineage::ProcessType::Agent => "total_session_loss",
+        crate::lineage::ProcessType::SubAgent => "partial",
+        crate::lineage::ProcessType::Tool => "recoverable",
+        _ => "unknown",
+    }
+}
+
+/// Handle a proctrace Exit for the lineage tree: intentionally a no-op.
+///
+/// Do NOT remove from lineage tree here — procmon Exit handler
+/// does the authoritative remove (line ~884). Removing here first
+/// would race: if proctrace exit arrives before procmon exit for
+/// the same PID, tree.get(pid) in the procmon SubAgent/Tool crash
+/// detection branch returns None, silently dropping the crash event.
+fn defer_proctrace_exit_removal(_tree: &mut crate::lineage::LineageTree, pid: u32) {
+    log::debug!("Lineage: proctrace exit pid={pid} (deferred to procmon handler)");
 }
 
 #[cfg(test)]
