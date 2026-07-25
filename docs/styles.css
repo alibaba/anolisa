@@ -5,12 +5,12 @@
   --paper-solid: #0a141b;
   --paper-2: rgba(10, 110, 92, 0.12);
   --border: rgba(10, 110, 92, 0.22);
-  --border-strong: rgba(24, 186, 158, 0.48);
+  --border-strong: rgba(45, 212, 167, 0.48);
   --text: #e8eeed;
   --muted: #94a3b8;
   --muted-2: #4b6060;
-  --accent: #18ba9e;
-  --accent-2: #18ba9e;
+  --accent: #2dd4a7;
+  --accent-2: #2dd4a7;
   --accent-soft: rgba(10, 110, 92, 0.18);
   --code: #d8fffa;
   --shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
@@ -90,17 +90,10 @@ a:focus-visible, button:focus-visible {
 }
 
 .brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   width: 28px;
   height: 28px;
-  border-radius: 6px;
-  color: #ffffff;
-  background: #0a6e5c;
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 700;
+  flex: 0 0 auto;
 }
 
 .top-actions {

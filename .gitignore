@@ -7,5 +7,8 @@
 !scripts/sync-site-changelog.mjs
 !agents/
 !agents/**
+!assets/
+!assets/brand/
+!assets/brand/**
 !docs/
 !docs/**

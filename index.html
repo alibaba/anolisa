@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ANOLISA — The Agentic OS</title>
 <meta name="description" content="Server-side operating layer for AI agent workloads. One command to install.">
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&gt;</text></svg>">
+<link rel="icon" href="assets/brand/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/brand/favicon-16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/brand/favicon-32.png">
+<link rel="icon" type="image/png" sizes="48x48" href="assets/brand/favicon-48.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -17,7 +20,7 @@
   --border: rgba(10,110,92,0.2);
   --border-hover: rgba(10,110,92,0.45);
   --accent: #0A6E5C;
-  --accent-light: #18ba9e;
+  --accent-light: #2DD4A7;
   --accent-dim: rgba(10,110,92,0.12);
   --accent-glow: rgba(10,110,92,0.4);
   --text: #e8eeed;
@@ -57,10 +60,11 @@ nav{
 }
 nav .wrap{display:flex;align-items:center;justify-content:space-between}
 .nav-logo{
+  display:inline-flex;align-items:center;gap:9px;
   font-family:var(--mono);font-size:0.875rem;font-weight:600;
   color:var(--text);text-decoration:none;letter-spacing:-0.01em;
 }
-.nav-logo span{color:var(--accent-light)}
+.nav-logo img{width:27px;height:27px;display:block;flex:0 0 auto}
 .nav-links{display:flex;gap:24px;list-style:none}
 .nav-links a{
   font-family:var(--mono);font-size:0.75rem;color:var(--text-2);
@@ -76,6 +80,7 @@ nav .wrap{display:flex;align-items:center;justify-content:space-between}
   scroll-snap-align:start;scroll-snap-stop:always;
 }
 .hero .wrap{
+  width:100%;
   display:flex;flex-direction:column;align-items:flex-start;
 }
 .badge{
@@ -97,7 +102,11 @@ h1{
   font-family:var(--mono);font-size:clamp(2.5rem,5.5vw,4rem);
   font-weight:600;letter-spacing:-0.03em;line-height:1.1;margin-bottom:20px;
 }
-h1 span{color:var(--accent-light)}
+.hero-brand{display:flex;align-items:center;gap:clamp(14px,2vw,22px)}
+.hero-brand img{
+  width:.94em;height:.94em;display:block;flex:0 0 auto;
+}
+.hero-brand span{color:var(--text)}
 .hero-sub{
   font-size:1.05rem;color:var(--text-2);max-width:580px;
   margin:0 0 24px;line-height:1.8;
@@ -737,7 +746,10 @@ h1 span{color:var(--accent-light)}
 
 <nav>
   <div class="wrap">
-    <a href="./" class="nav-logo"><span>&gt;_</span> ANOLISA</a>
+    <a href="./" class="nav-logo">
+      <img src="assets/brand/anolisa-glyph-dark.svg" alt="" aria-hidden="true">
+      <span>ANOLISA</span>
+    </a>
     <div class="nav-right">
       <a class="nav-ext nav-doc" href="#/user-guide/anolisa">USER GUIDE</a>
       <a class="nav-ext nav-doc" href="#/changelog/root">CHANGELOG</a>
@@ -753,7 +765,10 @@ h1 span{color:var(--accent-light)}
 <section class="hero">
   <div class="wrap">
     <div class="badge"><span class="badge-dot"></span>Agentic OS 1.0</div>
-    <h1><span>&gt;_</span> ANOLISA</h1>
+    <h1 class="hero-brand">
+      <img src="assets/brand/anolisa-glyph-signal.svg" alt="" aria-hidden="true">
+      <span>ANOLISA</span>
+    </h1>
     <p class="hero-sub" id="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
     <p class="hero-tagline" id="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
 
