@@ -285,7 +285,8 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
 /// when an agent process disappears, we check dmesg to determine if it
 /// was killed by the OOM killer (vs normal exit, SIGKILL, segfault, etc.).
 ///
-/// Returns `true` if the PID appears in a "Killed process" OOM line in dmesg.
+/// Returns `true` if the PID appears in an OOM kill line in dmesg
+/// (either format accepted by [`line_matches_oom_kill`]).
 pub fn was_pid_oom_killed(pid: i32) -> bool {
     let output = match Command::new("dmesg").arg("-T").output() {
         Ok(o) if o.status.success() => o,
@@ -302,14 +303,35 @@ pub fn was_pid_oom_killed(pid: i32) -> bool {
     let content = String::from_utf8_lossy(&output.stdout);
     let pid_str = pid.to_string();
 
-    for line in content.lines() {
-        if !line.contains("Killed process") {
-            continue;
+    content
+        .lines()
+        .any(|line| line_matches_oom_kill(line, &pid_str))
+}
+
+/// Returns `true` if a single dmesg line attributes an OOM kill to `pid_str`.
+///
+/// Two kernel formats are recognised:
+/// - Summary line (all kernels): `Out of memory: Killed process <pid> (<name>) ...`
+/// - Structured line (kernel 5.0+, commit ef8444ea01d7):
+///   `oom-kill:constraint=...,task=<name>,pid=<pid>,uid=<uid>`
+///   On some systems (e.g. memcg OOM on 6.6.x) this is the only line
+///   reliably present, so matching the summary line alone misses the kill.
+///
+/// Invariant: the pid comparison is whole-token (`==`), never a prefix
+/// match, so pid 6693 must not match a line reporting pid 669334.
+fn line_matches_oom_kill(line: &str, pid_str: &str) -> bool {
+    // Summary format: token after "Killed process " is the full pid.
+    if let Some(after) = line.split("Killed process ").nth(1) {
+        if after.split_whitespace().next() == Some(pid_str) {
+            return true;
         }
-        // Check if this line contains "Killed process <our_pid> "
-        if let Some(after) = line.split("Killed process ").nth(1) {
-            if let Some(line_pid_str) = after.split_whitespace().next() {
-                if line_pid_str == pid_str {
+    }
+
+    // Structured format: comma-separated key=value fields after "oom-kill:".
+    if let Some(after) = line.split("oom-kill:").nth(1) {
+        for field in after.split(',') {
+            if let Some(value) = field.trim().strip_prefix("pid=") {
+                if value == pid_str {
                     return true;
                 }
             }
@@ -317,4 +339,45 @@ pub fn was_pid_oom_killed(pid: i32) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Real dmesg line observed on kernel 6.6.102 (memcg OOM, e2e evidence).
+    const STRUCTURED_LINE: &str = "[Sat Jul 25 10:00:00 2026] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=/,mems_allowed=0,oom_memcg=/user.slice,task_memcg=/user.slice/session-1.scope,task=python3,pid=669334,uid=0";
+
+    const SUMMARY_LINE: &str = "[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB";
+
+    #[test]
+    fn structured_line_matches_target_pid() {
+        assert!(line_matches_oom_kill(STRUCTURED_LINE, "669334"));
+    }
+
+    #[test]
+    fn structured_line_rejects_prefix_pid() {
+        // pid 6693 is a strict prefix of the line's pid 669334 — must not match.
+        assert!(!line_matches_oom_kill(STRUCTURED_LINE, "6693"));
+        // Nor the other direction: querying a longer pid than the line's.
+        assert!(!line_matches_oom_kill(
+            "[ts] oom-kill:constraint=CONSTRAINT_NONE,task=node,pid=6693,uid=1000",
+            "669334"
+        ));
+    }
+
+    #[test]
+    fn summary_line_matches_target_pid() {
+        assert!(line_matches_oom_kill(SUMMARY_LINE, "12345"));
+        assert!(!line_matches_oom_kill(SUMMARY_LINE, "1234"));
+    }
+
+    #[test]
+    fn unrelated_line_does_not_match() {
+        assert!(!line_matches_oom_kill(
+            "[ts] audit: type=1400 pid=669334 comm=python3",
+            "669334"
+        ));
+        assert!(!line_matches_oom_kill("", "669334"));
+    }
 }
