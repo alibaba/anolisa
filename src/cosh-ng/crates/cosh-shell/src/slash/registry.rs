@@ -437,7 +437,12 @@ mod tests {
     #[test]
     fn shell_marker_exact_tokens_match_registry() {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
-        let marker = include_str!("../shell_host/marker.rs");
+        // Marker scripts live in per-shell owner files under shell_host/marker/.
+        let marker = concat!(
+            include_str!("../shell_host/marker/bash.rs"),
+            "\n",
+            include_str!("../shell_host/marker/zsh.rs")
+        );
         let marker_tokens = marker
             .lines()
             .map(str::trim)
