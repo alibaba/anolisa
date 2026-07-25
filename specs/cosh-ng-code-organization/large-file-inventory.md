@@ -33,7 +33,7 @@ new over-threshold file appears that is not listed here.
 | 912 | `src/evidence/output_policy.rs` | evidence | Output excerpt policy; pre-existing. Split bounding from classification. |
 | 906 | `src/adapter/fake.rs` | adapter | Test fake adapter; pre-existing. Split scripted-scenario builders. |
 | 898 | `src/ui/agent_render/approval.rs` | ui | Approval card rendering; pre-existing. Split per-card-kind renderers. |
-| 895 | `src/auth/runtime.rs` | auth | Auth control-protocol runtime; prompt rendering extracted to `auth/prompt.rs`. Extract provider-specific flows next. |
+| 871 | `src/auth/runtime.rs` | auth | Auth control-protocol runtime; prompt rendering extracted to `auth/prompt.rs`. Extract provider-specific flows next. |
 | 886 | `src/activity/runtime.rs` | activity | Activity runtime; pre-existing. Extract lifecycle from bookkeeping. |
 | 859 | `src/agent/poll.rs` | agent | Agent run polling loop; pre-existing debt (main baseline 839). The compaction feature added the `compaction_recommended_v1` status capture; split event routing from rendering. |
 | 856 | `src/parser/mod.rs` | parser | Event parser (legacy `mod.rs`); pre-existing. Split per-event-kind parsers and rename off `mod.rs`. |

@@ -53,6 +53,9 @@ pub(super) fn submit_delete_confirmation(
     };
     let core_state = load_core_auth_state(cosh_core)?;
     auth.existing_providers = core_state.existing_providers;
+    // Re-derive the SysOM slot from the reloaded list: deleting the promoted RAM-role
+    // provider must bring the shortcut back rather than relabel its replacement.
+    auth.sysom.sync(&mut auth.existing_providers);
     auth.phase = AuthPhase::ManagingProviders;
     auth.selected_provider = 0;
     let needs_reselection = existing.is_active

@@ -9,6 +9,7 @@ use crate::runtime::state::InlineState;
 
 use super::capture::auth_capture_id;
 use super::delete_confirm::render_delete_confirmation;
+use super::menu::{existing_provider_label, management_options};
 use super::provider_management::provider_action_options;
 use super::runtime::AuthPhase;
 
@@ -24,32 +25,7 @@ pub(super) fn render_current_auth_panel<W: Write>(
 
     match auth.phase {
         AuthPhase::ManagingProviders => {
-            let mut options: Vec<String> = auth
-                .existing_providers
-                .iter()
-                .map(|provider| {
-                    let active_mark = if provider.is_active {
-                        "* [active] "
-                    } else {
-                        "  "
-                    };
-                    let model_info = if provider.model.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" - {}", provider.model)
-                    };
-                    let source_info = if provider.source == "system" {
-                        " [system]"
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "{}{} - \"{}\"{}{}",
-                        active_mark, provider.label, provider.name, model_info, source_info
-                    )
-                })
-                .collect();
-            options.push("  + Add new provider".to_string());
+            let options = management_options(&auth.sysom, &auth.existing_providers);
 
             let model = QuestionPanelModel {
                 id: &panel_id,
@@ -70,7 +46,8 @@ pub(super) fn render_current_auth_panel<W: Write>(
             let provider = &auth.existing_providers[provider_idx];
             let title = format!(
                 "\u{1f511} {} \u{2014} \"{}\":",
-                provider.label, provider.name
+                existing_provider_label(&auth.sysom, &auth.existing_providers, provider_idx),
+                provider.name
             );
             let options = provider_action_options(
                 provider.is_active,

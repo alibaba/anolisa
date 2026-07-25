@@ -11,6 +11,10 @@ use crate::auth::delete_confirm::{
     begin_delete_confirmation, focus_delete_confirmation, render_delete_outcome,
     submit_delete_confirmation,
 };
+use crate::auth::menu::{
+    has_manageable_entries, management_entry, management_entry_count, management_entry_index,
+    AuthManagementEntry, EcsRamRolePrepare, PrefetchedAliyunPrepare, SysomMenu,
+};
 use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
 use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
@@ -49,6 +53,9 @@ pub(crate) struct RuntimeAuthState {
     pub(crate) editing_provider_name: Option<String>,
     pub(super) error_message: Option<String>,
     pub(super) backend: AuthBackend,
+    /// SysOM placement plus the Aliyun prepare result prefetched for this `/auth`.
+    /// Default (non-ECS) leaves every menu index and phase transition unchanged.
+    pub(super) sysom: SysomMenu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,13 +164,16 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     );
     let id = format!("auth-{request_id}");
 
-    let existing_providers = core_state.existing_providers;
+    let mut existing_providers = core_state.existing_providers;
+    let mut sysom = prefetch_sysom_menu(adapter);
+    sysom.sync(&mut existing_providers);
 
-    // If there are existing providers, start in ManagingProviders phase
-    let phase = if existing_providers.is_empty() {
-        AuthPhase::SelectingProvider
-    } else {
+    // Saved providers or the SysOM shortcut give the management panel something to show;
+    // otherwise go straight to the template picker as before.
+    let phase = if has_manageable_entries(&sysom, existing_providers.len()) {
         AuthPhase::ManagingProviders
+    } else {
+        AuthPhase::SelectingProvider
     };
 
     state.auth.state = Some(RuntimeAuthState {
@@ -180,6 +190,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         editing_provider_name: None,
         error_message: None,
         backend: AuthBackend::CoreRegistry,
+        sysom,
     });
 
     render_current_auth_panel(state, output)?;
@@ -229,6 +240,33 @@ fn core_auth_prepare(
     serde_json::from_value(value).map_err(|e| format!("invalid auth prepare response: {e}"))
 }
 
+/// Detects an ECS host once per `/auth` so the menu can offer the SysOM free trial.
+///
+/// This is a recommendation, not a requirement: a failed, unsupported or `manual` prepare
+/// yields the default (non-ECS) menu instead of breaking `/auth`.
+fn prefetch_sysom_menu(adapter: &AdapterInstance) -> SysomMenu {
+    match core_auth_prepare(adapter, "aliyun") {
+        Ok(prepare) if prepare.mode == "manual" => SysomMenu::on_manual(),
+        Ok(prepare) => ecs_ram_role_prepare(prepare)
+            .map(SysomMenu::on_ecs)
+            .unwrap_or_default(),
+        Err(error) => {
+            // The panel fails open, but the cause must survive: without this a metadata
+            // timeout or a protocol mismatch is indistinguishable from "not on ECS".
+            tracing::debug!("auth prepare for the SysOM menu entry failed: {error}");
+            SysomMenu::default()
+        }
+    }
+}
+
+fn ecs_ram_role_prepare(prepare: CoreAuthPrepare) -> Option<EcsRamRolePrepare> {
+    (prepare.mode == "ecs_ram_role").then(|| EcsRamRolePrepare {
+        instance_id: prepare.instance_id.unwrap_or_default(),
+        console_url: prepare.console_url.unwrap_or_default(),
+        values: prepare.values,
+    })
+}
+
 fn providers_with_provider_id_field(providers: Vec<AuthProviderInfo>) -> Vec<AuthProviderInfo> {
     providers
         .into_iter()
@@ -263,8 +301,8 @@ fn handle_auth_focus<W: std::io::Write>(
     }
     match auth.phase {
         AuthPhase::ManagingProviders => {
-            let max = auth.existing_providers.len(); // last item = "+ Add new"
-            auth.selected_provider = selected.min(max);
+            let entries = management_entry_count(&auth.sysom, auth.existing_providers.len());
+            auth.selected_provider = selected.min(entries.saturating_sub(1));
             clear_active_auth_panel(state, output)?;
             render_current_auth_panel(state, output)?;
         }
@@ -324,24 +362,28 @@ fn handle_auth_answer<W: std::io::Write>(
 
     match auth.phase {
         AuthPhase::ManagingProviders => {
-            let idx = auth.selected_provider;
-            if idx < auth.existing_providers.len() {
-                // Selected an existing provider -> show action menu
-                auth.phase = AuthPhase::ProviderAction { provider_idx: idx };
-                auth.selected_provider = 0;
-                clear_active_auth_panel(state, output)?;
-                render_current_auth_panel(state, output)?;
-            } else {
-                // Selected "+ Add new provider" -> go to SelectingProvider
-                auth.selected_provider = 0;
-                auth.editing_provider_name = None;
-                auth.phase = AuthPhase::SelectingProvider;
-                auth.current_field = 0;
-                auth.collected_values.clear();
-                auth.field_input.clear();
-                clear_active_auth_panel(state, output)?;
-                render_current_auth_panel(state, output)?;
+            let entry = management_entry(
+                &auth.sysom,
+                auth.existing_providers.len(),
+                auth.selected_provider,
+            );
+            match entry {
+                AuthManagementEntry::Existing(provider_idx) => {
+                    // Selected an existing provider -> show action menu
+                    auth.phase = AuthPhase::ProviderAction { provider_idx };
+                    auth.selected_provider = 0;
+                }
+                // The SysOM shortcut is the aliyun template with the ECS challenge already
+                // in hand; a template list without `aliyun` falls back to the picker.
+                AuthManagementEntry::SysomShortcut => {
+                    if !begin_sysom_shortcut(auth) {
+                        begin_new_provider(auth);
+                    }
+                }
+                AuthManagementEntry::AddNew => begin_new_provider(auth),
             }
+            clear_active_auth_panel(state, output)?;
+            render_current_auth_panel(state, output)?;
             Ok(true)
         }
         AuthPhase::ProviderAction { provider_idx } => {
@@ -451,9 +493,13 @@ fn handle_auth_answer<W: std::io::Write>(
                     render_current_auth_panel(state, output)?;
                 }
                 ProviderAction::Cancel => {
-                    // Cancel -> back to ManagingProviders
+                    // Cancel -> back to ManagingProviders, on the same row we came from
                     auth.phase = AuthPhase::ManagingProviders;
-                    auth.selected_provider = provider_idx;
+                    auth.selected_provider = management_entry_index(
+                        &auth.sysom,
+                        auth.existing_providers.len(),
+                        AuthManagementEntry::Existing(provider_idx),
+                    );
                     clear_active_auth_panel(state, output)?;
                     render_current_auth_panel(state, output)?;
                 }
@@ -550,6 +596,40 @@ fn handle_auth_answer<W: std::io::Write>(
     }
 }
 
+/// Resets the flow so the next answer picks a template for a brand-new provider.
+fn begin_new_provider(auth: &mut RuntimeAuthState) {
+    auth.selected_provider = 0;
+    auth.editing_provider_name = None;
+    auth.phase = AuthPhase::SelectingProvider;
+    auth.current_field = 0;
+    auth.collected_values.clear();
+    auth.field_input.clear();
+}
+
+/// Starts the SysOM free trial on the `aliyun` template, or reports `false` when the core
+/// offers no such template.
+///
+/// The Provider ID is still collected first: the shortcut must not silently overwrite an
+/// existing configuration with a fixed id. The prefetched ECS challenge is applied once
+/// that id validates, in the same place the manual aliyun flow would probe for it.
+fn begin_sysom_shortcut(auth: &mut RuntimeAuthState) -> bool {
+    let Some(template_idx) = auth
+        .providers
+        .iter()
+        .position(|provider| provider.id == "aliyun")
+    else {
+        return false;
+    };
+    auth.selected_provider = template_idx;
+    auth.editing_provider_name = None;
+    auth.phase = AuthPhase::FillingField;
+    auth.current_field = 0;
+    auth.collected_values.clear();
+    auth.field_input.clear();
+    auth.field_error = None;
+    true
+}
+
 fn load_current_field_input(auth: &mut RuntimeAuthState) {
     let field_name = auth.current_field_info().map(|f| f.name.clone());
     if let Some(name) = field_name {
@@ -592,14 +672,22 @@ fn clear_ecs_auth_source_for_manual_aliyun_edit(
     }
 }
 
+/// Switches the flow to the ECS RAM-role challenge, or reports `false` for manual AK/SK.
+///
+/// Reuses the challenge `/auth` already prefetched when there is one, so selecting the
+/// SysOM shortcut does not probe the ECS metadata service a second time.
 fn apply_aliyun_prepare(
     adapter: &AdapterInstance,
     auth: &mut RuntimeAuthState,
 ) -> Result<bool, String> {
-    let prepare = core_auth_prepare(adapter, "aliyun")?;
-    if prepare.mode != "ecs_ram_role" {
-        return Ok(false);
-    }
+    let prepare = match auth.sysom.prefetched() {
+        Some(PrefetchedAliyunPrepare::Manual) => return Ok(false),
+        Some(PrefetchedAliyunPrepare::EcsRamRole(prepare)) => prepare.clone(),
+        None => match ecs_ram_role_prepare(core_auth_prepare(adapter, "aliyun")?) {
+            Some(prepare) => prepare,
+            None => return Ok(false),
+        },
+    };
     for (key, value) in prepare.values {
         auth.collected_values.insert(key, value);
     }
@@ -607,8 +695,8 @@ fn apply_aliyun_prepare(
     auth.collected_values.remove("access_key_secret");
     auth.collected_values.remove("security_token");
     auth.phase = AuthPhase::AliyunEcsChallenge {
-        instance_id: prepare.instance_id.unwrap_or_default(),
-        console_url: prepare.console_url.unwrap_or_default(),
+        instance_id: prepare.instance_id,
+        console_url: prepare.console_url,
     };
     Ok(true)
 }
@@ -780,116 +868,4 @@ fn parse_card_id_text(event: &ShellEvent) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        clear_ecs_auth_source_for_manual_aliyun_edit, should_apply_aliyun_prepare_after_field,
-        should_apply_aliyun_prepare_for_edit, should_apply_aliyun_prepare_on_provider_selection,
-        AuthBackend, ExistingProvider,
-    };
-    use std::collections::HashMap;
-
-    #[test]
-    fn core_registry_aliyun_add_waits_for_provider_id_before_prepare() {
-        assert!(!should_apply_aliyun_prepare_on_provider_selection(
-            AuthBackend::CoreRegistry
-        ));
-        assert!(should_apply_aliyun_prepare_after_field(
-            AuthBackend::CoreRegistry,
-            false,
-            "aliyun",
-            Some("provider_id"),
-        ));
-    }
-
-    #[test]
-    fn active_run_aliyun_selection_can_prepare_without_provider_id_field() {
-        assert!(should_apply_aliyun_prepare_on_provider_selection(
-            AuthBackend::ActiveRun
-        ));
-        assert!(!should_apply_aliyun_prepare_after_field(
-            AuthBackend::ActiveRun,
-            false,
-            "aliyun",
-            Some("provider_id"),
-        ));
-    }
-
-    #[test]
-    fn manual_aliyun_edit_does_not_apply_ecs_prepare() {
-        let manual = ExistingProvider {
-            name: "aliyun-manual".to_string(),
-            provider_type: "aliyun".to_string(),
-            label: "Aliyun Authentication".to_string(),
-            model: "qwen3.7-plus".to_string(),
-            is_active: true,
-            editable: true,
-            source: "user".to_string(),
-            base_url: None,
-            api_key_mask: None,
-            access_key_id_mask: Some("••••".to_string()),
-            access_key_secret_mask: Some("••••••".to_string()),
-            security_token_mask: None,
-            auth_source: None,
-        };
-        let ecs = ExistingProvider {
-            auth_source: Some("ecs_ram_role".to_string()),
-            access_key_id_mask: None,
-            access_key_secret_mask: None,
-            ..manual.clone()
-        };
-
-        assert!(!should_apply_aliyun_prepare_for_edit(&manual));
-        assert!(should_apply_aliyun_prepare_for_edit(&ecs));
-    }
-
-    #[test]
-    fn ecs_aliyun_manual_fallback_clears_auth_source() {
-        let ecs = ExistingProvider {
-            name: "aliyun-ecs".to_string(),
-            provider_type: "aliyun".to_string(),
-            label: "Aliyun Authentication".to_string(),
-            model: "qwen3.7-plus".to_string(),
-            is_active: true,
-            editable: true,
-            source: "user".to_string(),
-            base_url: None,
-            api_key_mask: None,
-            access_key_id_mask: None,
-            access_key_secret_mask: None,
-            security_token_mask: None,
-            auth_source: Some("ecs_ram_role".to_string()),
-        };
-        let manual = ExistingProvider {
-            auth_source: None,
-            ..ecs.clone()
-        };
-        let mut ecs_values = HashMap::from([
-            ("auth_source".to_string(), "ecs_ram_role".to_string()),
-            ("access_key_id".to_string(), "manual-ak".to_string()),
-            ("access_key_secret".to_string(), "manual-sk".to_string()),
-            ("security_token".to_string(), "manual-token".to_string()),
-        ]);
-        let mut manual_values = ecs_values.clone();
-
-        clear_ecs_auth_source_for_manual_aliyun_edit(&ecs, &mut ecs_values);
-        clear_ecs_auth_source_for_manual_aliyun_edit(&manual, &mut manual_values);
-
-        assert!(!ecs_values.contains_key("auth_source"));
-        assert_eq!(
-            ecs_values.get("access_key_id").map(String::as_str),
-            Some("manual-ak")
-        );
-        assert_eq!(
-            ecs_values.get("access_key_secret").map(String::as_str),
-            Some("manual-sk")
-        );
-        assert_eq!(
-            ecs_values.get("security_token").map(String::as_str),
-            Some("manual-token")
-        );
-        assert_eq!(
-            manual_values.get("auth_source").map(String::as_str),
-            Some("ecs_ram_role")
-        );
-    }
-}
+mod tests;

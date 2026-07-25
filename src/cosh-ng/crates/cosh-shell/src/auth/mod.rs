@@ -2,6 +2,7 @@ mod active_submission;
 mod capture;
 mod completion;
 mod delete_confirm;
+mod menu;
 mod prompt;
 pub(crate) mod provider_display;
 mod provider_management;

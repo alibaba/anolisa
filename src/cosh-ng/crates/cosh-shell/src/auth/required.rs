@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use crate::runtime::prelude::{AgentEvent, GovernedEvent, NoticePanelModel, RatatuiInlineRenderer};
 use crate::runtime::state::InlineState;
 
+use super::menu::SysomMenu;
 use super::prompt::render_current_auth_panel;
 use super::provider_display::auth_required_providers_for_display;
 use super::runtime::{AuthBackend, AuthPhase, RuntimeAuthState};
@@ -44,6 +45,8 @@ pub(crate) fn record_auth_required(
                 editing_provider_name: None,
                 error_message: error_message.clone(),
                 backend: AuthBackend::ActiveRun,
+                // The active-run flow never shows the management menu.
+                sysom: SysomMenu::default(),
             });
             ids.push(id);
         }
