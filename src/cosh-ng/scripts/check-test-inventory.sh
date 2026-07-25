@@ -53,7 +53,7 @@ check_overlap_ceiling() {
 check_source_floor cosh-types 24
 check_source_floor cosh-platform 279
 check_source_floor cosh-cli 71
-check_source_floor cosh-core 672
+check_source_floor cosh-core 684
 check_source_floor cosh-shell 2528
 
 ignored_count="$(rg -n '^[[:space:]]*#\[ignore' crates -g '*.rs' | wc -l | tr -d ' ')"

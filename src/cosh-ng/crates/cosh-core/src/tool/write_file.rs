@@ -69,14 +69,9 @@ impl Tool for WriteFileTool {
     }
 }
 
-fn resolve_path(path_str: &str, cwd: &Path) -> std::path::PathBuf {
-    let p = std::path::Path::new(path_str);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    }
-}
+// resolve_path is provided by the parent module (super::resolve_path)
+// and supports ~ expansion.
+use super::resolve_path;
 
 fn write_result_output(content: &str, bytes: usize, lines: usize, path: &Path) -> String {
     let base_message = format!("Wrote {bytes} bytes ({lines} lines) to {}", path.display());
