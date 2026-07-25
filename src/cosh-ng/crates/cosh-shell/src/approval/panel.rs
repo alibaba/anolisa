@@ -165,7 +165,7 @@ pub(crate) fn approval_focus_from_event(
     let index = selected.trim().parse::<usize>().ok()?;
     let is_hook = requests
         .iter()
-        .any(|r| r.id == id.trim() && r.subject.contains("HOOK:"));
+        .any(|r| r.id == id.trim() && r.subject.starts_with("HOOK:"));
     let action = if is_hook {
         hook_approval_action_at(index)?
     } else {
