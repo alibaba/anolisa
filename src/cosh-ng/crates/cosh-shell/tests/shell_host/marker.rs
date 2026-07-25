@@ -1386,3 +1386,205 @@ fn shell_host_bash_debug_trap_children_never_see_exported_extdebug() {
     assert!(terminal.contains("trap-window-clean-ok"), "{terminal}");
     assert!(terminal.contains("shell-alive-ok"), "{terminal}");
 }
+
+#[test]
+fn shell_host_bash_alias_expanded_commands_keep_preexec_markers() {
+    // BASH_ALIASES (bash 4+) is required for the alias-aware guard; on
+    // older bash (e.g. macOS /bin/bash 3.2) the guard degrades to pre-fix
+    // behavior by design, so this test only runs on bash 4+.
+    let version_probe = Command::new("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+        .output();
+    let Ok(version_probe) = version_probe else {
+        return;
+    };
+    let major = String::from_utf8_lossy(&version_probe.stdout)
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
+    if major < 4 {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-alias-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    let list_dir = work_dir.join("listing");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::create_dir_all(&list_dir).expect("list dir");
+    let data_file = work_dir.join("data.txt");
+    std::fs::write(&data_file, "needle\n").expect("data file");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "alias ls='ls --color=auto'\n\
+         alias ll='ls -l'\n\
+         alias lg='grep --color=auto -n'\n\
+         alias wrap='env '\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("bash-alias-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let single = format!("ls {}", shell_arg(&list_dir));
+    let chained = format!("ll {}", shell_arg(&list_dir));
+    let assignment_prefixed = format!("FOO=1 ls {}", shell_arg(&list_dir));
+    let compound = format!("ls {}; pwd", shell_arg(&list_dir));
+    let pipeline = format!("ls {} | wc -l", shell_arg(&list_dir));
+    let quoted_alias = format!("lg needle {}", shell_arg(&data_file));
+    // Bash keeps alias-expanding the next word when an alias value ends
+    // with a blank (alias wrap='env '), so `wrap ll <dir>` really runs
+    // `env ls -l <dir>` and the guard must match that expansion.
+    let trailing_blank = format!("wrap ll {}", shell_arg(&list_dir));
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(single.clone()),
+            ScriptedInput::user_line(chained.clone()),
+            ScriptedInput::user_line(assignment_prefixed.clone()),
+            ScriptedInput::user_line(compound.clone()),
+            ScriptedInput::user_line(pipeline.clone()),
+            ScriptedInput::user_line(quoted_alias.clone()),
+            ScriptedInput::user_line(trailing_blank.clone()),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let ledger = ledger_from_output(&output);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    for expected in [
+        &single,
+        &chained,
+        &assignment_prefixed,
+        &compound,
+        &pipeline,
+        &quoted_alias,
+        &trailing_blank,
+    ] {
+        let block = ledger
+            .blocks
+            .iter()
+            .find(|block| block.command == **expected)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing command block for {expected:?}; blocks: {:?}",
+                    ledger
+                        .blocks
+                        .iter()
+                        .map(|block| block.command.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(block.exit_code, 0, "{expected}");
+    }
+    // preexec must report the history original text, never the
+    // alias-expanded variant.
+    assert!(
+        ledger
+            .blocks
+            .iter()
+            .all(|block| !block.command.contains("--color=auto")),
+        "{:?}",
+        ledger
+            .blocks
+            .iter()
+            .map(|block| block.command.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shell_host_bash_alias_guard_survives_polluted_ifs() {
+    // N6: the alias-aware guard must stay builtin-only and IFS-independent.
+    let version_probe = Command::new("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+        .output();
+    let Ok(version_probe) = version_probe else {
+        return;
+    };
+    let major = String::from_utf8_lossy(&version_probe.stdout)
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
+    if major < 4 {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-ifs-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    let list_dir = work_dir.join("listing");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::create_dir_all(&list_dir).expect("list dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "alias ls='ls --color=auto'\nIFS=':'\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("bash-ifs-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let aliased = format!("ls {}", shell_arg(&list_dir));
+    let output = run_scripted_bash(&config, &[ScriptedInput::user_line(aliased.clone())])
+        .expect("scripted bash pty");
+
+    let ledger = ledger_from_output(&output);
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == aliased)
+        .unwrap_or_else(|| {
+            panic!(
+                "missing aliased block under polluted IFS; blocks: {:?}",
+                ledger
+                    .blocks
+                    .iter()
+                    .map(|block| block.command.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(block.exit_code, 0);
+}
+
+#[test]
+fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-histdedup-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(home_dir.join(".bashrc"), "HISTCONTROL=ignoredups\n").expect("bashrc");
+
+    let config = ShellHostConfig::new("bash-histdedup-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("please explain the last error"),
+            ScriptedInput::user_line("please explain the last error"),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let intercepts = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("please explain the last error")
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .count();
+    assert_eq!(intercepts, 2, "{:?}", output.events);
+}

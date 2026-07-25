@@ -171,7 +171,7 @@ fn provider_shell_permission_approval_records_foreground_metadata() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
     assert_eq!(handoff.source, "approved_provider_shell_tool");
 }
@@ -276,7 +276,7 @@ fn streamed_tool_fallback_handoff_strips_control_request_id() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
 
     assert_eq!(handoff.command, "echo fallback");
@@ -301,7 +301,7 @@ fn provider_tool_call_fallback_handoff_keeps_provider_source() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
 
     assert_eq!(handoff.command, "echo provider-fallback");
