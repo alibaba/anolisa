@@ -24,6 +24,9 @@ pub(super) enum SlashCommand<'a> {
     #[allow(dead_code)]
     Info(SlashInfoCommand),
     Health,
+    Status,
+    About,
+    Stats,
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
@@ -114,6 +117,9 @@ impl<'a> SlashCommand<'a> {
                 parts.next(),
                 parts.next(),
             )),
+            "/status" => Some(Self::Status),
+            "/about" => Some(Self::About),
+            "/stats" => Some(Self::Stats),
             "/agent" | "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
             | "/send-to-shell" | "/shell" => None,
             "/" => Some(Self::Noop),
@@ -145,6 +151,9 @@ fn parser_owned_command(token: &str) -> bool {
             | "/config"
             | "/debug"
             | "/health"
+            | "/status"
+            | "/about"
+            | "/stats"
             | "/extensions"
             | "/skills"
             | "/session"

@@ -83,6 +83,7 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
         ("Modes", MessageId::HelpGroupModes),
         ("Hooks", MessageId::HelpGroupHooks),
         ("Registry", MessageId::HelpGroupRegistry),
+        ("Info", MessageId::HelpGroupInfo),
     ] {
         let entries = visible_slash_commands()
             .filter(|hint| hint.group == Some(group))

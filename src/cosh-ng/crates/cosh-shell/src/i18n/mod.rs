@@ -109,9 +109,9 @@ mod tests {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);
         }
-        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 750);
-        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 751);
-        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 752);
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 754);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 755);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 756);
         assert_eq!(
             MessageId::AgentQuestionUnavailableTitle as usize,
             MessageId::SlashQuotedArgumentsUnsupported as usize + 1

@@ -13,6 +13,7 @@ use crate::slash::parser::SlashCommand;
 use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
 use crate::slash::skills::render_skills_command;
+use crate::slash::status::{render_about_command, render_stats_command, render_status_command};
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
@@ -78,6 +79,18 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Recommendations(sub, arg, extra) => {
             render_recommendations_command(sub, arg, extra, event, adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Status => {
+            render_status_command(adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::About => {
+            render_about_command(output)?;
+            Ok(true)
+        }
+        SlashCommand::Stats => {
+            render_stats_command(adapter, state, output)?;
             Ok(true)
         }
         SlashCommand::Health => {
