@@ -167,7 +167,9 @@ pub fn convert_qoder_events(
                     step_model = msg.get("model").and_then(|v| v.as_str()).map(String::from);
                 }
 
-                // Extract usage/metrics
+                // Extract usage/metrics — accumulate across multiple usage
+                // events within the same LLM turn (some providers emit partial
+                // usage per chunk); only keeping the last would under-count.
                 if let Some(usage) = msg.get("usage") {
                     let pt = usage.get("input_tokens").and_then(|v| v.as_u64());
                     let ct = usage.get("output_tokens").and_then(|v| v.as_u64());
@@ -180,16 +182,25 @@ pub fn convert_qoder_events(
                                 .and_then(|v| v.as_u64())
                         });
                     if pt.is_some() || ct.is_some() {
-                        step_metrics = Some(Metrics {
-                            prompt_tokens: pt,
-                            completion_tokens: ct,
-                            cached_tokens: cache,
+                        let m = step_metrics.get_or_insert_with(|| Metrics {
+                            prompt_tokens: Some(0),
+                            completion_tokens: Some(0),
+                            cached_tokens: Some(0),
                             cost_usd: None,
                             logprobs: None,
                             completion_token_ids: None,
                             prompt_token_ids: None,
                             extra: None,
                         });
+                        if let Some(v) = pt {
+                            *m.prompt_tokens.get_or_insert(0) += v;
+                        }
+                        if let Some(v) = ct {
+                            *m.completion_tokens.get_or_insert(0) += v;
+                        }
+                        if let Some(v) = cache {
+                            *m.cached_tokens.get_or_insert(0) += v;
+                        }
                     }
                 }
 

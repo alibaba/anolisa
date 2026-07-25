@@ -298,16 +298,23 @@ pub async fn run_server(
     // serve only consumes). Path is derived via the shared sibling_db_path helper
     // so reader and writer always resolve the same file. A missing DB simply
     // yields an empty table → empty API results (graceful degradation).
+    // Only open when the file already exists to avoid creating an empty DB as a
+    // persistent side-effect in serve mode when collection was never enabled.
     let trajectory_store: Option<Arc<TrajectoryStore>> = {
         let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
-        match TrajectoryStore::new_with_path(&db_path) {
-            Ok(store) => {
-                log::info!("Trajectory store initialized at {db_path:?}");
-                Some(Arc::new(store))
-            }
-            Err(e) => {
-                log::warn!("Failed to open trajectory store: {e}");
-                None
+        if !db_path.exists() {
+            log::debug!("Trajectory store not found at {db_path:?}; endpoints degrade to empty");
+            None
+        } else {
+            match TrajectoryStore::new_with_path(&db_path) {
+                Ok(store) => {
+                    log::info!("Trajectory store initialized at {db_path:?}");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    log::warn!("Failed to open trajectory store: {e}");
+                    None
+                }
             }
         }
     };

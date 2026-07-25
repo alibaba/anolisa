@@ -3215,6 +3215,10 @@ pub struct TrajectoryQuery {
     pub limit: Option<i64>,
 }
 
+/// Default and hard-cap for the trajectory list `limit` parameter.
+const TRAJECTORY_DEFAULT_LIMIT: i64 = 200;
+const TRAJECTORY_MAX_LIMIT: i64 = 1000;
+
 /// GET /api/trajectories?project=&source=&agent_name=&limit=
 ///
 /// Lists collected trajectories (newest first) without the bulky `atif_json`
@@ -3228,7 +3232,13 @@ pub async fn list_trajectories(
     let Some(ref tstore) = data.trajectory_store else {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
-    let limit = query.limit.unwrap_or(200);
+    // Normalize: <= 0 falls back to default; cap at hard upper bound to
+    // prevent unbounded full-table scans (SQLite treats negative LIMIT as
+    // "no limit").
+    let limit = match query.limit {
+        Some(v) if v > 0 => v.min(TRAJECTORY_MAX_LIMIT),
+        _ => TRAJECTORY_DEFAULT_LIMIT,
+    };
     match tstore.list_summaries(
         query.project.as_deref(),
         query.source.as_deref(),

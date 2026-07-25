@@ -58,7 +58,9 @@ pub fn run_collector_loop(config: &CollectorConfig, stop: &AtomicBool) {
         config.db_path.display()
     );
 
-    while stop.load(Ordering::SeqCst) {
+    // Single exit point: the loop always exits via the `sleep_or_stop` check,
+    // avoiding split semantics between the while-condition and the helper.
+    loop {
         scan_once(&store, config);
         if !sleep_or_stop(stop, config.scan_interval_secs) {
             break;
@@ -122,6 +124,9 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
         .with_context(|| format!("read {}", session.path.display()))?;
     let events = qoder::load_jsonl_events(&content);
     if events.is_empty() {
+        // Record file state so persistently corrupted files are not re-read
+        // every scan round (they will be retried only when size/mtime change).
+        let _ = store.set_file_state(&file_path, file_size, file_mtime_ns);
         anyhow::bail!("no valid JSONL events");
     }
 

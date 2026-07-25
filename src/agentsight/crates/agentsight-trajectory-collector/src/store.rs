@@ -102,6 +102,16 @@ impl TrajectoryStore {
             )",
             [],
         )?;
+        // Lightweight bookkeeping for files that failed conversion (corrupted
+        // JSONL, empty events, etc.) so they are not re-read every scan round.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS skipped_files (
+                file_path TEXT PRIMARY KEY,
+                file_size INTEGER NOT NULL,
+                file_mtime_ns INTEGER NOT NULL
+            )",
+            [],
+        )?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -109,11 +119,14 @@ impl TrajectoryStore {
 
     /// Returns `(file_size, file_mtime_ns)` recorded for `file_path`, if any.
     /// Drives the incremental scan: unchanged files are skipped.
+    /// Checks both successfully ingested trajectories and skipped (corrupted)
+    /// files.
     ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn get_file_state(&self, file_path: &str) -> Result<Option<(i64, i64)>> {
         let conn = self.lock_conn()?;
+        // First check successfully ingested files.
         let state = conn
             .query_row(
                 "SELECT file_size, file_mtime_ns FROM collected_trajectories
@@ -122,7 +135,40 @@ impl TrajectoryStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(state)
+        if state.is_some() {
+            return Ok(state);
+        }
+        // Then check skipped (corrupted) files.
+        let skipped = conn
+            .query_row(
+                "SELECT file_size, file_mtime_ns FROM skipped_files
+                 WHERE file_path = ?1",
+                params![file_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(skipped)
+    }
+
+    /// Records the file state for a file that failed conversion, preventing
+    /// re-reads until the file changes (size/mtime differ).
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn set_file_state(
+        &self,
+        file_path: &str,
+        file_size: i64,
+        file_mtime_ns: i64,
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(file_path) DO UPDATE SET file_size = ?2, file_mtime_ns = ?3",
+            params![file_path, file_size, file_mtime_ns],
+        )?;
+        Ok(())
     }
 
     /// Inserts or updates one trajectory row (keyed by `session_id`).

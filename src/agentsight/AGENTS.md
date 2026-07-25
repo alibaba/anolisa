@@ -234,7 +234,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
 | `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
-| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON |
+| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤端点则降级为空 + 200） |
 
 ## 9. Frontend
 

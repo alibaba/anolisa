@@ -111,9 +111,10 @@ let trajectory_store = {
 };
 ```
 
-**决策**：即使 `features.trajectory_collection.enabled=false`，serve 也**总是尝试只读打开** DB。
+**决策**：serve 仅在 `trajectories.db` 文件**已存在**时尝试只读打开，不会创建空 DB。
 理由：采集由 `trace` 进程负责，`serve` 只消费；用户可能先采集、后开 Dashboard 查看历史数据。
-DB 不存在时 `new_with_path` 会创建空表 → 列表返回 `[]`，前端展示空态（见 §5.3 / §6 D4）。
+DB 不存在时 `trajectory_store=None` → 列表/过滤端点返回空 + 200，detail 端点返回 404（见 §5.3 / §6 D4）。
+这避免了 serve 模式在采集从未启用时产生空 DB 文件的持久化副作用。
 
 > **注意**：collector crate 的 `TrajectoryStore::new_with_path` 使用裸 `Connection::open`，
 > **不会创建父目录**（不同于主 crate `connection::create_connection` 的 `create_dir_all`）。
