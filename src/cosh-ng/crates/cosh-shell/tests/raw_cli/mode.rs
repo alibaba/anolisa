@@ -96,15 +96,19 @@ fn raw_cli_zsh_native_pasted_mode_slash_does_not_reach_shell() {
 
 #[test]
 fn raw_cli_pasted_trust_confirm_sets_trust_mode() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
             (
-                b"\x1b[200~/mode approval trust confirm\n\x1b[201~".to_vec(),
-                Duration::ZERO,
+                "cosh-osc$ ",
+                b"\x1b[200~/mode approval trust confirm\n\x1b[201~",
             ),
-            (b"/help\n".to_vec(), Duration::from_millis(200)),
-            (b"exit\n".to_vec(), Duration::from_millis(100)),
+            ("Mode set to trust.", b""),
+            ("cosh-osc$ ", b"/help\n"),
+            ("Mode: trust. Strategy: smart.", b"exit\n"),
         ],
     );
 
@@ -238,14 +242,19 @@ fn raw_cli_mode_approval_and_analysis_use_zh_language_env() {
 
 #[test]
 fn raw_cli_mode_approval_card_uses_zh_language_env() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "zh-CN")],
-        vec![
-            (b"/mode approval\n".to_vec(), Duration::from_millis(500)),
-            (b"\x1b[D\n".to_vec(), Duration::from_millis(1_000)),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/mode approval\n"),
+            ("\u{6309}\u{952e}: Left/Right \u{9009}\u{62e9}", b"\x1b[D\n"),
+            (
+                "\u{6a21}\u{5f0f}\u{5df2}\u{8bbe}\u{7f6e}\u{4e3a} recommend\u{3002}",
+                b"",
+            ),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -260,6 +269,9 @@ fn raw_cli_mode_approval_card_uses_zh_language_env() {
 
 #[test]
 fn raw_cli_mode_analysis_card_selects_auto_for_current_session() {
+    // Keep delayed input: the prompt repaints before card input ownership
+    // returns to the shell, so a marker-gated `/help` right after the
+    // analysis card can be silently dropped (input-ownership commit gap).
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
@@ -286,6 +298,8 @@ fn raw_cli_mode_analysis_card_selects_auto_for_current_session() {
 
 #[test]
 fn raw_cli_mode_analysis_card_cancel_keeps_current_session_mode() {
+    // Keep delayed input: same input-ownership commit gap as the
+    // selects-auto case above.
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
@@ -376,12 +390,16 @@ fn raw_cli_mode_root_and_language_guidance_are_canonical() {
 
 #[test]
 fn raw_cli_mode_slash_panel_selects_recommend_with_card_input() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"/mode approval\n".to_vec(), Duration::from_millis(500)),
-            (b"\x1b[D\n".to_vec(), Duration::from_millis(1_000)),
-            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/mode approval\n"),
+            ("> [ auto", b"\x1b[D\n"),
+            ("Mode set to recommend.", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -395,6 +413,8 @@ fn raw_cli_mode_slash_panel_selects_recommend_with_card_input() {
 
 #[test]
 fn raw_cli_suggest_mode_keeps_tool_requests_display_only() {
+    // Keep delayed input here: in recommend mode `??` routes into the
+    // tool-details flow whose session teardown races marker-gated stdin.
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
@@ -444,15 +464,16 @@ fn raw_cli_auto_mode_runs_safe_bash_tool_without_approval_panel() {
 
 #[test]
 fn raw_cli_trust_mode_runs_bash_tool_without_approval_panel() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
-            (
-                b"?? stream pwd tool approval\n".to_vec(),
-                Duration::from_millis(100),
-            ),
-            (b"exit\n".to_vec(), Duration::from_millis(2_000)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/mode approval trust confirm\n"),
+            ("Mode set to trust.", b"?? stream pwd tool approval\n"),
+            ("Deferred req-1", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -490,16 +511,17 @@ fn raw_cli_auto_mode_skips_readonly_builtin_tool_approval_panel() {
 
 #[test]
 fn raw_cli_auto_mode_still_asks_for_unsafe_bash_tool() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
-            (
-                b"?? request unsafe tool approval\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b"\x1b".to_vec(), Duration::from_millis(800)),
-            (b"exit\n".to_vec(), Duration::from_millis(800)),
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"/mode approval auto\n"),
+            ("Mode set to auto.", b"?? request unsafe tool approval\n"),
+            ("req-1", b"\x1b"),
+            ("Cancelled req-1", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -549,17 +571,16 @@ fn raw_cli_auto_mode_trusted_command_requires_exact_match() {
     let home_str = home.to_string_lossy().to_string();
     let _ = fs::remove_file("/tmp/cosh-shell-fake-action-should-not-run");
 
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[("HOME", &home_str)],
-        vec![
-            (
-                b"?? request unsafe tool approval\n".to_vec(),
-                Duration::ZERO,
-            ),
-            (b"\x1b".to_vec(), Duration::from_millis(800)),
-            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? request unsafe tool approval\n"),
+            ("req-1", b"\x1b"),
+            ("Cancelled req-1", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
