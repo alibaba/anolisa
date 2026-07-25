@@ -82,7 +82,7 @@ run_shell_integrations() {
   # raw_cli concurrency is governed by the in-tree shared/exclusive gate
   # (RAW_CLI_SHARED_PARALLELISM / COSH_RAW_CLI_TEST_PARALLELISM); give
   # libtest enough threads so that gate, not the runner, is the limiter.
-  cargo test --locked -p cosh-shell --test raw_cli -- --test-threads=8
+  cargo test --locked -p cosh-shell --test raw_cli -- --test-threads=16
   cargo test --locked -p cosh-shell --test shell_host -- --test-threads=1
 }
 
