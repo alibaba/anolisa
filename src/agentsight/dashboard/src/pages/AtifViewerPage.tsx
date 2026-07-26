@@ -8,6 +8,11 @@ import {
   fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
 } from '../utils/apiClient';
 import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
+import { SubagentGraph } from '../components/SubagentGraph';
+import type { TrajNode } from '../utils/trajectoryTree';
+import {
+  buildTrajectoryTree, findNodeByPath, findNodeByRef, encodeNodePath, decodeNodePath,
+} from '../utils/trajectoryTree';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -315,7 +320,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                                   key={ri}
                                   onClick={() => onNavigateSubagent?.(ref)}
                                   className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-lg text-xs font-medium transition-colors"
-                                  title={ref.session_id ? '在新窗口查看子代理轨迹' : '查看内嵌子代理轨迹'}
+                                  title="在上方拓扑图中选中该子代理并查看其轨迹"
                                 >
                                   🤖 子代理轨迹
                                   {ref.trajectory_id && (
@@ -618,45 +623,47 @@ export const AtifViewerPage: React.FC = () => {
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Subagent breadcrumb navigation stack
-  const [navStack, setNavStack] = useState<AtifDocument[]>([]);
-  const activeDoc = navStack.length > 0 ? navStack[navStack.length - 1] : doc;
+  // Subagent navigation: a trajectory-id path from the root, mirrored in the URL
+  // so refreshing or sharing the link lands on the same node.
+  const [nodePath, setNodePath] = useState<string[]>([]);
+  const graphRef = useRef<HTMLDivElement>(null);
 
-  const navigateToSubagent = useCallback((ref: SubagentTrajectoryRef) => {
-    // Prefer opening in a new tab when the subagent has its own session_id
-    // (queryable via API); fall back to in-page navigation for embedded docs.
-    if (ref.session_id) {
-      window.open(`#/atif?type=session&id=${encodeURIComponent(ref.session_id)}`, '_blank');
+  const tree = React.useMemo(() => buildTrajectoryTree(doc), [doc]);
+  const selectedNode = tree ? findNodeByPath(tree, nodePath) : null;
+  const activeDoc = selectedNode?.doc ?? doc;
+
+  const selectNode = useCallback((node: TrajNode) => {
+    // Subagents referenced by session id only (never embedded) still live on
+    // their own page — the sole remaining case where a new tab is warranted.
+    if (node.externalSessionId) {
+      window.open(`#/atif?type=session&id=${encodeURIComponent(node.externalSessionId)}`, '_blank');
       return;
     }
-    // Resolve embedded subagent by trajectory_id from the currently viewed
-    // document (supports nested subagent levels), falling back to the root.
-    const scope = navStack.length > 0 ? navStack[navStack.length - 1] : doc;
-    if (!scope) return;
-    const embedded = (scope.subagent_trajectories ?? doc?.subagent_trajectories)?.find(
-      t => t.trajectory_id && t.trajectory_id === ref.trajectory_id
-    );
-    if (embedded) {
-      setNavStack(prev => [...prev, embedded]);
-      setExpandedSections(new Set());
-      setSelectedRound(initialRound(groupIntoRounds(embedded.steps ?? []), new Set()));
+    setNodePath(node.path);
+    setExpandedSections(new Set());
+    setSelectedRound(initialRound(groupIntoRounds(node.doc?.steps ?? []), new Set()));
+    const next = new URLSearchParams(searchParamsRef.current);
+    if (node.path.length > 0) next.set('node', encodeNodePath(node.path));
+    else next.delete('node');
+    setSearchParams(next);
+  }, [setSearchParams]);
+
+  /** Step-level "🤖 子代理轨迹" button: select the node in the graph above. */
+  const navigateToSubagent = useCallback((ref: SubagentTrajectoryRef) => {
+    const target = tree ? findNodeByRef(tree, ref) : null;
+    if (target) {
+      selectNode(target);
+      graphRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      return;
+    }
+    if (ref.session_id) {
+      window.open(`#/atif?type=session&id=${encodeURIComponent(ref.session_id)}`, '_blank');
     } else if (ref.trajectory_path) {
       setError(`外部子轨迹引用暂不支持: ${ref.trajectory_path}`);
     } else {
       setError('无法解析子轨迹引用：缺少 trajectory_id 或 trajectory_path');
     }
-  }, [doc, navStack]);
-
-  const navigateToBreadcrumb = useCallback((index: number) => {
-    // index -1 = root doc, 0..n = navStack index
-    if (index < 0) {
-      setNavStack([]);
-    } else {
-      setNavStack(prev => prev.slice(0, index + 1));
-    }
-    setExpandedSections(new Set());
-    setSelectedRound(null);
-  }, []);
+  }, [tree, selectNode]);
 
   const toggleSection = useCallback((key: string) => {
     setExpandedSections(prev => {
@@ -675,17 +682,25 @@ export const AtifViewerPage: React.FC = () => {
 
     const nextParams: Record<string, string> = { type: t, id: i.trim() };
     const currentSearchParams = searchParamsRef.current;
+    // Node selection and highlights only carry over when the target is unchanged
+    // (an explicit reload of a different id starts at the root trajectory).
+    let initialPath: string[] = [];
     if (currentSearchParams.get('id') === i.trim()) {
       const highlightCallId = currentSearchParams.get('highlight_call_id');
       const interruptionId = currentSearchParams.get('interruption_id');
+      const node = currentSearchParams.get('node');
       if (highlightCallId) nextParams.highlight_call_id = highlightCallId;
       if (interruptionId) nextParams.interruption_id = interruptionId;
+      if (node) {
+        nextParams.node = node;
+        initialPath = decodeNodePath(node);
+      }
     }
     setSearchParams(nextParams, { replace: true });
     setLoading(true);
     setError(null);
     setDoc(null);
-    setNavStack([]);
+    setNodePath(initialPath);
     setExpandedSections(new Set());
     setSelectedRound(null);
 
@@ -699,7 +714,12 @@ export const AtifViewerPage: React.FC = () => {
       setDoc(data);
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
       setExpandedSections(sections);
-      setSelectedRound(initialRound(groupIntoRounds(data.steps ?? []), sections));
+      // Round selection follows the node the URL restored, not always the root.
+      const restoredTree = buildTrajectoryTree(data);
+      const restoredDoc = restoredTree
+        ? (findNodeByPath(restoredTree, initialPath).doc ?? data)
+        : data;
+      setSelectedRound(initialRound(groupIntoRounds(restoredDoc.steps ?? []), sections));
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
@@ -712,6 +732,17 @@ export const AtifViewerPage: React.FC = () => {
       setLoading(false);
     }
   }, [queryType, queryId, setSearchParams]);
+
+  // Back/forward navigation changes the URL without going through selectNode,
+  // so mirror the `node` param back into state when they diverge.
+  useEffect(() => {
+    if (!tree) return;
+    const urlPath = decodeNodePath(searchParams.get('node'));
+    if (encodeNodePath(urlPath) === encodeNodePath(nodePath)) return;
+    setNodePath(urlPath);
+    setExpandedSections(new Set());
+    setSelectedRound(initialRound(groupIntoRounds(findNodeByPath(tree, urlPath).doc?.steps ?? []), new Set()));
+  }, [searchParams, tree, nodePath]);
 
   // Auto-load from URL on mount
   useEffect(() => {
@@ -738,7 +769,7 @@ export const AtifViewerPage: React.FC = () => {
           return;
         }
         setDoc(parsed as AtifDocument);
-        setNavStack([]);
+        setNodePath([]);
         setError(null);
         setQueryId(parsed.session_id ?? '');
         setExpandedSections(new Set());
@@ -898,36 +929,6 @@ export const AtifViewerPage: React.FC = () => {
         {/* Loaded content */}
         {doc && !loading && (
           <>
-            {/* Subagent breadcrumb */}
-            {navStack.length > 0 && (
-              <div className="flex items-center gap-1.5 text-sm flex-wrap">
-                <button
-                  onClick={() => navigateToBreadcrumb(-1)}
-                  className="text-blue-600 hover:text-blue-800 hover:underline"
-                >
-                  🏠 根轨迹
-                </button>
-                {navStack.map((item, i) => (
-                  <span key={i} className="flex items-center gap-1.5">
-                    <span className="text-gray-300">/</span>
-                    {i === navStack.length - 1 ? (
-                      <span className="text-gray-800 font-medium">
-                        🤖 {item.agent?.name ?? 'subagent'}
-                        {item.trajectory_id && <span className="ml-1 text-xs text-gray-400 font-mono">{shortId(item.trajectory_id, 10)}</span>}
-                      </span>
-                    ) : (
-                      <button
-                        onClick={() => navigateToBreadcrumb(i)}
-                        className="text-blue-600 hover:text-blue-800 hover:underline"
-                      >
-                        🤖 {item.agent?.name ?? 'subagent'}
-                      </button>
-                    )}
-                  </span>
-                ))}
-              </div>
-            )}
-
             {/* Agent info + Metrics */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
               <AgentInfoCard doc={activeDoc!} />
@@ -1001,53 +1002,19 @@ export const AtifViewerPage: React.FC = () => {
               </div>
             )}
 
-            {/* Subagent trajectories section */}
-            {activeDoc?.subagent_trajectories && activeDoc.subagent_trajectories.length > 0 && (
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <h3 className="text-sm font-semibold text-gray-900 mb-3">
-                  🤖 子代理轨迹
-                  <span className="ml-2 text-xs font-normal text-gray-400">
-                    共 {activeDoc.subagent_trajectories.length} 个
-                  </span>
-                </h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {activeDoc.subagent_trajectories.map((sub, i) => (
-                    <button
-                      key={sub.trajectory_id ?? i}
-                      onClick={() => {
-                        setNavStack(prev => [...prev, sub]);
-                        setExpandedSections(new Set());
-                        setSelectedRound(initialRound(groupIntoRounds(sub.steps ?? []), new Set()));
-                      }}
-                      className="text-left px-4 py-3 rounded-lg border border-indigo-100 bg-indigo-50 hover:bg-indigo-100 transition-colors"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-indigo-800">
-                          {sub.agent?.name ?? 'subagent'}
-                        </span>
-                        {sub.trajectory_id && (
-                          <span className="text-xs text-indigo-400 font-mono truncate">
-                            {shortId(sub.trajectory_id, 12)}
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-1 text-xs text-indigo-600">
-                        {sub.steps?.length ?? 0} 步
-                        {sub.final_metrics?.total_prompt_tokens != null && (
-                          <span className="ml-2">
-                            {fmtTokens(sub.final_metrics.total_prompt_tokens)} in
-                          </span>
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                </div>
+            {/* Subagent topology graph — the single navigation surface */}
+            {tree && (
+              <div ref={graphRef}>
+                <SubagentGraph root={tree} selectedPath={nodePath} onSelect={selectNode} />
               </div>
             )}
 
             {/* Round master-detail: left = round list, right = round detail */}
             <div>
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
+                {selectedNode && selectedNode.depth > 0 && (
+                  <span className="text-indigo-600">{selectedNode.label} · </span>
+                )}
                 交互轨迹
                 <span className="ml-2 text-sm font-normal text-gray-400">
                   共 {rounds.length} 轮对话 · {steps.length} 步
