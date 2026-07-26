@@ -3,8 +3,10 @@
 //! Uses ACS3-HMAC-SHA256 signing and parses the cumulative SSE stream format
 //! into incremental `GenerateEvent`s compatible with `ContentGenerator` trait.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -324,83 +326,10 @@ impl SysomProvider {
             return Err(format!("SysOM API error {status}: {text}"));
         }
 
-        let cancelled = Arc::clone(&self.cancelled);
-        let byte_stream = response.bytes_stream();
-
-        // State for cumulative → incremental conversion
-        let state = SseParseState::default();
-
-        let event_stream = futures::stream::unfold(
-            (byte_stream, String::new(), cancelled, state),
-            |(mut stream, mut buf, cancelled, mut state)| async move {
-                loop {
-                    if cancelled.load(Ordering::SeqCst) {
-                        return Some((GenerateEvent::Cancelled, (stream, buf, cancelled, state)));
-                    }
-                    if state.stream_ended {
-                        return None;
-                    }
-
-                    // Try to extract a complete SSE event from buffer
-                    if let Some(pos) = buf.find("\n\n") {
-                        let event_block = buf[..pos].to_string();
-                        buf = buf[pos + 2..].to_string();
-
-                        if event_block.trim().is_empty() {
-                            continue;
-                        }
-
-                        if let Some(event) = parse_sysom_sse_event(&event_block, &mut state) {
-                            return Some((event, (stream, buf, cancelled, state)));
-                        }
-                        continue;
-                    }
-
-                    // Need more data
-                    match stream.next().await {
-                        Some(Ok(bytes)) => {
-                            buf.push_str(&String::from_utf8_lossy(&bytes));
-                        }
-                        Some(Err(e)) => {
-                            return Some((
-                                GenerateEvent::Error(format!("stream error: {e}")),
-                                (stream, buf, cancelled, state),
-                            ));
-                        }
-                        None => {
-                            // Stream ended — try to flush remaining buffer
-                            if !buf.trim().is_empty() {
-                                let event_block = buf.trim().to_string();
-                                buf.clear();
-                                if let Some(event) = parse_sysom_sse_event(&event_block, &mut state)
-                                {
-                                    return Some((event, (stream, buf, cancelled, state)));
-                                }
-                            }
-                            // Emit final Usage if available
-                            if let Some((prompt, completion, total)) = state.latest_usage.take() {
-                                state.stream_ended = true;
-                                return Some((
-                                    GenerateEvent::Usage {
-                                        prompt_tokens: prompt,
-                                        completion_tokens: completion,
-                                        total_tokens: total,
-                                    },
-                                    (stream, buf, cancelled, state),
-                                ));
-                            }
-                            state.stream_ended = true;
-                            return Some((
-                                GenerateEvent::MessageEnd,
-                                (stream, buf, cancelled, state),
-                            ));
-                        }
-                    }
-                }
-            },
-        );
-
-        Ok(Box::pin(event_stream))
+        Ok(sysom_event_stream(
+            response.bytes_stream(),
+            Arc::clone(&self.cancelled),
+        ))
     }
 
     /// Check if an error indicates STS credential expiration.
@@ -466,9 +395,111 @@ struct SseParseState {
     /// Track accumulated arguments length per tool index
     last_tool_args_len: Vec<usize>,
     message_ended: bool,
-    stream_ended: bool,
     /// Latest usage info (updated every frame, emitted at stream end)
     latest_usage: Option<(u32, u32, u32)>,
+}
+
+/// Byte-stream → `GenerateEvent` conversion state.
+struct SysomStreamState<S> {
+    source: Pin<Box<S>>,
+    /// Bytes received but not yet split into a complete SSE frame.
+    buf: String,
+    parse: SseParseState,
+    /// Events already decoded and waiting to be yielded, in emission order.
+    pending: VecDeque<GenerateEvent>,
+    /// Set once `source` reported EOF (or a transport error): a `Stream` gives
+    /// no guarantee about being polled again after it terminates.
+    source_done: bool,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Convert a raw SSE byte stream into incremental `GenerateEvent`s.
+///
+/// Terminal-event contract: the stream always ends with `MessageEnd`, preceded
+/// by `Usage` when the API reported token counts — `cosh-core` treats a stream
+/// without `MessageEnd` as `unexpected_eof` and aborts the turn before running
+/// any tool call the model requested. Both events are therefore queued together
+/// the moment the byte stream reaches EOF, and drained from `pending` without
+/// touching the exhausted source again.
+fn sysom_event_stream<S, B, E>(byte_stream: S, cancelled: Arc<AtomicBool>) -> GenerateStream
+where
+    S: futures::Stream<Item = Result<B, E>> + Send + 'static,
+    B: AsRef<[u8]> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let state = SysomStreamState {
+        source: Box::pin(byte_stream),
+        buf: String::new(),
+        parse: SseParseState::default(),
+        pending: VecDeque::new(),
+        source_done: false,
+        cancelled,
+    };
+
+    Box::pin(futures::stream::unfold(state, |mut state| async move {
+        loop {
+            if state.cancelled.load(Ordering::SeqCst) {
+                return Some((GenerateEvent::Cancelled, state));
+            }
+            if let Some(event) = state.pending.pop_front() {
+                return Some((event, state));
+            }
+            if state.source_done {
+                return None;
+            }
+
+            // Decode one complete SSE frame (frames are separated by "\n\n").
+            if let Some(pos) = state.buf.find("\n\n") {
+                let frame = state.buf[..pos].to_string();
+                state.buf = state.buf[pos + 2..].to_string();
+                if !frame.trim().is_empty() {
+                    drain_sse_frame(&frame, &mut state.parse, &mut state.pending);
+                }
+                continue;
+            }
+
+            match state.source.next().await {
+                Some(Ok(bytes)) => {
+                    state.buf.push_str(&String::from_utf8_lossy(bytes.as_ref()));
+                }
+                Some(Err(e)) => {
+                    // A transport error kills the underlying body; the core
+                    // aborts the turn on Error, so no terminal event follows.
+                    state.source_done = true;
+                    return Some((GenerateEvent::Error(format!("stream error: {e}")), state));
+                }
+                None => {
+                    state.source_done = true;
+                    // A final frame may arrive without its "\n\n" terminator.
+                    let tail = state.buf.trim().to_string();
+                    state.buf.clear();
+                    if !tail.is_empty() {
+                        drain_sse_frame(&tail, &mut state.parse, &mut state.pending);
+                    }
+                    if let Some((prompt, completion, total)) = state.parse.latest_usage.take() {
+                        state.pending.push_back(GenerateEvent::Usage {
+                            prompt_tokens: prompt,
+                            completion_tokens: completion,
+                            total_tokens: total,
+                        });
+                    }
+                    state.pending.push_back(GenerateEvent::MessageEnd);
+                }
+            }
+        }
+    }))
+}
+
+/// Queue every incremental event a single cumulative SSE frame contributes.
+///
+/// `parse_sysom_sse_event` reports at most one event per call, so a frame that
+/// advances both the text and a tool's arguments needs repeated calls. Each
+/// call returning an event advances a monotonically growing parse cursor
+/// (content length, tool count, argument length), so the loop terminates.
+fn drain_sse_frame(frame: &str, parse: &mut SseParseState, pending: &mut VecDeque<GenerateEvent>) {
+    while let Some(event) = parse_sysom_sse_event(frame, parse) {
+        pending.push_back(event);
+    }
 }
 
 /// Parse a single SSE event block (lines between \n\n).
@@ -732,6 +763,169 @@ fn hex_hmac_sha256(key: &[u8], data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::{Context, Poll};
+
+    /// Render one `event: OK` SSE frame, terminator included.
+    fn frame(payload: Value) -> String {
+        format!("event: OK\ndata: {payload}\n\n")
+    }
+
+    async fn collect_events(chunks: Vec<String>) -> Vec<GenerateEvent> {
+        let source = futures::stream::iter(chunks.into_iter().map(Ok::<String, String>));
+        let mut stream = sysom_event_stream(source, Arc::new(AtomicBool::new(false)));
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn usage_only_final_frame_still_terminates_with_message_end() {
+        let events = collect_events(vec![
+            frame(serde_json::json!({
+                "choices": [{"message": {"content": "hello"}}]
+            })),
+            frame(serde_json::json!({
+                "choices": [{"message": {"content": "hello"}}],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+            })),
+        ])
+        .await;
+
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    GenerateEvent::TextDelta(text),
+                    GenerateEvent::Usage {
+                        prompt_tokens: 11,
+                        completion_tokens: 7,
+                        total_tokens: 18,
+                    },
+                    GenerateEvent::MessageEnd,
+                ] if text == "hello"
+            ),
+            "unexpected events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_without_usage_terminates_with_message_end() {
+        let events = collect_events(vec![frame(serde_json::json!({
+            "choices": [{"message": {"content": "hi"}}]
+        }))])
+        .await;
+
+        assert!(
+            matches!(
+                &events[..],
+                [GenerateEvent::TextDelta(text), GenerateEvent::MessageEnd] if text == "hi"
+            ),
+            "unexpected events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unterminated_final_frame_is_flushed_before_message_end() {
+        let last = frame(serde_json::json!({
+            "choices": [{"message": {"content": "done"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+        }));
+        let events = collect_events(vec![last.trim_end().to_string()]).await;
+
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    GenerateEvent::TextDelta(text),
+                    GenerateEvent::Usage { total_tokens: 4, .. },
+                    GenerateEvent::MessageEnd,
+                ] if text == "done"
+            ),
+            "unexpected events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_with_final_usage_reaches_message_end() {
+        let events = collect_events(vec![
+            frame(serde_json::json!({
+                "choices": [{"message": {"tool_use": [{
+                    "id": "call_1",
+                    "index": 0,
+                    "function": {"name": "read_file", "arguments": ""}
+                }]}}]
+            })),
+            frame(serde_json::json!({
+                "choices": [{"message": {"tool_use": [{
+                    "id": "call_1",
+                    "index": 0,
+                    "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a\"}"}
+                }]}}],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 9, "total_tokens": 29}
+            })),
+        ])
+        .await;
+
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    GenerateEvent::ToolCallStart { index: 0, id, name },
+                    GenerateEvent::ToolCallDelta { index: 0, arguments_delta },
+                    GenerateEvent::Usage { total_tokens: 29, .. },
+                    GenerateEvent::MessageEnd,
+                ] if id == "call_1" && name == "read_file"
+                    && arguments_delta == "{\"path\":\"/tmp/a\"}"
+            ),
+            "unexpected events: {events:?}"
+        );
+    }
+
+    /// Byte stream that panics if polled again after reporting EOF.
+    struct PanicOnRepoll {
+        chunks: std::vec::IntoIter<String>,
+        exhausted: bool,
+    }
+
+    impl futures::Stream for PanicOnRepoll {
+        type Item = Result<String, String>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(!self.exhausted, "byte stream polled after EOF");
+            match self.chunks.next() {
+                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                None => {
+                    self.exhausted = true;
+                    Poll::Ready(None)
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn byte_stream_is_not_polled_after_eof() {
+        let source = PanicOnRepoll {
+            chunks: vec![frame(serde_json::json!({
+                "choices": [{"message": {"content": "x"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))]
+            .into_iter(),
+            exhausted: false,
+        };
+
+        let mut stream = sysom_event_stream(source, Arc::new(AtomicBool::new(false)));
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "unexpected events: {events:?}"
+        );
+    }
 
     #[test]
     fn region_id_strips_single_zone_suffix() {
