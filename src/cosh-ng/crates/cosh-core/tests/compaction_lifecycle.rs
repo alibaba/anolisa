@@ -94,6 +94,18 @@ fn session_id_of(messages: &[Value]) -> String {
         .to_string()
 }
 
+fn compaction_recommendation(messages: &[Value]) -> Option<String> {
+    messages.iter().find_map(|message| {
+        if message["type"] != "system" {
+            return None;
+        }
+        message["status"]
+            .as_str()
+            .filter(|status| status.starts_with("compaction_recommended_v1:"))
+            .map(ToOwned::to_owned)
+    })
+}
+
 /// Finds the single persisted session envelope beneath the store root.
 fn persisted_envelope(store: &Path) -> Value {
     fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -380,15 +392,7 @@ auto_compact_token_limit = 1500
         args.push(prompt.as_str());
         let messages = json_lines(&run_core(&fixture, &args));
         session_id = Some(session_id_of(&messages));
-        recommendation = messages.iter().find_map(|message| {
-            if message["type"] != "system" {
-                return None;
-            }
-            message["status"]
-                .as_str()
-                .filter(|status| status.starts_with("compaction_recommended_v1:"))
-                .map(ToOwned::to_owned)
-        });
+        recommendation = compaction_recommendation(&messages);
         if recommendation.is_some() {
             break;
         }
@@ -422,6 +426,51 @@ auto_compact_token_limit = 1500
     assert!(
         envelope.get("compaction").is_none(),
         "idle recommendation must not commit a projection inline: {envelope}"
+    );
+}
+
+#[test]
+fn automatic_idle_compaction_waits_for_a_compactable_run() {
+    let fixture = fixture();
+    configure(
+        &fixture,
+        "mock-compact-summary",
+        r#"
+[session.compaction]
+enabled = true
+auto = true
+preserve_recent_runs = 2
+model_context_window = 2000000
+auto_compact_token_limit = 1
+"#,
+    );
+
+    let first_prompt = bulky_prompt(0);
+    let first = json_lines(&run_core(&fixture, &[first_prompt.as_str()]));
+    assert!(
+        compaction_recommendation(&first).is_none(),
+        "one protected run must not trigger automatic compaction: {first:?}"
+    );
+    let session_id = session_id_of(&first);
+
+    let second_prompt = bulky_prompt(1);
+    let second = json_lines(&run_core(
+        &fixture,
+        &["--resume", session_id.as_str(), second_prompt.as_str()],
+    ));
+    assert!(
+        compaction_recommendation(&second).is_none(),
+        "all runs are still protected by preserve_recent_runs: {second:?}"
+    );
+
+    let third_prompt = bulky_prompt(2);
+    let third = json_lines(&run_core(
+        &fixture,
+        &["--resume", session_id.as_str(), third_prompt.as_str()],
+    ));
+    assert!(
+        compaction_recommendation(&third).is_some(),
+        "a newly eligible complete run should trigger compaction: {third:?}"
     );
 }
 

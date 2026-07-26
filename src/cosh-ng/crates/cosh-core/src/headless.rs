@@ -572,6 +572,26 @@ impl SessionRuntime {
         if !budget.over_trigger(history_tokens) {
             return;
         }
+        let compacted_through = engine
+            .compaction
+            .state()
+            .map(|state| state.compacted_through)
+            .unwrap_or(0);
+        match crate::compaction::has_new_compactable_prefix(
+            &engine.messages,
+            policy.preserve_recent_runs,
+            compacted_through,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.record.session_id,
+                    "automatic compaction preflight rejected the transcript: {error}"
+                );
+                return;
+            }
+        }
         // Bind to the durable revision clock, not the live projection: this
         // recommendation is emitted right after a persist, and a projection
         // that sanitization later rejects must not make it look stale.

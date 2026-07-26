@@ -15,7 +15,7 @@ use crate::context::ContextBuilder;
 use crate::provider::ContentGenerator;
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 
-use super::boundary::{group_agent_runs, select_compacted_through, BoundaryError};
+use super::boundary::{group_agent_runs, select_compacted_through_after, BoundaryError};
 use super::budget::{
     estimate_messages_tokens, estimate_text_tokens, measure_history, ContextBudget, ModelCapability,
 };
@@ -273,20 +273,18 @@ pub async fn compact_session(
     let tokens_before = measure_history(provider_reported_history, estimated_before);
 
     // 2. Choose a safe prefix over the complete transcript.
-    let cut = select_compacted_through(
-        &session.messages,
-        policy.preserve_recent_runs,
-        budget.target_tokens,
-    )?
-    .ok_or(CompactionError::NothingToCompact)?;
     let previous_cut = session
         .compaction
         .as_ref()
         .map(|state| state.compacted_through)
         .unwrap_or(0);
-    if cut <= previous_cut {
-        return Err(CompactionError::NothingToCompact);
-    }
+    let cut = select_compacted_through_after(
+        &session.messages,
+        policy.preserve_recent_runs,
+        budget.target_tokens,
+        previous_cut,
+    )?
+    .ok_or(CompactionError::NothingToCompact)?;
 
     // 3. Bound the summarizer input by the summarizer model's own context
     //    window (plus the byte-level memory ceiling). The committed cut may
@@ -387,10 +385,14 @@ pub(crate) async fn compact_in_memory(
     // path already treats `None` as "keep the current projection".
     let revision = previous_revision.checked_add(1)?;
     let previous_cut = previous.map(|state| state.compacted_through).unwrap_or(0);
-    let cut = select_compacted_through(messages, policy.preserve_recent_runs, target_tokens)
-        .ok()
-        .flatten()
-        .filter(|cut| *cut > previous_cut)?;
+    let cut = select_compacted_through_after(
+        messages,
+        policy.preserve_recent_runs,
+        target_tokens,
+        previous_cut,
+    )
+    .ok()
+    .flatten()?;
     // Emergency compaction shares the exact model-aware input budget used by
     // the manual/automatic engine path, so the three triggers cannot drift.
     let capability = ModelCapability::resolve(policy, config.agent.session_token_limit, model);
