@@ -833,6 +833,20 @@ pub(crate) fn render_auth_card_actions<W: std::io::Write>(
                     }
                 }
             }
+            // An empty Enter on a non-secret field arrives as `question_submit_empty`, not
+            // `answer` (secret fields send an empty `answer` instead). Without this arm the
+            // keystroke is dropped, so "Enter to keep current value" never advances an edit.
+            // The event carries the scoped capture id, and routing it through the same
+            // matches_auth_capture check is what keeps a stale `field-N` submission from
+            // advancing whichever field is live now.
+            Some("question_submit_empty") => {
+                if let Some(capture_id) = event.input.as_deref() {
+                    if handle_auth_answer(adapter, state, capture_id.trim(), "", output)? {
+                        let key = stable_event_key("question-answer", event_index, event);
+                        state.questions.handled_answers.insert(key);
+                    }
+                }
+            }
             Some("cancel") | Some("question_cancel") => {
                 if let Some(cancel_id) = event.input.as_deref() {
                     let matches_pending = state
