@@ -13,6 +13,9 @@ use crate::runtime::state::InlineState;
 
 const AUDIT_CLI_TIMEOUT: Duration = Duration::from_secs(3);
 const AUDIT_CLI_MAX_OUTPUT: usize = 256 * 1024;
+const AUDIT_USAGE: &str =
+    "usage: /audit status | /audit trace current | /audit export current <dir>";
+const AUDIT_EXPORT_USAGE: &str = "usage: /audit export current <dir>";
 
 pub(super) fn render_audit_command<W: Write>(
     arguments: &str,
@@ -39,39 +42,60 @@ pub(super) fn render_audit_command<W: Write>(
 }
 
 fn resolve_arguments(arguments: &str, state: &InlineState) -> Result<Vec<String>, String> {
-    let parts = arguments.split_whitespace().collect::<Vec<_>>();
-    match parts.as_slice() {
-        [] | ["status"] => Ok(vec!["audit".to_string(), "status".to_string()]),
-        ["trace", "current"] => {
-            let session = state
-                .shell_session_id
-                .as_ref()
-                .ok_or_else(|| "current Shell session is unavailable".to_string())?;
+    let (keyword, rest) = split_keyword(arguments);
+    match keyword {
+        "" | "status" if rest.is_empty() => Ok(vec!["audit".to_string(), "status".to_string()]),
+        "trace" => {
+            let (target, rest) = split_keyword(rest);
+            if target != "current" || !rest.is_empty() {
+                return Err(AUDIT_USAGE.to_string());
+            }
             Ok(vec![
                 "audit".to_string(),
                 "trace".to_string(),
-                session.clone(),
+                current_session(state)?,
             ])
         }
-        ["export", "current", destination] => {
-            let session = state
-                .shell_session_id
-                .as_ref()
-                .ok_or_else(|| "current Shell session is unavailable".to_string())?;
+        "export" => {
+            let (target, destination) = split_keyword(rest);
+            if target != "current" {
+                return Err(AUDIT_USAGE.to_string());
+            }
+            // The destination is the whole remainder rather than one whitespace
+            // token, so a directory containing spaces stays intact. It reaches
+            // `cosh-cli` as a single `Command::args` entry and never a shell, so
+            // the path needs no quoting from the user.
+            let destination = destination.trim_end();
+            if destination.is_empty() {
+                return Err(AUDIT_EXPORT_USAGE.to_string());
+            }
             Ok(vec![
                 "audit".to_string(),
                 "export".to_string(),
                 "--output".to_string(),
-                (*destination).to_string(),
+                destination.to_string(),
                 "--identity".to_string(),
-                session.clone(),
+                current_session(state)?,
             ])
         }
-        ["export", "current"] => Err("usage: /audit export current <dir>".to_string()),
-        _ => Err(
-            "usage: /audit status | /audit trace current | /audit export current <dir>".to_string(),
-        ),
+        _ => Err(AUDIT_USAGE.to_string()),
     }
+}
+
+/// Splits one leading keyword from the remaining raw argument text.
+fn split_keyword(arguments: &str) -> (&str, &str) {
+    let trimmed = arguments.trim_start();
+    match trimmed.find(char::is_whitespace) {
+        Some(boundary) => (&trimmed[..boundary], trimmed[boundary..].trim_start()),
+        None => (trimmed, ""),
+    }
+}
+
+fn current_session(state: &InlineState) -> Result<String, String> {
+    state
+        .shell_session_id
+        .clone()
+        .ok_or_else(|| "current Shell session is unavailable".to_string())
 }
 
 fn audit_program() -> String {
@@ -167,16 +191,89 @@ fn safe_render_data(data: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn current_trace_uses_stable_shell_session_id() {
-        let state = InlineState {
+    fn state() -> InlineState {
+        InlineState {
             shell_session_id: Some("shell-session-1".to_string()),
             ..InlineState::default()
-        };
+        }
+    }
+
+    #[test]
+    fn current_trace_uses_stable_shell_session_id() {
         assert_eq!(
-            resolve_arguments("trace current", &state).unwrap(),
+            resolve_arguments("trace current", &state()).unwrap(),
             ["audit", "trace", "shell-session-1"]
         );
+    }
+
+    #[test]
+    fn export_destination_keeps_spaces_in_one_argument() {
+        assert_eq!(
+            resolve_arguments("export current /tmp/my dir", &state()).unwrap(),
+            [
+                "audit",
+                "export",
+                "--output",
+                "/tmp/my dir",
+                "--identity",
+                "shell-session-1"
+            ]
+        );
+    }
+
+    #[test]
+    fn keywords_tolerate_repeated_whitespace_before_the_destination() {
+        assert_eq!(
+            resolve_arguments("export \t current \t /tmp/my  dir ", &state()).unwrap()[3],
+            "/tmp/my  dir"
+        );
+        assert_eq!(
+            resolve_arguments("trace \t current", &state()).unwrap(),
+            ["audit", "trace", "shell-session-1"]
+        );
+        assert_eq!(
+            resolve_arguments("  status  ", &state()).unwrap(),
+            ["audit", "status"]
+        );
+    }
+
+    #[test]
+    fn unsupported_invocations_keep_their_existing_usage_text() {
+        let state = state();
+        assert_eq!(
+            resolve_arguments("", &state).unwrap(),
+            ["audit", "status"],
+            "empty arguments still report status"
+        );
+        assert_eq!(
+            resolve_arguments("export current", &state).unwrap_err(),
+            AUDIT_EXPORT_USAGE
+        );
+        assert_eq!(
+            resolve_arguments("export current   ", &state).unwrap_err(),
+            AUDIT_EXPORT_USAGE
+        );
+        for arguments in [
+            "export",
+            "export previous /tmp/out",
+            "trace",
+            "trace current extra",
+            "status extra",
+            "bogus",
+        ] {
+            assert_eq!(
+                resolve_arguments(arguments, &state).unwrap_err(),
+                AUDIT_USAGE,
+                "{arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_scoped_subcommands_require_a_shell_session() {
+        let state = InlineState::default();
+        assert!(resolve_arguments("trace current", &state).is_err());
+        assert!(resolve_arguments("export current /tmp/my dir", &state).is_err());
     }
 
     #[cfg(unix)]
