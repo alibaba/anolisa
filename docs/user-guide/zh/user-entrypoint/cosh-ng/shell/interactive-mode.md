@@ -87,12 +87,14 @@ ESC]1337;COSH;<payload>BEL
 | `/extensions [list\|enable\|disable] [name]` | 管理扩展 |
 | `/skills [list\|enable\|disable] [name]` | 管理技能 |
 | `/session [status\|list\|resume <id>\|clear ...]` | 管理 provider 对话 |
+| `/session compact [status\|cancel]` | 启动、检查或取消后台会话压缩 |
 | `/resume [id]` | 会话选择器或会话选择的别名 |
 | `/debug [state\|events\|adapter]` | 调试信息 |
 | `/auth` | 触发认证流程 |
 
 选择器按键、工作空间作用域、清理确认和可恢复错误处理详见
-[会话恢复](session-recovery.md)。
+[会话恢复](session-recovery.md)。手动和自动压缩语义详见
+[会话压缩](session-compaction.md)。
 
 ## 启动流程
 

@@ -81,13 +81,18 @@ Inside cosh-shell, use `/session` to browse sessions, `/session list` to copy
 complete session IDs, and `/session status` to inspect selected and active
 identities. `/session new` (or `/new`) detaches the current provider
 conversation so the next Agent request starts fresh without restarting the
-shell; `/session clear ...` removes old entries after confirmation. Session
-recovery restores model-visible conversation context; historical terminal
-evidence is intentionally not restored. Records default to
+shell; `/session clear ...` removes old entries after confirmation.
+`/session compact` summarizes any complete conversation prefix in the
+background, including a single completed Agent run, while the full transcript
+remains stored. Automatic compaction waits for both model-window pressure and
+a safe older-run boundary. Session recovery restores model-visible
+conversation context; historical terminal evidence is intentionally not
+restored. Records default to
 `~/.copilot-shell/cosh-core/sessions/`; change the root with
 `session.persist_dir`. Project session settings and relative store paths are
 resolved from the workspace cosh-shell sends to Core. See the
-[session recovery guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-recovery.md).
+[session recovery guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-recovery.md)
+and [session compaction guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-compaction.md).
 
 Core and Shell also write a redacted, versioned audit timeline under
 `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. The existing

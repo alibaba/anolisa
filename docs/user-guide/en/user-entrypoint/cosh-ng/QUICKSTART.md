@@ -80,4 +80,5 @@ See [Configuration](configuration.md) for details.
 - [cosh-core Overview](core/overview.md) — Learn about headless mode and LLM integration
 - [cosh-shell Overview](shell/overview.md) — Learn about the interactive terminal
 - [Session Recovery](shell/session-recovery.md) — Resume, inspect, and safely clear Agent conversations
+- [Session Compaction](shell/session-compaction.md) — Reduce model-visible context without deleting the transcript
 - [Output Format](output-format.md) — Understand the JSON envelope and error codes
