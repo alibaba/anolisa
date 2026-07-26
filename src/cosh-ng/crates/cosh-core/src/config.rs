@@ -253,7 +253,9 @@ pub struct CompactionConfig {
     /// Best-effort post-compaction fraction of the usable history budget.
     #[serde(default = "default_target_ratio")]
     pub target_ratio: f64,
-    /// Minimum number of recent complete Agent runs kept verbatim.
+    /// Minimum recent complete Agent runs kept verbatim by automatic and
+    /// emergency compaction; at least one is always retained. Explicit manual
+    /// compaction may summarize the latest complete run.
     #[serde(default = "default_preserve_recent_runs")]
     pub preserve_recent_runs: usize,
     /// Explicit user override for the model context window, in tokens.

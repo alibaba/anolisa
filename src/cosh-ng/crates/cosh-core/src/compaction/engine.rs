@@ -15,7 +15,10 @@ use crate::context::ContextBuilder;
 use crate::provider::ContentGenerator;
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 
-use super::boundary::{group_agent_runs, select_compacted_through_after, BoundaryError};
+use super::boundary::{
+    group_agent_runs, select_compacted_through_after, select_manual_compacted_through_after,
+    BoundaryError,
+};
 use super::budget::{
     estimate_messages_tokens, estimate_text_tokens, measure_history, ContextBudget, ModelCapability,
 };
@@ -129,7 +132,7 @@ impl std::fmt::Display for CompactionError {
         match self {
             Self::Disabled => write!(formatter, "session compaction is disabled"),
             Self::NothingToCompact => {
-                write!(formatter, "no complete Agent run is old enough to compact")
+                write!(formatter, "no complete Agent run is available to compact")
             }
             Self::Boundary(detail) => {
                 write!(formatter, "unsafe transcript boundary: {detail}")
@@ -278,12 +281,19 @@ pub async fn compact_session(
         .as_ref()
         .map(|state| state.compacted_through)
         .unwrap_or(0);
-    let cut = select_compacted_through_after(
-        &session.messages,
-        policy.preserve_recent_runs,
-        budget.target_tokens,
-        previous_cut,
-    )?
+    let cut = match trigger {
+        CompactionTrigger::Manual => select_manual_compacted_through_after(
+            &session.messages,
+            budget.target_tokens,
+            previous_cut,
+        ),
+        CompactionTrigger::Auto | CompactionTrigger::Emergency => select_compacted_through_after(
+            &session.messages,
+            policy.preserve_recent_runs,
+            budget.target_tokens,
+            previous_cut,
+        ),
+    }?
     .ok_or(CompactionError::NothingToCompact)?;
 
     // 3. Bound the summarizer input by the summarizer model's own context

@@ -148,6 +148,36 @@ fn last_compactable_run_index(runs: &[RunSpan], preserve_recent_runs: usize) -> 
     (runs.len() > preserve).then(|| runs.len() - preserve)
 }
 
+fn choose_target_cut(
+    messages: &[Message],
+    candidates: impl IntoIterator<Item = usize>,
+    target_tokens: u64,
+) -> Option<usize> {
+    let mut fallback = None;
+    for cut in candidates {
+        fallback = Some(cut);
+        let retained = super::budget::estimate_messages_tokens(&messages[cut..]);
+        if retained <= target_tokens {
+            return Some(cut);
+        }
+    }
+    fallback
+}
+
+fn transcript_ends_with_complete_agent_run(messages: &[Message], run: RunSpan) -> bool {
+    messages[run.start..run.end]
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role.as_str(), "user" | "assistant" | "tool"))
+        .is_some_and(|message| {
+            message.role == "assistant"
+                && message
+                    .tool_calls
+                    .as_ref()
+                    .is_none_or(|calls| calls.is_empty())
+        })
+}
+
 /// Reports whether automatic compaction can advance beyond the active
 /// projection while preserving the configured number of recent runs.
 ///
@@ -207,19 +237,49 @@ pub(crate) fn select_compacted_through_after(
     };
     // Candidate cuts are run starts from runs[1] (compact at least one run)
     // through runs[len - preserve] (keep the required recent runs).
-    let mut fallback = None;
-    for span in &runs[1..=last_candidate] {
-        let cut = span.start;
-        if cut <= compacted_through {
+    let candidates = runs[1..=last_candidate]
+        .iter()
+        .map(|span| span.start)
+        .filter(|cut| *cut > compacted_through);
+    Ok(choose_target_cut(messages, candidates, target_tokens))
+}
+
+/// Selects a manual compaction cut, including the transcript end when the
+/// latest Agent run is complete.
+///
+/// Manual compaction is an explicit request, so it does not reserve recent
+/// runs unconditionally. It still preserves as much verbatim history as the
+/// target permits and only summarizes the latest run when no earlier cut can
+/// satisfy the request.
+///
+/// # Errors
+///
+/// Propagates [`BoundaryError`] so malformed transcripts are never compacted.
+pub(crate) fn select_manual_compacted_through_after(
+    messages: &[Message],
+    target_tokens: u64,
+    compacted_through: usize,
+) -> Result<Option<usize>, BoundaryError> {
+    let runs = group_agent_runs(messages)?;
+    if runs.is_empty() {
+        return Ok(None);
+    }
+    let mut candidates = Vec::with_capacity(runs.len());
+    let mut prefix_is_complete = true;
+    for (index, run) in runs.iter().copied().enumerate() {
+        prefix_is_complete &= transcript_ends_with_complete_agent_run(messages, run);
+        if !prefix_is_complete {
             continue;
         }
-        fallback = Some(cut);
-        let retained = super::budget::estimate_messages_tokens(&messages[cut..]);
-        if retained <= target_tokens {
-            return Ok(Some(cut));
+        let cut = runs
+            .get(index + 1)
+            .map(|next| next.start)
+            .unwrap_or(messages.len());
+        if cut > compacted_through {
+            candidates.push(cut);
         }
     }
-    Ok(fallback)
+    Ok(choose_target_cut(messages, candidates, target_tokens))
 }
 
 #[cfg(test)]
@@ -279,6 +339,43 @@ mod tests {
         assert_eq!(
             select_compacted_through_after(&messages, 1, u64::MAX, runs[1].start).unwrap(),
             Some(runs[2].start)
+        );
+    }
+
+    #[test]
+    fn manual_selection_can_compact_one_complete_run() {
+        let messages = run_with_tools("first", "call-1");
+
+        assert_eq!(
+            select_manual_compacted_through_after(&messages, u64::MAX, 0).unwrap(),
+            Some(messages.len())
+        );
+    }
+
+    #[test]
+    fn manual_selection_only_cuts_complete_run_prefixes() {
+        let user_only = vec![Message::user("unfinished")];
+        assert_eq!(
+            select_manual_compacted_through_after(&user_only, u64::MAX, 0).unwrap(),
+            None
+        );
+
+        let tool_tail = vec![
+            Message::user("unfinished tool run"),
+            Message::assistant_with_tool_calls("", vec![tool_call("call-1")]),
+            Message::tool_result("call-1", "output", false),
+        ];
+        assert_eq!(
+            select_manual_compacted_through_after(&tool_tail, u64::MAX, 0).unwrap(),
+            None
+        );
+
+        let mut older_complete = run_with_tools("first", "call-1");
+        let first_run_end = older_complete.len();
+        older_complete.push(Message::user("unfinished second run"));
+        assert_eq!(
+            select_manual_compacted_through_after(&older_complete, u64::MAX, 0).unwrap(),
+            Some(first_run_end)
         );
     }
 

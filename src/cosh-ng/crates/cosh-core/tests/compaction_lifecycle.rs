@@ -221,6 +221,47 @@ fn manual_compact_preserves_identity_and_appends_after_restart() {
 }
 
 #[test]
+fn manual_compact_succeeds_with_one_complete_run() {
+    let fixture = fixture();
+    configure(
+        &fixture,
+        "mock-compact-summary",
+        r#"
+[session.compaction]
+enabled = true
+auto = false
+preserve_recent_runs = 9
+model_context_window = 2000000
+"#,
+    );
+
+    let prompt = bulky_prompt(0);
+    let turn = json_lines(&run_core(&fixture, &[prompt.as_str()]));
+    let session_id = session_id_of(&turn);
+    let before = persisted_envelope(&fixture.store);
+    let message_count = before["messages"].as_array().expect("messages").len();
+    assert_eq!(message_count, 2);
+
+    let compact = run_core(&fixture, &["--resume", &session_id, "--compact"]);
+    let envelope = json_lines(&compact)
+        .into_iter()
+        .next()
+        .expect("compact envelope");
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(
+        envelope["data"]["compacted_through"], message_count as u64,
+        "{envelope}"
+    );
+
+    let after = persisted_envelope(&fixture.store);
+    assert_eq!(after["messages"], before["messages"]);
+    assert_eq!(
+        after["compaction"]["compacted_through"],
+        message_count as u64
+    );
+}
+
+#[test]
 fn provider_failure_never_commits_a_projection() {
     let fixture = fixture();
     configure(&fixture, "mock-compact-summary", MANUAL_POLICY);
