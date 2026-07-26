@@ -263,6 +263,8 @@ export interface AtifDocument {
   /** Optional in the schema; both AgentSight producers always set it. */
   session_id?: string;
   trajectory_id?: string;
+  /** Free-form description, e.g. the opt run root's target session. */
+  notes?: string;
   agent: AtifAgent;
   steps: AtifStep[];
   final_metrics?: AtifFinalMetrics;
