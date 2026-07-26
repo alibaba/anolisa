@@ -219,14 +219,16 @@ describe('AgentSessionsPage', () => {
     expect(screen.getByText('优化分析页面')).toBeInTheDocument();
   });
 
-  it('navigates to trajectory viewer on row click', async () => {
+  it('opens trajectory viewer in new tab on row click', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
     mockFetchSessions.mockResolvedValue([ebpfSession('s-ebpf-1')]);
     mockFetchTrajectories.mockResolvedValue([]);
     await act(async () => { renderPage(); });
 
     // Click on the session ID cell (part of the row) to trigger row navigation
     await act(async () => { fireEvent.click(screen.getByText('s-ebpf-1')); });
-    expect(screen.getByText('轨迹查看页面')).toBeInTheDocument();
+    expect(openSpy).toHaveBeenCalledWith('#/atif?type=session&id=s-ebpf-1', '_blank');
+    openSpy.mockRestore();
   });
 
   it('shows error banner when eBPF session fetch fails', async () => {
