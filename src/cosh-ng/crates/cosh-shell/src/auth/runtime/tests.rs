@@ -2,13 +2,14 @@
 
 use super::{
     apply_aliyun_prepare, begin_sysom_shortcut, clear_ecs_auth_source_for_manual_aliyun_edit,
-    ecs_ram_role_prepare, handle_auth_answer, management_entry,
+    ecs_ram_role_prepare, handle_auth_answer, management_entry, render_auth_card_actions,
     should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
-    should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthManagementEntry, AuthPhase,
-    AuthProviderInfo, CoreAuthPrepare, EcsRamRolePrepare, ExistingProvider, InlineState,
-    RuntimeAuthState, SysomMenu,
+    should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
+    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, EcsRamRolePrepare,
+    ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
 };
 use crate::adapter::{AdapterInstance, FakeAgentAdapter};
+use crate::auth::capture::auth_capture_id;
 use std::collections::HashMap;
 
 /// Any registry round-trip through this adapter fails, so reaching the ECS metadata
@@ -380,5 +381,132 @@ fn ecs_aliyun_manual_fallback_clears_auth_source() {
     assert_eq!(
         manual_values.get("auth_source").map(String::as_str),
         Some("ecs_ram_role")
+    );
+}
+
+fn field(name: &str, label: &str, secret: bool) -> AuthFieldInfo {
+    AuthFieldInfo {
+        name: name.to_string(),
+        label: label.to_string(),
+        hint: None,
+        secret,
+        required: true,
+        placeholder: None,
+    }
+}
+
+/// An `/auth` edit already sitting on Base URL with the saved value pre-filled — the state a
+/// user sees right before pressing Enter to keep it.
+fn editing_base_url_state() -> InlineState {
+    let mut template = template("openai_compat");
+    template.fields = vec![
+        field("provider_id", "Provider ID", false),
+        field("base_url", "Base URL", false),
+        field("model", "Model", false),
+        field("api_key", "API Key", true),
+    ];
+    let mut auth = slash_auth_state(&[], SysomMenu::default());
+    auth.providers = vec![template];
+    auth.phase = AuthPhase::FillingField;
+    auth.editing_provider_name = Some("qwen-prod".to_string());
+    auth.collected_values = HashMap::from([
+        ("provider_id".to_string(), "qwen-prod".to_string()),
+        (
+            "base_url".to_string(),
+            "https://example.invalid/v1".to_string(),
+        ),
+        ("model".to_string(), "qwen3.7-plus".to_string()),
+        (
+            "api_key".to_string(),
+            "\u{2022}\u{2022}\u{2022}".to_string(),
+        ),
+    ]);
+    auth.current_field = 1;
+    auth.field_input = "https://example.invalid/v1".to_string();
+    let mut state = InlineState::default();
+    state.auth.state = Some(auth);
+    state
+}
+
+/// The event an empty Enter produces on a non-secret capture: the scoped capture id, not the
+/// typed text, rides in `input`.
+fn empty_submission(capture_id: &str) -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("session", capture_id);
+    event.component = Some("card".to_string());
+    event.message = Some("question_submit_empty".to_string());
+    event.input = Some(capture_id.to_string());
+    event
+}
+
+fn relay_card_event(state: &mut InlineState, event: ShellEvent) -> String {
+    let mut output = Vec::new();
+    render_auth_card_actions(&[event], &adapter_without_registry(), state, &mut output, 0)
+        .expect("relay card event");
+    String::from_utf8(output).expect("utf8 panel output")
+}
+
+/// #1833: Enter on a pre-filled non-secret field kept the panel frozen, because the empty
+/// submission never reached the auth dispatcher.
+#[test]
+fn empty_enter_keeps_the_prefilled_value_and_advances_the_field() {
+    let mut state = editing_base_url_state();
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+
+    relay_card_event(&mut state, empty_submission(&capture_id));
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(
+        auth.collected_values.get("base_url").map(String::as_str),
+        Some("https://example.invalid/v1")
+    );
+    assert_eq!(auth.current_field, 2);
+    // The cursor moved to Model, so its saved value becomes the editable projection.
+    assert_eq!(auth.field_input, "qwen3.7-plus");
+}
+
+/// The scoped capture id is the guard: an empty submission left over from the field the user
+/// already passed must not push the live field forward a second time.
+#[test]
+fn a_stale_empty_submission_does_not_advance_the_live_field() {
+    let mut state = editing_base_url_state();
+    let stale_id = {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.current_field = 0;
+        let stale = auth_capture_id(auth);
+        auth.current_field = 1;
+        stale
+    };
+
+    relay_card_event(&mut state, empty_submission(&stale_id));
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(auth.current_field, 1);
+    assert_eq!(auth.field_input, "https://example.invalid/v1");
+}
+
+/// Secret fields already worked: an empty Enter there is delivered as an empty `answer`.
+#[test]
+fn empty_enter_on_a_secret_field_still_keeps_the_masked_value() {
+    let mut state = editing_base_url_state();
+    {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.current_field = 3;
+        auth.load_current_field_input();
+        assert_eq!(auth.field_input, "\u{2022}\u{2022}\u{2022}");
+    }
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+    let mut event = empty_submission(&capture_id);
+    event.component = Some("card_secret".to_string());
+    event.message = Some("answer".to_string());
+    event.input = Some(String::new());
+
+    relay_card_event(&mut state, event);
+
+    // All fields collected: the submission is attempted and the fake adapter rejects it, so
+    // the edit is restored instead of completed — with the mask intact for another try.
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(
+        auth.collected_values.get("api_key").map(String::as_str),
+        Some("\u{2022}\u{2022}\u{2022}")
     );
 }
