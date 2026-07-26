@@ -36,7 +36,9 @@ impl QuestionWriter {
 
         if !self.prompt.is_empty() {
             let user_msg = control_protocol::serialize_user_message_with_context(
-                &self.prompt, None, Some(&self.cwd),
+                &self.prompt,
+                None,
+                Some(&self.cwd),
             );
             let _ = writeln!(writer, "{user_msg}");
             let _ = writer.flush();
