@@ -377,9 +377,8 @@ impl TrajectoryStore {
     pub fn get_subagent_atif_jsons(&self, parent_session_id: &str) -> Result<Vec<String>> {
         let conn = self.lock_conn()?;
         let pattern = format!("{parent_session_id}:subagent:%");
-        let mut stmt = conn.prepare(
-            "SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1")?;
         let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
         let mut out = Vec::new();
         for row in rows {
