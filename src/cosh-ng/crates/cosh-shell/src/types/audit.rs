@@ -12,6 +12,8 @@ pub const AUDIT_EVENT_SCHEMA_VERSION: u16 = 1;
 pub const MAX_AUDIT_RECORD_BYTES: usize = 64 * 1024;
 /// Maximum payload accepted for an unknown future event.
 pub const MAX_UNKNOWN_DATA_BYTES: usize = 4096;
+/// Producer redaction policy version shared with the canonical contract.
+pub const AUDIT_REDACTION_POLICY_VERSION: &str = "audit-redaction-v1";
 
 /// Failure behavior for governed audit boundaries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +130,26 @@ pub struct AuditRedaction {
     pub status: AuditRedactionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
+}
+
+impl AuditRedaction {
+    /// Declares that no sensitive field was presented to the payload.
+    pub fn clean() -> Self {
+        Self {
+            policy_version: AUDIT_REDACTION_POLICY_VERSION.to_string(),
+            status: AuditRedactionStatus::Clean,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Declares the public field paths the producer omitted or replaced.
+    pub fn dropped(fields: &[&str]) -> Self {
+        Self {
+            policy_version: AUDIT_REDACTION_POLICY_VERSION.to_string(),
+            status: AuditRedactionStatus::Dropped,
+            fields: fields.iter().map(|field| (*field).to_string()).collect(),
+        }
+    }
 }
 
 /// Allowlisted Shell command payload.
@@ -276,12 +298,17 @@ mod rfc3339_millis {
 
 impl AuditEventV1 {
     /// Builds a Shell event with writer-assigned fields left at their initial values.
+    ///
+    /// The caller owns `redaction`: only the producer that shaped `payload` knows
+    /// which source fields it omitted, so this constructor must not infer a claim
+    /// from the event type.
     pub fn shell<T: Serialize>(
         event_type: &str,
         identity: AuditIdentity,
         outcome: AuditEventOutcome,
         subject: AuditSubject,
         payload: &T,
+        redaction: AuditRedaction,
     ) -> Result<Self, String> {
         let now = Utc::now();
         let data = serde_json::to_value(payload).map_err(|error| error.to_string())?;
@@ -306,11 +333,7 @@ impl AuditEventV1 {
             outcome,
             subject,
             data,
-            redaction: AuditRedaction {
-                policy_version: "audit-v1".to_string(),
-                status: AuditRedactionStatus::Dropped,
-                fields: vec!["command".to_string(), "cwd".to_string()],
-            },
+            redaction,
             legacy_schema: None,
         };
         event.validate()?;
@@ -401,7 +424,7 @@ mod tests {
             "outcome": {"status": "success", "retryable": false},
             "subject": {"kind": "provider", "name": "fixture"},
             "data": {"provider": "fixture", "future_optional": 1},
-            "redaction": {"policy_version": "audit-v1", "status": "clean"}
+            "redaction": {"policy_version": "audit-redaction-v1", "status": "clean"}
         });
         let event: AuditEventV1 = serde_json::from_value(value.clone()).expect("mirror fixture");
         event.validate().expect("valid fixture");
@@ -423,7 +446,55 @@ mod tests {
                 name: None,
             },
             &AuditShellCommandData::default(),
+            AuditRedaction::dropped(&["command"]),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn redaction_helpers_carry_the_shared_policy_version() {
+        let clean = serde_json::to_value(AuditRedaction::clean()).expect("serialize clean");
+        assert_eq!(
+            clean,
+            serde_json::json!({
+                "policy_version": AUDIT_REDACTION_POLICY_VERSION,
+                "status": "clean",
+            }),
+            "a clean claim must omit the empty field list"
+        );
+        let dropped =
+            serde_json::to_value(AuditRedaction::dropped(&["command", "cwd"])).expect("serialize");
+        assert_eq!(
+            dropped,
+            serde_json::json!({
+                "policy_version": AUDIT_REDACTION_POLICY_VERSION,
+                "status": "dropped",
+                "fields": ["command", "cwd"],
+            })
+        );
+    }
+
+    #[test]
+    fn shell_constructor_preserves_the_producer_redaction_claim() {
+        let event = AuditEventV1::shell(
+            "session.started",
+            AuditIdentity {
+                shell_session_id: Some("session-1".to_string()),
+                ..AuditIdentity::default()
+            },
+            AuditEventOutcome {
+                status: AuditOutcomeStatus::Started,
+                code: None,
+                retryable: false,
+            },
+            AuditSubject {
+                kind: "session".to_string(),
+                name: None,
+            },
+            &serde_json::json!({}),
+            AuditRedaction::clean(),
+        )
+        .expect("session event");
+        assert_eq!(event.redaction, AuditRedaction::clean());
     }
 }

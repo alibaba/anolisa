@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config::audit::{load_audit_settings, resolve_audit_root, AuditSettings};
 use crate::types::audit::{
     AuditApprovalData, AuditEventOutcome, AuditEventV1, AuditEvidenceData, AuditIdentity,
-    AuditMode, AuditOutcomeStatus, AuditShellCommandData, AuditSubject,
+    AuditMode, AuditOutcomeStatus, AuditRedaction, AuditShellCommandData, AuditSubject,
 };
 use crate::types::{ShellEvent, ShellEventKind, COMMAND_OUTPUT_REF_MAX_BYTES};
 
@@ -148,6 +148,8 @@ impl ShellAuditRecorder {
                 size_category: size_category.map(str::to_string),
                 range_category: range_category.map(str::to_string),
             },
+            // Categories are derived, never carrying a raw path or byte range.
+            AuditRedaction::clean(),
         );
         match event {
             Ok(event) => {
@@ -187,6 +189,8 @@ impl ShellAuditRecorder {
                 preview_hash: Some(self.hash(request.preview)),
                 ..AuditApprovalData::default()
             },
+            // The raw preview is replaced by a salted hash.
+            AuditRedaction::dropped(&["preview"]),
         );
         match event {
             Ok(event) => {
@@ -235,6 +239,7 @@ impl ShellAuditRecorder {
                 decision: Some(request.status.to_string()),
                 ..AuditApprovalData::default()
             },
+            AuditRedaction::clean(),
         )?;
         let event_id = event.event_id.clone();
         self.ensure_writer();
@@ -272,7 +277,7 @@ impl ShellAuditRecorder {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("unknown");
-        let program = crate::evidence::redact_sensitive_text(basename).0;
+        let (program, program_redacted) = crate::evidence::redact_sensitive_text(basename);
         let identity = AuditIdentity {
             shell_session_id: Some(self.shell_session_id.clone()),
             run_id: event
@@ -327,6 +332,16 @@ impl ShellAuditRecorder {
             code,
             retryable: false,
         };
+        // Only the source fields this projection actually changed may be claimed:
+        // `cwd` is optional, and `program` survives verbatim unless the secret
+        // scanner rewrote it.
+        let mut redacted_fields = vec!["command"];
+        if event.cwd.is_some() {
+            redacted_fields.push("cwd");
+        }
+        if program_redacted {
+            redacted_fields.push("program");
+        }
         match AuditEventV1::shell(
             event_type,
             identity,
@@ -336,6 +351,7 @@ impl ShellAuditRecorder {
                 name: None,
             },
             &payload,
+            AuditRedaction::dropped(&redacted_fields),
         ) {
             Ok(event) => {
                 let event_id = event.event_id.clone();
@@ -364,6 +380,7 @@ impl ShellAuditRecorder {
                 name: None,
             },
             &serde_json::json!({}),
+            AuditRedaction::clean(),
         );
         match event {
             Ok(event) => {
@@ -429,6 +446,7 @@ impl ShellAuditRecorder {
                     name: None,
                 },
                 &serde_json::json!({ "operation": operation }),
+                AuditRedaction::clean(),
             )
         };
         let mut degraded = marker(

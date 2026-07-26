@@ -2,8 +2,8 @@
 
 use super::{ShellApprovalAuditInput, ShellAuditRecorder};
 use crate::types::audit::{
-    AuditEventOutcome, AuditEventV1, AuditIdentity, AuditMode, AuditOutcomeStatus, AuditSubject,
-    AuditToolData,
+    AuditEventOutcome, AuditEventV1, AuditIdentity, AuditMode, AuditOutcomeStatus, AuditRedaction,
+    AuditSubject, AuditToolData,
 };
 
 impl ShellAuditRecorder {
@@ -44,6 +44,8 @@ impl ShellAuditRecorder {
                 execution_path: Some("shell_foreground_handoff".to_string()),
                 ..AuditToolData::default()
             },
+            // This boundary never receives raw Tool input, so nothing is omitted.
+            AuditRedaction::clean(),
         )?;
         self.append_governed(tool)
     }

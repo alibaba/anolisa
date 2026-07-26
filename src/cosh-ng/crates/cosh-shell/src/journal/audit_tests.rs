@@ -2,6 +2,8 @@ use super::*;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use crate::types::audit::AUDIT_REDACTION_POLICY_VERSION;
+
 fn private_root() -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-audit-test-{}-{}",
@@ -36,6 +38,7 @@ fn distinct_writers_lock_distinct_segments_and_close() {
                 name: None,
             },
             &serde_json::json!({}),
+            AuditRedaction::clean(),
         )
         .unwrap()
     };
@@ -254,6 +257,205 @@ fn successful_write_closes_shell_degraded_episode() {
     let content = walk_segment_text(&root);
     assert!(content.contains("\"event_type\":\"audit.degraded\""));
     assert!(content.contains("\"event_type\":\"audit.recovered\""));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn recording_recorder(root: &Path) -> ShellAuditRecorder {
+    ShellAuditRecorder {
+        writer: Some(AuditSegmentWriter::create(root).unwrap()),
+        writer_root: Some(root.to_path_buf()),
+        mode: AuditMode::BestEffort,
+        shell_session_id: "session-1".to_string(),
+        seen_events: 0,
+        hash_salt: "salt".to_string(),
+        degraded: false,
+        warning_emitted: false,
+        owned_approvals: std::collections::HashSet::new(),
+        command_refs: std::collections::HashMap::new(),
+    }
+}
+
+/// Returns the redaction claim of the first record with the given event type.
+fn redaction_claim(root: &Path, event_type: &str) -> serde_json::Value {
+    walk_segment_text(root)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("audit record"))
+        .find(|record| record["event_type"] == event_type)
+        .unwrap_or_else(|| panic!("no {event_type} record was persisted"))["redaction"]
+        .clone()
+}
+
+fn clean_claim() -> serde_json::Value {
+    serde_json::json!({
+        "policy_version": AUDIT_REDACTION_POLICY_VERSION,
+        "status": "clean",
+    })
+}
+
+fn dropped_claim(fields: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "policy_version": AUDIT_REDACTION_POLICY_VERSION,
+        "status": "dropped",
+        "fields": fields,
+    })
+}
+
+#[test]
+fn command_events_claim_only_the_fields_the_projection_omits() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let started = ShellEvent::command_started("session-1", "cmd-1", "ls -l", "/tmp/work", 1);
+    let mut completed = started.clone();
+    completed.kind = ShellEventKind::CommandCompleted;
+    completed.exit_code = Some(0);
+    let mut failed = started.clone();
+    failed.kind = ShellEventKind::CommandFailed;
+    failed.exit_code = Some(1);
+    recorder.observe_shell_events(&[started, completed, failed]);
+    drop(recorder);
+
+    for event_type in [
+        "shell.command.started",
+        "shell.command.completed",
+        "shell.command.failed",
+    ] {
+        assert_eq!(
+            redaction_claim(&root, event_type),
+            dropped_claim(&["command", "cwd"]),
+            "{event_type} must claim exactly the omitted source fields"
+        );
+    }
+    assert_eq!(
+        redaction_claim(&root, "session.ended"),
+        clean_claim(),
+        "the session lifecycle payload holds no source field to omit"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn command_without_a_cwd_does_not_claim_a_dropped_cwd() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let mut started = ShellEvent::command_started("session-1", "cmd-1", "ls -l", "/tmp/work", 1);
+    started.cwd = None;
+    recorder.observe_shell_events(&[started]);
+    drop(recorder);
+
+    assert_eq!(
+        redaction_claim(&root, "shell.command.started"),
+        dropped_claim(&["command"])
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn command_with_a_secret_program_also_claims_the_program_field() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let started = ShellEvent::command_started(
+        "session-1",
+        "cmd-1",
+        "ghp_0123456789abcdefghijklmnopqrstuvwxyz --help",
+        "/tmp/work",
+        1,
+    );
+    recorder.observe_shell_events(&[started]);
+    drop(recorder);
+
+    assert_eq!(
+        redaction_claim(&root, "shell.command.started"),
+        dropped_claim(&["command", "cwd", "program"]),
+        "a scanner-rewritten program must be visible in the claim"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn approval_events_claim_only_the_hashed_preview() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let request = |status| ShellApprovalAuditInput {
+        id: "approval-1",
+        audit_ref: None,
+        session_id: "session-1",
+        run_id: "run-1",
+        request_id: Some("request-1"),
+        tool_use_id: None,
+        subject: "shell command",
+        risk: "medium",
+        assessment: None,
+        preview: "$ echo ok",
+        status,
+    };
+    assert!(recorder
+        .record_approval_requested(request("pending"))
+        .is_some());
+    assert!(recorder
+        .record_approval_resolved(request("approved"))
+        .unwrap()
+        .is_some());
+    drop(recorder);
+
+    assert_eq!(
+        redaction_claim(&root, "approval.requested"),
+        dropped_claim(&["preview"])
+    );
+    assert_eq!(
+        redaction_claim(&root, "approval.resolved"),
+        clean_claim(),
+        "the resolution payload carries only a decision label"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn evidence_and_recovery_markers_claim_clean_redaction() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    recorder.degraded = true;
+    assert!(recorder
+        .record_evidence_accessed("command_output", Some("small"), None, true)
+        .is_some());
+    drop(recorder);
+
+    for event_type in ["evidence.accessed", "audit.degraded", "audit.recovered"] {
+        assert_eq!(
+            redaction_claim(&root, event_type),
+            clean_claim(),
+            "{event_type} carries no producer-omitted field"
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn host_execution_boundary_claims_clean_redaction() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    recorder
+        .authorize_host_execution(ShellApprovalAuditInput {
+            id: "approval-1",
+            audit_ref: Some("core-approval-event"),
+            session_id: "session-1",
+            run_id: "run-1",
+            request_id: Some("request-1"),
+            tool_use_id: Some("tool-1"),
+            subject: "run_shell_command",
+            risk: "medium",
+            assessment: None,
+            preview: "$ echo ok",
+            status: "approved",
+        })
+        .unwrap();
+    drop(recorder);
+
+    assert_eq!(
+        redaction_claim(&root, "tool.execution.started"),
+        clean_claim(),
+        "the handoff boundary never receives raw Tool input"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
