@@ -450,6 +450,25 @@ pub trait FrameworkDriver: Send + Sync {
     /// `PATH` and the filesystem; must not spawn the framework.
     fn detect(&self, env: &HostEnv) -> DetectResult;
 
+    /// Cheap read-only check that `resource_root` plausibly holds a real
+    /// bundle for this framework. The Manager consults it when resolving
+    /// the adapter source across multiple datadir roots so a stale or
+    /// empty leftover directory in one root cannot shadow (or impersonate)
+    /// the real bundle in another.
+    ///
+    /// Must mirror [`Self::read_bundle`]'s *mandatory file* checks without
+    /// parsing or digesting, and must never be stricter than `read_bundle`
+    /// (a root this probe rejects must also fail `read_bundle`, otherwise
+    /// resolution could skip a bundle enable would accept). The default
+    /// accepts any non-empty directory, matching the frameworks whose
+    /// `read_bundle` requires no specific file (OpenClaw, Hermes).
+    fn probe_bundle(&self, resource_root: &Path, _declared_entry: Option<&str>) -> bool {
+        resource_root
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
+    }
+
     /// External roots (outside ANOLISA-owned roots) this driver is allowed
     /// to write into. The Manager validates every
     /// [`ClaimResourceKind::ExternalPath`](super::claim::ClaimResourceKind::ExternalPath)

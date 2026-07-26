@@ -70,6 +70,14 @@ impl FrameworkDriver for CodexDriver {
         "codex"
     }
 
+    fn probe_bundle(&self, resource_root: &Path, declared_entry: Option<&str>) -> bool {
+        // Mirrors read_bundle's mandatory check: the codex-native plugin
+        // manifest (or the contract-declared entry) must be present.
+        resource_root
+            .join(declared_entry.unwrap_or(CODEX_PLUGIN_MANIFEST))
+            .is_file()
+    }
+
     fn detect(&self, _env: &HostEnv) -> DetectResult {
         match find_binary_in_path(&codex_bin()) {
             Some(path) => DetectResult {

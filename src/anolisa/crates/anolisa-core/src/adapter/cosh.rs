@@ -72,6 +72,14 @@ impl FrameworkDriver for CoshDriver {
         "cosh"
     }
 
+    fn probe_bundle(&self, resource_root: &Path, declared_entry: Option<&str>) -> bool {
+        // Mirrors read_bundle's mandatory check: the native extension
+        // manifest (or the contract-declared entry) must be present.
+        resource_root
+            .join(declared_entry.unwrap_or(COSH_MANIFEST))
+            .is_file()
+    }
+
     fn detect(&self, env: &HostEnv) -> DetectResult {
         // A cosh CLI on PATH is the strong signal. Because the extension
         // model only drops files (no CLI needed to enable), an existing
