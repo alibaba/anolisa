@@ -598,19 +598,39 @@ _cosh_precmd_marker() {
   _cosh_emit_marker "precmd" "" "$status" false
   _COSH_AT_PROMPT=1
 }
+# Helper frame so a hook containing `return` unwinds here instead of
+# skipping the extdebug restore in _cosh_run_user_prompt_command.
+_cosh_eval_user_prompt_hook() {
+  eval "$1"
+}
 _cosh_run_user_prompt_command() {
   local status="$1"
   if [[ -z "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     return "$status"
   fi
+  # User prompt hooks run with extdebug off: while it is on, bash re-execs
+  # shebang-less scripts with --debugger (ENOEXEC fallback), and hosts
+  # without the bashdb package print debugger startup failures at every
+  # prompt (Alinux points PROMPT_COMMAND at the shebang-less
+  # /etc/sysconfig/bash-prompt-history audit script). extdebug is only
+  # needed for DEBUG trap return-1 semantics during real command dispatch,
+  # which prompt-hook eval does not exercise.
+  shopt -u extdebug 2>/dev/null || true
+  # shopt -u extdebug also clears the errtrace/functrace flags it implied
+  # while enabled. Re-assert them so hooks keep the baseline trap
+  # inheritance semantics of this session (ERR/DEBUG traps reaching hook
+  # functions); neither flag triggers the debugger re-exec.
+  set -E 2>/dev/null || true
+  set -T 2>/dev/null || true
   if [[ "${_COSH_USER_PROMPT_COMMAND_IS_ARRAY:-0}" == 1 ]]; then
     local _cosh_prompt_command
     for _cosh_prompt_command in "${_COSH_USER_PROMPT_COMMAND[@]}"; do
-      eval "$_cosh_prompt_command"
+      _cosh_eval_user_prompt_hook "$_cosh_prompt_command"
     done
   elif [[ -n "${_COSH_USER_PROMPT_COMMAND:-}" ]]; then
-    eval "$_COSH_USER_PROMPT_COMMAND"
+    _cosh_eval_user_prompt_hook "$_COSH_USER_PROMPT_COMMAND"
   fi
+  shopt -s extdebug 2>/dev/null || true
   return "$status"
 }
 _cosh_prompt_command() {
@@ -656,6 +676,19 @@ else
   unset _COSH_USER_PROMPT_COMMAND
   _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
 fi
+# Replace wholesale: assigning over an array PROMPT_COMMAND (bash >= 5.1)
+# only overwrites element 0, and surviving user elements would keep running
+# natively at every prompt, outside the extdebug guard in
+# _cosh_run_user_prompt_command.
+#
+# Deliberately no top-level extdebug re-enable here: a hook that installs a
+# DEBUG trap ending in `return` unwinds every function frame, and with
+# extdebug back on that trap's top-level failure status would make bash
+# skip every subsequent command — bricking the session. With extdebug off
+# the session degrades to native-bash behavior (marker interception idles)
+# and the in-function restore self-heals on the first prompt after the
+# user clears the trap.
+unset PROMPT_COMMAND
 PROMPT_COMMAND=_cosh_prompt_command
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   builtin history -c 2>/dev/null || true

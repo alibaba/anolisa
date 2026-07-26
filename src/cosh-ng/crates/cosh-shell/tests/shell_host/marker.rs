@@ -1387,6 +1387,229 @@ fn shell_host_bash_debug_trap_children_never_see_exported_extdebug() {
     assert!(terminal.contains("shell-alive-ok"), "{terminal}");
 }
 
+// bash re-execs shebang-less scripts with --debugger only when built with
+// debugger support, and the startup failure is only visible on hosts without
+// the bashdb package. Probe the exact re-exec path so tests can skip
+// anywhere the regression cannot manifest (e.g. macOS bash 3.2).
+fn bash_reexecs_shebang_less_with_debugger(work_dir: &std::path::Path) -> bool {
+    let probe_path = work_dir.join("shebang-less-probe");
+    std::fs::write(&probe_path, "true\n").expect("probe script");
+    make_executable(&probe_path);
+    let probe = Command::new("bash")
+        .args(["--noprofile", "--norc", "-c"])
+        .arg(format!("shopt -s extdebug; {}", probe_path.display()))
+        .output()
+        .expect("debugger probe");
+    let stderr = String::from_utf8_lossy(&probe.stderr);
+    stderr.contains("bashdb") || stderr.contains("cannot start debugger")
+}
+
+#[test]
+fn shell_host_bash_shebang_less_prompt_hook_avoids_debugger_reexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-debugger-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    if !bash_reexecs_shebang_less_with_debugger(&work_dir) {
+        return;
+    }
+
+    // Hook mirroring Alinux /etc/sysconfig/bash-prompt-history: inherited
+    // PROMPT_COMMAND points at a shebang-less executable script, so the
+    // marker's eval can only run it through the ENOEXEC re-exec fallback.
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hook_log = work_dir.join("hook-ran.log");
+    let hook_path = work_dir.join("bash-prompt-history");
+    std::fs::write(
+        &hook_path,
+        format!("echo prompt-hook-ran >> {}\n", hook_log.display()),
+    )
+    .expect("hook script");
+    make_executable(&hook_path);
+
+    let config = ShellHostConfig::new("prompt-hook-debugger-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("PROMPT_COMMAND", hook_path.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo ok"),
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-hook-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    // The hook must still run — the fix silences the debugger re-exec,
+    // not the user prompt command.
+    let hook_ran = std::fs::read_to_string(&hook_log).unwrap_or_default();
+    assert!(hook_ran.contains("prompt-hook-ran"), "{terminal}");
+    assert!(!terminal.contains("bashdb"), "{terminal}");
+    assert!(!terminal.contains("cannot start debugger"), "{terminal}");
+    // extdebug must be back on for the next real command: the DEBUG trap
+    // return-1 suppression depends on it.
+    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    // Array PROMPT_COMMAND only exists since bash 5.1.
+    let version_probe = Command::new("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"])
+        .output();
+    let Ok(version_probe) = version_probe else {
+        return;
+    };
+    let version = String::from_utf8_lossy(&version_probe.stdout);
+    let mut parts = version
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok());
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if (major, minor) < (5, 1) {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-array-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    if !bash_reexecs_shebang_less_with_debugger(&work_dir) {
+        return;
+    }
+
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hook_log = work_dir.join("hook-ran.log");
+    let hook_path = work_dir.join("bash-prompt-history");
+    std::fs::write(
+        &hook_path,
+        format!("echo array-hook-ran >> {}\n", hook_log.display()),
+    )
+    .expect("hook script");
+    make_executable(&hook_path);
+    // Array-form PROMPT_COMMAND captured from the user rcfile. The leading
+    // `return 0` element pins the eval helper frame: an early-returning hook
+    // must not skip the remaining elements or the extdebug restore.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!("PROMPT_COMMAND=('return 0' '{}')\n", hook_path.display()),
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-array-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo ok"),
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-hook-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    let hook_ran = std::fs::read_to_string(&hook_log).unwrap_or_default();
+    assert!(hook_ran.contains("array-hook-ran"), "{terminal}");
+    assert!(!terminal.contains("bashdb"), "{terminal}");
+    assert!(!terminal.contains("cannot start debugger"), "{terminal}");
+    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_prompt_hook_keeps_err_trap_inheritance_and_survives_debug_trap() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    // `shopt -u extdebug` also clears errtrace/functrace on every bash that
+    // implements the implication (4.4 through 5.x); skip only where bash is
+    // too old to link the flags at all.
+    let implication_probe = Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "set -E; shopt -s extdebug; shopt -u extdebug; [[ -o errtrace ]]",
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(true);
+    if implication_probe {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-traps-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let err_log = work_dir.join("err-trap.log");
+    // Hook regression pair from the PR discussion:
+    // - an ERR trap with `set -E` must still fire inside a hook function
+    //   (the extdebug-off window re-asserts errtrace/functrace), and
+    // - a hook that installs a DEBUG trap ending in `return 0` unwinds every
+    //   function frame past the in-function extdebug restore. The session
+    //   must stay usable (native-bash degradation, no command skipping) and
+    //   extdebug must self-heal on the first clean prompt cycle after the
+    //   user clears the trap; the hook poisons only once so that cycle
+    //   exists.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!(
+            "trap 'echo err-fired >> {err_log}' ERR\n\
+             set -E\n\
+             _user_hook() {{\n\
+               false\n\
+               if [[ -z \"${{_poisoned:-}}\" ]]; then\n\
+                 _poisoned=1\n\
+                 trap 'return 0' DEBUG\n\
+               fi\n\
+             }}\n\
+             PROMPT_COMMAND=_user_hook\n",
+            err_log = err_log.display()
+        ),
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-traps-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            // Executes natively while the poisoned trap is live: with
+            // extdebug off the top-level `return` only prints an error and
+            // the command still runs — the session is not bricked.
+            ScriptedInput::user_line("trap - DEBUG; echo session-usable"),
+            // The prompt cycle after the trap removal ran the in-function
+            // restore again, so extdebug must be back on.
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-heal-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    // The ERR trap must have reached the hook function body (`false`).
+    let err_fired = std::fs::read_to_string(&err_log).unwrap_or_default();
+    assert!(err_fired.contains("err-fired"), "{terminal}");
+    assert!(terminal.contains("session-usable"), "{terminal}");
+    assert!(terminal.contains("post-heal-extdebug-rc=0"), "{terminal}");
+}
+
 #[test]
 fn shell_host_bash_alias_expanded_commands_keep_preexec_markers() {
     // BASH_ALIASES (bash 4+) is required for the alias-aware guard; on
