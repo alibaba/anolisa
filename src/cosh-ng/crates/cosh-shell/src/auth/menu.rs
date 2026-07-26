@@ -18,7 +18,7 @@ const ADD_NEW_PROVIDER_LABEL: &str = "  + Add new provider";
 // SysOM is not a provider type of its own: it is the `aliyun` provider authenticated through
 // the instance RAM role instead of a manual AK/SK pair.
 const ECS_RAM_ROLE_PROVIDER_TYPE: &str = "aliyun";
-const ECS_RAM_ROLE_AUTH_SOURCE: &str = "ecs_ram_role";
+pub(super) const ECS_RAM_ROLE_AUTH_SOURCE: &str = "ecs_ram_role";
 
 /// ECS RAM-role challenge prefetched by `/auth` from the core `auth.prepare` action.
 #[derive(Debug, Clone, PartialEq, Eq)]

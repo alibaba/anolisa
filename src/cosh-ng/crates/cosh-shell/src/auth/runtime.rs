@@ -96,6 +96,18 @@ impl RuntimeAuthState {
     fn all_fields_collected(&self) -> bool {
         self.current_field >= self.current_provider().fields.len()
     }
+
+    /// Re-projects the field cursor onto the editable buffer.
+    ///
+    /// `collected_values` is the form's data; `field_input` is only the editable projection of
+    /// the field the cursor sits on. Every move of `current_field` has to go through here, or
+    /// the panel shows a value the form no longer holds.
+    pub(super) fn load_current_field_input(&mut self) {
+        let field_name = self.current_field_info().map(|field| field.name.clone());
+        self.field_input = field_name
+            .and_then(|name| self.collected_values.get(&name).cloned())
+            .unwrap_or_default();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -483,7 +495,7 @@ fn handle_auth_answer<W: std::io::Write>(
 
                     auth.phase = AuthPhase::FillingField;
                     auth.current_field = 1.min(auth.current_provider().fields.len());
-                    load_current_field_input(auth);
+                    auth.load_current_field_input();
                     clear_active_auth_panel(state, output)?;
                     render_current_auth_panel(state, output)?;
                 }
@@ -558,7 +570,7 @@ fn handle_auth_answer<W: std::io::Write>(
             }
             auth.current_field += 1;
             // Load next field's pre-filled value (for edit mode)
-            load_current_field_input(auth);
+            auth.load_current_field_input();
 
             if auth.all_fields_collected() {
                 clear_active_auth_panel(state, output)?;
@@ -628,19 +640,6 @@ fn begin_sysom_shortcut(auth: &mut RuntimeAuthState) -> bool {
     auth.field_input.clear();
     auth.field_error = None;
     true
-}
-
-fn load_current_field_input(auth: &mut RuntimeAuthState) {
-    let field_name = auth.current_field_info().map(|f| f.name.clone());
-    if let Some(name) = field_name {
-        auth.field_input = auth
-            .collected_values
-            .get(&name)
-            .cloned()
-            .unwrap_or_default();
-    } else {
-        auth.field_input.clear();
-    }
 }
 
 fn should_apply_aliyun_prepare_on_provider_selection(backend: AuthBackend) -> bool {
