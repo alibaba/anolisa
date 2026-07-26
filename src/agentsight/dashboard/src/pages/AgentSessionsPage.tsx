@@ -375,8 +375,8 @@ export const AgentSessionsPage: React.FC = () => {
                 <tr
                   key={s.session_id}
                   className="hover:bg-gray-50 cursor-pointer transition-colors"
-                  onClick={() => navigate(`/atif?type=session&id=${encodeURIComponent(s.session_id)}`)}
-                  title="点击查看轨迹详情"
+                  onClick={() => window.open(`#/atif?type=session&id=${encodeURIComponent(s.session_id)}`, '_blank')}
+                  title="点击在新窗口查看轨迹详情"
                 >
                   <td className="px-4 py-3"><SourceBadge sources={s.sources} /></td>
                   <td className="px-4 py-3">
