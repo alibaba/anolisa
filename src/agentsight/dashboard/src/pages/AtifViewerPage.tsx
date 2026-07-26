@@ -622,10 +622,11 @@ export const AtifViewerPage: React.FC = () => {
   const activeDoc = navStack.length > 0 ? navStack[navStack.length - 1] : doc;
 
   const navigateToSubagent = useCallback((ref: SubagentTrajectoryRef) => {
-    const rootDoc = doc;
-    if (!rootDoc) return;
-    // Resolve embedded subagent by trajectory_id
-    const embedded = rootDoc.subagent_trajectories?.find(
+    // Resolve embedded subagent by trajectory_id from the currently viewed
+    // document (supports nested subagent levels), falling back to the root.
+    const scope = navStack.length > 0 ? navStack[navStack.length - 1] : doc;
+    if (!scope) return;
+    const embedded = (scope.subagent_trajectories ?? doc?.subagent_trajectories)?.find(
       t => t.trajectory_id && t.trajectory_id === ref.trajectory_id
     );
     if (embedded) {
@@ -637,7 +638,7 @@ export const AtifViewerPage: React.FC = () => {
     } else {
       setError('无法解析子轨迹引用：缺少 trajectory_id 或 trajectory_path');
     }
-  }, [doc]);
+  }, [doc, navStack]);
 
   const navigateToBreadcrumb = useCallback((index: number) => {
     // index -1 = root doc, 0..n = navStack index
