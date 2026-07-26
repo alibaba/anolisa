@@ -163,7 +163,12 @@ fn discover_in_project_dir(
             continue;
         }
 
-        // Sub-agent sessions: <uuid>/subagents/agent-<uuid>.jsonl
+        // Sub-agent sessions: <uuid>/subagents/agent-<stem>.jsonl
+        //
+        // Historical Qoder versions named subagent files `agent-<uuid>.jsonl`;
+        // newer versions embed the subagent type, e.g.
+        // `agent-aExplore-b4b7e9141b9524f6.jsonl`. Accept any non-empty stem
+        // (the `agent-` prefix + `.jsonl` suffix already gate the file).
         if is_dir && is_valid_session_id(&name) {
             let subagents_dir = path.join("subagents");
             let Ok(sub_entries) = std::fs::read_dir(&subagents_dir) else {
@@ -177,7 +182,7 @@ fn discover_in_project_dir(
                 let sub_stem = sub_name
                     .trim_end_matches(".jsonl")
                     .trim_start_matches("agent-");
-                if is_valid_session_id(sub_stem) {
+                if is_valid_subagent_stem(sub_stem) {
                     sessions.push(DiscoveredSession {
                         path: sub_entry.path(),
                         project: project.to_string(),
@@ -263,6 +268,17 @@ fn is_valid_session_id(s: &str) -> bool {
     true
 }
 
+/// Check if a subagent file stem is usable as a session-id component.
+///
+/// Accepts both the legacy UUID form and the newer `<type>-<hex>` form
+/// (e.g. `aExplore-b4b7e9141b9524f6`). Only rejects empty stems and stems
+/// with characters that would be unsafe in a composite session id.
+fn is_valid_subagent_stem(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +310,19 @@ mod tests {
     }
 
     #[test]
+    fn test_is_valid_subagent_stem() {
+        // Legacy UUID form
+        assert!(is_valid_subagent_stem(UUID_B));
+        // Newer <type>-<hex> form
+        assert!(is_valid_subagent_stem("aExplore-b4b7e9141b9524f6"));
+        assert!(is_valid_subagent_stem("ageneral-purpose-fa6bcbf451087ee5"));
+        // Rejects empty and unsafe characters
+        assert!(!is_valid_subagent_stem(""));
+        assert!(!is_valid_subagent_stem("bad/name"));
+        assert!(!is_valid_subagent_stem("has space"));
+    }
+
+    #[test]
     fn test_discover_filters_and_subagents() {
         let projects = tmp_projects_dir("main");
         let proj = projects.join("-data-myapp");
@@ -304,21 +333,26 @@ mod tests {
         // Invalid names must be skipped
         std::fs::write(proj.join("notes.jsonl"), "{}\n").unwrap();
         std::fs::write(proj.join(format!("agent-{UUID_B}.jsonl")), "{}\n").unwrap();
-        // Sub-agent session under <uuid>/subagents/
+        // Sub-agent session under <uuid>/subagents/ (legacy UUID name)
         let sub = proj.join(UUID_A).join("subagents");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join(format!("agent-{UUID_B}.jsonl")), "{}\n").unwrap();
+        // Newer <type>-<hex> subagent name must also be discovered
+        std::fs::write(sub.join("agent-aExplore-b4b7e9141b9524f6.jsonl"), "{}\n").unwrap();
 
         let sessions = discover_sessions(Some(std::slice::from_ref(&projects)));
-        assert_eq!(sessions.len(), 2, "one main + one subagent: {sessions:?}");
+        assert_eq!(sessions.len(), 3, "one main + two subagents: {sessions:?}");
 
         let main = sessions.iter().find(|s| !s.is_subagent).unwrap();
         assert_eq!(main.session_id, UUID_A);
         assert_eq!(main.project, "data-myapp");
         assert_eq!(main.source, "qoder");
 
-        let sub = sessions.iter().find(|s| s.is_subagent).unwrap();
-        assert_eq!(sub.session_id, format!("{UUID_A}:subagent:{UUID_B}"));
+        assert!(sessions
+            .iter()
+            .any(|s| s.is_subagent && s.session_id == format!("{UUID_A}:subagent:{UUID_B}")));
+        assert!(sessions.iter().any(|s| s.is_subagent
+            && s.session_id == format!("{UUID_A}:subagent:aExplore-b4b7e9141b9524f6")));
 
         let _ = std::fs::remove_dir_all(&projects);
     }

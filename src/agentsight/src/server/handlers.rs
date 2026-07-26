@@ -3313,9 +3313,7 @@ pub async fn get_trajectory_detail(
         Ok(Some(atif_json)) => {
             // Inject subagent_trajectories if any exist.
             let enriched = match tstore.get_subagent_atif_jsons(&session_id) {
-                Ok(subs) if !subs.is_empty() => {
-                    inject_subagents(&atif_json, &subs)
-                }
+                Ok(subs) if !subs.is_empty() => inject_subagents(&atif_json, &subs),
                 _ => atif_json,
             };
             HttpResponse::Ok()

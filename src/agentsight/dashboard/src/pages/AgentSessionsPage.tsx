@@ -25,6 +25,8 @@ export interface MergedSession {
   last_message: string | null;
   /** Last activity in epoch milliseconds (null when unknown). */
   last_active_ms: number | null;
+  /** Number of subagent trajectories spawned by this session. */
+  subagent_count: number;
 }
 
 /** Last activity of a log-collected trajectory in epoch milliseconds. */
@@ -47,6 +49,18 @@ export function mergeSessions(
 ): MergedSession[] {
   const byId = new Map<string, MergedSession>();
 
+  // Count subagents per parent session. A subagent's session_id follows the
+  // composite form "<parent>:subagent:<child>"; tally by the parent prefix.
+  const subagentCount = new Map<string, number>();
+  for (const t of logs) {
+    if (!t.is_subagent) continue;
+    const idx = t.session_id.indexOf(':subagent:');
+    if (idx > 0) {
+      const parent = t.session_id.slice(0, idx);
+      subagentCount.set(parent, (subagentCount.get(parent) ?? 0) + 1);
+    }
+  }
+
   for (const s of ebpf) {
     byId.set(s.session_id, {
       session_id: s.session_id,
@@ -60,6 +74,7 @@ export function mergeSessions(
       first_message: s.first_user_query ?? null,
       last_message: s.last_user_query ?? null,
       last_active_ms: s.last_seen_ns > 0 ? Math.floor(s.last_seen_ns / 1_000_000) : null,
+      subagent_count: subagentCount.get(s.session_id) ?? 0,
     });
   }
 
@@ -90,6 +105,7 @@ export function mergeSessions(
         first_message: t.first_user_message ?? null,
         last_message: t.last_user_message ?? null,
         last_active_ms: lastMs,
+        subagent_count: subagentCount.get(t.session_id) ?? 0,
       });
     }
   }
@@ -349,9 +365,6 @@ export const AgentSessionsPage: React.FC = () => {
                   <td className="px-4 py-3"><SourceBadge sources={s.sources} /></td>
                   <td className="px-4 py-3">
                     <div className="text-gray-800">{s.agent_name ?? '-'}</div>
-                    <div className="text-xs text-gray-400 max-w-[120px] truncate" title={s.model ?? ''}>
-                      {s.model ?? '-'}
-                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <div className="text-gray-700 max-w-[150px] truncate" title={s.project ?? ''}>
@@ -363,6 +376,14 @@ export const AgentSessionsPage: React.FC = () => {
                       </span>
                       <CopyButton text={s.session_id} title="复制会话 ID" />
                     </div>
+                    {s.subagent_count > 0 && (
+                      <span
+                        className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded text-xs font-medium"
+                        title={`该会话派生了 ${s.subagent_count} 个子代理`}
+                      >
+                        🤖 {s.subagent_count} 子代理
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-gray-600">
                     <div className="max-w-[260px] truncate" title={s.first_message ?? ''}>

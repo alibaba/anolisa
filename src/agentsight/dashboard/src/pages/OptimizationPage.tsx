@@ -604,7 +604,7 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
           <table className="w-full table-fixed text-sm">
             <thead>
               <tr className="border-b border-gray-200">
-                <th className="w-[90px] text-left pb-2 pr-3 text-xs font-semibold text-gray-600">工具</th>
+                <th className="w-[110px] text-left pb-2 pr-3 text-xs font-semibold text-gray-600">工具</th>
                 <th className="w-[70px] text-left pb-2 pr-3 text-xs font-semibold text-gray-600">耗时</th>
                 <th className="text-left pb-2 text-xs font-semibold text-gray-600">命令</th>
               </tr>
@@ -619,7 +619,7 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
               ) : (
                 perf.top_slow.slice(0, 5).map((call, i) => (
                   <tr key={i}>
-                    <td className="py-2 pr-3 whitespace-nowrap text-gray-800">{call.name}</td>
+                    <td title={call.name} className="py-2 pr-3 whitespace-nowrap overflow-hidden text-ellipsis text-gray-800">{call.name}</td>
                     <td className={`py-2 pr-3 whitespace-nowrap ${call.err ? 'text-red-500' : 'text-gray-600'}`}>
                       {formatSecs(call.dur)}{call.err ? ' ✗' : ''}
                     </td>

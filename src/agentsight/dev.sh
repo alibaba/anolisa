@@ -8,7 +8,7 @@
 #   ./dev.sh --frontend-port 3005
 #   ./dev.sh --frontend-host 127.0.0.1  # 前端只监听本机（默认监听所有网卡）
 #   ./dev.sh --host 0.0.0.0       # 后端 API 也对外监听（默认仅 127.0.0.1）
-#   ./dev.sh --no-trace           # 不启动 trace（也就不采集轨迹）
+#   ./dev.sh --no-trace           # 不启动 trace（也就不采集轨迹，且不动已有 trace 进程）
 #   ./dev.sh --backend-only | --frontend-only
 #
 # 前端 dev server（dashboard/webpack.config.js）把 /api 代理到 127.0.0.1:7396，
@@ -30,6 +30,9 @@
 #           features.trajectory_collection.enabled 打开、扫描间隔压到 5s，
 #           这样 /api/trajectories 在 dev 环境有数据。非 root 会自动跳过 trace。
 #           注意 trace 会连带启动全部 eBPF 探针（kernel >= 5.8 + BTF）。
+#           若机器上已有 agentsight trace 在跑，脚本会先把它停掉（TERM→KILL）再启动
+#           自己的实例 —— 那个进程大概率用的是系统配置（轨迹采集默认关闭），留着
+#           dev 环境依然没有轨迹数据。想保留它请加 --no-trace。
 #           serve 只在 trajectories.db 已存在时才打开该 store，而 collector 线程
 #           要等 uprobe 挂完才 spawn（agent 进程多时 >1min），所以脚本预建空 DB
 #           文件，schema 由首个打开者建表；首轮数据稍后到，刷新页面即可，不用重启。
@@ -108,17 +111,58 @@ fi
 # collector 线程只在 trace 路径（src/unified.rs）里启动，serve 侧纯只读，
 # 所以想让 /api/trajectories 有数据就必须把 trace 一起拉起来。
 
+# 找出真正在跑的 trace 进程：先按可执行名匹配（comm == agentsight），再确认参数里
+# 带 trace 子命令。不能用 pgrep -f 'agentsight trace' —— 那会把 cmdline 里恰好含这串
+# 字符的 shell / nohup wrapper（甚至调用本脚本的那个 shell）一起匹配上，既会误杀，
+# 也会让「是否已退出」的检查永远为真。
+trace_pids() {
+  local pid args
+  for pid in $(pgrep -x agentsight 2>/dev/null || true); do
+    args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    case " $args" in *" trace "*) echo "$pid" ;; esac
+  done
+}
+
+# 已在跑的 trace 会占着 uprobe / ring buffer，而且几乎肯定用的是系统配置
+# （trajectory_collection 默认关闭）—— 留着它，dev 环境照样拿不到轨迹数据。
+# 所以这里直接清掉，再由本脚本用 .dev/config.json 重新拉起。
+# 不想动机器上现有的 trace 就加 --no-trace。
+kill_stale_trace() {
+  local pids i=0
+  pids="$(trace_pids | tr '\n' ' ')"
+  [ -n "${pids// /}" ] || return 0
+
+  warn "已有 agentsight trace 在运行 (pid ${pids% })，先清理再启动本脚本自己的实例。"
+  warn "不想动它请改用 --no-trace（那样 /api/trajectories 不会有新数据）。"
+  kill -TERM $pids 2>/dev/null || true
+  # trace 退出前要做 WAL checkpoint，给它几秒优雅收尾
+  while [ $i -lt 15 ] && [ -n "$(trace_pids)" ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  pids="$(trace_pids | tr '\n' ' ')"
+  if [ -n "${pids// /}" ]; then
+    warn "TERM 后仍在运行 (pid ${pids% })，改用 KILL。"
+    kill -KILL $pids 2>/dev/null || true
+    sleep 1
+  fi
+  if [ -n "$(trace_pids)" ]; then
+    error "无法清理已有 agentsight trace，请手动停止后重试（或用 --no-trace 跳过）。"
+    exit 1
+  fi
+  rm -f "$ROOT_DIR/.dev/agentsight.pid"
+  ok "旧 trace 进程已清理。"
+}
+
 if [ "$RUN_TRACE" = 1 ]; then
   if [ "$(id -u)" != "0" ]; then
     warn "非 root，跳过 trace（eBPF 需 root/CAP_BPF）；/api/trajectories 不会有新数据。"
     RUN_TRACE=0
-  elif pgrep -f "agentsight trace" >/dev/null 2>&1; then
-    warn "已有 agentsight trace 在运行，跳过启动（避免探针/pid 文件冲突）。"
-    warn "它若已开启 trajectory_collection，轨迹数据照样会更新。"
-    RUN_TRACE=0
   elif ! command -v python3 >/dev/null 2>&1; then
     warn "未找到 python3，无法派生开发配置，跳过 trace。"
     RUN_TRACE=0
+  else
+    kill_stale_trace
   fi
 fi
 
