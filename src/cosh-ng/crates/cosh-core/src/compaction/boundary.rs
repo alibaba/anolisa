@@ -143,6 +143,31 @@ pub(crate) fn is_safe_split_point(messages: &[Message], index: usize) -> bool {
     }
 }
 
+fn last_compactable_run_index(runs: &[RunSpan], preserve_recent_runs: usize) -> Option<usize> {
+    let preserve = preserve_recent_runs.max(1);
+    (runs.len() > preserve).then(|| runs.len() - preserve)
+}
+
+/// Reports whether automatic compaction can advance beyond the active
+/// projection while preserving the configured number of recent runs.
+///
+/// This deliberately checks only boundary feasibility. The compactor still
+/// owns target-aware cut selection, but an automatic recommendation must not
+/// launch it when every eligible prefix is already compacted or protected.
+///
+/// # Errors
+///
+/// Propagates [`BoundaryError`] so malformed transcripts fail closed.
+pub(crate) fn has_new_compactable_prefix(
+    messages: &[Message],
+    preserve_recent_runs: usize,
+    compacted_through: usize,
+) -> Result<bool, BoundaryError> {
+    let runs = group_agent_runs(messages)?;
+    Ok(last_compactable_run_index(&runs, preserve_recent_runs)
+        .is_some_and(|index| runs[index].start > compacted_through))
+}
+
 /// Selects the compaction cut for a transcript, or `None` when no safe cut
 /// frees at least one complete Agent run.
 ///
@@ -159,22 +184,42 @@ pub(crate) fn select_compacted_through(
     preserve_recent_runs: usize,
     target_tokens: u64,
 ) -> Result<Option<usize>, BoundaryError> {
+    select_compacted_through_after(messages, preserve_recent_runs, target_tokens, 0)
+}
+
+/// Selects a safe cut strictly after an already compacted transcript prefix.
+///
+/// This prevents a later compaction from selecting the active projection's
+/// boundary merely because its retained suffix still fits the target.
+///
+/// # Errors
+///
+/// Propagates [`BoundaryError`] so malformed transcripts are never compacted.
+pub(crate) fn select_compacted_through_after(
+    messages: &[Message],
+    preserve_recent_runs: usize,
+    target_tokens: u64,
+    compacted_through: usize,
+) -> Result<Option<usize>, BoundaryError> {
     let runs = group_agent_runs(messages)?;
-    let preserve = preserve_recent_runs.max(1);
-    if runs.len() <= preserve {
+    let Some(last_candidate) = last_compactable_run_index(&runs, preserve_recent_runs) else {
         return Ok(None);
-    }
+    };
     // Candidate cuts are run starts from runs[1] (compact at least one run)
     // through runs[len - preserve] (keep the required recent runs).
-    let last_candidate = runs.len() - preserve;
+    let mut fallback = None;
     for span in &runs[1..=last_candidate] {
         let cut = span.start;
+        if cut <= compacted_through {
+            continue;
+        }
+        fallback = Some(cut);
         let retained = super::budget::estimate_messages_tokens(&messages[cut..]);
         if retained <= target_tokens {
             return Ok(Some(cut));
         }
     }
-    Ok(Some(runs[last_candidate].start))
+    Ok(fallback)
 }
 
 #[cfg(test)]
@@ -210,6 +255,31 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0], RunSpan { start: 0, end: 4 });
         assert_eq!(runs[1], RunSpan { start: 4, end: 8 });
+    }
+
+    #[test]
+    fn automatic_preflight_requires_a_new_eligible_boundary() {
+        let mut messages = run_with_tools("first", "call-1");
+        messages.extend(run_with_tools("second", "call-2"));
+
+        assert!(!has_new_compactable_prefix(&messages, 2, 0).unwrap());
+        assert!(has_new_compactable_prefix(&messages, 1, 0).unwrap());
+
+        let first_cut = group_agent_runs(&messages).unwrap()[1].start;
+        assert!(!has_new_compactable_prefix(&messages, 1, first_cut).unwrap());
+    }
+
+    #[test]
+    fn target_selection_advances_past_the_active_projection() {
+        let mut messages = run_with_tools("first", "call-1");
+        messages.extend(run_with_tools("second", "call-2"));
+        messages.extend(run_with_tools("third", "call-3"));
+        let runs = group_agent_runs(&messages).unwrap();
+
+        assert_eq!(
+            select_compacted_through_after(&messages, 1, u64::MAX, runs[1].start).unwrap(),
+            Some(runs[2].start)
+        );
     }
 
     #[test]
