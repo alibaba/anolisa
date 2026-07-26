@@ -208,6 +208,14 @@ export interface AtifObservationResult {
   source_call_id?: string;
   /** Any JSON per the schema — AgentSight's exporter flattens it to a string. */
   content?: unknown;
+  subagent_trajectory_ref?: SubagentTrajectoryRef[];
+}
+
+export interface SubagentTrajectoryRef {
+  trajectory_id?: string;
+  trajectory_path?: string;
+  session_id?: string;
+  extra?: any;
 }
 
 export interface AtifObservation {
@@ -254,8 +262,10 @@ export interface AtifDocument {
   schema_version: string;
   /** Optional in the schema; both AgentSight producers always set it. */
   session_id?: string;
+  trajectory_id?: string;
   agent: AtifAgent;
   steps: AtifStep[];
   final_metrics?: AtifFinalMetrics;
+  subagent_trajectories?: AtifDocument[];
   extra?: any;
 }

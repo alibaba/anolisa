@@ -3294,8 +3294,10 @@ pub async fn trajectory_filters(data: web::Data<AppState>) -> impl Responder {
 
 /// GET /api/trajectories/{session_id}
 ///
-/// Returns the stored ATIF v1.7 JSON document for one trajectory (raw string
-/// passthrough, no re-parsing).
+/// Returns the stored ATIF v1.7 JSON document for one trajectory. When the
+/// session has subagent rows (`<session_id>:subagent:%`), they are embedded
+/// into the document's `subagent_trajectories` array so the frontend can
+/// navigate them via breadcrumb.
 #[get("/trajectories/{session_id}")]
 pub async fn get_trajectory_detail(
     data: web::Data<AppState>,
@@ -3308,15 +3310,42 @@ pub async fn get_trajectory_detail(
     };
     let session_id = path.into_inner();
     match tstore.get_atif_json(&session_id) {
-        Ok(Some(atif_json)) => HttpResponse::Ok()
-            .content_type("application/json")
-            .body(atif_json),
+        Ok(Some(atif_json)) => {
+            // Inject subagent_trajectories if any exist.
+            let enriched = match tstore.get_subagent_atif_jsons(&session_id) {
+                Ok(subs) if !subs.is_empty() => {
+                    inject_subagents(&atif_json, &subs)
+                }
+                _ => atif_json,
+            };
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .body(enriched)
+        }
         Ok(None) => HttpResponse::NotFound()
             .json(serde_json::json!({"error": "not_found", "message": "Trajectory not found"})),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Parse the parent ATIF JSON, embed subagent documents into
+/// `subagent_trajectories`, and re-serialize.
+fn inject_subagents(parent_json: &str, sub_jsons: &[String]) -> String {
+    let mut doc: serde_json::Value = match serde_json::from_str(parent_json) {
+        Ok(v) => v,
+        Err(_) => return parent_json.to_string(),
+    };
+    let subs: Vec<serde_json::Value> = sub_jsons
+        .iter()
+        .filter_map(|s| serde_json::from_str(s).ok())
+        .collect();
+    if subs.is_empty() {
+        return parent_json.to_string();
+    }
+    doc["subagent_trajectories"] = serde_json::Value::Array(subs);
+    serde_json::to_string(&doc).unwrap_or_else(|_| parent_json.to_string())
 }
 
 // ─── Skill Metrics endpoints ─────────────────────────────────────────────────

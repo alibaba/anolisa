@@ -29,6 +29,27 @@ pub struct ToolCall {
 }
 
 // ---------------------------------------------------------------------------
+// SubagentTrajectoryRef
+// ---------------------------------------------------------------------------
+
+/// Reference to a delegated subagent trajectory (ATIF v1.7).
+///
+/// Resolution: `trajectory_id` matches an embedded entry in the parent's
+/// `subagent_trajectories` array; `trajectory_path` points at an external file.
+/// At least one MUST be set. `session_id` is informational only (run-scoped).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentTrajectoryRef {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trajectory_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trajectory_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<HashMap<String, serde_json::Value>>,
+}
+
+// ---------------------------------------------------------------------------
 // ObservationResult & Observation
 // ---------------------------------------------------------------------------
 
@@ -39,6 +60,8 @@ pub struct ObservationResult {
     pub source_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_trajectory_ref: Option<Vec<SubagentTrajectoryRef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<HashMap<String, serde_json::Value>>,
 }
@@ -179,6 +202,8 @@ pub struct AtifTrajectory {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continued_trajectory_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_trajectories: Option<Vec<AtifTrajectory>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<HashMap<String, serde_json::Value>>,
 }
 
@@ -283,6 +308,7 @@ mod tests {
             notes: None,
             final_metrics: None,
             continued_trajectory_ref: None,
+            subagent_trajectories: None,
             extra: None,
         }
     }
