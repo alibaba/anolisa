@@ -220,15 +220,18 @@ impl AtifStep {
 }
 
 impl AtifToolCall {
-    /// Short human-readable argument summary (command / file_path / url / query),
+    /// Short human-readable argument summary (command / file_path / url / query / regex …),
     /// falling back to subagent descriptors, truncated UTF-8 safe.
     pub fn command_summary(&self, max_chars: usize) -> String {
         let args = &self.arguments;
         let primary = args
             .get("command")
             .or_else(|| args.get("file_path"))
+            .or_else(|| args.get("filePath"))
             .or_else(|| args.get("url"))
             .or_else(|| args.get("query"))
+            .or_else(|| args.get("regex"))
+            .or_else(|| args.get("pattern"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if !primary.is_empty() {
@@ -395,6 +398,34 @@ mod tests {
         };
         assert_eq!(call.display_name(), "Agent(Explore)");
         assert_eq!(call.command_summary(50), "[Explore] scan");
+    }
+
+    #[test]
+    fn tool_call_summary_grep_regex() {
+        // Grep tool uses "regex" as primary arg — must not be empty.
+        let call = AtifToolCall {
+            tool_call_id: "c2".into(),
+            function_name: "Grep".into(),
+            arguments: serde_json::json!({"regex": "fn main\\(\\)", "path": "/src"}),
+        };
+        assert_eq!(call.command_summary(50), "fn main\\(\\)");
+
+        // LSP tool uses "filePath" — must be picked up.
+        let call2 = AtifToolCall {
+            tool_call_id: "c3".into(),
+            function_name: "LSP".into(),
+            arguments: serde_json::json!({"filePath": "/src/main.rs", "operation": "goToDefinition"}),
+        };
+        assert_eq!(call2.command_summary(50), "/src/main.rs");
+
+        // Glob tool uses "pattern" — must be picked up.
+        let call3 = AtifToolCall {
+            tool_call_id: "c4".into(),
+            function_name: "Glob".into(),
+            arguments: serde_json::json!({"pattern": "*.rs", "path": "/src"}),
+        };
+        // "pattern" is after "query" in the chain; Glob also has "query" semantics via pattern
+        assert_eq!(call3.command_summary(50), "*.rs");
     }
 
     #[test]

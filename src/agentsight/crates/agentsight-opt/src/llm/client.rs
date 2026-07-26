@@ -288,7 +288,6 @@ impl LlmClient {
                     if let Some(ref recorder) = self.recorder {
                         let end_ts = chrono::Utc::now().to_rfc3339();
                         recorder.record(RecordParams {
-                            label: tag,
                             messages: &messages,
                             response: &text,
                             model: &self.model,

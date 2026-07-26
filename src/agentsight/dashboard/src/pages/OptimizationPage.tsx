@@ -1015,17 +1015,6 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
         {report.cost ? ` · ${report.cost.total_events} 事件` : ''}
       </div>
 
-      {/* ── 提取结果 ── */}
-      {progress.accuracy === 'done' && report.extraction.final_answer && (
-        <div className="mb-4 bg-white rounded-lg shadow border border-green-200 p-4">
-          <p className="font-mono text-xs text-gray-600 m-0">
-            <b>提取结果：</b>
-            {report.extraction.final_answer.length > 200
-              ? [...report.extraction.final_answer].slice(0, 200).join('') + '...'
-              : report.extraction.final_answer}
-          </p>
-        </div>
-      )}
 
       {/* ── 内容 ── */}
       {loadingResults ? (
