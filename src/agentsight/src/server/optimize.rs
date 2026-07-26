@@ -15,6 +15,8 @@ use agentsight_opt::{AnalyzePipeline, AtifTrajectory, LlmClient, TrajectoryRecor
 use agentsight_opt_store::{Dimension, OptimizationStore};
 use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
+use uuid::Uuid;
+
 use super::AppState;
 use crate::storage::sqlite::GenAISqliteStore;
 
@@ -348,14 +350,16 @@ pub async fn run_optimization(
 
                 // Persist to trajectories.db for Dashboard query.
                 if let Some(ref traj_store) = data.trajectory_store {
-                    let doc = recorder.to_atif();
+                    let mut doc = recorder.to_atif();
+                    let record_session_id = Uuid::new_v4().to_string();
+                    doc.session_id = Some(record_session_id.clone());
                     let atif_json = serde_json::to_string(&doc).unwrap_or_default();
                     let (first_user_message, last_user_message) =
                         agentsight_trajectory_collector::store::extract_user_message_previews(
                             &atif_json,
                         );
                     let record = TrajectoryRecord {
-                        session_id: format!("opt_{dimension_raw}_{session_id}"),
+                        session_id: record_session_id,
                         schema_version: doc.schema_version.clone(),
                         agent_name: "agentsight-opt".to_string(),
                         model_name: doc.agent.model_name.clone(),

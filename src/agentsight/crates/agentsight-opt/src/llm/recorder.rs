@@ -19,8 +19,6 @@ use super::types::ChatMessage;
 /// A single recorded LLM call.
 #[derive(Debug, Clone)]
 pub struct RecordedCall {
-    /// Label identifying the call purpose (e.g. "perf:fast_tool", "accuracy:extract").
-    pub label: String,
     /// Input messages sent to the LLM.
     pub messages: Vec<ChatMessage>,
     /// The LLM response text.
@@ -39,7 +37,6 @@ pub struct RecordedCall {
 
 /// Parameters for recording a single LLM call.
 pub struct RecordParams<'a> {
-    pub label: &'a str,
     pub messages: &'a [ChatMessage],
     pub response: &'a str,
     pub model: &'a str,
@@ -72,7 +69,6 @@ impl TrajectoryRecorder {
     /// Record a completed LLM call.
     pub fn record(&self, params: RecordParams<'_>) {
         let call = RecordedCall {
-            label: params.label.to_string(),
             messages: params.messages.to_vec(),
             response: params.response.to_string(),
             model: params.model.to_string(),
@@ -111,24 +107,6 @@ impl TrajectoryRecorder {
         let mut total_completion: u64 = 0;
 
         for call in &calls {
-            // Add a "user" step describing the analysis task (the label).
-            step_id += 1;
-            steps.push(Step {
-                step_id,
-                timestamp: Some(call.start_ts.clone()),
-                source: StepSource::User,
-                message: format!("[{}]", call.label),
-                model_name: None,
-                reasoning_effort: None,
-                reasoning_content: None,
-                tool_calls: None,
-                observation: None,
-                metrics: None,
-                extra: None,
-                llm_call_count: None,
-                is_copied_context: None,
-            });
-
             // System prompt step (first system message, if any).
             if let Some(sys) = call.messages.iter().find(|m| m.role == "system") {
                 step_id += 1;
@@ -186,10 +164,6 @@ impl TrajectoryRecorder {
             extra.insert(
                 "start_timestamp".to_string(),
                 serde_json::Value::String(call.start_ts.clone()),
-            );
-            extra.insert(
-                "label".to_string(),
-                serde_json::Value::String(call.label.clone()),
             );
             steps.push(Step {
                 step_id,
@@ -314,7 +288,6 @@ mod tests {
 
         // Simulate two LLM calls.
         recorder.record(RecordParams {
-            label: "perf:fast_tool",
             messages: &[
                 ChatMessage::system("You are a perf analyzer."),
                 ChatMessage::user("Analyze this trajectory."),
@@ -327,7 +300,6 @@ mod tests {
             end_ts: "2026-07-24T10:00:05+00:00",
         });
         recorder.record(RecordParams {
-            label: "perf:prefix_cache",
             messages: &[
                 ChatMessage::system("You are a cache analyzer."),
                 ChatMessage::user("Check cache hits."),
@@ -347,7 +319,7 @@ mod tests {
         let doc = recorder.to_atif();
         assert_eq!(doc.schema_version, "ATIF-v1.7");
         assert_eq!(doc.session_id.as_deref(), Some("perf-issues/test-session"));
-        assert!(doc.steps.len() > 2); // at least label + system + user + agent per call
+        assert!(doc.steps.len() > 2); // at least system + user + agent per call
         let metrics = doc.final_metrics.as_ref().unwrap();
         assert_eq!(metrics.total_prompt_tokens, Some(2300));
         assert_eq!(metrics.total_completion_tokens, Some(72));

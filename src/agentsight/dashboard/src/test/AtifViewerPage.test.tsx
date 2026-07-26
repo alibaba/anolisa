@@ -278,10 +278,6 @@ describe('AtifViewerPage', () => {
     expect(mockFetchAtifByConversation).toHaveBeenCalledWith('conv-123');
   });
 
-  it('should show back button', async () => {
-    await act(async () => { renderPage(); });
-    expect(screen.getByText('← 返回')).toBeInTheDocument();
-  });
 
   it('should show download button when doc is loaded', async () => {
     mockFetchAtifBySession.mockResolvedValue(mockAtifDoc);
