@@ -311,3 +311,195 @@ fn failed_edit_submission_preserves_provider_identity() {
     assert!(!auth.collected_values.contains_key("api_key"));
     assert!(auth.field_input.is_empty());
 }
+
+fn auth_field(name: &str, label: &str, secret: bool) -> AuthFieldInfo {
+    AuthFieldInfo {
+        name: name.to_string(),
+        label: label.to_string(),
+        hint: None,
+        secret,
+        required: true,
+        placeholder: None,
+    }
+}
+
+/// An edit of `qwen-prod` that reached the end of the form: every field is collected, the API
+/// key still carries the display mask, and the user retyped the Access Key Secret.
+fn failed_edit_state() -> InlineState {
+    let mut provider = provider("openai_compat", "OpenAI Compatible");
+    provider.fields = vec![
+        auth_field("provider_id", "Provider ID", false),
+        auth_field("base_url", "Base URL", false),
+        auth_field("model", "Model", false),
+        auth_field("api_key", "API Key", true),
+        auth_field("access_key_secret", "Access Key Secret", true),
+    ];
+    let mut state = InlineState::default();
+    record_auth_required(&mut state, &[governed_auth_required(vec![provider])]);
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::FillingField;
+    auth.current_field = 5;
+    auth.editing_provider_name = Some("qwen-prod".to_string());
+    auth.collected_values = [
+        ("provider_id", "qwen-prod"),
+        ("base_url", "https://example.invalid/v1"),
+        ("model", "qwen3.7-plus"),
+        ("api_key", "\u{2022}\u{2022}\u{2022}"),
+        ("access_key_secret", "real-typed-secret"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect();
+    auth.field_input = "real-typed-secret".to_string();
+    state
+}
+
+/// #1834: a rejected edit wiped the whole form, so the user had to retype every field.
+#[test]
+fn failed_edit_submission_keeps_the_values_the_user_can_reconfirm() {
+    let mut state = failed_edit_state();
+    let auth = state.auth.state.as_mut().unwrap();
+
+    restore_after_failed_submission(auth);
+
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("qwen-prod")
+    );
+    assert_eq!(
+        auth.collected_values.get("base_url").map(String::as_str),
+        Some("https://example.invalid/v1")
+    );
+    assert_eq!(
+        auth.collected_values.get("model").map(String::as_str),
+        Some("qwen3.7-plus")
+    );
+    // A bullet mask is not a credential: cosh-core swaps it back for the stored secret, so
+    // keeping it is what lets an unrelated field be fixed without retyping the API key.
+    assert_eq!(
+        auth.collected_values.get("api_key").map(String::as_str),
+        Some("\u{2022}\u{2022}\u{2022}")
+    );
+    // The cursor returns to the first editable field with its value re-projected.
+    assert_eq!(auth.current_field, 1);
+    assert_eq!(auth.field_input, "https://example.invalid/v1");
+    assert!(auth.field_error.is_none());
+}
+
+/// A real secret typed into the rejected attempt is dropped: a failed submission must not
+/// extend how long a plaintext credential lives in the form.
+#[test]
+fn failed_edit_submission_drops_secrets_the_user_actually_typed() {
+    let mut state = failed_edit_state();
+    let auth = state.auth.state.as_mut().unwrap();
+
+    restore_after_failed_submission(auth);
+
+    assert!(!auth.collected_values.contains_key("access_key_secret"));
+    assert!(
+        !auth
+            .collected_values
+            .values()
+            .any(|value| value == "real-typed-secret"),
+        "plaintext secret survived the retry: {:?}",
+        auth.collected_values
+    );
+}
+
+/// Selective preservation is scoped to edits. A new provider must still retry from empty,
+/// which is what #1769 hardened the retry path for.
+#[test]
+fn failed_new_provider_submission_still_clears_every_value() {
+    let mut state = failed_edit_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.editing_provider_name = None;
+
+    restore_after_failed_submission(auth);
+
+    assert_eq!(auth.current_field, 0);
+    assert!(auth.collected_values.is_empty());
+    assert!(auth.field_input.is_empty());
+}
+
+/// The restored panel has to offer the keep-current-value shortcut again; without the
+/// re-projected `field_input` the hint stays hidden and the value looks lost.
+#[test]
+fn restored_edit_panel_offers_to_keep_the_current_value() {
+    let mut state = failed_edit_state();
+    restore_after_failed_submission(state.auth.state.as_mut().unwrap());
+
+    let mut output = Vec::new();
+    crate::auth::prompt::render_current_auth_panel(&mut state, &mut output)
+        .expect("render restored panel");
+    let rendered = String::from_utf8(output).expect("utf8 panel");
+
+    assert!(
+        rendered.contains("keep current value"),
+        "restored panel dropped the keep-current-value hint: {rendered}"
+    );
+}
+
+/// An Aliyun edit that reached the ECS RAM-role challenge and had its configure rejected.
+fn failed_ecs_challenge_edit_state() -> InlineState {
+    let mut provider = provider("aliyun", "Aliyun Authentication");
+    provider.fields = vec![
+        auth_field("provider_id", "Provider ID", false),
+        auth_field("access_key_id", "Access Key ID", true),
+        auth_field("access_key_secret", "Access Key Secret", true),
+        auth_field("model", "Model", false),
+    ];
+    let mut state = InlineState::default();
+    record_auth_required(&mut state, &[governed_auth_required(vec![provider])]);
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::AliyunEcsChallenge {
+        instance_id: "i-test-1".to_string(),
+        console_url: "https://example.invalid/authorize".to_string(),
+    };
+    auth.editing_provider_name = Some("sysom-trial".to_string());
+    // What apply_aliyun_prepare leaves behind: the ECS marker in, AK/SK out.
+    auth.collected_values = [
+        ("provider_id", "sysom-trial"),
+        ("auth_source", "ecs_ram_role"),
+        ("model", "qwen3.7-plus"),
+        ("security_token", "\u{2022}\u{2022}\u{2022}"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect();
+    state
+}
+
+/// The retry comes back to the manual AK/SK prompts, so the ECS marker cannot survive: cosh-core
+/// reads it as "credentials come from the metadata service", skips the AK/SK required check and
+/// stores `None` for them — the user would type an Access Key pair and have it silently dropped.
+#[test]
+fn failed_ecs_challenge_edit_retry_drops_the_ecs_auth_source() {
+    let mut state = failed_ecs_challenge_edit_state();
+    let auth = state.auth.state.as_mut().unwrap();
+
+    restore_after_failed_submission(auth);
+
+    assert!(
+        !auth.collected_values.contains_key("auth_source"),
+        "manual retry kept the ECS marker: {:?}",
+        auth.collected_values
+    );
+    // The restored phase asks for Access Key ID, which cosh-core will now actually validate.
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert_eq!(auth.current_field, 1);
+    assert_eq!(
+        auth.current_field_info().map(|field| field.name.as_str()),
+        Some("access_key_id")
+    );
+    // Values that describe the provider rather than contradict the phase still survive.
+    assert_eq!(
+        auth.collected_values.get("model").map(String::as_str),
+        Some("qwen3.7-plus")
+    );
+    assert_eq!(
+        auth.collected_values
+            .get("security_token")
+            .map(String::as_str),
+        Some("\u{2022}\u{2022}\u{2022}")
+    );
+}
