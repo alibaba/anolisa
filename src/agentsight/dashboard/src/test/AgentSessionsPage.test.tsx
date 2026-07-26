@@ -54,6 +54,7 @@ function renderPage() {
       <Routes>
         <Route path="/sessions" element={<AgentSessionsPage />} />
         <Route path="/optimization/:sessionId" element={<div>优化分析页面</div>} />
+        <Route path="/atif" element={<div>轨迹查看页面</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -97,6 +98,26 @@ describe('mergeSessions', () => {
     const merged = mergeSessions([ebpfSession('s-new')] as any, [older] as any);
     expect(merged[0].session_id).toBe('s-new');
     expect(merged[1].session_id).toBe('s-old');
+  });
+
+  it('hides subagent rows when their parent is present', () => {
+    const parent = logTrajectory('s-parent');
+    const sub1 = { ...logTrajectory('s-parent:subagent:aExplore-b4b7e9'), is_subagent: true };
+    const sub2 = { ...logTrajectory('s-parent:subagent:aDebug-f1a2c3'), is_subagent: true };
+    const merged = mergeSessions([] as any, [parent, sub1, sub2] as any);
+
+    // Only the parent row remains; subagents are folded into it.
+    expect(merged).toHaveLength(1);
+    expect(merged[0].session_id).toBe('s-parent');
+    expect(merged[0].subagent_count).toBe(2);
+  });
+
+  it('keeps orphaned subagent rows when parent is absent', () => {
+    const orphan = { ...logTrajectory('s-gone:subagent:aExplore-abc123'), is_subagent: true };
+    const merged = mergeSessions([] as any, [orphan] as any);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].session_id).toBe('s-gone:subagent:aExplore-abc123');
   });
 });
 
@@ -194,8 +215,18 @@ describe('AgentSessionsPage', () => {
     mockFetchTrajectories.mockResolvedValue([]);
     await act(async () => { renderPage(); });
 
-    await act(async () => { fireEvent.click(screen.getByText('优化分析')); });
+    await act(async () => { fireEvent.click(screen.getByText('🔬 分析')); });
     expect(screen.getByText('优化分析页面')).toBeInTheDocument();
+  });
+
+  it('navigates to trajectory viewer on row click', async () => {
+    mockFetchSessions.mockResolvedValue([ebpfSession('s-ebpf-1')]);
+    mockFetchTrajectories.mockResolvedValue([]);
+    await act(async () => { renderPage(); });
+
+    // Click on the session ID cell (part of the row) to trigger row navigation
+    await act(async () => { fireEvent.click(screen.getByText('s-ebpf-1')); });
+    expect(screen.getByText('轨迹查看页面')).toBeInTheDocument();
   });
 
   it('shows error banner when eBPF session fetch fails', async () => {
