@@ -295,6 +295,7 @@ impl LlmClient {
                             output_tokens,
                             start_ts: &start_ts,
                             end_ts: &end_ts,
+                            label,
                         });
                         tracing::debug!(
                             "[{tag}] Recorded LLM call ({} calls total)",
