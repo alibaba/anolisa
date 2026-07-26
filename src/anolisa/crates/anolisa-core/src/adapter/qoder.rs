@@ -106,6 +106,16 @@ impl FrameworkDriver for QoderDriver {
         "qoder"
     }
 
+    fn probe_bundle(&self, resource_root: &Path, declared_entry: Option<&str>) -> bool {
+        // Mirrors read_bundle's mandatory checks: the plugin manifest (or
+        // the contract-declared entry) AND hooks.json must both be
+        // present — a manifest-only leftover is not a usable bundle.
+        resource_root
+            .join(declared_entry.unwrap_or(QODER_PLUGIN_MANIFEST))
+            .is_file()
+            && resource_root.join(QODER_HOOKS_FILE).is_file()
+    }
+
     fn detect(&self, env: &HostEnv) -> DetectResult {
         match resolve_qodercli(env.user_home.as_deref()) {
             Some(path) => DetectResult {

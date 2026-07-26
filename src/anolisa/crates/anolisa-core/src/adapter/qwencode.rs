@@ -73,6 +73,14 @@ impl FrameworkDriver for QwenCodeDriver {
         "qwencode"
     }
 
+    fn probe_bundle(&self, resource_root: &Path, _declared_entry: Option<&str>) -> bool {
+        // Mirrors read_bundle's mandatory check: the Qwen-native root
+        // manifest must be present. The declared entry is ignored here —
+        // read_bundle rejects any entry other than the native manifest,
+        // so consulting it could only make this probe stricter.
+        resource_root.join(QWEN_MANIFEST).is_file()
+    }
+
     fn detect(&self, _env: &HostEnv) -> DetectResult {
         match find_binary_in_path(&qwen_program()) {
             Some(path) => DetectResult {
