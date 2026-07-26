@@ -79,6 +79,17 @@ export function mergeSessions(
   }
 
   for (const t of logs) {
+    // Subagent trajectories belong to their parent task — don't show them as
+    // independent rows. They remain reachable via the parent's ATIF viewer
+    // (breadcrumb navigation). Only keep orphaned subagents whose parent is
+    // absent from both sources (e.g. parent outside the selected time range).
+    if (t.is_subagent) {
+      const idx = t.session_id.indexOf(':subagent:');
+      const parentId = idx > 0 ? t.session_id.slice(0, idx) : null;
+      if (parentId && (byId.has(parentId) || logs.some((l) => l.session_id === parentId))) {
+        continue;
+      }
+    }
     const lastMs = trajectoryLastActiveMs(t);
     const existing = byId.get(t.session_id);
     if (existing) {
@@ -361,7 +372,12 @@ export const AgentSessionsPage: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {paged.map((s) => (
-                <tr key={s.session_id} className="hover:bg-gray-50">
+                <tr
+                  key={s.session_id}
+                  className="hover:bg-gray-50 cursor-pointer transition-colors"
+                  onClick={() => navigate(`/atif?type=session&id=${encodeURIComponent(s.session_id)}`)}
+                  title="点击查看轨迹详情"
+                >
                   <td className="px-4 py-3"><SourceBadge sources={s.sources} /></td>
                   <td className="px-4 py-3">
                     <div className="text-gray-800">{s.agent_name ?? '-'}</div>
@@ -403,13 +419,13 @@ export const AgentSessionsPage: React.FC = () => {
                       {timeAgo(s.last_active_ms)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-center">
+                  <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
                     <button
                       onClick={() => navigate(`/optimization/${encodeURIComponent(s.session_id)}`)}
                       className="px-3 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
                       title="对该会话运行优化分析"
                     >
-                      优化分析
+                      🔬 分析
                     </button>
                   </td>
                 </tr>
