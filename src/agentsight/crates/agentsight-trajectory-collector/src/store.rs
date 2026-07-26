@@ -369,6 +369,25 @@ impl TrajectoryStore {
         Ok(json)
     }
 
+    /// Returns the ATIF JSON strings of all subagent trajectories belonging to
+    /// the given parent session (matching `<parent>:subagent:%`).
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn get_subagent_atif_jsons(&self, parent_session_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock_conn()?;
+        let pattern = format!("{parent_session_id}:subagent:%");
+        let mut stmt = conn.prepare(
+            "SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1",
+        )?;
+        let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Returns distinct project / source / agent_name values for UI filters.
     ///
     /// # Errors

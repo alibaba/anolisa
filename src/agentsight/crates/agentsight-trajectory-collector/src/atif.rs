@@ -77,6 +77,7 @@ pub fn convert_qoder_events(
                         obs_results.push(ObservationResult {
                             source_call_id: Some(tr.tool_use_id.clone()),
                             content: Some(serde_json::Value::String(tr.content.clone())),
+                            subagent_trajectory_ref: None,
                             extra,
                         });
                         // Write result_timestamp into matching ToolCall.extra
@@ -325,6 +326,7 @@ pub fn convert_qoder_events(
                             obs_results.push(ObservationResult {
                                 source_call_id: Some(tr.tool_use_id.clone()),
                                 content: Some(serde_json::Value::String(tr.content.clone())),
+                                subagent_trajectory_ref: None,
                                 extra,
                             });
                             if let Some(ts) = result_ts {
@@ -395,6 +397,7 @@ pub fn convert_qoder_events(
         notes: None,
         final_metrics,
         continued_trajectory_ref: None,
+        subagent_trajectories: None,
         extra: None,
     })
 }

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
+  SubagentTrajectoryRef,
 } from '../types';
 import {
   fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
@@ -204,9 +205,10 @@ interface StepCardProps {
   expandedSections: Set<string>;
   onToggleSection: (key: string) => void;
   savingsMap?: Map<string, OptimizationItem>;
+  onNavigateSubagent?: (ref: SubagentTrajectoryRef) => void;
 }
 
-const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, savingsMap }) => {
+const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, savingsMap, onNavigateSubagent }) => {
   const style = getSourceStyle(step.source);
   const sectionKey = (name: string) => `${step.step_id}-${name}`;
   const isOpen = (name: string) => expandedSections.has(sectionKey(name));
@@ -298,6 +300,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                   <div className="space-y-2">
                     {step.observation!.results.map((r, i) => {
                       const content = asText(r.content);
+                      const hasSubagentRef = r.subagent_trajectory_ref && r.subagent_trajectory_ref.length > 0;
                       return (
                         <div key={i} className="border border-teal-100 rounded-lg overflow-hidden">
                           {r.source_call_id && (
@@ -305,13 +308,29 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                               <span className="text-xs text-gray-400 font-mono">call: {shortId(r.source_call_id, 16)}</span>
                             </div>
                           )}
+                          {hasSubagentRef && (
+                            <div className="px-3 py-2 bg-indigo-50 border-b border-indigo-100 flex flex-wrap gap-2">
+                              {r.subagent_trajectory_ref!.map((ref, ri) => (
+                                <button
+                                  key={ri}
+                                  onClick={() => onNavigateSubagent?.(ref)}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-lg text-xs font-medium transition-colors"
+                                >
+                                  🤖 子代理轨迹
+                                  {ref.trajectory_id && (
+                                    <span className="font-mono text-indigo-400">{shortId(ref.trajectory_id, 12)}</span>
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                           {content ? (
                             <div className="p-2">
                               <ExpandableText text={content} className="text-xs text-gray-700 bg-teal-50 font-mono" />
                             </div>
-                          ) : (
+                          ) : !hasSubagentRef ? (
                             <div className="px-3 py-2 text-xs text-gray-400 italic">无输出内容</div>
-                          )}
+                          ) : null}
                         </div>
                       );
                     })}
@@ -465,10 +484,11 @@ interface RoundDetailProps {
   expandedSections: Set<string>;
   onToggleSection: (key: string) => void;
   savingsMap?: Map<string, OptimizationItem>;
+  onNavigateSubagent?: (ref: SubagentTrajectoryRef) => void;
 }
 
 const RoundDetail: React.FC<RoundDetailProps> = ({
-  round, expandedSections, onToggleSection, savingsMap,
+  round, expandedSections, onToggleSection, savingsMap, onNavigateSubagent,
 }) => {
   const stats = roundStats(round);
 
@@ -498,6 +518,7 @@ const RoundDetail: React.FC<RoundDetailProps> = ({
             expandedSections={expandedSections}
             onToggleSection={onToggleSection}
             savingsMap={savingsMap}
+            onNavigateSubagent={onNavigateSubagent}
           />
         ))}
       </div>
@@ -596,6 +617,39 @@ export const AtifViewerPage: React.FC = () => {
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Subagent breadcrumb navigation stack
+  const [navStack, setNavStack] = useState<AtifDocument[]>([]);
+  const activeDoc = navStack.length > 0 ? navStack[navStack.length - 1] : doc;
+
+  const navigateToSubagent = useCallback((ref: SubagentTrajectoryRef) => {
+    const rootDoc = doc;
+    if (!rootDoc) return;
+    // Resolve embedded subagent by trajectory_id
+    const embedded = rootDoc.subagent_trajectories?.find(
+      t => t.trajectory_id && t.trajectory_id === ref.trajectory_id
+    );
+    if (embedded) {
+      setNavStack(prev => [...prev, embedded]);
+      setExpandedSections(new Set());
+      setSelectedRound(initialRound(groupIntoRounds(embedded.steps ?? []), new Set()));
+    } else if (ref.trajectory_path) {
+      setError(`外部子轨迹引用暂不支持: ${ref.trajectory_path}`);
+    } else {
+      setError('无法解析子轨迹引用：缺少 trajectory_id 或 trajectory_path');
+    }
+  }, [doc]);
+
+  const navigateToBreadcrumb = useCallback((index: number) => {
+    // index -1 = root doc, 0..n = navStack index
+    if (index < 0) {
+      setNavStack([]);
+    } else {
+      setNavStack(prev => prev.slice(0, index + 1));
+    }
+    setExpandedSections(new Set());
+    setSelectedRound(null);
+  }, []);
+
   const toggleSection = useCallback((key: string) => {
     setExpandedSections(prev => {
       const next = new Set(prev);
@@ -623,6 +677,7 @@ export const AtifViewerPage: React.FC = () => {
     setLoading(true);
     setError(null);
     setDoc(null);
+    setNavStack([]);
     setExpandedSections(new Set());
     setSelectedRound(null);
 
@@ -675,6 +730,7 @@ export const AtifViewerPage: React.FC = () => {
           return;
         }
         setDoc(parsed as AtifDocument);
+        setNavStack([]);
         setError(null);
         setQueryId(parsed.session_id ?? '');
         setExpandedSections(new Set());
@@ -700,11 +756,11 @@ export const AtifViewerPage: React.FC = () => {
   }, [doc]);
 
   // Compute metrics (fallback when final_metrics is partial)
-  const steps = doc?.steps ?? [];
-  const rounds = React.useMemo(() => groupIntoRounds(doc?.steps ?? []), [doc]);
+  const steps = activeDoc?.steps ?? [];
+  const rounds = React.useMemo(() => groupIntoRounds(activeDoc?.steps ?? []), [activeDoc]);
   const activeRound = rounds.find(r => r.key === selectedRound) ?? null;
-  const computedMetrics = doc ? (() => {
-    const fm = doc.final_metrics;
+  const computedMetrics = activeDoc ? (() => {
+    const fm = activeDoc.final_metrics;
     let promptSum = 0, completionSum = 0, cachedSum = 0;
     for (const s of steps) {
       if (s.metrics) {
@@ -834,9 +890,39 @@ export const AtifViewerPage: React.FC = () => {
         {/* Loaded content */}
         {doc && !loading && (
           <>
+            {/* Subagent breadcrumb */}
+            {navStack.length > 0 && (
+              <div className="flex items-center gap-1.5 text-sm flex-wrap">
+                <button
+                  onClick={() => navigateToBreadcrumb(-1)}
+                  className="text-blue-600 hover:text-blue-800 hover:underline"
+                >
+                  🏠 根轨迹
+                </button>
+                {navStack.map((item, i) => (
+                  <span key={i} className="flex items-center gap-1.5">
+                    <span className="text-gray-300">/</span>
+                    {i === navStack.length - 1 ? (
+                      <span className="text-gray-800 font-medium">
+                        🤖 {item.agent?.name ?? 'subagent'}
+                        {item.trajectory_id && <span className="ml-1 text-xs text-gray-400 font-mono">{shortId(item.trajectory_id, 10)}</span>}
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => navigateToBreadcrumb(i)}
+                        className="text-blue-600 hover:text-blue-800 hover:underline"
+                      >
+                        🤖 {item.agent?.name ?? 'subagent'}
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+
             {/* Agent info + Metrics */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-              <AgentInfoCard doc={doc} />
+              <AgentInfoCard doc={activeDoc!} />
               {computedMetrics && (
                 <>
                   <MetricCard
@@ -907,6 +993,50 @@ export const AtifViewerPage: React.FC = () => {
               </div>
             )}
 
+            {/* Subagent trajectories section */}
+            {activeDoc?.subagent_trajectories && activeDoc.subagent_trajectories.length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+                <h3 className="text-sm font-semibold text-gray-900 mb-3">
+                  🤖 子代理轨迹
+                  <span className="ml-2 text-xs font-normal text-gray-400">
+                    共 {activeDoc.subagent_trajectories.length} 个
+                  </span>
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {activeDoc.subagent_trajectories.map((sub, i) => (
+                    <button
+                      key={sub.trajectory_id ?? i}
+                      onClick={() => {
+                        setNavStack(prev => [...prev, sub]);
+                        setExpandedSections(new Set());
+                        setSelectedRound(initialRound(groupIntoRounds(sub.steps ?? []), new Set()));
+                      }}
+                      className="text-left px-4 py-3 rounded-lg border border-indigo-100 bg-indigo-50 hover:bg-indigo-100 transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-indigo-800">
+                          {sub.agent?.name ?? 'subagent'}
+                        </span>
+                        {sub.trajectory_id && (
+                          <span className="text-xs text-indigo-400 font-mono truncate">
+                            {shortId(sub.trajectory_id, 12)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 text-xs text-indigo-600">
+                        {sub.steps?.length ?? 0} 步
+                        {sub.final_metrics?.total_prompt_tokens != null && (
+                          <span className="ml-2">
+                            {fmtTokens(sub.final_metrics.total_prompt_tokens)} in
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Round master-detail: left = round list, right = round detail */}
             <div>
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
@@ -943,6 +1073,7 @@ export const AtifViewerPage: React.FC = () => {
                         expandedSections={expandedSections}
                         onToggleSection={toggleSection}
                         savingsMap={savingsMap}
+                        onNavigateSubagent={navigateToSubagent}
                       />
                     ) : (
                       <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">

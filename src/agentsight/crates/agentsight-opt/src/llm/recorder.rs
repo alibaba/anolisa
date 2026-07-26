@@ -220,6 +220,7 @@ impl TrajectoryRecorder {
                 extra: None,
             }),
             continued_trajectory_ref: None,
+            subagent_trajectories: None,
             extra: Some(doc_extra),
         }
     }

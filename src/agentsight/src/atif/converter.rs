@@ -206,6 +206,7 @@ fn trajectory(
         notes: None,
         final_metrics: Some(final_metrics),
         continued_trajectory_ref: None,
+        subagent_trajectories: None,
         extra: None,
     }
 }
@@ -644,6 +645,7 @@ fn collect_tool_responses(
                             results.push(ObservationResult {
                                 source_call_id: Some(tc_id.clone()),
                                 content: Some(serde_json::Value::String(content_str)),
+                                subagent_trajectory_ref: None,
                                 extra: None,
                             });
                             continue;
@@ -663,6 +665,7 @@ fn collect_tool_responses(
                                 .unwrap_or_else(|| format!("auto_{positional_idx}")),
                         ),
                         content: Some(serde_json::Value::String(content_str)),
+                        subagent_trajectory_ref: None,
                         extra: None,
                     });
                     positional_idx += 1;
