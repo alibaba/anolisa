@@ -1,3 +1,4 @@
+pub(crate) mod ask_user_question;
 pub mod edit;
 mod file_patterns;
 mod glob;
@@ -260,40 +261,7 @@ impl ToolRegistry {
             })
             .collect();
         if self.ask_user_question_enabled {
-            decls.push(ToolDeclaration {
-                name: "ask_user_question".to_string(),
-                description: "Ask the user a question. Use this when you need clarification or want the user to choose between options.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "question": {
-                            "type": "string",
-                            "description": "The question to ask the user"
-                        },
-                        "options": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "label": { "type": "string" },
-                                    "description": { "type": "string" }
-                                },
-                                "required": ["label"]
-                            },
-                            "description": "Options for the user to choose from"
-                        },
-                        "allow_free_text": {
-                            "type": "boolean",
-                            "description": "Whether to allow free-text input (default: true)"
-                        },
-                        "multi_select": {
-                            "type": "boolean",
-                            "description": "Whether to allow selecting multiple options (default: false)"
-                        }
-                    },
-                    "required": ["question"]
-                }),
-            });
+            decls.push(ask_user_question::declaration());
         }
         decls.sort_by(|a, b| a.name.cmp(&b.name));
         decls
