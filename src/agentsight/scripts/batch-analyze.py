@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Batch trajectory analysis: find conversation JSONL files in ~/.claude and
-~/.qoder, convert to ATIF v1.6, and run the `analyze` CLI on each.
+~/.qoder, convert to ATIF v1.7, and run the `analyze` CLI on each.
 
 Usage:
     python3 scripts/batch-analyze.py --dim perf [--limit 5] [--min-steps 3]
@@ -94,7 +94,7 @@ def extract_thinking(content) -> Optional[str]:
 
 
 def jsonl_to_atif(filepath: Path) -> Optional[dict]:
-    """Convert a Claude/Qoder conversation JSONL to ATIF v1.6 dict."""
+    """Convert a Claude/Qoder conversation JSONL to ATIF v1.7 dict."""
     entries = []
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -205,7 +205,7 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
         agent_name = "qoder"
 
     return {
-        "schema_version": "1.6",
+        "schema_version": "ATIF-v1.7",
         "session_id": session_id,
         "agent": {
             "name": agent_name,
