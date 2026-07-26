@@ -1087,7 +1087,7 @@ fn run_batch_consent_covers_is_fail_closed() {
     assert_eq!(state.control.trust.run_batch_consent(), None);
 }
 
-/// Blocked 的请求不能授予轮次同意（V4/C2）。
+/// Blocked turn decisions keep the blocked title and never grant consent.
 #[test]
 fn approve_turn_blocked_request_does_not_grant_consent() {
     let mut state = InlineState::default();
@@ -1098,10 +1098,32 @@ fn approve_turn_blocked_request_does_not_grant_consent() {
         .requests
         .push(provider_tool_request("run_shell_command", None));
 
-    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
+    let direct_decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
         .expect("approval decision");
-    assert_eq!(decision.request.status, ApprovalRequestStatus::Blocked);
+    assert_eq!(
+        direct_decision.request.status,
+        ApprovalRequestStatus::Blocked
+    );
+    assert_eq!(
+        direct_decision.title,
+        MessageId::ApprovalResolutionBlockedTitle
+    );
     assert_eq!(state.control.trust.run_batch_consent(), None);
+
+    state
+        .approvals
+        .requests
+        .push(provider_tool_request("run_shell_command", None));
+    let batch_decision =
+        apply_batch_consent_decision(&mut state, 1).expect("batch consent decision");
+    assert_eq!(
+        batch_decision.request.status,
+        ApprovalRequestStatus::Blocked
+    );
+    assert_eq!(
+        batch_decision.title,
+        MessageId::ApprovalResolutionBlockedTitle
+    );
 }
 
 /// 批量清扫决策复用同一管线，journal 逐条留痕 actor=batch_consent，

@@ -129,7 +129,6 @@ fn finalize_approval_decision(
         request.status = ApprovalRequestStatus::Blocked;
         request.execution_path = Some("blocked_audit_required");
         state.approvals.requests[request_index] = request.clone();
-        title = MessageId::ApprovalResolutionBlockedTitle;
     }
     if request.status == ApprovalRequestStatus::Approved
         && outcome == ApprovalOutcome::ForegroundShellHandoff
@@ -143,8 +142,12 @@ fn finalize_approval_decision(
             request.status = ApprovalRequestStatus::Blocked;
             request.execution_path = Some("blocked_audit_required");
             state.approvals.requests[request_index] = request.clone();
-            title = MessageId::ApprovalResolutionBlockedTitle;
         }
+    }
+    // Keep the receipt title aligned with the final status, including
+    // validation blocks that occur before the audit checks above.
+    if request.status == ApprovalRequestStatus::Blocked {
+        title = MessageId::ApprovalResolutionBlockedTitle;
     }
     if request.status == ApprovalRequestStatus::Approved {
         if let Some(key) = trust_key {
