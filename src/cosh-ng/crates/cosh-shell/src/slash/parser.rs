@@ -46,7 +46,12 @@ impl<'a> SlashCommand<'a> {
         let Some(token) = parts.next() else {
             return Ok(None);
         };
-        if parser_owned_command(token) && input.contains(['\'', '"']) {
+        // Most parser-owned commands split arguments on whitespace, so quotes
+        // would silently produce wrong tokens. `/extensions` is the exception:
+        // it forwards its raw argument string to a quote-aware tokenizer.
+        let supports_quoted_arguments = token == "/extensions";
+        if parser_owned_command(token) && !supports_quoted_arguments && input.contains(['\'', '"'])
+        {
             return Err(SlashParseError::QuotedArgumentsUnsupported);
         }
         Ok(match token {
@@ -247,6 +252,16 @@ mod tests {
                 ),
                 "{command}"
             );
+        }
+    }
+
+    #[test]
+    fn extensions_forwards_quoted_arguments_to_its_own_tokenizer() {
+        match SlashCommand::parse(r#"/extensions new "my extension" --template mcp"#) {
+            Ok(Some(SlashCommand::Extensions(arguments))) => {
+                assert_eq!(arguments, r#"new "my extension" --template mcp"#);
+            }
+            _ => panic!("quoted /extensions argument was not forwarded"),
         }
     }
 
