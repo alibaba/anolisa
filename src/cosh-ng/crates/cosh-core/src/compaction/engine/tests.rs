@@ -91,6 +91,29 @@ async fn compact_persist_reload_preserves_identity_and_transcript() {
 }
 
 #[tokio::test]
+async fn manual_compaction_can_summarize_one_complete_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 1);
+    let provider = summary_provider();
+
+    let (report, updated) = compact(&store, &session, &provider, &CoreConfig::default())
+        .await
+        .expect("manual compaction committed");
+
+    assert_eq!(report.compacted_through, session.messages.len());
+    assert_eq!(updated.messages.len(), session.messages.len());
+    assert_eq!(
+        updated
+            .compaction
+            .as_ref()
+            .expect("projection")
+            .compacted_through,
+        session.messages.len()
+    );
+}
+
+#[tokio::test]
 async fn sessions_without_projection_load_compatibly() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);
@@ -870,13 +893,19 @@ async fn legacy_envelope_without_projection_starts_at_zero() {
 }
 
 #[tokio::test]
-async fn nothing_to_compact_for_short_sessions() {
+async fn nothing_to_compact_without_a_complete_run() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);
-    let session = persisted(&store, 2);
+    let mut session = PersistedSession::new(
+        ProviderSessionId::new(),
+        store.workspace_scope().to_string(),
+        "mock-model".to_string(),
+        vec![Message::user("unfinished request")],
+    );
+    store.persist(&mut session).unwrap();
     let provider = summary_provider();
     let error = compact(&store, &session, &provider, &CoreConfig::default())
         .await
-        .expect_err("too few runs");
+        .expect_err("incomplete run");
     assert_eq!(error.code(), "nothing_to_compact");
 }
