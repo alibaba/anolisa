@@ -73,6 +73,14 @@ persist_dir = "~/.copilot-shell/cosh-core/sessions"
 # 设为 false 时仅保留内存会话，输出的 ID 不会用于后续恢复
 auto_persist = true
 
+[session.compaction]
+enabled = true
+auto = true
+trigger_ratio = 0.70
+emergency_ratio = 0.90
+target_ratio = 0.30
+preserve_recent_runs = 2
+
 [logging]
 level = "warn"
 ```
@@ -80,6 +88,28 @@ level = "warn"
 项目配置层从 `<workspace>/.copilot-shell/config.toml` 加载，其中 `workspace`
 是 `--workspace` 或会话管理请求传入的路径。相对 `session.persist_dir` 从该
 工作空间解析，而不是从 Core 进程的启动目录解析。
+
+## 会话压缩
+
+压缩会保留完整的持久化 transcript，只用摘要 projection 替换模型可见前缀。
+自动和 emergency 路径会按 `preserve_recent_runs` 保留最近 run；显式执行
+`/session compact` 时可以摘要最新的完整 run。
+
+| 配置项 | 默认值 | 作用 |
+|--------|--------|------|
+| `session.compaction.enabled` | `true` | 启用手动、自动和 emergency 压缩 |
+| `session.compaction.auto` | `true` | 在 idle 边界推荐后台压缩 |
+| `session.compaction.auto_compact_token_limit` | 未设置 | 可选的绝对自动触发值，并限制在模型可用预算内 |
+| `session.compaction.trigger_ratio` | `0.70` | 触发自动压缩的可用历史比例 |
+| `session.compaction.emergency_ratio` | `0.90` | 启用 run 内 emergency 保护的比例 |
+| `session.compaction.target_ratio` | `0.30` | 压缩后保留历史的尽力目标 |
+| `session.compaction.preserve_recent_runs` | `2` | 自动和 emergency 压缩原样保留的最近完整 run 数 |
+| `session.compaction.model_context_window` | 根据模型确定 | 显式覆盖模型上下文窗口 |
+| `session.compaction.model_max_output_tokens` | 根据模型确定 | 显式覆盖最大输出预留 |
+
+比例必须满足 `target_ratio <= trigger_ratio <= emergency_ratio`。非法比例组合会
+回退到编译时默认值。命令、安全保证以及手动与自动行为差异详见
+[会话压缩](shell/session-compaction.md)。
 
 ## MCP Server
 

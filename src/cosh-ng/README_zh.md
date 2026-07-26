@@ -80,11 +80,14 @@ cosh-shell --resume <session-id> # 选择已知的 provider 会话
 ID，并通过 `/session status` 查看已选择和已激活的身份。`/session new`
 （或 `/new`）会与当前 provider 对话分离，使下一次 Agent 请求开启全新对话，
 而无需重启 Shell；`/session clear ...` 会在确认后清理旧记录。会话恢复会还原
-模型可见的对话上下文，但不会伪装成已恢复历史终端证据。记录默认保存在
+模型可见的对话上下文，但不会伪装成已恢复历史终端证据。`/session compact`
+会在后台摘要任意完整对话前缀，包括仅有一个已完成 Agent run 的会话，同时保留
+完整 transcript。自动压缩则同时等待模型窗口压力和安全的旧 run 边界。记录默认保存在
 `~/.copilot-shell/cosh-core/sessions/`，可通过 `session.persist_dir` 修改
 根目录。项目会话配置和相对存储路径均从 cosh-shell 传给 Core 的工作空间解析。
 详见
-[会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)。
+[会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)
+和[会话压缩指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-compaction.md)。
 
 Core 和 Shell 还会把脱敏、版本化的审计时间线写入
 `$XDG_STATE_HOME/cosh/audit` 或 `~/.local/state/cosh/audit`。既有
