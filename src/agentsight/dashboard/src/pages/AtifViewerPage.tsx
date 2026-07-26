@@ -315,6 +315,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                                   key={ri}
                                   onClick={() => onNavigateSubagent?.(ref)}
                                   className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-lg text-xs font-medium transition-colors"
+                                  title={ref.session_id ? '在新窗口查看子代理轨迹' : '查看内嵌子代理轨迹'}
                                 >
                                   🤖 子代理轨迹
                                   {ref.trajectory_id && (
@@ -622,6 +623,12 @@ export const AtifViewerPage: React.FC = () => {
   const activeDoc = navStack.length > 0 ? navStack[navStack.length - 1] : doc;
 
   const navigateToSubagent = useCallback((ref: SubagentTrajectoryRef) => {
+    // Prefer opening in a new tab when the subagent has its own session_id
+    // (queryable via API); fall back to in-page navigation for embedded docs.
+    if (ref.session_id) {
+      window.open(`#/atif?type=session&id=${encodeURIComponent(ref.session_id)}`, '_blank');
+      return;
+    }
     // Resolve embedded subagent by trajectory_id from the currently viewed
     // document (supports nested subagent levels), falling back to the root.
     const scope = navStack.length > 0 ? navStack[navStack.length - 1] : doc;
