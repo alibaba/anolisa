@@ -1328,6 +1328,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+        env: None,
         }],
         post_tool_use: vec![config::HookDefinition {
             command: "echo '{\"decision\":\"block\",\"reason\":\"post hook should not run\"}'"
@@ -1336,6 +1337,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+        env: None,
         }],
         ..Default::default()
     };

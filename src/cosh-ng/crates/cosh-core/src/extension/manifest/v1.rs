@@ -405,16 +405,23 @@ fn validate_and_convert_hooks(
                 if let Some(timeout) = hook.timeout {
                     projection["timeout"] = Value::Number(timeout.into());
                 }
+                if !hook.env.is_empty() {
+                    projection["env"] = serde_json::to_value(&hook.env)
+                        .unwrap_or_else(|_| Value::Object(Default::default()));
+                }
                 records.push(CapabilityRecord {
                     id: id.canonical(),
                     projection,
                 });
+                let env_map: std::collections::HashMap<String, String> = hook.env.into_iter().collect();
+                let env_opt = if env_map.is_empty() { None } else { Some(env_map) };
                 runtime_hooks.push(CommandHookConfig {
                     hook_type: Some(hook.hook_type),
                     command: hook.command,
                     name: Some(hook.name),
                     description: hook.description,
                     timeout: hook.timeout,
+                    env: env_opt,
                 });
             }
             converted.push(HookGroup {
@@ -764,6 +771,8 @@ struct CommandHookV1 {
     description: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

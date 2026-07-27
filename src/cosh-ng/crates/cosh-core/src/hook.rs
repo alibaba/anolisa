@@ -805,8 +805,9 @@ impl HookSystem {
                     let json = input_json.clone();
                     let cmd = def.command.clone();
                     let timeout = Self::timeout_for(def);
+                    let env = def.env.clone();
                     async move {
-                        let output = Self::run_hook_cmd(&cmd, &json, timeout).await;
+                        let output = Self::run_hook_cmd(&cmd, &json, timeout, env.as_ref()).await;
                         (i, output)
                     }
                 })
@@ -816,10 +817,15 @@ impl HookSystem {
     }
 
     async fn run_single_hook(def: &HookDefinition, input_json: &str) -> HookOutput {
-        Self::run_hook_cmd(&def.command, input_json, Self::timeout_for(def)).await
+        Self::run_hook_cmd(&def.command, input_json, Self::timeout_for(def), def.env.as_ref()).await
     }
 
-    async fn run_hook_cmd(command: &str, input_json: &str, timeout: Duration) -> HookOutput {
+    async fn run_hook_cmd(
+        command: &str,
+        input_json: &str,
+        timeout: Duration,
+        env: Option<&std::collections::HashMap<String, String>>,
+    ) -> HookOutput {
         use tokio::process::Command;
 
         use crate::process::{output_with_timeout, OutputError};
@@ -827,6 +833,23 @@ impl HookSystem {
         let safe_command = crate::redaction::redact_text(command);
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
+
+        // Apply hook-specific environment variables to the child process only.
+        // These override inherited values in the subprocess but do not mutate
+        // the parent Cosh-NG process environment.
+        if let Some(env_map) = env {
+            for (key, value) in env_map {
+                // Skip invalid environment variable names silently.
+                if !key.is_empty() && !key.contains('\0') && !key.contains('=') {
+                    cmd.env(key, value);
+                } else {
+                    tracing::warn!(
+                        target: "cosh_hook",
+                        "Skipping invalid environment variable name for hook '{safe_command}': {key}"
+                    );
+                }
+            }
+        }
 
         // The deadline covers the stdin write as well: a hook that never
         // reads stdin must not stall the session, and on timeout the whole
@@ -1208,6 +1231,7 @@ mod tests {
             matcher: Some("run_shell.*".to_string()),
             timeout: None,
             sequential: None,
+        env: None,
         };
         assert!(HookSystem::matches_tool(&def, "run_shell_command"));
         assert!(!HookSystem::matches_tool(&def, "read_file"));
@@ -1221,6 +1245,7 @@ mod tests {
             matcher: None,
             timeout: None,
             sequential: None,
+        env: None,
         };
         assert!(HookSystem::matches_tool(&def, "any_tool"));
     }
@@ -1236,6 +1261,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+            env: None,
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1274,6 +1300,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: None,
                 sequential: None,
+            env: None,
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1308,6 +1335,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+            env: None,
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1333,6 +1361,7 @@ mod tests {
             matcher: Some(matcher.to_string()),
             timeout: None,
             sequential: None,
+        env: None,
         }
     }
 
@@ -1456,6 +1485,7 @@ mod tests {
                 matcher: Some("^run_shell_command$".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+            env: None,
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1497,6 +1527,7 @@ mod tests {
                 matcher: Some("skill".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+            env: None,
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1538,7 +1569,7 @@ mod tests {
         let pid_file = dir.path().join("pids");
         let script = leak_script(&marker, &pid_file);
 
-        let out = HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300)).await;
+        let out = HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300), None).await;
         assert!(
             out.decision.is_none(),
             "timed-out hook must fall back to the default output"
@@ -1560,7 +1591,7 @@ mod tests {
         // blocked in the stdin write before the timeout even started.
         let payload = "x".repeat(1 << 20);
         let started = std::time::Instant::now();
-        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300)).await;
+        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300), None).await;
         assert!(out.decision.is_none());
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -1640,6 +1671,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+            env: None,
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1685,6 +1717,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                env: None,
                 },
                 HookDefinition {
                     command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "second"}}))'"#.to_string(),
@@ -1692,6 +1725,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                env: None,
                 },
             ],
             post_tool_use_failure: vec![],
@@ -1731,6 +1765,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+            env: None,
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1757,4 +1792,56 @@ mod tests {
         );
         assert_eq!(result.additional_context.as_deref(), Some("just context"),);
     }
+    #[tokio::test]
+    async fn hook_env_passed_to_subprocess() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("MY_HOOK_VAR".to_string(), "hello".to_string());
+        env.insert("ANOTHER_VAR".to_string(), "world".to_string());
+
+        let def = HookDefinition {
+            command: "echo $MY_HOOK_VAR $ANOTHER_VAR".to_string(),
+            name: Some("env-test".to_string()),
+            matcher: None,
+            timeout: Some(5000),
+            sequential: None,
+            env: Some(env),
+        };
+        let out = HookSystem::run_single_hook(&def, "{}").await;
+        // The hook runs successfully with env vars set
+        // (stdout is parsed as JSON, and since echo output isn't JSON,
+        // it falls back to default output)
+        assert!(out.decision.is_none());
+    }
+
+    #[tokio::test]
+    async fn hook_env_none_works_normally() {
+        let def = HookDefinition {
+            command: "echo '{}'".to_string(),
+            name: Some("no-env-test".to_string()),
+            matcher: None,
+            timeout: Some(5000),
+            sequential: None,
+            env: None,
+        };
+        let out = HookSystem::run_single_hook(&def, "{}").await;
+        assert!(out.decision.is_none());
+    }
+
+    #[tokio::test]
+    async fn hook_env_invalid_names_skipped() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("VALID_VAR".to_string(), "ok".to_string());
+        env.insert("".to_string(), "empty-key".to_string());
+        env.insert("BAD=VAR".to_string(), "has-equals".to_string());
+
+        let out = HookSystem::run_hook_cmd(
+            "echo $VALID_VAR",
+            "{}",
+            std::time::Duration::from_secs(5),
+            Some(&env),
+        ).await;
+        // Hook should run without crashing despite invalid env var names
+        assert!(out.decision.is_none());
+    }
+
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde::Deserialize;
 
 use crate::config::HookDefinition;
@@ -83,6 +84,9 @@ pub struct CommandHookConfig {
     pub description: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// Environment variables passed to the hook subprocess.
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
 }
 
 /// A hook group containing an optional matcher and an array of hook configs.
@@ -118,6 +122,7 @@ impl HookGroup {
                 matcher: self.matcher.clone(),
                 timeout: h.timeout,
                 sequential: self.sequential,
+                env: h.env.clone(),
             })
             .collect()
     }
@@ -275,6 +280,7 @@ mod tests {
                     name: Some("hook-a".to_string()),
                     description: None,
                     timeout: Some(3000),
+                    env: None,
                 }],
             },
             HookGroup {
@@ -286,6 +292,7 @@ mod tests {
                     name: None,
                     description: None,
                     timeout: None,
+                    env: None,
                 }],
             },
         ];
