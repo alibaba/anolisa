@@ -131,3 +131,17 @@ macro_rules! status_query_ids {
         );
     };
 }
+
+macro_rules! prompt_soft_newline_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            PromptSoftNewlineTip,
+            PromptDraftTitle,
+            PromptDraftFooterEditing,
+            PromptDraftFooterSubmitted,
+            PromptDraftFooterCancelled,
+        );
+    };
+}

@@ -3,7 +3,18 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
-        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
+        MessageId::HelpFooter => {
+            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可多行组稿。"
+        }
+        MessageId::PromptSoftNewlineTip => {
+            "提示：以 ?? 开头可组稿多行 prompt（Shift+Enter 换行）。"
+        }
+        MessageId::PromptDraftTitle => "Prompt 草稿",
+        MessageId::PromptDraftFooterEditing => {
+            "Enter 发送 · Shift+Enter 换行 · Esc 取消"
+        }
+        MessageId::PromptDraftFooterSubmitted => "已发送给 Agent",
+        MessageId::PromptDraftFooterCancelled => "草稿已取消",
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",

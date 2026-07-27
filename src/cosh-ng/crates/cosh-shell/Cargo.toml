@@ -24,6 +24,9 @@ toml.workspace = true
 uuid.workspace = true
 wait-timeout.workspace = true
 qrcode = { version = "0.14", default-features = false }
+# Display-column accounting for native candidate echo (#1721); already in
+# the dependency graph via ratatui, pinned to the resolved 0.1.x line.
+unicode-width = "0.1"
 regex.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

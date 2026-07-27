@@ -188,4 +188,11 @@ pub enum RawInputCapture {
     Evidence {
         id: String,
     },
+    /// Multi-line prompt draft card (#1721 D13): opened by the first soft
+    /// newline in a native/escape candidate; the capture owns every key
+    /// until submit (Enter) or cancel (Esc/Ctrl+C).
+    PromptDraft {
+        id: String,
+        initial_text: String,
+    },
 }

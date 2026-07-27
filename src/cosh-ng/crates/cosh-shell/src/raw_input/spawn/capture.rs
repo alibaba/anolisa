@@ -165,6 +165,7 @@ pub(super) fn relay_input_chunk(
                     relay.input_generation,
                     relay.line_submits,
                     relay.input_events,
+                    relay.main_prompt_gate,
                     bytes,
                 )?;
                 return Ok(());
@@ -282,6 +283,7 @@ pub(in super::super) fn relay_late_capture_input(
         capture_owned_input,
         input_generation,
         line_submits,
+        main_prompt_gate,
         ..
     } = state;
     let mut relay = InputRelayContext {
@@ -294,6 +296,7 @@ pub(in super::super) fn relay_late_capture_input(
         line_buffer,
         native_line_state,
         exit_tracker,
+        main_prompt_gate,
     };
     relay_late_capture_bytes(bytes, generation, capture_owned_input, &mut relay)
 }
@@ -446,6 +449,7 @@ pub(in super::super) fn finish_input_relay(
             capture_owned_input,
             input_generation,
             line_submits,
+            main_prompt_gate,
             ..
         } = state;
         let mut relay = InputRelayContext {
@@ -458,8 +462,23 @@ pub(in super::super) fn finish_input_relay(
             line_buffer,
             native_line_state,
             exit_tracker,
+            main_prompt_gate,
         };
         drain_abandoned_capture(capture_owned_input, &mut relay)?;
+    }
+    // Bytes held as a possible split paste delimiter never got a routing
+    // verdict: forward them byte-identically before the trailing exit
+    // (#1721; keeps partial CSI passthrough guarantees at EOF).
+    let held_partial = state.line_buffer.take_pending_partial();
+    if !held_partial.is_empty() {
+        write_user_bytes_to_pty(
+            master,
+            &state.input_generation,
+            &mut state.line_submits,
+            input_events,
+            &state.main_prompt_gate,
+            &held_partial,
+        )?;
     }
     if !state.exit_tracker.saw_explicit_exit() {
         write_user_bytes_to_pty(
@@ -467,6 +486,7 @@ pub(in super::super) fn finish_input_relay(
             &state.input_generation,
             &mut state.line_submits,
             input_events,
+            &state.main_prompt_gate,
             b"exit\n",
         )?;
     }
@@ -529,6 +549,7 @@ mod tests {
         let mut exit_tracker = ExplicitExitTracker::default();
         let input_generation = UserPtyInputGeneration::default();
         let mut line_submits = LineSubmitCounter::default();
+        let main_prompt_gate = super::super::super::MainPromptGate::default();
         let mut relay = InputRelayContext {
             master: &mut master,
             input_classifier: &classifier,
@@ -539,6 +560,7 @@ mod tests {
             line_buffer: &mut line_buffer,
             native_line_state: &mut native_line_state,
             exit_tracker: &mut exit_tracker,
+            main_prompt_gate: &main_prompt_gate,
         };
 
         relay_input_chunk(
@@ -579,6 +601,7 @@ mod tests {
         let mut quarantine = CaptureOwnedInput::default();
         let mut deferred_input = None;
         let mut line_submits = LineSubmitCounter::default();
+        let main_prompt_gate = super::super::super::MainPromptGate::default();
         let mut relay = InputRelayContext {
             master: &mut master,
             input_classifier: &classifier,
@@ -589,6 +612,7 @@ mod tests {
             line_buffer: &mut line_buffer,
             native_line_state: &mut native_line_state,
             exit_tracker: &mut exit_tracker,
+            main_prompt_gate: &main_prompt_gate,
         };
         relay_input_chunk(
             b"later",

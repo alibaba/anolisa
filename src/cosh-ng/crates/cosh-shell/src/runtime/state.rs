@@ -108,6 +108,14 @@ pub(crate) struct InlineState {
     pub(crate) pending_prompt_suggestion_bindings: HashMap<String, PendingInputGhostBinding>,
     pub(crate) shown_shell_rewrite_guidance: bool,
     pub(crate) shown_agent_prompt_guidance: bool,
+    /// #1721 T-c: a soft-newline shortcut was observed on the bash-owned
+    /// passthrough path; surface a one-time discoverability tip at the next
+    /// prompt-ready boundary.
+    pub(crate) pending_soft_newline_tip: bool,
+    pub(crate) shown_soft_newline_tip: bool,
+    /// #1721 D13: active multi-line prompt draft card, if any.
+    pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
+    pub(crate) prompt_draft_seq: u64,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,

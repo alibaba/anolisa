@@ -77,6 +77,9 @@ pub(super) struct OscParser {
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
     history_file_observer: Option<ShellHistoryFileObserver>,
+    /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
+    /// relay; prompt_ready raises it, preexec lowers it.
+    main_prompt_gate: crate::raw_input::MainPromptGate,
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +127,13 @@ impl OscParser {
             shell_environment_snapshot: None,
             environment_observer: None,
             history_file_observer: None,
+            main_prompt_gate: crate::raw_input::MainPromptGate::default(),
         }
+    }
+
+    /// Shares the main-prompt gate with the raw input relay (#1721 D16).
+    pub(crate) fn set_main_prompt_gate(&mut self, gate: crate::raw_input::MainPromptGate) {
+        self.main_prompt_gate = gate;
     }
 
     pub(super) fn with_environment_observer(mut self, observer: ShellEnvironmentObserver) -> Self {
@@ -243,8 +252,13 @@ impl OscParser {
         match marker.event.as_str() {
             "prompt_ready" => {
                 self.prompt_ready_display_start = Some(self.display.len());
+                // #1721 D16: the shell marker emits prompt_ready only for the
+                // primary prompt (PS1), so this is the authoritative "CJK
+                // drafts may open" signal.
+                self.main_prompt_gate.set_at_prompt(true);
             }
             "preexec" => {
+                self.main_prompt_gate.set_at_prompt(false);
                 let command = marker.command.unwrap_or_default();
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
@@ -656,6 +670,23 @@ impl OscParser {
             "control input observed while relaying to bash",
             Some(input),
         );
+    }
+
+    /// Observe-only soft-newline shortcut signal on a passthrough path
+    /// (#1721 T-c): the bytes were relayed to bash unchanged; the runtime
+    /// may surface a one-time discoverability tip at the next prompt-ready.
+    pub(super) fn push_soft_newline_shortcut_event(&mut self) {
+        self.push_self_session_input_event(
+            "soft_newline_shortcut",
+            "soft-newline shortcut observed while relaying to bash",
+            None,
+        );
+    }
+
+    /// #1721 D13: forwards prompt-draft card lifecycle events (open/changed/
+    /// submit/cancel) to the runtime as structured JSON payloads.
+    pub(super) fn push_prompt_draft_event(&mut self, action: &str, payload: Option<&str>) {
+        self.push_self_session_input_event("prompt_draft", action, payload);
     }
 
     pub(super) fn push_shell_input_activity_event(&mut self, empty: bool) {
