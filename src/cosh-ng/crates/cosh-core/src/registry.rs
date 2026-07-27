@@ -377,7 +377,10 @@ async fn handle_mcp(
     match action {
         "list" => {
             let servers = mcp::list_servers(config);
-            mcp_success(request_id, serde_json::to_value(&servers).unwrap_or(Value::Null))
+            mcp_success(
+                request_id,
+                serde_json::to_value(&servers).unwrap_or(Value::Null),
+            )
         }
         "connect" => {
             let server = params.get("server").and_then(Value::as_str).unwrap_or("");
@@ -389,7 +392,10 @@ async fn handle_mcp(
                     if let Err(error) = state::remove_disabled(MCP_SERVERS_STATE, server) {
                         return registry_error(request_id, &error);
                     }
-                    mcp_success(request_id, serde_json::to_value(&inspection).unwrap_or(Value::Null))
+                    mcp_success(
+                        request_id,
+                        serde_json::to_value(&inspection).unwrap_or(Value::Null),
+                    )
                 }
                 Err(error) => registry_error(request_id, &error),
             }
@@ -400,9 +406,10 @@ async fn handle_mcp(
                 return registry_error(request_id, "missing 'server' parameter");
             }
             match mcp::inspect_server(server, config, "inspected", false).await {
-                Ok(inspection) => {
-                    mcp_success(request_id, serde_json::to_value(&inspection).unwrap_or(Value::Null))
-                }
+                Ok(inspection) => mcp_success(
+                    request_id,
+                    serde_json::to_value(&inspection).unwrap_or(Value::Null),
+                ),
                 Err(error) => registry_error(request_id, &error),
             }
         }
@@ -412,9 +419,10 @@ async fn handle_mcp(
                 return registry_error(request_id, "missing 'server' parameter");
             }
             match mcp::inspect_server(server, config, "refreshed", false).await {
-                Ok(inspection) => {
-                    mcp_success(request_id, serde_json::to_value(&inspection).unwrap_or(Value::Null))
-                }
+                Ok(inspection) => mcp_success(
+                    request_id,
+                    serde_json::to_value(&inspection).unwrap_or(Value::Null),
+                ),
                 Err(error) => registry_error(request_id, &error),
             }
         }

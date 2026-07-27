@@ -30,12 +30,9 @@ pub(super) fn render_mcp_command<W: Write>(
                 let body = format_mcp_list(&data, &i18n);
                 render_notice_panel(output, title, body, None)
             }
-            Err(error) => render_notice_panel(
-                output,
-                title,
-                vec![format_error(&i18n, &error)],
-                None,
-            ),
+            Err(error) => {
+                render_notice_panel(output, title, vec![format_error(&i18n, &error)], None)
+            }
         },
         "connect" | "inspect" | "refresh" => {
             let server = arg.unwrap_or("");
@@ -53,12 +50,9 @@ pub(super) fn render_mcp_command<W: Write>(
                     let body = format_inspection(&data, action);
                     render_notice_panel(output, title, body, None)
                 }
-                Err(error) => render_notice_panel(
-                    output,
-                    title,
-                    vec![format_error(&i18n, &error)],
-                    None,
-                ),
+                Err(error) => {
+                    render_notice_panel(output, title, vec![format_error(&i18n, &error)], None)
+                }
             }
         }
         "disconnect" => {
@@ -77,12 +71,9 @@ pub(super) fn render_mcp_command<W: Write>(
                     let body = format_disconnect(&data, server);
                     render_notice_panel(output, title, body, None)
                 }
-                Err(error) => render_notice_panel(
-                    output,
-                    title,
-                    vec![format_error(&i18n, &error)],
-                    None,
-                ),
+                Err(error) => {
+                    render_notice_panel(output, title, vec![format_error(&i18n, &error)], None)
+                }
             }
         }
         "login" => {
@@ -128,12 +119,9 @@ pub(super) fn render_mcp_command<W: Write>(
                     };
                     render_notice_panel(output, title, vec![message], None)
                 }
-                Err(error) => render_notice_panel(
-                    output,
-                    title,
-                    vec![format_error(&i18n, &error)],
-                    None,
-                ),
+                Err(error) => {
+                    render_notice_panel(output, title, vec![format_error(&i18n, &error)], None)
+                }
             }
         }
         _ => render_notice_panel(

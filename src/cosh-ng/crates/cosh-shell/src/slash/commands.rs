@@ -6,6 +6,7 @@ use crate::slash::debug::render_debug_command;
 use crate::slash::extensions::render_extensions_command;
 use crate::slash::health::render_health_command;
 use crate::slash::hooks::render_hooks_command;
+use crate::slash::mcp::render_mcp_command;
 use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
 };
@@ -13,7 +14,6 @@ use crate::slash::parser::SlashCommand;
 use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
 use crate::slash::skills::render_skills_command;
-use crate::slash::mcp::render_mcp_command;
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
