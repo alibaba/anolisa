@@ -4,6 +4,20 @@ use crate::types::{AgentEvent, QuestionSelectionMode};
 
 use super::claude_stream::ClaudeStreamParser;
 
+/// Assert that a tool-use block start produced only the argument-generation
+/// status for `tool`, so the caller can keep asserting on later events alone.
+#[track_caller]
+fn assert_tool_arguments_status(events: &[AgentEvent], tool: &str) {
+    assert!(
+        matches!(
+            events,
+            [AgentEvent::StatusChanged { phase, message, .. }]
+                if phase == "tool_arguments" && message == &format!("generating tool arguments: {tool}")
+        ),
+        "expected only an argument-generation status for {tool}, got {events:?}"
+    );
+}
+
 #[test]
 fn claude_stream_parser_extracts_partial_text_and_completion() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
@@ -185,11 +199,12 @@ fn claude_stream_parser_extracts_tool_use_and_session_id() {
 fn claude_stream_parser_extracts_streaming_bash_tool_use() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 
-    assert!(parser
-        .parse_line(
+    assert_tool_arguments_status(
+        &parser.parse_line(
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stream","name":"Bash","input":{}}}}"#
-        )
-        .is_empty());
+        ),
+        "Bash",
+    );
     assert!(parser
         .parse_line(
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}}"#
@@ -202,6 +217,99 @@ fn claude_stream_parser_extracts_streaming_bash_tool_use() {
         &events[..],
         [AgentEvent::ToolCall { name, input, .. }] if name == "Bash" && input == "pwd"
     ));
+}
+
+#[test]
+fn streamed_tool_arguments_report_progress_without_leaking_the_payload() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    let start = parser.parse_line(
+        r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_big","name":"write_file","input":{}}}}"#,
+    );
+
+    let [AgentEvent::StatusChanged { phase, message, .. }] = &start[..] else {
+        panic!("expected one status event, got {start:?}");
+    };
+    assert_eq!(phase, "tool_arguments");
+    assert_eq!(message, "generating tool arguments: write_file");
+
+    // A thousand deltas would be a refresh storm, so none of them may produce an
+    // event; and no status may carry the path or the file body they contain.
+    for chunk in [
+        r#"{"path":"/etc/secret.conf","#,
+        r#""content":"TOKEN=hunter2"#,
+        r#"UNTERMINATED"#,
+    ] {
+        let line = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": chunk}
+            }
+        })
+        .to_string();
+        assert!(
+            parser.parse_line(&line).is_empty(),
+            "argument delta {chunk:?} must not produce a UI event"
+        );
+    }
+
+    let rendered = format!("{start:?}");
+    assert!(!rendered.contains("/etc/secret.conf"), "{rendered}");
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+}
+
+#[test]
+fn streamed_tool_argument_status_neutralizes_a_hostile_tool_name() {
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+
+    // The name is model output. A `\u001b` on the wire deserializes to a real ESC
+    // byte, and the status animation writes its label straight to the terminal.
+    let line = serde_json::json!({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_evil",
+                "name": "write\u{1b}[2J\r\nfile"
+            }
+        }
+    })
+    .to_string();
+    let events = parser.parse_line(&line);
+
+    let [AgentEvent::StatusChanged { message, .. }] = &events[..] else {
+        panic!("expected one status event, got {events:?}");
+    };
+    assert!(!message.contains('\u{1b}'), "{message:?}");
+    assert!(!message.contains('\r'), "{message:?}");
+    assert!(!message.contains('\n'), "{message:?}");
+    // The escape body survives as inert text; only the ESC that armed it is gone.
+    assert_eq!(message, "generating tool arguments: write[2Jfile");
+
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
+    let line = serde_json::json!({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_long", "name": "n".repeat(4096)}
+        }
+    })
+    .to_string();
+    let events = parser.parse_line(&line);
+
+    let [AgentEvent::StatusChanged { message, .. }] = &events[..] else {
+        panic!("expected one status event, got {events:?}");
+    };
+    assert!(
+        message.chars().count() < 120,
+        "one status line must not flood the surface: {}",
+        message.chars().count()
+    );
 }
 
 #[test]
@@ -219,11 +327,12 @@ fn claude_stream_parser_keeps_text_delta_streaming_before_streamed_tool_use() {
         &text_events[..],
         [AgentEvent::TextDelta { text, .. }] if text == "PRE TOOL TEXT"
     ));
-    assert!(parser
-        .parse_line(
+    assert_tool_arguments_status(
+        &parser.parse_line(
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stream","name":"Bash","input":{}}}}"#
-        )
-        .is_empty());
+        ),
+        "Bash",
+    );
     assert!(parser
         .parse_line(
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}}"#
@@ -255,11 +364,12 @@ fn claude_stream_parser_deduplicates_streamed_final_snapshot_after_tool() {
         )[..],
         [AgentEvent::TextDelta { text, .. }] if text == "PRE"
     ));
-    assert!(parser
-        .parse_line(
+    assert_tool_arguments_status(
+        &parser.parse_line(
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stream","name":"Bash","input":{}}}}"#
-        )
-        .is_empty());
+        ),
+        "Bash",
+    );
     assert!(parser
         .parse_line(
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}}"#
@@ -491,7 +601,7 @@ fn claude_stream_parser_waits_for_streamed_question_input_json() {
     let start_events = parser.parse_line(
         r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
     );
-    assert!(start_events.is_empty());
+    assert_tool_arguments_status(&start_events, "AskUserQuestion");
 
     let delta_events = parser.parse_line(
         r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"你喜欢什么颜色？\",\"header\":\"颜色\",\"options\":[{\"label\":\"白色\"},{\"label\":\"黑色\"}],\"multiSelect\":false}]}"}}}"#,
@@ -520,11 +630,12 @@ fn claude_stream_parser_waits_for_streamed_question_input_json() {
 fn claude_stream_parser_accumulates_fragmented_question_input_json() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 
-    assert!(parser
-        .parse_line(
-            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
-        )
-        .is_empty());
+    assert_tool_arguments_status(
+        &parser.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#
+        ),
+        "AskUserQuestion",
+    );
 
     for partial_json in [
         r#"{"questions":[{"#,
@@ -578,11 +689,12 @@ fn claude_stream_parser_accumulates_fragmented_question_input_json() {
 fn claude_stream_parser_deduplicates_streamed_and_snapshot_tool_use() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 
-    assert!(parser
-        .parse_line(
-            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
-        )
-        .is_empty());
+    assert_tool_arguments_status(
+        &parser.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#
+        ),
+        "AskUserQuestion",
+    );
     assert!(parser
         .parse_line(
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"Pick\",\"header\":\"Pick\",\"options\":[{\"label\":\"A\"},{\"label\":\"B\"}],\"multiSelect\":false}]}"}}}"#,
@@ -615,11 +727,12 @@ fn claude_stream_parser_deduplicates_streamed_and_snapshot_tool_use() {
 fn claude_stream_parser_ignores_incomplete_snapshot_for_streaming_question() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 
-    assert!(parser
-        .parse_line(
-            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#,
-        )
-        .is_empty());
+    assert_tool_arguments_status(
+        &parser.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}}}"#
+        ),
+        "AskUserQuestion",
+    );
 
     let snapshot_events = parser.parse_line(
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Agent needs your input"},{"type":"tool_use","id":"tool-ask","name":"AskUserQuestion","input":{}}]}}"#,

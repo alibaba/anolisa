@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use crate::types::AgentEvent;
+use crate::tools::display::display_tool_name;
+use crate::types::{AgentEvent, TOOL_ARGUMENTS_STATUS_PHASE, TOOL_ARGUMENTS_STATUS_PREFIX};
 
 use super::claude_stream_extract::{
     extract_claude_assistant_text, extract_claude_error_text, extract_claude_result_text,
@@ -91,8 +92,8 @@ impl ClaudeStreamParser {
             });
         } else if let Some(text) = extract_claude_stream_delta(&value) {
             self.push_stream_text_event(&mut events, text);
-        } else if let Some(tool_call) = self.extract_streaming_tool_call(&value) {
-            events.push(tool_call);
+        } else if let Some(streaming) = self.extract_streaming_tool_events(&value) {
+            events.extend(streaming);
         } else if self.contains_streaming_tool_snapshot(&value) {
             return events;
         } else if let Some(tool_call) = self.extract_tool_call(&value) {
@@ -203,7 +204,15 @@ impl ClaudeStreamParser {
             .any(|tool| self.is_streaming_tool_id(&tool.id))
     }
 
-    fn extract_streaming_tool_call(&mut self, value: &serde_json::Value) -> Option<AgentEvent> {
+    /// Handle one streaming tool-use block event.
+    ///
+    /// `None` means the value was not part of a tracked tool-use block, so the
+    /// caller keeps matching it against the other event shapes. `Some` — possibly
+    /// empty — means the block was consumed here.
+    fn extract_streaming_tool_events(
+        &mut self,
+        value: &serde_json::Value,
+    ) -> Option<Vec<AgentEvent>> {
         let event = value.get("event")?;
         match event.get("type").and_then(|value| value.as_str()) {
             Some("content_block_start") => {
@@ -226,6 +235,16 @@ impl ClaudeStreamParser {
                     .get("input")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                // Arguments arrive as a long delta stream with no declared total
+                // length, so the only honest progress signal is the tool name.
+                // Byte counts and the partial JSON itself stay out of the status:
+                // a percentage would be invented, and the payload can hold paths
+                // and file contents.
+                let status = AgentEvent::StatusChanged {
+                    run_id: self.run_id.clone(),
+                    phase: TOOL_ARGUMENTS_STATUS_PHASE.to_string(),
+                    message: format!("{TOOL_ARGUMENTS_STATUS_PREFIX}{}", display_tool_name(&name)),
+                };
                 self.streaming_tool_uses.insert(
                     index,
                     StreamingClaudeToolUse {
@@ -235,7 +254,7 @@ impl ClaudeStreamParser {
                         input_json: String::new(),
                     },
                 );
-                None
+                Some(vec![status])
             }
             Some("content_block_delta") => {
                 let index = event.get("index").and_then(|value| value.as_u64())? as usize;
@@ -243,15 +262,20 @@ impl ClaudeStreamParser {
                     .pointer("/delta/partial_json")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                if let Some(tool) = self.streaming_tool_uses.get_mut(&index) {
-                    tool.input_json.push_str(partial_json);
-                }
-                None
+                // Deltas accumulate in memory only: one UI event per delta would be
+                // a refresh storm — a single call streams over a thousand of them.
+                let tool = self.streaming_tool_uses.get_mut(&index)?;
+                tool.input_json.push_str(partial_json);
+                Some(Vec::new())
             }
             Some("content_block_stop") => {
                 let index = event.get("index").and_then(|value| value.as_u64())? as usize;
                 let tool = self.streaming_tool_uses.remove(&index)?;
-                self.event_from_tool_use(tool.into_tool_use())
+                Some(
+                    self.event_from_tool_use(tool.into_tool_use())
+                        .into_iter()
+                        .collect(),
+                )
             }
             _ => None,
         }

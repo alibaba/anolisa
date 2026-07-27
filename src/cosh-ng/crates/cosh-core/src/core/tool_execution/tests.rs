@@ -110,15 +110,143 @@ fn parsed_arguments_that_are_not_an_object_are_rejected() {
 
 #[test]
 fn rejection_message_carries_a_code_and_no_payload() {
-    let malformed = invalid_arguments_message("shell", &ArgumentError::InvalidJson);
+    let malformed = invalid_arguments_message(
+        "shell",
+        &ArgumentError::InvalidJson,
+        1,
+        MAX_INVALID_ARGUMENT_ATTEMPTS,
+    );
     assert!(malformed.contains("code=invalid_json"), "{malformed}");
     assert!(malformed.contains("shell"), "{malformed}");
 
-    let wrong_root =
-        invalid_arguments_message("shell", &ArgumentError::RootNotObject { shape: "array" });
+    let wrong_root = invalid_arguments_message(
+        "shell",
+        &ArgumentError::RootNotObject { shape: "array" },
+        1,
+        MAX_INVALID_ARGUMENT_ATTEMPTS,
+    );
     assert!(
         wrong_root.contains("code=arguments_not_object"),
         "{wrong_root}"
     );
     assert!(wrong_root.contains("JSON array"), "{wrong_root}");
+}
+
+#[test]
+fn rejection_message_shows_the_attempt_and_stops_inviting_retries_at_the_limit() {
+    let retryable = invalid_arguments_message(
+        "write_file",
+        &ArgumentError::InvalidJson,
+        1,
+        MAX_INVALID_ARGUMENT_ATTEMPTS,
+    );
+    assert!(retryable.contains("attempt 1/3"), "{retryable}");
+    assert!(retryable.contains("re-issue the call"), "{retryable}");
+
+    let exhausted = invalid_arguments_message(
+        "write_file",
+        &ArgumentError::InvalidJson,
+        MAX_INVALID_ARGUMENT_ATTEMPTS,
+        MAX_INVALID_ARGUMENT_ATTEMPTS,
+    );
+    assert!(exhausted.contains("attempt 3/3"), "{exhausted}");
+    assert!(
+        !exhausted.contains("re-issue the call"),
+        "the budget is spent, so the model must not be told to try again: {exhausted}"
+    );
+    assert!(exhausted.contains("run was stopped"), "{exhausted}");
+}
+
+#[test]
+fn streak_counts_the_same_tool_and_code_and_resets_on_anything_else() {
+    let mut streak = InvalidArgumentStreak::default();
+
+    assert_eq!(streak.record("write_file", "invalid_json", "turn-1"), 1);
+    assert_eq!(streak.record("write_file", "invalid_json", "turn-2"), 2);
+
+    // A different error code from the same tool is a different failure.
+    assert_eq!(
+        streak.record("write_file", "arguments_not_object", "turn-3"),
+        1
+    );
+    // As is the same code from a different tool.
+    assert_eq!(streak.record("shell", "arguments_not_object", "turn-4"), 1);
+    assert_eq!(streak.record("shell", "arguments_not_object", "turn-5"), 2);
+
+    // A parseable call in between means the model recovered.
+    streak.clear();
+    assert_eq!(streak.record("shell", "arguments_not_object", "turn-6"), 1);
+}
+
+#[test]
+fn streak_reaches_the_limit_only_on_three_consecutive_identical_failures() {
+    let mut streak = InvalidArgumentStreak::default();
+
+    assert!(streak.record("write_file", "invalid_json", "turn-1") < MAX_INVALID_ARGUMENT_ATTEMPTS);
+    assert!(streak.record("write_file", "invalid_json", "turn-2") < MAX_INVALID_ARGUMENT_ATTEMPTS);
+    assert_eq!(
+        streak.record("write_file", "invalid_json", "turn-3"),
+        MAX_INVALID_ARGUMENT_ATTEMPTS
+    );
+}
+
+#[test]
+fn streak_counts_matching_calls_only_once_per_provider_turn() {
+    let mut streak = InvalidArgumentStreak::default();
+
+    assert_eq!(streak.record("write_file", "invalid_json", "turn-1"), 1);
+    assert_eq!(
+        streak.record("write_file", "invalid_json", "turn-1"),
+        1,
+        "parallel calls in one assistant message are not retries"
+    );
+    assert_eq!(streak.record("write_file", "invalid_json", "turn-2"), 2);
+}
+
+#[test]
+fn display_tool_name_strips_control_characters_and_bounds_length() {
+    // A provider name is model output: the escape would reach a terminal intact.
+    assert_eq!(
+        display_tool_name("write\u{1b}[2Jfile"),
+        "write[2Jfile",
+        "the ESC byte must be gone, leaving the body as inert text"
+    );
+    assert_eq!(display_tool_name("write\r\nfile"), "writefile");
+    assert_eq!(display_tool_name("a\u{2028}b"), "ab");
+    assert_eq!(display_tool_name("  spaced  "), "spaced");
+
+    // Nothing renderable left, and nothing at all, both need a stand-in.
+    assert_eq!(display_tool_name("\u{1b}\r\n"), "tool");
+    assert_eq!(display_tool_name(""), "tool");
+
+    let long = display_tool_name(&"n".repeat(200));
+    assert_eq!(long.chars().count(), 65, "{long}");
+    assert!(long.ends_with('…'), "truncation must be visible: {long}");
+}
+
+#[test]
+fn rejection_messages_use_the_safe_display_name() {
+    let message = invalid_arguments_message(
+        "write\u{1b}[2Jfile",
+        &ArgumentError::InvalidJson,
+        1,
+        MAX_INVALID_ARGUMENT_ATTEMPTS,
+    );
+    assert!(!message.contains('\u{1b}'), "{message}");
+
+    let exhausted =
+        invalid_arguments_exhausted_error("write\u{1b}[2Jfile", &ArgumentError::InvalidJson);
+    assert!(!exhausted.contains('\u{1b}'), "{exhausted}");
+
+    let skipped = skipped_after_fatal_message("write\u{1b}[2Jfile");
+    assert!(!skipped.contains('\u{1b}'), "{skipped}");
+    assert!(skipped.contains("was not executed"), "{skipped}");
+}
+
+#[test]
+fn exhausted_error_names_the_tool_and_code_without_the_payload() {
+    let error = invalid_arguments_exhausted_error("write_file", &ArgumentError::InvalidJson);
+    assert!(error.contains("write_file"), "{error}");
+    assert!(error.contains("code=invalid_json"), "{error}");
+    assert!(error.contains("never executed"), "{error}");
 }

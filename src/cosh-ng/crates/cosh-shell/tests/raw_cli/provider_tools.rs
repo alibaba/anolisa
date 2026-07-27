@@ -296,6 +296,73 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-tool-spli
     );
 }
 
+/// A model generating large arguments streams deltas for a long time before the
+/// tool call exists. Without a status for that window the Agent card sits blank
+/// and the user cannot tell generation from a hang.
+///
+/// Text is streamed first on purpose: that is the harder case, because a live
+/// markdown surface otherwise suppresses the status entirely.
+#[test]
+fn raw_cli_qwen_slow_tool_arguments_show_a_status_without_the_payload() {
+    let home = temp_shell_home("qwen-slow-tool-arguments-status");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let co_path = bin_dir.join("co");
+    write_executable(
+        &co_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-slow-arguments","model":"qwen-test"}'
+read -r user_message
+case "$user_message" in
+  *slow-tool-arguments-status*)
+    printf '%s\n' '{"type":"stream_event","session_id":"sess-slow-arguments","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me write that file.\n\n"}}}'
+    printf '%s\n' '{"type":"stream_event","session_id":"sess-slow-arguments","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_write_slow","name":"write_file","input":{}}}}'
+    printf '%s\n' '{"type":"stream_event","session_id":"sess-slow-arguments","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/tmp/SECRET_ARGUMENT_PATH\",\"content\":\"SECRET_ARGUMENT_BODY"}}}'
+    sleep 8
+    printf '%s\n' '{"type":"stream_event","session_id":"sess-slow-arguments","event":{"type":"content_block_stop","index":1}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-slow-arguments","is_error":false,"result":"done"}'
+    exit 0
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-slow-arguments","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "qwen",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("PATH", &path),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ANIMATION", "always"),
+        ],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? slow-tool-arguments-status\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(12_000)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Let me write that file."), "{output}");
+    assert!(
+        output.contains("generating write_file arguments"),
+        "the argument-generation window must be visible even after streamed text: {output}"
+    );
+    // The deltas carry the destination path and the file body; neither may reach
+    // the terminal, and a byte count would only invent progress.
+    assert!(!output.contains("SECRET_ARGUMENT_PATH"), "{output}");
+    assert!(!output.contains("SECRET_ARGUMENT_BODY"), "{output}");
+}
+
 #[test]
 fn raw_cli_qwen_long_running_tool_shows_pending_status_then_result_card() {
     let home = temp_shell_home("qwen-long-running-tool-pending-status");

@@ -68,6 +68,19 @@ macro_rules! agent_ids {
     };
 }
 
+// Keep feature-specific additions in a trailing segment so existing public
+// MessageId discriminants remain stable.
+macro_rules! tool_argument_status_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentStatusToolArguments,
+            AgentStatusGeneratingToolArguments,
+        );
+    };
+}
+
 macro_rules! agent_queue_ids {
     ($next:ident, $remaining:tt, $($ids:ident,)*) => {
         $next!(

@@ -161,17 +161,148 @@ pub(super) fn parse_tool_arguments(raw: &str) -> Result<serde_json::Value, Argum
     Ok(value)
 }
 
+/// How many times in a row one tool may have its arguments refused before the
+/// run is stopped.
+///
+/// Fixed rather than configurable: the budget exists to break a model that
+/// cannot produce parseable arguments, and a tunable would only let a session
+/// re-enter the loop this bound was added to end.
+pub(super) const MAX_INVALID_ARGUMENT_ATTEMPTS: u8 = 3;
+
+/// Consecutive pre-execution argument rejections within one user message.
+///
+/// Keyed by tool name and stable error code, not tool-call id: every retry is a
+/// fresh call with a fresh id, so ids would never match and the streak would
+/// never grow.
+#[derive(Debug, Default)]
+pub(super) struct InvalidArgumentStreak {
+    current: Option<(String, &'static str, String, u8)>,
+}
+
+impl InvalidArgumentStreak {
+    /// Count one rejected provider turn and return its 1-based attempt number.
+    ///
+    /// A different tool or a different error code starts a new streak at 1: the
+    /// model changing how it fails is progress, not another attempt at the same
+    /// failure. Multiple matching calls in one assistant message share an
+    /// attempt because they are a batch, not retries of one another.
+    pub(super) fn record(
+        &mut self,
+        tool_name: &str,
+        code: &'static str,
+        provider_turn_id: &str,
+    ) -> u8 {
+        match &mut self.current {
+            Some((name, current_code, counted_turn, count))
+                if name == tool_name
+                    && *current_code == code
+                    && counted_turn == provider_turn_id =>
+            {
+                *count
+            }
+            Some((name, current_code, counted_turn, count))
+                if name == tool_name && *current_code == code =>
+            {
+                *count = count.saturating_add(1);
+                *counted_turn = provider_turn_id.to_string();
+                *count
+            }
+            slot => {
+                *slot = Some((tool_name.to_string(), code, provider_turn_id.to_string(), 1));
+                1
+            }
+        }
+    }
+
+    /// Forget the streak once a tool call's arguments parsed.
+    pub(super) fn clear(&mut self) {
+        self.current = None;
+    }
+}
+
+/// Longest tool name kept in a message that reaches a terminal.
+const MAX_DISPLAY_TOOL_NAME_CHARS: usize = 64;
+
+/// A provider-supplied tool name, made safe to embed in a rendered message.
+///
+/// Mirrors cosh-shell's terminal-facing sanitizer because the Shell is a
+/// standalone crate; keep the filtering and length contract aligned in both.
+///
+/// The name is model output, not a validated identifier: an `` in the JSON
+/// arrives here as a real ESC byte and would reach the terminal as an escape
+/// sequence, and an unbounded name would flood the surface it is drawn on.
+pub(super) fn display_tool_name(tool_name: &str) -> String {
+    let mut safe: String = tool_name
+        .chars()
+        .filter(|character| {
+            !character.is_control() && !matches!(character, '\u{2028}' | '\u{2029}')
+        })
+        .take(MAX_DISPLAY_TOOL_NAME_CHARS)
+        .collect();
+    let trimmed = safe.trim();
+    if trimmed.is_empty() {
+        return "tool".to_string();
+    }
+    if trimmed.len() != safe.len() {
+        safe = trimmed.to_string();
+    }
+    if tool_name.chars().count() > MAX_DISPLAY_TOOL_NAME_CHARS {
+        safe.push('…');
+    }
+    safe
+}
+
 /// Tool-result text for a tool call whose arguments were refused.
 ///
 /// Carries no fragment of the rejected payload: malformed arguments can still
-/// contain session content.
-pub(super) fn invalid_arguments_message(tool_name: &str, error: &ArgumentError) -> String {
+/// contain session content. The attempt counter is included so the model — and
+/// the failure card the user sees — show how much budget is left.
+pub(super) fn invalid_arguments_message(
+    tool_name: &str,
+    error: &ArgumentError,
+    attempt: u8,
+    max_attempts: u8,
+) -> String {
+    let tool_name = display_tool_name(tool_name);
+    let next = if attempt >= max_attempts {
+        format!(
+            "The tool was not executed, and the run was stopped after {max_attempts} \
+             consecutive rejections."
+        )
+    } else {
+        "The tool was not executed; re-issue the call with one complete JSON object matching \
+         the declared schema."
+            .to_string()
+    };
     format!(
-        "{tool_name} arguments rejected [code={}]: {}. \
-         The tool was not executed; re-issue the call with one complete JSON object matching \
-         the declared schema.",
+        "{tool_name} arguments rejected [code={}] (attempt {attempt}/{max_attempts}): {}. {next}",
         error.code(),
         error.summary()
+    )
+}
+
+/// Run-terminating message for a tool that exhausted its rejection budget.
+///
+/// Names the tool and the stable code only, and states that nothing ran, so the
+/// user can act without seeing the payload.
+pub(super) fn invalid_arguments_exhausted_error(tool_name: &str, error: &ArgumentError) -> String {
+    format!(
+        "{} arguments were rejected {MAX_INVALID_ARGUMENT_ATTEMPTS} times in a row \
+         [code={}]; stopped this run. The tool never executed.",
+        display_tool_name(tool_name),
+        error.code()
+    )
+}
+
+/// Tool-result text for a call left unattempted because an earlier call in the
+/// same assistant message ended the run.
+///
+/// Exists so the batch stays paired: an unanswered `tool_use` id would make the
+/// next provider request malformed.
+pub(super) fn skipped_after_fatal_message(tool_name: &str) -> String {
+    format!(
+        "{} was not executed: an earlier tool call in the same message ended this run.",
+        display_tool_name(tool_name)
     )
 }
 
@@ -263,7 +394,10 @@ impl CoshCore {
                     validation_error_code: error.code(),
                     question_shape: report.question_shape,
                 });
-                self.reject_tool_arguments(
+                // The result is not emitted on the wire: the Shell never opened a
+                // pending tool for an incomplete question call, so a tool result
+                // would arrive for an id it does not know.
+                let _ = self.reject_tool_arguments(
                     scope,
                     &call.name,
                     &call.id,
@@ -304,11 +438,65 @@ impl CoshCore {
         }
     }
 
+    /// Audit data for a call refused before its arguments were ever parsed.
+    ///
+    /// Reports the payload as `unparsed` — the same shape a malformed payload
+    /// gets — because that is literally what happened: nothing inspected these
+    /// bytes. Hashing them still identifies the call in a trace without
+    /// recording session content.
+    fn unexecuted_tool_data(&self, tool_name: &str, arguments: &str) -> AuditToolData {
+        AuditToolData {
+            tool_kind: self
+                .tools
+                .get(tool_name)
+                .map(|tool| format!("{:?}", tool.kind()).to_ascii_lowercase())
+                .unwrap_or_else(|| "virtual".to_string()),
+            input_shape: Some("unparsed".to_string()),
+            input_hash: Some(hash_bytes(arguments.as_bytes())),
+            ..AuditToolData::default()
+        }
+    }
+
+    /// Fail a tool call the run never attempted, over its whole lifecycle.
+    ///
+    /// A skipped call is refused before the normal path builds any audit data, so
+    /// without this it would reach the provider history with no `tool.requested`,
+    /// no terminal event and no metrics — invisible in an audit trace even though
+    /// it is part of the transcript. The audit contract is one `tool.requested`
+    /// and one terminal event per call, including the ones that never ran.
+    pub(super) fn skip_unexecuted_tool_call<W: Write>(
+        &mut self,
+        scope: CoreAuditScope<'_>,
+        writer: &mut W,
+        call: &PendingToolCall,
+    ) -> ToolResult {
+        let tool_data = self.unexecuted_tool_data(&call.name, &call.arguments);
+        self.audit
+            .record_tool_requested(scope, &call.name, &tool_data);
+        let result = self.reject_tool_arguments(
+            scope,
+            &call.name,
+            &call.id,
+            &tool_data,
+            skipped_after_fatal_message(&call.name),
+        );
+        // The Shell never opened a pending tool for a question call, so a result
+        // for that id would be unroutable; every other tool has one to close.
+        if !(call.name == ask_user_question::TOOL_NAME && self.tools.supports_ask_user_question()) {
+            self.emit_provider_native_tool_result(writer, &call.id, &result);
+        }
+        result
+    }
+
     /// Fail a tool call whose arguments were rejected before execution.
     ///
     /// Audits the call as failed without a `tool.execution.started` record and
     /// appends an error tool result, so the model can re-issue a valid call
     /// instead of the run stalling on an unusable one.
+    ///
+    /// Returns that tool result so the caller can also emit it on the wire: the
+    /// Shell opened a pending tool for this call and only a tool result closes
+    /// it, otherwise a rejected call stays on screen as if it were still running.
     pub(super) fn reject_tool_arguments(
         &mut self,
         scope: CoreAuditScope<'_>,
@@ -316,7 +504,7 @@ impl CoshCore {
         tool_call_id: &str,
         tool_data: &AuditToolData,
         message: String,
-    ) {
+    ) -> ToolResult {
         self.note_tool_call_metrics(true, 0);
         let result = ToolResult::error(message);
         self.audit.record_tool_terminal(
@@ -332,6 +520,7 @@ impl CoshCore {
             &result.output,
             result.is_error,
         ));
+        result
     }
 
     /// Emit an interactive question and wait for the user's answer.

@@ -29,7 +29,6 @@ new over-threshold file appears that is not listed here.
 | 1717 | `src/ui/agent_render/health.rs` | ui | Health banner rendering; pre-existing. Split per-severity renderers. |
 | 1628 | `src/diagnostics/health/collectors.rs` | diagnostics | Per-subsystem collectors; pre-existing. Split by collector family. |
 | 992 | `src/runtime/state.rs` | runtime | Central inline state; pre-existing. Extract per-domain state modules. |
-| 925 | `src/agent/heartbeat.rs` | agent | Heartbeat/status animation; pre-existing. Split timing from rendering. |
 | 912 | `src/evidence/output_policy.rs` | evidence | Output excerpt policy; pre-existing. Split bounding from classification. |
 | 906 | `src/adapter/fake.rs` | adapter | Test fake adapter; pre-existing. Split scripted-scenario builders. |
 | 944 | `src/ui/agent_render/approval.rs` | ui | Approval card rendering; action-row rendering extracted to `approval_actions.rs` (turn consent, #1773). Split per-card-kind renderers next. |
