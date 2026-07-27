@@ -234,10 +234,11 @@ impl CkptClient {
         if !Path::new(&self.socket_path).exists() {
             return Err(CoshError::new(
                 ErrorCode::CheckpointDaemonUnavailable,
-                format!("ws-ckpt daemon socket not found at {}", self.socket_path),
+                "ws-ckpt daemon socket not found",
                 "checkpoint",
             )
             .with_hint("Start daemon with: systemctl start ws-ckpt")
+            .with_details(serde_json::json!({ "socket_path": self.socket_path }))
             .recoverable(true));
         }
 
@@ -382,7 +383,8 @@ fn unexpected_response() -> CoshError {
 /// Classify an I/O error into a structured CoshError with specific handling
 /// for daemon crash (BrokenPipe / ConnectionReset) and timeout scenarios.
 fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> CoshError {
-    match e.kind() {
+    let kind = e.kind();
+    match kind {
         std::io::ErrorKind::BrokenPipe => CoshError::new(
             ErrorCode::CheckpointDaemonUnavailable,
             format!("ws-ckpt daemon crashed while {}: BrokenPipe", context),
@@ -391,6 +393,7 @@ fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> Cos
         .with_hint(
             "ws-ckpt daemon process terminated unexpectedly. Restart with: systemctl start ws-ckpt",
         )
+        .with_details(serde_json::json!({ "socket_path": socket_path }))
         .recoverable(true),
 
         std::io::ErrorKind::ConnectionReset => CoshError::new(
@@ -401,32 +404,45 @@ fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> Cos
         .with_hint(
             "ws-ckpt daemon process terminated unexpectedly. Restart with: systemctl start ws-ckpt",
         )
+        .with_details(serde_json::json!({ "socket_path": socket_path }))
+        .recoverable(true),
+
+        std::io::ErrorKind::UnexpectedEof => CoshError::new(
+            ErrorCode::CheckpointProtocolError,
+            format!(
+                "ws-ckpt daemon returned an incomplete or malformed response while {}",
+                context
+            ),
+            "checkpoint",
+        )
+        .with_hint("The daemon connection was interrupted. Retry the operation; if the problem persists, restart ws-ckpt with: systemctl restart ws-ckpt")
+        .with_details(serde_json::json!({ "io_error": e.to_string(), "socket_path": socket_path }))
         .recoverable(true),
 
         std::io::ErrorKind::TimedOut => CoshError::new(
             ErrorCode::Timeout,
-            format!("Timeout while {} on {}", context, socket_path),
+            format!("Timeout while communicating with ws-ckpt daemon: {}", context),
             "checkpoint",
         )
         .with_hint("ws-ckpt daemon may be overloaded, retry later")
+        .with_details(serde_json::json!({ "socket_path": socket_path }))
         .recoverable(true),
 
         std::io::ErrorKind::ConnectionRefused => CoshError::new(
             ErrorCode::CheckpointDaemonUnavailable,
-            format!(
-                "Cannot connect to ws-ckpt daemon at {}: Connection refused",
-                socket_path
-            ),
+            "Cannot connect to ws-ckpt daemon: Connection refused".to_string(),
             "checkpoint",
         )
         .with_hint("Start daemon with: systemctl start ws-ckpt")
+        .with_details(serde_json::json!({ "socket_path": socket_path }))
         .recoverable(true),
 
         _ => CoshError::new(
             ErrorCode::CheckpointDaemonUnavailable,
-            format!("I/O error while {}: {} ({})", context, e, socket_path),
+            format!("I/O error while {}: {}", context, e),
             "checkpoint",
         )
+        .with_details(serde_json::json!({ "io_error_kind": format!("{:?}", kind), "socket_path": socket_path }))
         .recoverable(true),
     }
 }
@@ -664,6 +680,69 @@ mod tests {
         );
         assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
         assert!(err.recoverable);
+        // socket_path must not appear in user-visible message
+        assert!(
+            !err.message.contains("/tmp/test.sock"),
+            "socket_path leaked into message: {}",
+            err.message
+        );
+        // but should be in details
+        assert!(err.details.is_some());
+    }
+
+    #[test]
+    fn test_classify_unexpected_eof() {
+        let err = classify_io_error(
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"),
+            "/tmp/test.sock",
+            "read response length",
+        );
+        assert_eq!(err.code, ErrorCode::CheckpointProtocolError);
+        assert!(err.recoverable);
+        // message should be user-friendly, no raw io error or socket path
+        assert!(
+            !err.message.contains("failed to fill whole buffer"),
+            "raw io error leaked into message: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("/tmp/test.sock"),
+            "socket_path leaked into message: {}",
+            err.message
+        );
+        assert!(err.message.contains("incomplete") || err.message.contains("malformed"));
+        // details should contain diagnostic info
+        assert!(err.details.is_some());
+    }
+
+    #[test]
+    fn test_classify_connection_refused_no_socket_leak() {
+        let err = classify_io_error(
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+            "/tmp/secret.sock",
+            "connect",
+        );
+        assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
+        assert!(
+            !err.message.contains("/tmp/secret.sock"),
+            "socket_path leaked into message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_classify_timeout_no_socket_leak() {
+        let err = classify_io_error(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
+            "/tmp/secret.sock",
+            "read response",
+        );
+        assert_eq!(err.code, ErrorCode::Timeout);
+        assert!(
+            !err.message.contains("/tmp/secret.sock"),
+            "socket_path leaked into message: {}",
+            err.message
+        );
     }
 
     #[test]
