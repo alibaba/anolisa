@@ -299,4 +299,18 @@ mod tests {
             other => panic!("expected Complete, got {:?}", other),
         }
     }
+
+    #[test]
+    fn bare_lf_from_stdin_triggers_submit() {
+        let mut line = CandidateLineBuffer::default();
+        line.push(b"hello");
+        line.push(b"\n"); // bare LF from stdin/pipe
+        let status = candidate_line_status(&line.bytes);
+        match status {
+            CandidateLineStatus::Complete { line, .. } => {
+                assert_eq!(line, "hello");
+            }
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
 }
