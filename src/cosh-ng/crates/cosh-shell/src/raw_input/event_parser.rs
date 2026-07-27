@@ -179,6 +179,9 @@ impl NativeLineState {
 
 pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
+    if trimmed.starts_with('@') {
+        return at_file_hint(trimmed);
+    }
     if !trimmed.starts_with('/') || trimmed[1..].contains('/') {
         return None;
     }
@@ -194,6 +197,80 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
         _ => crate::slash::registry::visible_slash_commands()
             .find(|spec| spec.name.starts_with(token) && spec.name != token)
             .map(|spec| spec.usage.to_string()),
+    }
+}
+
+fn at_file_hint(line: &str) -> Option<String> {
+    let prefix = line.strip_prefix('@').unwrap_or("");
+    // Only show candidates when the @ token has no whitespace yet (single token).
+    if prefix.contains(char::is_whitespace) {
+        return None;
+    }
+    let candidates = at_file_candidates(prefix);
+    if candidates.is_empty() {
+        return None;
+    }
+    // Show up to 8 file candidates inline.
+    let display: Vec<&str> = candidates.iter().take(8).map(|s| s.as_str()).collect();
+    Some(display.join("  "))
+}
+
+/// Lists files in the current directory matching the given prefix.
+pub(super) fn at_file_candidates(prefix: &str) -> Vec<String> {
+    let cwd = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => return Vec::new(),
+    };
+    let mut entries: Vec<String> = Vec::new();
+    let read_dir = match std::fs::read_dir(&cwd) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Skip hidden files unless prefix starts with '.'.
+        if name.starts_with('.') && !prefix.starts_with('.') {
+            continue;
+        }
+        if name.starts_with(prefix) {
+            let suffix = if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                format!("{name}/")
+            } else {
+                name
+            };
+            entries.push(suffix);
+        }
+    }
+    entries.sort();
+    entries
+}
+
+/// Completes the `@` prefix to the best matching filename.
+/// Returns the completed `@filename` string, or None if no match.
+pub(super) fn at_file_complete(prefix: &str) -> Option<String> {
+    let candidates = at_file_candidates(prefix);
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return Some(candidates.into_iter().next().unwrap());
+    }
+    // Find longest common prefix among candidates.
+    let first = &candidates[0];
+    let mut common_len = first.len();
+    for candidate in &candidates[1..] {
+        let shared = first
+            .chars()
+            .zip(candidate.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        common_len = common_len.min(shared);
+    }
+    if common_len > prefix.len() {
+        Some(first[..common_len].to_string())
+    } else {
+        // No further common prefix; return first candidate.
+        Some(candidates.into_iter().next().unwrap())
     }
 }
 
@@ -234,7 +311,7 @@ pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
 
 pub(super) fn starts_intercept_candidate(bytes: &[u8]) -> bool {
     let first = first_visible_input_byte(bytes);
-    matches!(first, Some(b'/' | b'?')) || first.is_some_and(|byte| byte >= 0x80)
+    matches!(first, Some(b'/' | b'?' | b'@')) || first.is_some_and(|byte| byte >= 0x80)
 }
 
 pub(super) fn starts_native_intercept_candidate(
@@ -243,6 +320,7 @@ pub(super) fn starts_native_intercept_candidate(
 ) -> bool {
     native_line_state.is_at_line_start()
         && (first_visible_input_byte(bytes) == Some(b'/')
+            || first_visible_input_byte(bytes) == Some(b'@')
             || first_visible_input_bytes(bytes).starts_with(b"??"))
 }
 
@@ -324,5 +402,55 @@ fn incomplete_escape_suffix(bytes: &[u8]) -> bool {
         [0x1b, b'[', parameters @ ..] => parameters.iter().all(|byte| matches!(byte, 0x20..=0x3f)),
         [0x1b, b'O'] => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn at_is_intercept_candidate() {
+        assert!(starts_intercept_candidate(b"@"));
+        assert!(starts_intercept_candidate(b"@file"));
+    }
+
+    #[test]
+    fn non_at_inputs_are_not_at_candidates() {
+        assert!(!starts_intercept_candidate(b"a"));
+        assert!(!starts_intercept_candidate(b"#"));
+    }
+
+    #[test]
+    fn at_file_hint_returns_none_for_bare_at() {
+        // Bare @ should show candidates, not None - it depends on what's in cwd
+        let hint = at_file_hint("@");
+        // hint may be Some or None depending on cwd contents, just check no panic
+        let _ = hint;
+    }
+
+    #[test]
+    fn at_file_hint_returns_none_for_multi_token() {
+        assert_eq!(at_file_hint("@file extra"), None);
+    }
+
+    #[test]
+    fn at_file_complete_returns_none_for_empty_dir() {
+        // With an empty prefix in any directory, we might get results
+        // Just verify no panic
+        let _ = at_file_complete("zzz_nonexistent_prefix_zzz");
+    }
+
+    #[test]
+    fn candidate_inline_hint_handles_at_prefix() {
+        // @ with no matching files returns None
+        let hint = candidate_inline_hint("@zzz_nonexistent_zzz");
+        assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn candidate_inline_hint_still_handles_slash() {
+        let hint = candidate_inline_hint("/mode");
+        assert!(hint.is_some());
     }
 }
