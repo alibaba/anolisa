@@ -377,7 +377,13 @@ impl CoshCore {
             // ─── Hook: BeforeModel ───
             let before_model_result = self
                 .hook_system
-                .fire_before_model(&self.session_id, &cwd_str, &self.model, &provider_messages)
+                .fire_before_model(
+                    &self.session_id,
+                    &cwd_str,
+                    &self.model,
+                    &provider_messages,
+                    &tool_decls,
+                )
                 .await;
             self.emit_hook_notifications(writer, &before_model_result.notifications, None);
             self.audit.record_hook_decision(
@@ -386,6 +392,14 @@ impl CoshCore {
                 AuditOutcomeStatus::Success,
                 "observed",
             );
+
+            // A BeforeModel hook's rewritten declarations apply to this provider
+            // call only — `tool_decls` and the ToolRegistry stay authoritative
+            // for the next turn.
+            let turn_tool_decls = before_model_result
+                .updated_tools
+                .as_deref()
+                .unwrap_or(&tool_decls);
 
             let mut msgs_with_system = vec![Message::system(&system_prompt)];
             msgs_with_system.extend(provider_messages);
@@ -411,7 +425,7 @@ impl CoshCore {
 
             let stream_result = self
                 .provider
-                .generate(&msgs_with_system, &tool_decls, &generate_config)
+                .generate(&msgs_with_system, turn_tool_decls, &generate_config)
                 .await;
 
             let mut stream = match stream_result {

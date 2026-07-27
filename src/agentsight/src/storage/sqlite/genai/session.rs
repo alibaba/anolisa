@@ -82,7 +82,7 @@ impl GenAISqliteStore {
                     COUNT(DISTINCT conversation_id) AS conversation_count,
                     MIN(start_timestamp_ns)  AS first_seen_ns,
                     MAX(start_timestamp_ns)  AS last_seen_ns,
-                    COALESCE(SUM(input_tokens), 0)  AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
                     MAX(model)               AS model,
                     MAX(agent_name)          AS agent_name,
@@ -142,7 +142,7 @@ impl GenAISqliteStore {
         let sql = if agent_name.is_some() {
             "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -155,7 +155,7 @@ impl GenAISqliteStore {
         } else {
             "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -203,7 +203,7 @@ impl GenAISqliteStore {
 
         let sql = "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -344,7 +344,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -362,7 +362,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -380,7 +380,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -398,7 +398,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,

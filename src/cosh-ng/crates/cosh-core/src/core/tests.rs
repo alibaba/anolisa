@@ -25,8 +25,10 @@ struct CountingShellTool {
 
 struct ExternalTool;
 
+#[derive(Default)]
 struct RecordingProvider {
     messages: Arc<Mutex<Vec<crate::provider::Message>>>,
+    tools: Arc<Mutex<Vec<crate::provider::ToolDeclaration>>>,
 }
 
 #[async_trait]
@@ -34,10 +36,11 @@ impl crate::provider::ContentGenerator for RecordingProvider {
     async fn generate(
         &self,
         messages: &[crate::provider::Message],
-        _tools: &[crate::provider::ToolDeclaration],
+        tools: &[crate::provider::ToolDeclaration],
         _config: &crate::provider::GenerateConfig,
     ) -> Result<crate::provider::GenerateStream, String> {
         *self.messages.lock().unwrap() = messages.to_vec();
+        *self.tools.lock().unwrap() = tools.to_vec();
         Ok(Box::pin(futures::stream::iter([
             crate::provider::GenerateEvent::TextDelta("done".to_string()),
             crate::provider::GenerateEvent::MessageEnd,
@@ -203,6 +206,7 @@ async fn project_context_reaches_the_provider_boundary() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let provider = RecordingProvider {
         messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
     };
     let mut config = CoreConfig::default();
     config.agent.approval_mode = "trust".to_string();
@@ -227,6 +231,117 @@ async fn project_context_reaches_the_provider_boundary() {
         .content
         .as_text()
         .contains("## Project Context\nprovider-visible marker"));
+}
+
+fn find_declaration<'a>(
+    declarations: &'a [crate::provider::ToolDeclaration],
+    name: &str,
+) -> &'a crate::provider::ToolDeclaration {
+    declarations
+        .iter()
+        .find(|tool| tool.name == name)
+        .unwrap_or_else(|| panic!("missing '{name}' declaration"))
+}
+
+/// A BeforeModel hook that rewrites every tool `description` to `compressed`
+/// and strips schema properties, mirroring tokenless schema compression.
+fn compress_schema_hook(command: &str) -> crate::config::HookDefinition {
+    crate::config::HookDefinition {
+        command: command.to_string(),
+        name: Some("compress-schema".to_string()),
+        matcher: None,
+        timeout: Some(10_000),
+        sequential: None,
+        env: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn before_model_hook_rewrites_tool_declarations_for_one_provider_call() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        tools: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.before_model = vec![compress_schema_hook(
+        r#"python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+tools = payload["llm_request"]["config"]["tools"]
+for tool in tools:
+    tool["description"] = "compressed"
+    tool["parameters"] = {"type": "object", "properties": {"api_key": {"type": "string"}}}
+print(json.dumps({"hookSpecificOutput": {"llm_request": {"config": {"tools": tools}}}}))
+'"#,
+    )];
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("hello", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let recorded = captured.lock().unwrap();
+    let shell = find_declaration(&recorded, "shell");
+    assert_eq!(shell.description, "compressed");
+    // The schema property named `api_key` is a declaration, not a secret:
+    // redaction must not have collapsed it into a "<redacted>" string.
+    assert_eq!(shell.parameters["properties"]["api_key"]["type"], "string");
+
+    // The registry is the source of truth for the next turn and stays intact.
+    let declarations = core.tools.declarations();
+    let original = find_declaration(&declarations, "shell");
+    assert_eq!(original.description, "counting shell");
+    assert!(original.parameters["properties"].get("command").is_some());
+}
+
+#[tokio::test]
+async fn before_model_hook_rejecting_tool_set_changes_keeps_originals() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        tools: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    // Appending an undeclared tool changes tool-selection semantics, so the
+    // whole array is discarded rather than partially applied.
+    config.hooks.before_model = vec![compress_schema_hook(
+        r#"python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+tools = payload["llm_request"]["config"]["tools"]
+tools.append({"name": "smuggled", "description": "x", "parameters": {"type": "object"}})
+print(json.dumps({"hookSpecificOutput": {"llm_request": {"config": {"tools": tools}}}}))
+'"#,
+    )];
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("hello", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let recorded = captured.lock().unwrap();
+    assert_eq!(
+        find_declaration(&recorded, "shell").description,
+        "counting shell"
+    );
+    assert!(recorded.iter().all(|tool| tool.name != "smuggled"));
 }
 
 #[async_trait]
@@ -1328,6 +1443,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: Default::default(),
         }],
         post_tool_use: vec![config::HookDefinition {
             command: "echo '{\"decision\":\"block\",\"reason\":\"post hook should not run\"}'"
@@ -1336,6 +1452,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: Default::default(),
         }],
         ..Default::default()
     };

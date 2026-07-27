@@ -157,10 +157,10 @@ impl MessageParser {
     /// via Server-Sent Events (SSE) instead of a single JSON body.
     /// SSE events are converted to a JSON array and passed to parse_response.
     ///
-    /// Only the SysOM path is deep-parsed here (see
-    /// [`Self::parse_by_path_sysom_only`] for why) — OpenAI/Anthropic SSE
-    /// responses rely on the HttpRecord-based genai-builder fallback instead,
-    /// avoiding duplicate provider/model/message extraction.
+    /// Delegates to [`Self::parse_by_path`] so that Anthropic/OpenAI/SysOM
+    /// SSE responses are all deep-parsed by their typed parsers. The
+    /// genai-builder SSE fallback alone cannot reconstruct Anthropic
+    /// content blocks from `message_start`/`content_block_delta` events.
     ///
     /// # Arguments
     /// * `path` - The HTTP request path (e.g., "/v1/chat/completions")
@@ -191,7 +191,7 @@ impl MessageParser {
             Some(serde_json::Value::Array(chunks))
         };
 
-        self.parse_by_path_sysom_only(path, request_body, response_body.as_ref())
+        self.parse_by_path(path, request_body, response_body.as_ref())
     }
 
     /// Detect provider from path without parsing
@@ -441,11 +441,10 @@ mod tests {
 
     // -- parse_by_path_sysom_only / parse_by_path_with_sse scoping tests --
     //
-    // These cover the branch-A/branch-B dedup fix: SSE responses for
-    // OpenAI/Anthropic must no longer be deep-parsed here (that semantic
-    // reconstruction now lives solely in genai::extract_parts_from_sse_body
-    // against the raw HttpRecord), while SysOM must still be deep-parsed
-    // because its llmParamString/tool_use envelope has no HttpRecord fallback.
+    // parse_by_path_with_sse delegates to the full parse_by_path, so all
+    // providers (OpenAI/Anthropic/SysOM) are deep-parsed for SSE responses.
+    // The genai-builder SSE fallback alone cannot reconstruct Anthropic
+    // content blocks from message_start/content_block_delta events.
 
     #[test]
     fn test_parse_by_path_sysom_only_rejects_openai_and_anthropic() {
@@ -520,7 +519,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_by_path_with_sse_skips_openai() {
+    fn test_parse_by_path_with_sse_openai_returns_none() {
+        // The OpenAI parser does not deep-parse SSE arrays — the genai
+        // builder's SSE fallback handles OpenAI streaming instead.
         let parser = MessageParser::new();
         let chunk = serde_json::json!({
             "id": "chatcmpl-123",
@@ -529,12 +530,44 @@ mod tests {
         });
         let events = vec![make_sse_event(&chunk.to_string())];
 
-        // Previously this returned Some(OpenAICompletion { .. }); now branch A
-        // leaves OpenAI/Anthropic SSE responses unparsed since the genai
-        // builder's SSE fallback already reconstructs the same semantics from
-        // the raw HttpRecord.
         let result = parser.parse_by_path_with_sse("/v1/chat/completions", None, &events);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_by_path_with_sse_parses_anthropic() {
+        // The Anthropic parser deep-parses SSE arrays (message_start,
+        // content_block_delta, etc.) — this must not be skipped.
+        let parser = MessageParser::new();
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_123",
+                "model": "claude-3-opus",
+                "role": "assistant",
+                "type": "message",
+                "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0}
+            }
+        });
+        let content_delta = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"}
+        });
+        let message_delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 5}
+        });
+        let events = vec![
+            make_sse_event(&message_start.to_string()),
+            make_sse_event(&content_delta.to_string()),
+            make_sse_event(&message_delta.to_string()),
+        ];
+
+        let result = parser.parse_by_path_with_sse("/v1/messages", None, &events);
+        assert!(result.is_some(), "Anthropic SSE should be deep-parsed");
     }
 
     #[test]

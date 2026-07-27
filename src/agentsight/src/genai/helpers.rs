@@ -208,13 +208,18 @@ impl GenAIBuilder {
     ///   top-level `"input"` array with sibling `"instructions"` string.
     ///
     /// Returns `(messages_vec, instructions_text)` where `instructions_text`
-    /// is only set when the Responses API form is used (it serves as the
-    /// system prompt fallback when the messages array has no system role).
+    /// is the system-prompt fallback used when the messages array has no
+    /// `role == "system"` entry. It is set for:
+    /// - OpenAI Responses API: the top-level `"instructions"` string.
+    /// - Anthropic Messages API: the top-level `"system"` field (string or
+    ///   array of `{"type":"text","text":"..."}` blocks), since Anthropic
+    ///   carries the system prompt outside the messages array.
     pub(super) fn extract_messages_view(
         body: &serde_json::Value,
     ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
         if let Some(arr) = body.get("messages").and_then(|m| m.as_array()) {
-            return Some((arr.clone(), None));
+            let system_text = body.get("system").and_then(Self::extract_system_text);
+            return Some((arr.clone(), system_text));
         }
         if let Some(arr) = body.get("input").and_then(|m| m.as_array()) {
             let instructions = body
@@ -224,6 +229,32 @@ impl GenAIBuilder {
             return Some((arr.clone(), instructions));
         }
         None
+    }
+
+    /// Extract text from Anthropic's top-level `system` field.
+    ///
+    /// The field is either a plain string or an array of content blocks
+    /// (`{"type":"text","text":"..."}`). Returns `None` when empty so the
+    /// caller's "no system role in messages" fallback stays inactive.
+    fn extract_system_text(system: &serde_json::Value) -> Option<String> {
+        match system {
+            serde_json::Value::String(s) => {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
+                }
+            }
+            serde_json::Value::Array(blocks) => {
+                let text: String = blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.is_empty() { None } else { Some(text) }
+            }
+            _ => None,
+        }
     }
 
     /// Extract human-readable text from a message's `content` field.
@@ -1044,6 +1075,75 @@ mod tests {
         let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(instructions.is_none());
+    }
+
+    #[test]
+    fn test_extract_system_text_string() {
+        let system = serde_json::json!("You are helpful");
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&system),
+            Some("You are helpful".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_system_text_empty_string() {
+        let system = serde_json::json!("");
+        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
+    }
+
+    #[test]
+    fn test_extract_system_text_array() {
+        let system = serde_json::json!([
+            {"type": "text", "text": "Part 1"},
+            {"type": "text", "text": "Part 2"}
+        ]);
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&system),
+            Some("Part 1\nPart 2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_system_text_empty_array() {
+        let system = serde_json::json!([]);
+        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
+    }
+
+    #[test]
+    fn test_extract_system_text_non_text() {
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&serde_json::json!(123)),
+            None
+        );
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&serde_json::Value::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_messages_view_anthropic_system() {
+        let body = serde_json::json!({
+            "model": "claude-3",
+            "system": "You are helpful",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(instructions.as_deref(), Some("You are helpful"));
+    }
+
+    #[test]
+    fn test_extract_messages_view_anthropic_system_array() {
+        let body = serde_json::json!({
+            "model": "claude-3",
+            "system": [{"type": "text", "text": "sys prompt"}],
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(instructions.as_deref(), Some("sys prompt"));
     }
 
     #[test]

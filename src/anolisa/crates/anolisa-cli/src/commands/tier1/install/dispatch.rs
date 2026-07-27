@@ -7,6 +7,7 @@
 //! through [`RawInstallOps`], a delegated plan re-uses the native-transaction
 //! executor with a [`StoreRecordSink`]. No lifecycle policy lives here.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
@@ -49,9 +50,10 @@ use crate::resolution::{
 use crate::response::{CliError, render_json};
 
 use super::owned_ops::{
-    RawInstallOps, ValidatedInstall, installed_version_label, validate_owned_install,
+    RawInstallOps, ValidatedInstall, installed_version_label, validate_component_conflict,
+    validate_owned_install,
 };
-use super::raw::resolve_raw;
+use super::raw::{load_dry_run_install_contract, resolve_raw};
 use super::render::repo_config_err;
 use super::rpm::{
     PinError, RpmTarget, resolve_pinned_candidate, rpm_package_candidates_with_index,
@@ -67,6 +69,26 @@ pub(crate) fn handle_one(
 ) -> Result<InstallOutcome, CliError> {
     let (query, txn) = host_backends(&component, &args, ctx)?;
     install_component_with_deps(&component, &args, ctx, &query, &txn, privilege::is_root())
+}
+
+/// Dispatch one batch member while treating earlier successful dry-run
+/// members as installed for directional manifest-conflict validation.
+pub(crate) fn handle_one_with_planned_components(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+    planned_components: &HashSet<String>,
+) -> Result<InstallOutcome, CliError> {
+    let (query, txn) = host_backends(&component, &args, ctx)?;
+    install_component_with_deps_and_planned(
+        &component,
+        &args,
+        ctx,
+        &query,
+        &txn,
+        privilege::is_root(),
+        planned_components,
+    )
 }
 
 /// Real host backends for one component invocation.
@@ -248,8 +270,20 @@ pub(crate) fn install_component_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> Result<InstallOutcome, CliError> {
+    install_component_with_deps_and_planned(input, args, ctx, query, txn, is_root, &HashSet::new())
+}
+
+fn install_component_with_deps_and_planned(
+    input: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+    planned_components: &HashSet<String>,
+) -> Result<InstallOutcome, CliError> {
     let planned = plan_component(input, args, ctx, query, txn)?;
-    execute_planned(planned, args, ctx, query, txn, is_root)
+    execute_planned(planned, args, ctx, query, txn, is_root, planned_components)
 }
 
 /// Planning prefix of an install: resolve the component and its provider
@@ -496,6 +530,7 @@ fn execute_planned(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
+    planned_components: &HashSet<String>,
 ) -> Result<InstallOutcome, CliError> {
     let PlannedComponent {
         command,
@@ -569,6 +604,22 @@ fn execute_planned(
     if ctx.dry_run {
         for warning in resolution.iter().flat_map(|r| r.warnings.iter()) {
             eprintln!("warning: {warning}");
+        }
+        if let Some(resolution) = resolution.as_ref() {
+            match load_dry_run_install_contract(ctx, &layout, resolution)? {
+                Some(contract) => {
+                    validate_component_conflict(
+                        &contract.manifest,
+                        &store,
+                        planned_components,
+                        &command,
+                    )?;
+                }
+                None => eprintln!(
+                    "warning: dry-run could not validate component conflicts for '{}' because the repository has no lightweight meta.toml; the full artifact was not downloaded",
+                    resolution.component
+                ),
+            }
         }
         // A pinned dry-run reports the version it resolved against the
         // repository, not the raw `--version` echo — the pin fields carry

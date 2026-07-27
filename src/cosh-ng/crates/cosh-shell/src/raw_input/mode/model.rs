@@ -30,6 +30,31 @@ pub enum PromptGhostRoute {
     },
 }
 
+/// Semantic destination of a [`PromptGhostRoute`], stripped of display-only
+/// payload (ghost text, candidate list, active index). Routes with the same
+/// kind interpret Tab/Enter identically, so kind changes mark an input
+/// ownership cutover while same-kind refreshes do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptGhostRouteKind {
+    NativeShell,
+    AgentIntercept,
+    AgentSelection,
+}
+
+impl PromptGhostRoute {
+    /// Exhaustive on purpose (no wildcard arm): adding a `PromptGhostRoute`
+    /// variant fails to compile here until the new variant receives its own
+    /// ownership classification, so a future route can never be silently
+    /// folded into an existing kind.
+    pub(crate) fn kind(&self) -> PromptGhostRouteKind {
+        match self {
+            Self::NativeShell => PromptGhostRouteKind::NativeShell,
+            Self::AgentIntercept { .. } => PromptGhostRouteKind::AgentIntercept,
+            Self::AgentSelection { .. } => PromptGhostRouteKind::AgentSelection,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptGhostCandidate {
     pub text: String,
@@ -90,13 +115,17 @@ pub(crate) enum RawInputMode {
 /// inside the same owner (prompt ghost candidate cycling, card selection
 /// redraws) keep the owner stable, so bytes obtained across such updates are
 /// not treated as an ownership cutover and never get silently dropped.
+/// A prompt ghost route change (e.g. `AgentSelection` -> `NativeShell`) is
+/// not display-only: Tab/Enter have different destinations per route kind,
+/// so crossing kinds is an ownership cutover and in-flight bytes are
+/// discarded instead of being reinterpreted under the new route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputOwnership {
     Passthrough,
     RawPassthrough,
     Hold,
     Delay(u64),
-    PromptGhost,
+    PromptGhost(PromptGhostRouteKind),
     Capture(u64),
     Submitted(u64),
     Draining(u64),
@@ -110,7 +139,7 @@ impl RawInputMode {
             Self::RawPassthrough => InputOwnership::RawPassthrough,
             Self::Hold => InputOwnership::Hold,
             Self::Delay { generation } => InputOwnership::Delay(*generation),
-            Self::PromptGhost { .. } => InputOwnership::PromptGhost,
+            Self::PromptGhost { route, .. } => InputOwnership::PromptGhost(route.kind()),
             Self::Capture { generation, .. } => InputOwnership::Capture(*generation),
             Self::Submitted { generation, .. } => InputOwnership::Submitted(*generation),
             Self::Draining { generation, .. } => InputOwnership::Draining(*generation),

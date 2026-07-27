@@ -28,6 +28,7 @@ from hook_utils import (
     _TOKENLESS_LOCAL_SHARE,
     forward_stderr,
     parse_version,
+    resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
     skip,
@@ -38,12 +39,7 @@ from hook_utils import (
 # -- constants ---------------------------------------------------------------
 
 _MIN_RTK_VERSION = (0, 35, 0)
-_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
-
-# Import Cosh-NG detection for stats attribution
-from hook_utils import detect_cosh_ng_runtime as _detect_cosh_ng
-if _detect_cosh_ng() is not None and _AGENT_ID == "tokenless":
-    _AGENT_ID = "cosh-ng"
+_AGENT_ID = resolve_agent_id()
 
 
 # -- main --------------------------------------------------------------------

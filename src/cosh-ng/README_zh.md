@@ -121,6 +121,8 @@ install、link 和能力发生变化的 update 会先生成 preflight operation�
 展示时始终为 `[redacted]`；workspace setting 只对已信任项目生效。扩展 context
 有明确大小边界，并位于 project context 之后。local stdio MCP tool 使用完整
 `<extension>/mcp/<server>/<tool>` namespace，并经过正常 tool approval。
+钩子可声明 `env`，仅注入该钩子自身的子进程——宿主进程永不被修改；由于这属于可执行
+能力，它会计入扩展 capability 指纹，因此声明或修改需要重新确认。
 Agent definition 会被严格校验和列出，但在统一 subagent executor 接入前明确报告
 `executable=false`。registry mutation 会构建 candidate generation。shell 会话复用
 同一个长生命周期 core process：空闲时 `/extensions reload` 立即切换健康 candidate；

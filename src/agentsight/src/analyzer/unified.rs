@@ -573,13 +573,9 @@ impl Analyzer {
                 }
                 let req_body = stream.request_json_body();
                 if let Some(sse_json) = stream.response_sse_json_array() {
-                    // SSE-shaped response: OpenAI/Anthropic semantics are already
-                    // reconstructed by the genai builder's SSE fallback from the raw
-                    // HttpRecord, so only SysOM (non-standard llmParamString / tool_use
-                    // envelope) still needs the typed parser here.
                     return self
                         .message
-                        .parse_by_path_sysom_only(&path, req_body.as_ref(), Some(&sse_json))
+                        .parse_by_path(&path, req_body.as_ref(), Some(&sse_json))
                         .map(AnalysisResult::Message);
                 }
                 let resp_body = stream.response_json_body();
@@ -1554,12 +1550,11 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_message_from_http_skips_openai_sse() {
-        // SSE-shaped OpenAI response: branch A must NOT produce a
-        // ParsedApiMessage here anymore — provider/model/message semantics
-        // for this path are reconstructed solely from the raw HttpRecord by
-        // genai::GenAIBuilder's SSE fallback, so parsing it again in the
-        // analyzer would just duplicate that work.
+    fn test_extract_message_from_http_parses_openai_sse_request() {
+        // SSE-shaped OpenAI response: branch A now delegates to parse_by_path
+        // (restored), so the request body is parsed even though the OpenAI
+        // parser does not deep-parse the SSE response array — that part is
+        // still reconstructed by genai::GenAIBuilder's SSE fallback.
         let analyzer = Analyzer::new();
         let request_body = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
         let chunk = serde_json::json!({
@@ -1571,7 +1566,7 @@ mod tests {
 
         let agg = AggregatedResult::Http2StreamComplete(stream);
         let result = analyzer.extract_message_from_http(&agg);
-        assert!(result.is_none());
+        assert!(result.is_some());
     }
 
     #[test]

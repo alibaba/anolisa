@@ -217,8 +217,11 @@ impl CardInputState {
                         RawInputCapture::Session { id, .. } => {
                             events.push(RawInputEvent::SessionCancel(id.clone()))
                         }
+                        // Ctrl+C abandons the prompt outright. A capture is all that reaches the
+                        // relay here, so this is the only place the interrupt can be told apart
+                        // from the ESC arms below.
                         RawInputCapture::Question { id, .. } => {
-                            events.push(RawInputEvent::QuestionCancel(id.clone()))
+                            events.push(RawInputEvent::QuestionAbort(id.clone()))
                         }
                         RawInputCapture::Evidence { id } => {
                             events.push(RawInputEvent::EvidenceCancel(id.clone()))

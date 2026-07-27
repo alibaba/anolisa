@@ -22,6 +22,7 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
     skip,
@@ -30,7 +31,7 @@ from hook_utils import (
 
 # -- constants ---------------------------------------------------------------
 
-_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
+_AGENT_ID = resolve_agent_id()
 
 
 # -- helpers -----------------------------------------------------------------
@@ -68,9 +69,19 @@ def main() -> None:
         warn("failed to read BeforeModel payload. Passing through unchanged.")
         skip()
 
-    # 3. Extract tools array
+    # 3. Extract tools array. `config.tools` is the canonical position (both
+    # copilot-shell's Hook Translator and Cosh-NG put it there); the top-level
+    # `tools` is the older position, kept for hosts that still emit it.
+    # Presence of the canonical key decides, not its truthiness: a host that
+    # declares no tools sends an empty canonical array, and falling through to
+    # a stale legacy field there would compress declarations this request never
+    # carried. This mirrors the host-side precedence.
     llm_request = input_data.get("llm_request", {})
-    tools = llm_request.get("tools")
+    config = llm_request.get("config")
+    if isinstance(config, dict) and "tools" in config:
+        tools = config["tools"]
+    else:
+        tools = llm_request.get("tools")
     if not tools:
         skip()
 
@@ -115,12 +126,14 @@ def main() -> None:
         )
         skip()
 
-    # 6. Build response
+    # 6. Build response at the canonical position.
     output = {
         "hookSpecificOutput": {
             "hookEventName": "BeforeModel",
             "llm_request": {
-                "tools": json.loads(compressed),
+                "config": {
+                    "tools": json.loads(compressed),
+                },
             },
         },
     }

@@ -6,7 +6,7 @@
 # Installed to: %{_datadir}/anolisa/components/agent-memory/component.toml
 [component]
 name = "agent-memory"
-version = "0.2.4"
+version = "0.2.5"
 
 [[adapters]]
 framework = "openclaw"

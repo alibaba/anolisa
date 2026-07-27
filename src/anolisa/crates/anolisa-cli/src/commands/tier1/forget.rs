@@ -76,7 +76,7 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     // legacy state the migration refused to classify and repair cannot
     // recover.
     let provenance = record_provenance(&store, target);
-    let provenance = provenance.ok_or_else(|| CliError::InvalidArgument {
+    let provenance = provenance.ok_or_else(|| CliError::NotInstalled {
         command: command.clone(),
         reason: format!(
             "component '{target}' is not installed — nothing to forget (run `anolisa status` to see what is tracked)"
@@ -600,9 +600,9 @@ mod tests {
         );
     }
 
-    /// Forgetting an absent component routes to INVALID_ARGUMENT (exit 2).
+    /// Forgetting an absent component routes to NOT_INSTALLED (exit 2).
     #[test]
-    fn forget_unknown_component_routes_to_invalid_argument() {
+    fn forget_unknown_component_routes_to_not_installed() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let err = handle(
@@ -612,7 +612,7 @@ mod tests {
             &c,
         )
         .expect_err("absent component must error");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert_eq!(err.exit_code(), 2);
         assert!(err.reason().contains("not installed"));
     }

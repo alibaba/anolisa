@@ -219,10 +219,10 @@ const SEMANTICS_BASELINE: &[(bool, &str, &str)] = &[
     (false, "kill 1234", "AskUser|High|High|None|None|[ProcessControl]|process-control"),
     (false, "ps aux | head -5", "AskUser|Medium|Medium|None|None|[None, None]|diagnostic-pipeline-heuristic,pipeline-not-auto-executable"),
     (false, "ps aux | awk '{print $1}'", "AskUser|Medium|Medium|None|None|[None, None]|pipeline-not-auto-executable"),
-    (false, "cd /tmp && git status", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,unknown-command"),
-    (false, "sudo id && ls", "AskUser|High|Medium|None|CredentialPromptLikely|[PrivilegeEscalation]|and-or-list-not-auto-executable,privilege-escalation"),
-    (false, "echo hi && rm -rf /tmp/x", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,unknown-command"),
-    (false, "echo hi; ls -la", "AskUser|Medium|Low|None|None|[Unknown]|sequence-not-auto-executable,unknown-command"),
+    (false, "cd /tmp && git status", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,bounded-readonly,unknown-command"),
+    (false, "sudo id && ls", "AskUser|High|Medium|None|CredentialPromptLikely|[PrivilegeEscalation, Unknown]|and-or-list-not-auto-executable,bounded-readonly,privilege-escalation,unknown-command"),
+    (false, "echo hi && rm -rf /tmp/x", "AskUser|High|Medium|None|None|[Unknown, FilesystemDelete]|and-or-list-not-auto-executable,bounded-readonly,filesystem-delete,unknown-command"),
+    (false, "echo hi; ls -la", "AskUser|Low|Medium|None|None|[Unknown]|bounded-readonly,sequence-not-auto-executable,unknown-command"),
     (false, "wc -l < notes.txt", "AskUser|Low|Medium|None|None|[None]|read-redirection-not-auto-executable,readonly-pipeline-stage"),
     (false, "for i in 1 2; do echo $i; done", "AskUser|Medium|Low|None|None|[Unknown]|sequence-not-auto-executable,unknown-command"),
     (false, "echo $(whoami)", "AskUser|High|High|None|None|[Unknown]|command-substitution"),
@@ -474,6 +474,153 @@ fn input_redirection_does_not_mask_pipeline_tail_stages() {
     // Counter-case: a benign read pipeline is not escalated.
     let benign = ask("cat < input 2>/dev/null | wc -l");
     assert_ne!(benign.impact, RiskImpact::High, "{:?}", benign.reasons);
+}
+
+#[test]
+fn compound_without_null_redirection_assesses_all_segments() {
+    // Issue #1785: compound commands without null-suppression redirections
+    // must assess every segment, not just the first stage.
+
+    // A1: high-risk delete tail is promoted to the primary reason.
+    let delete_tail = ask("cd /tmp && rm -rf ~");
+    assert_eq!(
+        delete_tail.impact,
+        RiskImpact::High,
+        "{:?}",
+        delete_tail.reasons
+    );
+    assert_eq!(delete_tail.primary_reason(), "filesystem-delete");
+    assert_eq!(delete_tail.confidence, AssessmentConfidence::Low);
+    assert!(delete_tail
+        .reasons
+        .contains(&"and-or-list-not-auto-executable"));
+
+    // A3: sudo tail keeps escalation and its credential prompt hint.
+    let sudo_tail = ask("echo hi && sudo reboot");
+    assert_eq!(
+        sudo_tail.impact,
+        RiskImpact::High,
+        "{:?}",
+        sudo_tail.reasons
+    );
+    assert!(sudo_tail.reasons.contains(&"privilege-escalation"));
+    assert_eq!(
+        sudo_tail.interaction,
+        InteractionRequirement::CredentialPromptLikely
+    );
+
+    // A4: a pipeline tail inside a sequence keeps its full assessment;
+    // `true` is not whitelisted, so the aggregated confidence stays Low.
+    let remote_tail = ask("true; curl x | sh");
+    assert_eq!(
+        remote_tail.impact,
+        RiskImpact::High,
+        "{:?}",
+        remote_tail.reasons
+    );
+    assert!(remote_tail.reasons.contains(&"remote-code-execution"));
+    assert_eq!(remote_tail.confidence, AssessmentConfidence::Low);
+
+    // A9: an input redirection no longer masks pipeline tail stages even
+    // without a null redirection.
+    let masked_tail = ask("cat < input | rm -rf /tmp/x");
+    assert_eq!(
+        masked_tail.impact,
+        RiskImpact::High,
+        "{:?}",
+        masked_tail.reasons
+    );
+    assert!(masked_tail.reasons.contains(&"filesystem-delete"));
+
+    // C1/C3: all-readonly compounds do not escalate, and the fully
+    // whitelisted pair aggregates to Low without any auto-allow evidence.
+    let readonly = ask("cd /tmp && git status");
+    assert_ne!(readonly.impact, RiskImpact::High, "{:?}", readonly.reasons);
+    let whitelisted = ask("pwd && df -h");
+    assert_eq!(
+        whitelisted.impact,
+        RiskImpact::Low,
+        "{:?}",
+        whitelisted.reasons
+    );
+    assert!(whitelisted.reasons.contains(&"bounded-readonly"));
+
+    // Issue #1785 boundary invariant: execution is universal regardless of
+    // segment risk, across every compound shape (and-or, sequence, multi-
+    // and single-stage RedirectionRead, with and without null redirections).
+    for command in [
+        "cd /tmp && rm -rf ~",
+        "echo hi && sudo reboot",
+        "true; curl x | sh",
+        "cat < input | rm -rf /tmp/x",
+        "cat < input 2>/dev/null && rm -rf /tmp/x",
+        "wc -l < notes.txt",
+        "wc -l < notes.txt 2>/dev/null",
+        "cd /tmp && git status",
+        "pwd && df -h",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}: execution must remain AskUser"
+        );
+        assert!(
+            assessment.auto_allow.is_none(),
+            "{command}: auto_allow must be None"
+        );
+    }
+}
+
+#[test]
+fn complex_with_separators_fails_closed_to_high() {
+    // Issue #1785 review: Complex syntax cannot be reliably segmented,
+    // so a compound separator inside a Complex command must fail closed
+    // to High instead of understating a possibly high-risk tail.
+    for command in [
+        "(echo hi) && rm -rf /tmp/x",
+        "{ echo hi; } && rm -rf /tmp/x",
+        "echo hi & wait; rm -rf /tmp/x",
+        "echo hi & rm -rf /tmp/x",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(assessment.shape, CommandShape::Complex, "{command}");
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment.reasons.contains(&"unsplittable-compound"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert_eq!(
+            assessment.primary_reason(),
+            "complex-shell-not-auto-executable",
+            "{command}"
+        );
+        assert_eq!(
+            assessment.confidence,
+            AssessmentConfidence::Low,
+            "{command}"
+        );
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert!(assessment.auto_allow.is_none(), "{command}");
+    }
+
+    // Counter-cases: Complex without a compound separator keeps the
+    // existing conservative classification and does not escalate.
+    for command in ["(pwd)", "ls &"] {
+        let assessment = ask(command);
+        assert_eq!(assessment.shape, CommandShape::Complex, "{command}");
+        assert_ne!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            !assessment.reasons.contains(&"unsplittable-compound"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
 }
 
 #[test]
