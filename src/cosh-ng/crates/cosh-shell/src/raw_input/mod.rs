@@ -269,10 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn at_mention_inline_hint_with_matching_files() {
+    fn at_mention_inline_hint_and_tab_completion() {
+        use super::event_parser::try_at_mention_tab_completion;
         use std::fs;
-        use std::path::Path;
-        let dir = std::env::temp_dir().join("cosh_at_test");
+        let dir = std::env::temp_dir().join(format!("cosh_at_combined_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("alpha_file.txt"), "").unwrap();
@@ -280,6 +280,7 @@ mod tests {
         let prev_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).unwrap();
 
+        // Inline hint tests
         let hint = candidate_inline_hint("@");
         assert!(hint.is_some(), "hint should be Some when files exist");
 
@@ -290,22 +291,7 @@ mod tests {
         let hint_nomatch = candidate_inline_hint("@zzz");
         assert!(hint_nomatch.is_none(), "hint for @zzz should be None");
 
-        std::env::set_current_dir(prev_dir).unwrap();
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn at_mention_tab_completion() {
-        use super::event_parser::try_at_mention_tab_completion;
-        use std::fs;
-        let dir = std::env::temp_dir().join("cosh_at_tab_test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("alpha_file.txt"), "").unwrap();
-        fs::write(dir.join("beta_file.txt"), "").unwrap();
-        let prev_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
-
+        // Tab completion tests
         let result = try_at_mention_tab_completion("@alp");
         assert_eq!(result, Some("@alpha_file.txt".to_string()));
 
@@ -314,6 +300,11 @@ mod tests {
 
         let result_nomatch = try_at_mention_tab_completion("@zzz");
         assert!(result_nomatch.is_none(), "Tab for non-matching prefix should return None");
+
+        // Prefix preservation test
+        let result_prefix = try_at_mention_tab_completion("  @alp");
+        assert_eq!(result_prefix, Some("  @alpha_file.txt".to_string()),
+            "Tab completion should preserve text before @");
 
         std::env::set_current_dir(prev_dir).unwrap();
         let _ = fs::remove_dir_all(&dir);

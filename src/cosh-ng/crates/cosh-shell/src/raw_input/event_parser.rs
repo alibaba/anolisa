@@ -191,10 +191,11 @@ fn at_mention_query(line: &str) -> Option<(usize, &str)> {
         }
     }
     let at_pos = at_pos?;
-    let query = &line[at_pos + 1..];
-    if query.contains(|c: char| c.is_whitespace()) {
-        return None;
-    }
+    let after_at = &line[at_pos + 1..];
+    let query = match after_at.find(|c: char| c.is_whitespace()) {
+        Some(end) => &after_at[..end],
+        None => after_at,
+    };
     Some((at_pos, query))
 }
 
@@ -219,11 +220,13 @@ fn list_at_completion_candidates(query: &str) -> Vec<String> {
 
 /// Attempts to complete an `@`-mention file path when Tab is pressed.
 /// Returns the completed line (with the full filename) if completion succeeds.
+/// Preserves any text before the `@` for future mid-line `@`-mention support.
 pub fn try_at_mention_tab_completion(line: &str) -> Option<String> {
-    let (_at_pos, query) = at_mention_query(line)?;
+    let (at_pos, query) = at_mention_query(line)?;
     let matches = list_at_completion_candidates(query);
     let first_match = matches.into_iter().next()?;
-    Some(format!("@{}", first_match))
+    let prefix = &line[..at_pos];
+    Some(format!("{}@{}", prefix, first_match))
 }
 
 pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
