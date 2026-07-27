@@ -503,3 +503,91 @@ fn failed_ecs_challenge_edit_retry_drops_the_ecs_auth_source() {
         Some("\u{2022}\u{2022}\u{2022}")
     );
 }
+
+
+// ===== ESC back-step tests for GH-1760 =====
+
+fn multi_field_filling_state() -> InlineState {
+    let mut state = InlineState::default();
+    record_auth_required(
+        &mut state,
+        &[governed_auth_required(vec![
+            openai_compat_with_provider_id_field(),
+        ])],
+    );
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.phase = AuthPhase::FillingField;
+    // Simulate that the user has already filled provider_id (field 0) and is on base_url (field 1)
+    auth.current_field = 1;
+    auth.collected_values
+        .insert("provider_id".to_string(), "my-provider".to_string());
+    auth.field_input = "https://api.example.com".to_string();
+    state
+}
+
+#[test]
+fn esc_back_step_from_field_1_returns_to_field_0() {
+    let mut state = multi_field_filling_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    assert_eq!(auth.current_field, 1);
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+
+    // Simulate ESC back-step: decrement field, reload input
+    auth.current_field -= 1;
+    auth.field_error = None;
+    auth.load_current_field_input();
+
+    assert_eq!(auth.current_field, 0);
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    // The previously collected provider_id value should be restored as input
+    assert_eq!(auth.field_input, "my-provider");
+    // Other collected values are preserved
+    assert!(auth.collected_values.contains_key("provider_id"));
+}
+
+#[test]
+fn esc_back_step_from_field_0_returns_to_selecting_provider() {
+    let mut state = filling_provider_id_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    assert_eq!(auth.current_field, 0);
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+
+    // Simulate ESC back-step from first field: return to SelectingProvider
+    auth.phase = AuthPhase::SelectingProvider;
+    auth.collected_values.clear();
+    auth.field_input.clear();
+    auth.field_error = None;
+
+    assert_eq!(auth.phase, AuthPhase::SelectingProvider);
+    assert!(auth.collected_values.is_empty());
+    assert!(auth.field_input.is_empty());
+}
+
+#[test]
+fn esc_back_step_preserves_already_filled_fields() {
+    let mut state = multi_field_filling_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    // User is on field 2 (api_key), with provider_id and base_url filled
+    auth.current_field = 2;
+    auth.collected_values
+        .insert("base_url".to_string(), "https://api.example.com".to_string());
+
+    // ESC back-step: go to field 1 (base_url)
+    auth.current_field -= 1;
+    auth.field_error = None;
+    auth.load_current_field_input();
+
+    assert_eq!(auth.current_field, 1);
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    // base_url value should be loaded as current input
+    assert_eq!(auth.field_input, "https://api.example.com");
+    // Both previously collected values are preserved
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("my-provider")
+    );
+    assert_eq!(
+        auth.collected_values.get("base_url").map(String::as_str),
+        Some("https://api.example.com")
+    );
+}
