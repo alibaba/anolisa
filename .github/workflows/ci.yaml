@@ -750,7 +750,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src/tokenless
+          workspaces: |
+            src/tokenless
+            src/tokenless/benchmark
 
       - name: Check component contract
         run: make -C src/tokenless check-component-contract
@@ -769,6 +771,30 @@ jobs:
         run: |
           cd src/tokenless
           cargo test --workspace -- --test-threads=1
+
+      # The benchmark suite is a standalone workspace (empty [workspace] in
+      # src/tokenless/benchmark/Cargo.toml), so the --workspace commands above
+      # never touch it. Exercise it explicitly: fmt, clippy and the 96
+      # quality/adversarial tests, all with --locked so a stale Cargo.lock
+      # fails fast. Criterion benches stay a manual/periodic task.
+      - name: Check benchmark suite formatting (L1)
+        run: |
+          cd src/tokenless/benchmark
+          cargo fmt --all -- --check
+
+      - name: Lint benchmark suite (L1)
+        run: |
+          cd src/tokenless/benchmark
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test benchmark suite (L1)
+        env:
+          # Deep-recursion adversarial tests overflow the default Linux
+          # thread stack; give test threads 16 MiB.
+          RUST_MIN_STACK: '16777216'
+        run: |
+          cd src/tokenless/benchmark
+          cargo test --release --locked
 
       - name: Run hook integration tests (Python)
         run: |
