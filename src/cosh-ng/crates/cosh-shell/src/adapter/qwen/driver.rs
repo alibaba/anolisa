@@ -246,7 +246,14 @@ pub(super) fn start_control_protocol_qwen_process(
             let _ = writer.flush();
 
             if !prompt_for_writer.is_empty() {
-                let user_msg = control_protocol::serialize_user_message(&prompt_for_writer, None);
+                let initial_cwd = std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned());
+                let user_msg = control_protocol::serialize_user_message(
+                    &prompt_for_writer,
+                    None,
+                    initial_cwd.as_deref(),
+                );
                 let _ = writeln!(writer, "{user_msg}");
                 let _ = writer.flush();
             }

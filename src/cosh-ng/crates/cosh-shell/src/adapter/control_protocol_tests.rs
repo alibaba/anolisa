@@ -823,17 +823,24 @@ fn serialize_initialize_format() {
 
 #[test]
 fn serialize_user_message_format() {
-    let s = serialize_user_message("hello world", Some("sess-1"));
+    let s = serialize_user_message("hello world", Some("sess-1"), None);
     let v: Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["type"], "user");
     assert_eq!(v["message"]["role"], "user");
     assert_eq!(v["message"]["content"], "hello world");
     assert!(v["parent_tool_use_id"].is_null());
     assert_eq!(v["session_id"], "sess-1");
+    assert!(v.get("shell_context").is_none());
 
-    let s2 = serialize_user_message("hi", None);
+    let s2 = serialize_user_message("hi", None, None);
     let v2: Value = serde_json::from_str(&s2).unwrap();
     assert!(v2.get("session_id").is_none());
+    assert!(v2.get("shell_context").is_none());
+
+    let s3 = serialize_user_message("hi", None, Some("/home/test"));
+    let v3: Value = serde_json::from_str(&s3).unwrap();
+    assert_eq!(v3["shell_context"]["cwd"], "/home/test");
+    assert_eq!(v3["shell_context"]["last_exit_code"], 0);
 }
 
 #[test]

@@ -37,7 +37,11 @@ pub fn serialize_initialize(request_id: &str) -> String {
     .to_string()
 }
 
-pub fn serialize_user_message(content: &str, session_id: Option<&str>) -> String {
+pub fn serialize_user_message(
+    content: &str,
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+) -> String {
     let mut message = json!({
         "type": "user",
         "message": { "role": "user", "content": content },
@@ -45,6 +49,13 @@ pub fn serialize_user_message(content: &str, session_id: Option<&str>) -> String
     });
     if let Some(session_id) = session_id {
         message["session_id"] = Value::String(session_id.to_string());
+    }
+    if let Some(cwd) = cwd {
+        message["shell_context"] = json!({
+            "cwd": cwd,
+            "env": {},
+            "last_exit_code": 0
+        });
     }
     message.to_string()
 }

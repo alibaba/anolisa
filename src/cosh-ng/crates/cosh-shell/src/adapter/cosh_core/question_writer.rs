@@ -13,6 +13,7 @@ use super::question_ingress::{protocol_error, CoreQuestionProtocolReason, CoshCo
 pub(crate) struct QuestionWriter {
     pub(crate) stdin: ChildStdin,
     pub(crate) prompt: String,
+    pub(crate) cwd: Option<String>,
     pub(crate) approval_rx: mpsc::Receiver<ApprovalResponse>,
     pub(crate) auth_rx: mpsc::Receiver<AuthResponse>,
     pub(crate) done: Arc<AtomicBool>,
@@ -34,7 +35,8 @@ impl QuestionWriter {
         let _ = writer.flush();
 
         if !self.prompt.is_empty() {
-            let user_msg = control_protocol::serialize_user_message(&self.prompt, None);
+            let user_msg =
+                control_protocol::serialize_user_message(&self.prompt, None, self.cwd.as_deref());
             let _ = writeln!(writer, "{user_msg}");
             let _ = writer.flush();
         }
