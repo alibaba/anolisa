@@ -31,7 +31,7 @@ pub(super) fn render_mcp_command<W: Write>(
             if let Some(server) = arg {
                 cmd_args.push(server);
             }
-            run_mcp_subprocess(&cosh_core.program, &cmd_args, &title, output)
+            run_mcp_subprocess(&cosh_core.program, &cmd_args, title, output)
         }
         "help" | "--help" | "-h" => render_notice_panel(
             output,
