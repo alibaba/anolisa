@@ -313,12 +313,21 @@ mod tests {
             assert!(
                 hints.iter().all(|hint| matches!(
                     hint.name,
-                    "/config" | "/session" | "/mode" | "/hooks" | "/extensions" | "/skills"
+                    "/config"
+                        | "/session"
+                        | "/mode"
+                        | "/hooks"
+                        | "/extensions"
+                        | "/skills"
+                        | "/auth"
                 )),
                 "{prefix} returned non-public hints: {:?}",
                 hints.iter().map(|hint| hint.name).collect::<Vec<_>>()
             );
         }
+        // /au matches the public /auth but must never surface the contextual /audit
+        assert!(slash_hints("/au").iter().any(|hint| hint.name == "/auth"));
+        assert!(slash_hints("/au").iter().all(|hint| hint.name != "/audit"));
         // /ex and /skill now match public commands
         assert!(slash_hints("/ex")
             .iter()
