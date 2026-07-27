@@ -297,6 +297,7 @@ fn null_redirection_suppression_is_not_filesystem_write() {
         "ls > /dev/null",
         "cat x 2>>/dev/null",
         "du -sh /var 2> /dev/null",
+        "find /tmp -maxdepth 3 -name '*cosh*' 2>/dev/null",  // GH-1752
     ] {
         let assessment = ask(command);
         assert_ne!(assessment.impact, RiskImpact::High, "{command}");
