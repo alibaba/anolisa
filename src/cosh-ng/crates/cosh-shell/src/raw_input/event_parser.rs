@@ -338,7 +338,7 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
                     CandidateLineStatus::Unsafe
                 };
             }
-            if *byte < 0x20 && !matches!(byte, b'\t' | SOFT_NEWLINE) {
+            if *byte < 0x20 && !matches!(*byte, b'\t' | SOFT_NEWLINE) {
                 return CandidateLineStatus::Unsafe;
             }
         }
@@ -347,10 +347,9 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
 
     let line_len = newline_idx + 1;
     let line_bytes = &bytes[..line_len];
-    if line_bytes
-        .iter()
-        .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t' | SOFT_NEWLINE)))
-    {
+    if line_bytes.iter().any(|byte| {
+        *byte == 0x1b || (*byte < 0x20 && !matches!(*byte, b'\n' | b'\r' | b'\t' | SOFT_NEWLINE))
+    }) {
         return CandidateLineStatus::Unsafe;
     }
 
