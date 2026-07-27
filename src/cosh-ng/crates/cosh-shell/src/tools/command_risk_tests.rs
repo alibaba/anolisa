@@ -312,6 +312,13 @@ fn null_redirection_suppression_is_not_filesystem_write() {
             assessment.reasons
         );
     }
+    // GH-1752: find's reasons set must stay consistent — not just impact.
+    let find = ask("find /tmp -maxdepth 3 -name '*cosh*' 2>/dev/null");
+    assert_eq!(find.impact, RiskImpact::Medium);
+    assert!(find.reasons.contains(&"unknown-command"), "{:?}", find.reasons);
+    assert!(find.reasons.contains(&"output-suppressed"), "{:?}", find.reasons);
+    assert!(!find.reasons.contains(&"redirection-write"), "{:?}", find.reasons);
+
     // V-TOK: fd and target tokens must not leak into stages.
     let parsed = super::command_risk_parser::parse_command("ps aux 2>/dev/null");
     assert_eq!(parsed.shape, CommandShape::Simple);
