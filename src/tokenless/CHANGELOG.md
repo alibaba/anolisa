@@ -1,8 +1,36 @@
 # Changelog
 
-## Unreleased
+All notable changes to Tokenless will be documented in this file.
 
-- fix Claude Code PostToolUse hook to *replace* the model-visible tool result via `hookSpecificOutput.updatedToolOutput` (Claude Code >= 2.1.121) instead of appending the compressed payload through the additive `additionalContext`, which duplicated the original output — `additionalContext` now carries only additive env-attribution diagnostics, empty schema fields (e.g. Bash `stderr`/`interrupted`/`isImage`) are restored on the replacement, older or undetectable Claude Code versions fail open by disabling compression, and non-beneficial compressions now pass through unchanged for every agent; adds `tests/test-posttooluse-replacement.sh` covering replacement semantics (closes #1645)
+Releases from 0.7.2 onward follow
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+## [0.7.2] - 2026-07-27
+
+### Added
+
+- Tokenless now compresses Cosh-NG tool responses by replacing the original model-visible content ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Tokenless now rewrites supported Cosh-NG shell commands for more compact output ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+
+### Changed
+
+- Shell environment checks now report only recommended tools referenced by the current command ([#1598](https://github.com/alibaba/anolisa/pull/1598)).
+- `tokenless env-check --fix` now installs required dependencies only, leaving optional recommendations untouched ([#1598](https://github.com/alibaba/anolisa/pull/1598)).
+- Automatic dependency fixes now fail quickly with actionable authentication, network, or permission messages instead of prompting for sudo ([#1598](https://github.com/alibaba/anolisa/pull/1598)).
+- Cosh-NG compression statistics are now recorded under the `cosh-ng` agent ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Cosh-NG compression now excludes display-only content from model context ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Cosh-NG runs with undetectable versions now keep original tool responses unchanged ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Compression now leaves tool results unchanged when the compressed output is not smaller ([#1674](https://github.com/alibaba/anolisa/pull/1674)).
+- Tokenless user manuals now live in the central ANOLISA guide instead of the RPM package ([#1586](https://github.com/alibaba/anolisa/pull/1586)).
+
+### Fixed
+
+- Claude Code 2.1.121+ now replaces original tool results with compressed versions, preventing duplicate context ([#1674](https://github.com/alibaba/anolisa/pull/1674), [#1686](https://github.com/alibaba/anolisa/pull/1686)).
+- Older or undetectable Claude Code versions now pass tool results through unchanged instead of duplicating compressed context ([#1674](https://github.com/alibaba/anolisa/pull/1674), [#1686](https://github.com/alibaba/anolisa/pull/1686)).
+- Claude Code replacements now preserve built-in tool result formats, including empty fields ([#1674](https://github.com/alibaba/anolisa/pull/1674), [#1686](https://github.com/alibaba/anolisa/pull/1686)).
+- ANOLISA now recognizes the packaged Tokenless version correctly ([#1587](https://github.com/alibaba/anolisa/pull/1587)).
 
 ## 0.7.1
 
@@ -156,3 +184,6 @@
 ## 0.1.0
 
 - introduce tokenless into ANOLISA (#199)
+
+[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...HEAD
+[0.7.2]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.1...tokenless/v0.7.2
