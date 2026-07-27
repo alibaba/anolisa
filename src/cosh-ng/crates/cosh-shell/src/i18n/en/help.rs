@@ -121,8 +121,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashStatsFooter => {
             "Statistics are read-only and cover data observed by this cosh-shell process."
         }
+        MessageId::HelpSummaryMcp => "manage MCP servers",
         MessageId::SlashExtensionsTitle => "Extensions",
         MessageId::SlashSkillsTitle => "Skills",
+        MessageId::SlashMcpTitle => "MCP Servers",
+        MessageId::SlashMcpEmptyBody => "No MCP servers configured.",
         MessageId::SlashRegistryUnavailable => {
             "This feature requires cosh-core backend."
         }

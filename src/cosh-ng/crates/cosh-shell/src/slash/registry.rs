@@ -209,6 +209,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/mcp",
+            usage: "/mcp [list|connect|inspect|refresh|disconnect|login|logout] [name]",
+            summary_id: MessageId::HelpSummaryMcp,
+            group: Some("Registry"),
+            scope: "config",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/select",
             usage: "/select N",
             summary_id: MessageId::HelpSummarySelect,

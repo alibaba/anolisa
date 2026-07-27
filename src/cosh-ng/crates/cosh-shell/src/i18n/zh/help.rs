@@ -111,8 +111,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashStatsFooter => {
             "统计信息只读，覆盖当前 cosh-shell 进程已观测到的数据。"
         }
+        MessageId::HelpSummaryMcp => "管理 MCP 服务器",
         MessageId::SlashExtensionsTitle => "扩展",
         MessageId::SlashSkillsTitle => "技能",
+        MessageId::SlashMcpTitle => "MCP 服务器",
+        MessageId::SlashMcpEmptyBody => "未配置 MCP 服务器。",
         MessageId::SlashRegistryUnavailable => "此功能需要 cosh-core 后端支持。",
         MessageId::SlashHooksShellSection => "Shell Hooks",
         MessageId::SlashHooksAgentSection => "Agent Hooks",

@@ -91,6 +91,97 @@ pub(crate) async fn run_command(args: McpArgs, config: &CoreConfig) -> Result<()
     }
 }
 
+/// Handles MCP registry queries from the TUI slash command.
+pub(crate) async fn handle_mcp_registry(
+    action: &str,
+    params: &Value,
+    config: &CoreConfig,
+) -> Result<Value, String> {
+    match action {
+        "list" => list_servers_value(config),
+        "inspect" => {
+            let server = params
+                .get("server")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing 'server' parameter".to_string())?;
+            let inspection = inspect_server(server, config, "inspected", false).await?;
+            serde_json::to_value(&inspection)
+                .map_err(|e| format!("serialization error: {e}"))
+        }
+        "connect" => {
+            let server = params
+                .get("server")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing 'server' parameter".to_string())?;
+            let inspection = inspect_server(server, config, "connected", true).await?;
+            state::remove_disabled(MCP_SERVERS_STATE, server)?;
+            serde_json::to_value(&inspection)
+                .map_err(|e| format!("serialization error: {e}"))
+        }
+        "refresh" => {
+            let server = params
+                .get("server")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing 'server' parameter".to_string())?;
+            let inspection = inspect_server(server, config, "refreshed", false).await?;
+            serde_json::to_value(&inspection)
+                .map_err(|e| format!("serialization error: {e}"))
+        }
+        "disconnect" => {
+            let server = params
+                .get("server")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing 'server' parameter".to_string())?;
+            configured_server(config, server)?;
+            state::add_disabled(MCP_SERVERS_STATE, server)?;
+            let credentials_removed = oauth::remove_credentials(server)?;
+            serde_json::to_value(&McpDisconnectResult {
+                server: server.to_string(),
+                disabled: true,
+                credentials_removed,
+            })
+            .map_err(|e| format!("serialization error: {e}"))
+        }
+        "login" => {
+            let server = params
+                .get("server")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing 'server' parameter".to_string())?;
+            let manual = params
+                .get("manual")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let server_config = configured_server(config, server)?;
+            oauth::login(server, server_config, manual).await?;
+            Ok(json!({"server": server, "status": "logged_in"}))
+        }
+        "logout" => {
+            let server = params
+                .get("server")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing 'server' parameter".to_string())?;
+            oauth::logout(server)?;
+            Ok(json!({"server": server, "status": "logged_out"}))
+        }
+        _ => Err(format!("unknown MCP action: {action}")),
+    }
+}
+
+fn list_servers_value(config: &CoreConfig) -> Result<Value, String> {
+    let disabled = state::load_disabled(MCP_SERVERS_STATE);
+    let mut servers = Vec::new();
+    for (server, server_config) in &config.mcp.servers {
+        servers.push(json!({
+            "server": server,
+            "transport": transport(server_config),
+            "enabled": !disabled.contains(server),
+            "has_credentials": server_config.bearer_token.is_some()
+                || oauth::has_credentials(server)?,
+        }));
+    }
+    Ok(Value::Array(servers))
+}
+
 #[derive(Debug, Serialize)]
 struct McpServerStatus {
     server: String,

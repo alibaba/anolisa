@@ -18,6 +18,7 @@ pub(super) enum SlashCommand<'a> {
     Auth,
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
+    Mcp(Option<&'a str>, Option<&'a str>),
     Mode(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
@@ -101,6 +102,11 @@ impl<'a> SlashCommand<'a> {
                 let sub = parts.next();
                 let arg = parts.next();
                 Some(Self::Skills(sub, arg))
+            }
+            "/mcp" => {
+                let sub = parts.next();
+                let arg = parts.next();
+                Some(Self::Mcp(sub, arg))
             }
             "/session" => Some(Self::Session(
                 input.strip_prefix("/session").unwrap_or_default().trim(),

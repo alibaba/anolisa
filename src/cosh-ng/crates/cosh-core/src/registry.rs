@@ -338,6 +338,17 @@ pub(crate) async fn handle_registry_request(
             Err(error) => registry_error(request_id, error),
         },
         "hooks" => handle_hooks(request_id, action, params, ext_manager),
+        "mcp" => {
+            match crate::tool::mcp::handle_mcp_registry(action, params, config).await {
+                Ok(data) => OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: true,
+                    data: Some(data),
+                    error: None,
+                },
+                Err(error) => registry_error(request_id, &error),
+            }
+        }
         _ => OutputMessage::RegistryResponse {
             request_id: request_id.to_string(),
             success: false,
