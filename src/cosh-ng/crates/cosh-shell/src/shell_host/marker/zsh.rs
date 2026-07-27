@@ -423,7 +423,7 @@ _cosh_precmd_marker() {
 # Slash command function stubs — prevent "zsh: no such file or directory" for
 # commands starting with / that zsh would try to exec as an absolute path.
 # The actual interception and marker emission happens in _cosh_preexec_marker.
-for _cosh_sc in agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions health help hooks mode new recommendations select send-to-shell shell skills; do
+for _cosh_sc in agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions health help hooks mcp mode new recommendations select send-to-shell shell skills; do
   functions[/$_cosh_sc]=':'
 done
 unset _cosh_sc

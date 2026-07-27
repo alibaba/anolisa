@@ -186,12 +186,12 @@ pub(super) fn logout(server_name: &str) -> Result<(), String> {
 }
 
 /// Returns whether credentials exist without exposing their contents.
-pub(super) fn has_credentials(server_name: &str) -> Result<bool, String> {
+pub(crate) fn has_credentials(server_name: &str) -> Result<bool, String> {
     Ok(read_credentials()?.servers.contains_key(server_name))
 }
 
 /// Deletes credentials when present and returns whether anything was removed.
-pub(super) fn remove_credentials(server_name: &str) -> Result<bool, String> {
+pub(crate) fn remove_credentials(server_name: &str) -> Result<bool, String> {
     let mut credentials = read_credentials()?;
     let removed = credentials.servers.remove(server_name).is_some();
     if removed {

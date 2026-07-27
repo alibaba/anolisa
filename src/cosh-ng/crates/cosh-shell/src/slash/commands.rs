@@ -13,6 +13,7 @@ use crate::slash::parser::SlashCommand;
 use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
 use crate::slash::skills::render_skills_command;
+use crate::slash::mcp::render_mcp_command;
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
@@ -71,6 +72,10 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Skills(sub, arg) => {
             render_skills_command(sub, arg, adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Mcp(sub, arg) => {
+            render_mcp_command(sub, arg, adapter, state, output)?;
             Ok(true)
         }
         SlashCommand::Session(arguments) => {

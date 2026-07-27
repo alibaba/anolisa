@@ -2,6 +2,7 @@
 
 mod http;
 mod oauth;
+pub(crate) use oauth::remove_credentials;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -92,7 +93,7 @@ pub(crate) async fn run_command(args: McpArgs, config: &CoreConfig) -> Result<()
 }
 
 #[derive(Debug, Serialize)]
-struct McpServerStatus {
+pub(crate) struct McpServerStatus {
     server: String,
     transport: &'static str,
     enabled: bool,
@@ -100,14 +101,14 @@ struct McpServerStatus {
 }
 
 #[derive(Debug, Serialize)]
-struct McpToolStatus {
+pub(crate) struct McpToolStatus {
     name: String,
     exposed_name: String,
     description: String,
 }
 
 #[derive(Debug, Serialize)]
-struct McpServerInspection {
+pub(crate) struct McpServerInspection {
     server: String,
     action: &'static str,
     transport: &'static str,
@@ -115,13 +116,13 @@ struct McpServerInspection {
 }
 
 #[derive(Debug, Serialize)]
-struct McpDisconnectResult {
+pub(crate) struct McpDisconnectResult {
     server: String,
     disabled: bool,
     credentials_removed: bool,
 }
 
-fn configured_server<'a>(
+pub(crate) fn configured_server<'a>(
     config: &'a CoreConfig,
     server: &str,
 ) -> Result<&'a McpServerConfig, String> {
@@ -132,7 +133,7 @@ fn configured_server<'a>(
         .ok_or_else(|| format!("MCP server '{server}' is not configured"))
 }
 
-fn transport(config: &McpServerConfig) -> &'static str {
+pub(crate) fn transport(config: &McpServerConfig) -> &'static str {
     if config.url.is_some() {
         "streamable_http"
     } else {
@@ -145,6 +146,23 @@ fn print_json(value: &impl Serialize) -> Result<(), String> {
         .map_err(|error| format!("failed to serialize MCP status: {error}"))?;
     println!("{output}");
     Ok(())
+}
+
+/// Returns MCP server list data without printing to stdout.
+pub(crate) fn list_servers(config: &CoreConfig) -> Vec<McpServerStatus> {
+    let disabled = state::load_disabled(MCP_SERVERS_STATE);
+    let mut servers = Vec::new();
+    for (server, server_config) in &config.mcp.servers {
+        servers.push(McpServerStatus {
+            server: server.clone(),
+            transport: transport(server_config),
+            enabled: !disabled.contains(server),
+            has_credentials: server_config.bearer_token.is_some()
+                || oauth::has_credentials(server).unwrap_or(false),
+        });
+    }
+    servers.sort_by(|left, right| left.server.cmp(&right.server));
+    servers
 }
 
 fn print_server_list(config: &CoreConfig) -> Result<(), String> {
@@ -163,7 +181,7 @@ fn print_server_list(config: &CoreConfig) -> Result<(), String> {
     print_json(&servers)
 }
 
-async fn inspect_server(
+pub(crate) async fn inspect_server(
     server: &str,
     config: &CoreConfig,
     action: &'static str,

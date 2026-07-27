@@ -15,6 +15,8 @@ use crate::extension::{
 use crate::protocol::{InputMessage, OutputMessage};
 use crate::skill::manager::expand_path;
 use crate::skill::SkillManager;
+use crate::state::{self, MCP_SERVERS_STATE};
+use crate::tool::mcp;
 
 mod auth;
 mod extensions;
@@ -338,6 +340,7 @@ pub(crate) async fn handle_registry_request(
             Err(error) => registry_error(request_id, error),
         },
         "hooks" => handle_hooks(request_id, action, params, ext_manager),
+        "mcp" => handle_mcp(request_id, action, params, config).await,
         _ => OutputMessage::RegistryResponse {
             request_id: request_id.to_string(),
             success: false,
@@ -353,6 +356,106 @@ fn registry_error(request_id: &str, error: &str) -> OutputMessage {
         success: false,
         data: None,
         error: Some(error.to_string()),
+    }
+}
+
+fn mcp_success(request_id: &str, data: Value) -> OutputMessage {
+    OutputMessage::RegistryResponse {
+        request_id: request_id.to_string(),
+        success: true,
+        data: Some(data),
+        error: None,
+    }
+}
+
+async fn handle_mcp(
+    request_id: &str,
+    action: &str,
+    params: &Value,
+    config: &CoreConfig,
+) -> OutputMessage {
+    match action {
+        "list" => {
+            let servers = mcp::list_servers(config);
+            mcp_success(request_id, serde_json::to_value(&servers).unwrap_or(Value::Null))
+        }
+        "connect" => {
+            let server = params.get("server").and_then(Value::as_str).unwrap_or("");
+            if server.is_empty() {
+                return registry_error(request_id, "missing 'server' parameter");
+            }
+            match mcp::inspect_server(server, config, "connected", true).await {
+                Ok(inspection) => {
+                    if let Err(error) = state::remove_disabled(MCP_SERVERS_STATE, server) {
+                        return registry_error(request_id, &error);
+                    }
+                    mcp_success(request_id, serde_json::to_value(&inspection).unwrap_or(Value::Null))
+                }
+                Err(error) => registry_error(request_id, &error),
+            }
+        }
+        "inspect" => {
+            let server = params.get("server").and_then(Value::as_str).unwrap_or("");
+            if server.is_empty() {
+                return registry_error(request_id, "missing 'server' parameter");
+            }
+            match mcp::inspect_server(server, config, "inspected", false).await {
+                Ok(inspection) => {
+                    mcp_success(request_id, serde_json::to_value(&inspection).unwrap_or(Value::Null))
+                }
+                Err(error) => registry_error(request_id, &error),
+            }
+        }
+        "refresh" => {
+            let server = params.get("server").and_then(Value::as_str).unwrap_or("");
+            if server.is_empty() {
+                return registry_error(request_id, "missing 'server' parameter");
+            }
+            match mcp::inspect_server(server, config, "refreshed", false).await {
+                Ok(inspection) => {
+                    mcp_success(request_id, serde_json::to_value(&inspection).unwrap_or(Value::Null))
+                }
+                Err(error) => registry_error(request_id, &error),
+            }
+        }
+        "disconnect" => {
+            let server = params.get("server").and_then(Value::as_str).unwrap_or("");
+            if server.is_empty() {
+                return registry_error(request_id, "missing 'server' parameter");
+            }
+            if let Err(error) = mcp::configured_server(config, server) {
+                return registry_error(request_id, &error);
+            }
+            if let Err(error) = state::add_disabled(MCP_SERVERS_STATE, server) {
+                return registry_error(request_id, &error);
+            }
+            let credentials_removed = mcp::remove_credentials(server).unwrap_or(false);
+            mcp_success(
+                request_id,
+                serde_json::json!({
+                    "server": server,
+                    "disabled": true,
+                    "credentials_removed": credentials_removed,
+                }),
+            )
+        }
+        "logout" => {
+            let server = params.get("server").and_then(Value::as_str).unwrap_or("");
+            if server.is_empty() {
+                return registry_error(request_id, "missing 'server' parameter");
+            }
+            match mcp::remove_credentials(server) {
+                Ok(removed) => mcp_success(
+                    request_id,
+                    serde_json::json!({
+                        "server": server,
+                        "credentials_removed": removed,
+                    }),
+                ),
+                Err(error) => registry_error(request_id, &error),
+            }
+        }
+        _ => registry_error(request_id, &format!("unknown mcp action: {action}")),
     }
 }
 
