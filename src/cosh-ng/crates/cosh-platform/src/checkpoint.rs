@@ -234,7 +234,7 @@ impl CkptClient {
         if !Path::new(&self.socket_path).exists() {
             return Err(CoshError::new(
                 ErrorCode::CheckpointDaemonUnavailable,
-                format!("ws-ckpt daemon socket not found at {}", self.socket_path),
+                "ws-ckpt daemon socket not found",
                 "checkpoint",
             )
             .with_hint("Start daemon with: systemctl start ws-ckpt")
@@ -405,7 +405,7 @@ fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> Cos
 
         std::io::ErrorKind::TimedOut => CoshError::new(
             ErrorCode::Timeout,
-            format!("Timeout while {} on {}", context, socket_path),
+            format!("Timeout while communicating with ws-ckpt daemon ({})", context),
             "checkpoint",
         )
         .with_hint("ws-ckpt daemon may be overloaded, retry later")
@@ -413,20 +413,29 @@ fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> Cos
 
         std::io::ErrorKind::ConnectionRefused => CoshError::new(
             ErrorCode::CheckpointDaemonUnavailable,
-            format!(
-                "Cannot connect to ws-ckpt daemon at {}: Connection refused",
-                socket_path
-            ),
+            "Cannot connect to ws-ckpt daemon: connection refused",
             "checkpoint",
         )
         .with_hint("Start daemon with: systemctl start ws-ckpt")
         .recoverable(true),
 
-        _ => CoshError::new(
-            ErrorCode::CheckpointDaemonUnavailable,
-            format!("I/O error while {}: {} ({})", context, e, socket_path),
+        std::io::ErrorKind::UnexpectedEof => CoshError::new(
+            ErrorCode::CheckpointProtocolError,
+            format!("ws-ckpt daemon response incomplete ({})", context),
             "checkpoint",
         )
+        .with_hint("Daemon returned an unexpected or truncated response; retry the operation")
+        .recoverable(true),
+
+        _ => CoshError::new(
+            ErrorCode::Unknown,
+            format!("I/O error while {}: {}", context, e),
+            "checkpoint",
+        )
+        .with_details(serde_json::json!({
+            "io_error_kind": format!("{:?}", e.kind()),
+            "socket_path": socket_path,
+        }))
         .recoverable(true),
     }
 }
@@ -662,7 +671,27 @@ mod tests {
             "/tmp/test.sock",
             "do thing",
         );
-        assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
+        assert_eq!(err.code, ErrorCode::Unknown);
+        assert!(err.recoverable);
+        // socket_path must NOT appear in the user-visible message
+        assert!(!err.message.contains("/tmp/test.sock"));
+        // but should be preserved in details for diagnostics
+        let details = err.details.as_ref().unwrap();
+        assert_eq!(details["socket_path"], "/tmp/test.sock");
+    }
+
+    #[test]
+    fn test_classify_unexpected_eof() {
+        let err = classify_io_error(
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"),
+            "/tmp/test.sock",
+            "read response length",
+        );
+        assert_eq!(err.code, ErrorCode::CheckpointProtocolError);
+        assert!(err.message.contains("incomplete"));
+        // socket_path must NOT leak into user-visible message
+        assert!(!err.message.contains("/tmp/test.sock"));
+        assert!(err.hint.as_ref().unwrap().contains("retry"));
         assert!(err.recoverable);
     }
 

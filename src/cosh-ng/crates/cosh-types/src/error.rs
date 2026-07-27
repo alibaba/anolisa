@@ -26,6 +26,7 @@ pub enum ErrorCode {
     CheckpointCreateFailed = 301,
     CheckpointRestoreFailed = 302,
     CheckpointNotFound = 303,
+    CheckpointProtocolError = 304,
     // Audit (4xx)
     AuditDenied = 400,
     AuditPolicyError = 401,
