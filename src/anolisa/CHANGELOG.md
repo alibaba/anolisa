@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Commands that act on an installed component now report an absent target as
+  `NOT_INSTALLED` instead of `INVALID_ARGUMENT`, so a caller can tell "there was
+  nothing to act on" from "the invocation was wrong" without parsing the error
+  message. The code reports state absence only, and does not indicate whether
+  the name was valid. Affects `uninstall`, `update`, `repair`, `forget`,
+  `restart`, and `adapter`; the exit code stays 2.
+
 ## [0.2.11] - 2026-07-24
 
 ### Added
