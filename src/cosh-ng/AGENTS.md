@@ -120,12 +120,20 @@ When writing safety gates that auto-approve commands, don't pattern-match substr
 4. Add platform logic to `cosh-platform/src/`
 5. Add integration tests in `crates/cosh-cli/tests/cli_integration.rs`
 
+## Pre-Commit Checklist
+
+Every commit **must** pass these checks locally before pushing. CI will reject the PR if any fail:
+
+- `cargo fmt --all -- --check` — formatting is non-negotiable; run `cargo fmt --all` to auto-fix.
+- `cargo clippy --workspace --all-targets` — `--all-targets` is non-negotiable; the default omits test code.
+- `cargo test --package cosh-shell --lib` — unit tests must pass.
+- For changes touching terminal rendering (escape sequences, cursor management, `raw_relay`, `input_events`): also run `cargo test --package cosh-shell --test raw_cli` and `cargo test --package cosh-shell --test shell_host` to catch PTY integration regressions. Terminal escape sequence changes are high-risk for integration test breakage because they affect the exact byte stream the PTY tests assert against.
+
 ## Production-Readiness Checklist
 
 Don't trust development reports — verify before merging:
 
 - `cargo test --workspace` — count must match the report.
-- `cargo clippy --workspace --all-targets` — `--all-targets` is non-negotiable; the default omits test code, where most lint debt accumulates. "0 warnings" claims without `--all-targets` are misleading.
 - `cargo build --workspace --release` — release profile catches optimization-only issues.
 - For every "hardened against X" claim, write a PoC that *would have* triggered X and verify it now fails closed. Substring-based safety lists in particular need adversarial review.
 
