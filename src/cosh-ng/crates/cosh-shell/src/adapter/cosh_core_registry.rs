@@ -203,9 +203,7 @@ pub(super) fn registry_timeout(domain: &str, action: &str) -> Duration {
             ));
     let long_running_mcp_action =
         domain == "mcp" && matches!(action, "connect" | "inspect" | "refresh" | "login");
-    if long_running_extension_action {
-        REGISTRY_MUTATION_TIMEOUT
-    } else if long_running_mcp_action {
+    if long_running_extension_action || long_running_mcp_action {
         REGISTRY_MUTATION_TIMEOUT
     } else {
         REGISTRY_READ_TIMEOUT
