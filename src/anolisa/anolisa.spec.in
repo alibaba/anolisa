@@ -143,7 +143,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Fri Jul 24 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Mon Jul 27 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Missing installed components now report `NOT_INSTALLED` in structured output.
+- Adapter status now ignores stale source directories and reports missing bundles as degraded.
+- Raw install dry-runs now validate component conflicts before execution.
+
+* Fri Jul 24 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.11-1
 - Raw `anolisa install --version` now installs the exact published component version.
 - Raw `anolisa install --version` output now reports requested and resolved versions, artifact URL, and source repository.
 - Raw `anolisa install --version` now lists published alternatives when the requested version is unavailable.
