@@ -179,14 +179,14 @@ impl NativeLineState {
 
 pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
-    
+
     // Check for @ file completion first
     if trimmed.contains('@') {
         if let Some(hint) = at_completion_hint(trimmed) {
             return Some(hint);
         }
     }
-    
+
     // Then check for slash command completion
     if !trimmed.starts_with('/') || trimmed[1..].contains('/') {
         return None;
@@ -292,49 +292,49 @@ fn at_completion_hint(line: &str) -> Option<String> {
 pub(super) fn at_completion_complete(line: &str) -> Option<String> {
     // Find the last @ in the line
     let at_pos = line.rfind('@')?;
-    
+
     // Get the pattern after @
     let after_at = &line[at_pos + 1..];
-    
+
     // If the pattern contains whitespace, don't complete
     if after_at.contains(|c: char| c.is_whitespace()) {
         return None;
     }
-    
+
     // Get current working directory
     let cwd = std::env::current_dir().ok()?;
-    
+
     // Find the first matching file
     let pattern = after_at.to_lowercase();
-    
+
     if let Ok(entries) = std::fs::read_dir(&cwd) {
         let mut matches: Vec<String> = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            
+
             // Skip hidden files unless pattern starts with .
             if name_str.starts_with('.') && !pattern.starts_with('.') {
                 continue;
             }
-            
+
             // Check if filename matches the pattern
             if name_str.to_lowercase().starts_with(&pattern) {
                 matches.push(name_str.to_string());
             }
         }
-        
+
         if !matches.is_empty() {
             // Sort and take the first match
             matches.sort();
             let completed = matches[0].clone();
-            
+
             // Build the completed line
             let before_at = &line[..=at_pos];
             return Some(format!("{}{}", before_at, completed));
         }
     }
-    
+
     None
 }
 
