@@ -405,7 +405,10 @@ fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> Cos
 
         std::io::ErrorKind::TimedOut => CoshError::new(
             ErrorCode::Timeout,
-            format!("Timeout while communicating with ws-ckpt daemon ({})", context),
+            format!(
+                "Timeout while communicating with ws-ckpt daemon ({})",
+                context
+            ),
             "checkpoint",
         )
         .with_hint("ws-ckpt daemon may be overloaded, retry later")
@@ -683,7 +686,10 @@ mod tests {
     #[test]
     fn test_classify_unexpected_eof() {
         let err = classify_io_error(
-            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"),
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ),
             "/tmp/test.sock",
             "read response length",
         );
