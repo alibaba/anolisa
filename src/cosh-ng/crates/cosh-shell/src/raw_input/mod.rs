@@ -248,7 +248,7 @@ mod tests {
     fn soft_newline_shift_enter_inserts_newline_without_submit() {
         let mut line = CandidateLineBuffer::default();
         line.push(b"line1");
-        line.push(b"\x1b[27;2u");  // Shift+Enter (kitty protocol)
+        line.push(b"\x1b[27;2u"); // Shift+Enter (kitty protocol)
         line.push(b"line2");
         let status = candidate_line_status(&line.bytes);
         assert_eq!(status, CandidateLineStatus::Pending);
@@ -259,7 +259,7 @@ mod tests {
     fn soft_newline_shift_enter_alt_encoding() {
         let mut line = CandidateLineBuffer::default();
         line.push(b"first");
-        line.push(b"\x1b[13;2u");  // Shift+Enter alternate encoding
+        line.push(b"\x1b[13;2u"); // Shift+Enter alternate encoding
         line.push(b"second");
         let status = candidate_line_status(&line.bytes);
         assert_eq!(status, CandidateLineStatus::Pending);
@@ -270,9 +270,9 @@ mod tests {
     fn bare_enter_submits_after_soft_newlines() {
         let mut line = CandidateLineBuffer::default();
         line.push(b"line1");
-        line.push(b"\x1b\r");  // soft newline
+        line.push(b"\x1b\r"); // soft newline
         line.push(b"line2");
-        line.push(b"\r");  // bare Enter → submit
+        line.push(b"\r"); // bare Enter → submit
         let status = candidate_line_status(&line.bytes);
         match status {
             CandidateLineStatus::Complete { line, .. } => {
@@ -290,7 +290,7 @@ mod tests {
         line.push(b"suggest fixes");
         line.push(b"\x1b\r");
         line.push(b"no sudo");
-        line.push(b"\r");  // submit
+        line.push(b"\r"); // submit
         let status = candidate_line_status(&line.bytes);
         match status {
             CandidateLineStatus::Complete { line, .. } => {
@@ -299,5 +299,4 @@ mod tests {
             other => panic!("expected Complete, got {:?}", other),
         }
     }
-
 }

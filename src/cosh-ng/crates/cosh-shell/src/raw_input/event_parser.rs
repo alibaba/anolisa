@@ -78,6 +78,10 @@ impl CandidateLineBuffer {
                     self.pop_visible_char();
                     idx += 4;
                 }
+                b'\n' => {
+                    self.bytes.push(b'\r');
+                    idx += 1;
+                }
                 byte => {
                     self.bytes.push(byte);
                     idx += 1;
