@@ -2,9 +2,9 @@ use super::{
     strip_ansi_escape, ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel,
     ActivityToolRowModel, ApprovalDetailsPanelModel, ApprovalJournalEntryModel,
     ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
-    HealthBannerModel, NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel,
-    RatatuiInlineRenderer, RecommendationActionPanelModel, RecommendationPanelModel,
-    ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
+    HealthBannerModel, NoticePanelModel, QuestionAnswerPanelModel, QuestionInputFeedback,
+    QuestionPanelModel, RatatuiInlineRenderer, RecommendationActionPanelModel,
+    RecommendationPanelModel, ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
 };
 use crate::diagnostics::health::{
     HealthCollector, HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue,
@@ -864,6 +864,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 next_label: None,
                 selected_action: ApprovalPanelAction::Approve,
                 expanded: true,
+                turn_consent: false,
                 hook_warnings: Vec::new(),
             })
             .join("\n");
@@ -883,6 +884,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 custom_answer: "",
                 allow_free_text: true,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::None,
             })
             .join("\n");
         assert!(question.contains("Agent 问题"), "{question}");

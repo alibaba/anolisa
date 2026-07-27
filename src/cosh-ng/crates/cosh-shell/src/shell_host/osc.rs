@@ -1,3 +1,6 @@
+// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs.
+mod routing;
+
 use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -7,7 +10,8 @@ use serde::Deserialize;
 
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use crate::types::{
-    CommandOrigin, ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
+    CommandOrigin, ShellCaptureLifecycle, ShellCaptureMetadata, ShellCommandAuditIdentity,
+    ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
     SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
@@ -35,9 +39,20 @@ struct CurrentCommand {
     command: String,
     cwd: String,
     origin: CommandOrigin,
+    audit_identity: Option<ShellCommandAuditIdentity>,
     started_at_ms: u64,
     output_start: usize,
+    attempt_generation: Option<u64>,
     shell_environment_generation: Option<u64>,
+}
+
+/// Why a display cut was recorded, so consumers can tell an intercepted
+/// input (shell has not painted a prompt for it yet) apart from a real
+/// prompt boundary (precmd/shell-ready).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DisplayCutKind {
+    Intercept,
+    PromptBoundary,
 }
 
 #[derive(Debug)]
@@ -53,8 +68,9 @@ pub(super) struct OscParser {
     current: Option<CurrentCommand>,
     command_seq: usize,
     intervention_cuts: Vec<usize>,
-    intervention_display_cuts: Vec<usize>,
+    intervention_display_cuts: Vec<(usize, DisplayCutKind)>,
     last_prompt_display_start: Option<usize>,
+    prompt_ready_display_start: Option<usize>,
     pub(super) captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
     pending_handoff_echo: Option<PendingHandoffEcho>,
@@ -67,6 +83,7 @@ pub(super) struct OscParser {
 struct PendingCommandOrigin {
     command: String,
     origin: CommandOrigin,
+    audit_identity: ShellCommandAuditIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +117,7 @@ impl OscParser {
             intervention_cuts: Vec::new(),
             intervention_display_cuts: Vec::new(),
             last_prompt_display_start: None,
+            prompt_ready_display_start: None,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
             pending_handoff_echo: None,
@@ -123,6 +141,11 @@ impl OscParser {
         self.pending_command_origin = Some(PendingCommandOrigin {
             command: request.command.clone(),
             origin: command_origin_from_handoff_request(request),
+            audit_identity: ShellCommandAuditIdentity {
+                run_id: request.run_id.clone(),
+                request_id: request.request_id.clone(),
+                tool_use_id: request.tool_use_id.clone(),
+            },
         });
     }
 
@@ -177,6 +200,9 @@ impl OscParser {
                     message: Some(format!("marker parse failed: {err}")),
                     command_origin: None,
                     shell_environment_generation: None,
+                    audit_identity: None,
+                    routing: None,
+                    capture: None,
                 }),
             }
         }
@@ -209,30 +235,30 @@ impl OscParser {
             .unwrap_or_else(|| self.session_id.clone());
         let timestamp = marker.timestamp_ms.unwrap_or_else(now_ms);
 
+        if matches!(marker.event.as_str(), "intercept" | "top_level_missing") {
+            self.handle_routing_marker(marker, session_id, timestamp);
+            return Ok(());
+        }
+
         match marker.event.as_str() {
-            "intercept" => {
-                let input = marker.command.unwrap_or_default();
-                let reason = marker
-                    .reason
-                    .unwrap_or_else(|| "natural_language".to_string());
-                self.intervention_cuts.push(self.clean.len());
-                self.intervention_display_cuts.push(self.display.len());
-                self.push_intercept_event(&session_id, input, marker.cwd, &reason);
-                self.current = None;
+            "prompt_ready" => {
+                self.prompt_ready_display_start = Some(self.display.len());
             }
             "preexec" => {
                 let command = marker.command.unwrap_or_default();
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
-                let origin = self.consume_pending_command_origin(&command);
+                let (origin, audit_identity) = self.consume_pending_command_origin(&command);
                 self.current = Some(CurrentCommand {
                     id: command_id.clone(),
                     command: command.clone(),
                     cwd: cwd.clone(),
                     origin,
+                    audit_identity: audit_identity.clone(),
                     started_at_ms: timestamp,
                     output_start: self.clean.len(),
+                    attempt_generation: marker.generation,
                     shell_environment_generation: marker
                         .path_trusted
                         .unwrap_or(false)
@@ -246,12 +272,15 @@ impl OscParser {
                     .current
                     .as_ref()
                     .and_then(|current| current.shell_environment_generation);
+                event.audit_identity = audit_identity;
                 self.events.push(event);
             }
             "precmd" => {
+                self.prompt_ready_display_start = None;
                 let Some(current) = self.current.take() else {
                     self.intervention_cuts.push(self.clean.len());
-                    self.intervention_display_cuts.push(self.display.len());
+                    self.intervention_display_cuts
+                        .push((self.display.len(), DisplayCutKind::PromptBoundary));
                     self.last_prompt_display_start = Some(self.display.len());
                     self.events.push(ShellEvent {
                         kind: ShellEventKind::ShellReady,
@@ -271,6 +300,9 @@ impl OscParser {
                         message: None,
                         command_origin: None,
                         shell_environment_generation: None,
+                        audit_identity: None,
+                        routing: None,
+                        capture: None,
                     });
                     return Ok(());
                 };
@@ -283,7 +315,8 @@ impl OscParser {
                 let output = self.clean[current.output_start..].to_vec();
                 let output_ref = self.capture_command_output_ref(&current.id, &output)?;
                 self.intervention_cuts.push(self.clean.len());
-                self.intervention_display_cuts.push(self.display.len());
+                self.intervention_display_cuts
+                    .push((self.display.len(), DisplayCutKind::PromptBoundary));
                 self.last_prompt_display_start = Some(self.display.len());
                 let kind = if status == 0 {
                     ShellEventKind::CommandCompleted
@@ -305,6 +338,7 @@ impl OscParser {
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
                 event.terminal_output_bytes = Some(output.len() as u64);
                 event.command_origin = Some(current.origin);
+                event.audit_identity = current.audit_identity;
                 event.shell_environment_generation = current.shell_environment_generation;
                 self.events.push(event);
             }
@@ -369,14 +403,17 @@ impl OscParser {
         }
     }
 
-    fn consume_pending_command_origin(&mut self, command: &str) -> CommandOrigin {
+    fn consume_pending_command_origin(
+        &mut self,
+        command: &str,
+    ) -> (CommandOrigin, Option<ShellCommandAuditIdentity>) {
         let Some(pending) = self.pending_command_origin.take() else {
-            return CommandOrigin::UserInteractive;
+            return (CommandOrigin::UserInteractive, None);
         };
         if pending.command == command {
-            pending.origin
+            (pending.origin, Some(pending.audit_identity))
         } else {
-            CommandOrigin::Unknown
+            (CommandOrigin::Unknown, None)
         }
     }
 
@@ -546,6 +583,7 @@ impl OscParser {
         event.duration_ms = Some(ended_at.saturating_sub(current.started_at_ms));
         event.terminal_output_bytes = Some(output.len() as u64);
         event.command_origin = Some(current.origin);
+        event.audit_identity = current.audit_identity;
         event.shell_environment_generation = current.shell_environment_generation;
         self.events.push(event);
         Ok(())
@@ -575,8 +613,14 @@ impl OscParser {
             .count()
     }
 
-    pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<usize> {
+    pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<(usize, DisplayCutKind)> {
         std::mem::take(&mut self.intervention_display_cuts)
+    }
+
+    /// True while a marker-tracked foreground command is running (between
+    /// its preexec and precmd markers).
+    pub(super) fn has_active_foreground_command(&self) -> bool {
+        self.current.is_some()
     }
 
     pub(super) fn last_prompt_display(&self) -> &[u8] {
@@ -589,6 +633,13 @@ impl OscParser {
         &self.display[start..]
     }
 
+    /// True after the shell's post-hook marker is followed by visible prompt
+    /// bytes, excluding output produced by user prompt hooks.
+    pub(super) fn has_prompt_painted_since_ready(&self) -> bool {
+        self.prompt_ready_display_start
+            .is_some_and(|start| start < self.display.len())
+    }
+
     pub(super) fn push_intercept_event(
         &mut self,
         session_id: &str,
@@ -596,25 +647,7 @@ impl OscParser {
         cwd: Option<String>,
         reason: &str,
     ) {
-        self.events.push(ShellEvent {
-            kind: ShellEventKind::UserInputIntercepted,
-            session_id: session_id.to_string(),
-            command_id: None,
-            command: None,
-            cwd,
-            end_cwd: None,
-            exit_code: None,
-            started_at_ms: Some(now_ms()),
-            ended_at_ms: None,
-            duration_ms: None,
-            terminal_output_ref: None,
-            terminal_output_bytes: None,
-            input: Some(input),
-            component: Some(reason.to_string()),
-            message: Some("input intercepted before reaching bash".to_string()),
-            command_origin: None,
-            shell_environment_generation: None,
-        });
+        self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false);
     }
 
     pub(super) fn push_control_event(&mut self, input: &str) {
@@ -639,6 +672,48 @@ impl OscParser {
 
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {
         self.push_self_session_input_event("card", action, Some(value));
+    }
+
+    pub(super) fn push_capture_event(
+        &mut self,
+        lifecycle: ShellCaptureLifecycle,
+        generation: u64,
+        kind: Option<&str>,
+        target_id: Option<&str>,
+    ) {
+        let message = match lifecycle {
+            ShellCaptureLifecycle::Submitted => "capture_submitted",
+            ShellCaptureLifecycle::Drained => "capture_drained",
+            ShellCaptureLifecycle::Expired => "capture_expired",
+            ShellCaptureLifecycle::Overflow => "capture_overflow",
+        };
+        self.events.push(ShellEvent {
+            kind: ShellEventKind::UserInputIntercepted,
+            session_id: self.session_id.clone(),
+            command_id: None,
+            command: None,
+            cwd: None,
+            end_cwd: None,
+            exit_code: None,
+            started_at_ms: Some(now_ms()),
+            ended_at_ms: None,
+            duration_ms: None,
+            terminal_output_ref: None,
+            terminal_output_bytes: None,
+            input: None,
+            component: Some("card".to_string()),
+            message: Some(message.to_string()),
+            command_origin: None,
+            shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: Some(ShellCaptureMetadata {
+                kind: kind.map(str::to_string),
+                target_id: target_id.map(str::to_string),
+                generation,
+                lifecycle,
+            }),
+        });
     }
 
     pub(super) fn push_secret_card_event(&mut self, action: &str, value: &str) {
@@ -676,6 +751,9 @@ impl OscParser {
             message: Some(message.to_string()),
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
         });
     }
 }
@@ -698,6 +776,13 @@ struct Marker {
     path: Option<String>,
     path_trusted: Option<bool>,
     history_file: Option<String>,
+    generation: Option<u64>,
+    top_level_missing: Option<bool>,
+    proven: Option<bool>,
+    intent: Option<String>,
+    sensitive: Option<bool>,
+    #[serde(rename = "unsafe")]
+    unsafe_input: Option<bool>,
 }
 
 fn command_finished_event(
@@ -741,6 +826,9 @@ fn command_finished_event(
             }),
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
         },
     }
 }

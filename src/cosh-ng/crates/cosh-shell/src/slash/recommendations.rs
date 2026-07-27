@@ -76,17 +76,27 @@ fn set_enabled<W: Write>(
         output,
         result.map(|_| {
             if enabled {
-                localized(
+                vec![localized(
                     &state.i18n(),
                     "Prompt recommendations are on.",
                     "已开启个性化提示词推荐。",
                 )
+                .to_string()]
             } else {
-                localized(
-                    &state.i18n(),
-                    "Prompt recommendations are off and local recommendation data was cleared.",
-                    "已关闭提示词推荐，并清理本地推荐数据。",
-                )
+                vec![
+                    localized(
+                        &state.i18n(),
+                        "Prompt recommendations are off and local recommendation data was cleared.",
+                        "已关闭提示词推荐，并清理本地推荐数据。",
+                    )
+                    .to_string(),
+                    localized(
+                        &state.i18n(),
+                        "Command failure insights are controlled separately with /mode analysis manual.",
+                        "失败命令 Insight 由 /mode analysis manual 单独控制。",
+                    )
+                    .to_string(),
+                ]
             }
         }),
     )
@@ -120,17 +130,19 @@ fn clear<W: Write>(
         output,
         result.map(|recovered| {
             if recovered {
-                localized(
+                vec![localized(
                     &state.i18n(),
                     "Damaged recommendation data was reset. Recommendations are off; run /recommendations on to enable them.",
                     "已重置损坏的推荐数据。推荐当前关闭，可运行 /recommendations on 开启。",
                 )
+                .to_string()]
             } else {
-                localized(
+                vec![localized(
                     &state.i18n(),
                     "Local recommendation data was cleared. Your on/off setting was kept.",
                     "已清理本地推荐数据，并保留当前开关设置。",
                 )
+                .to_string()]
             }
         }),
     )
@@ -314,25 +326,20 @@ fn render_usage<W: Write>(state: &InlineState, output: &mut W) -> std::io::Resul
     )
 }
 
-fn render_result<W: Write, T: Into<String>>(
+fn render_result<W: Write>(
     state: &InlineState,
     output: &mut W,
-    result: Result<T, impl std::fmt::Display>,
+    result: Result<Vec<String>, impl std::fmt::Display>,
 ) -> std::io::Result<()> {
     let body = match result {
-        Ok(message) => message.into(),
-        Err(error) => localized_owned(
+        Ok(lines) => lines,
+        Err(error) => vec![localized_owned(
             &state.i18n(),
             format!("Recommendation operation failed: {error}"),
             format!("推荐操作失败：{error}"),
-        ),
+        )],
     };
-    render_notice_panel(
-        output,
-        recommendations_title(&state.i18n()),
-        vec![body],
-        None,
-    )
+    render_notice_panel(output, recommendations_title(&state.i18n()), body, None)
 }
 
 fn recommendations_title(i18n: &I18n) -> &'static str {
@@ -361,130 +368,4 @@ fn now_hour_bucket() -> u64 {
         .unwrap_or_default()
         .as_secs()
         / 3600
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        privacy_lines, render_recommendations_command, render_status_lines,
-        RecommendationReadiness, RecommendationStatusView,
-    };
-    use crate::adapter::{AdapterInstance, FakeAgentAdapter};
-    use crate::config::Language;
-    use crate::i18n::I18n;
-
-    #[test]
-    fn status_uses_user_language_and_hides_technical_fields() {
-        let lines = render_status_lines(
-            &I18n::new(Language::ZhCn),
-            &RecommendationStatusView {
-                readiness: RecommendationReadiness::ReadyWithProfile,
-                bash_history: false,
-            },
-        );
-        let text = lines.join("\n");
-
-        assert!(text.contains("近期 Shell 与 Agent"));
-        assert!(text.contains("Bash history：未纳入"));
-        for hidden in [
-            "gate4",
-            "endpoint",
-            "fingerprint",
-            "小时桶",
-            "容量",
-            "错误数",
-        ] {
-            assert!(!text.contains(hidden));
-        }
-    }
-
-    #[test]
-    fn privacy_explains_sources_retention_and_current_ai_boundary() {
-        let lines = privacy_lines(&I18n::new(Language::ZhCn));
-        let text = lines.join("\n");
-
-        assert!(lines.iter().all(|line| line.chars().count() <= 55));
-
-        for required in [
-            "Shell 命令",
-            "Agent 请求",
-            "Bash history",
-            "Pod",
-            "当前 AI 服务",
-            "7 天",
-            "14 天",
-            "90 天",
-        ] {
-            assert!(text.contains(required), "missing privacy text: {required}");
-        }
-        for hidden in ["gate4", "http://", "https://", "provider_id"] {
-            assert!(!text.contains(hidden));
-        }
-    }
-
-    #[test]
-    fn clear_recovers_corrupt_state_without_retaining_quarantine_payloads() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = std::env::temp_dir().join(format!(
-            "cosh-slash-recover-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = crate::recommendation::personal_store::PersonalStore::open(&root).unwrap();
-        store.initialize(1).unwrap();
-        std::fs::write(root.join("state.json"), b"broken").unwrap();
-        std::fs::set_permissions(
-            root.join("state.json"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let _ = std::fs::remove_file(root.join("state.backup.json"));
-        let mut state = crate::runtime::state::InlineState {
-            personalization: crate::recommendation::personal_state::PersonalizationState {
-                store_root: Some(root.clone()),
-                configured_enabled: true,
-                ..Default::default()
-            },
-            ..crate::runtime::state::InlineState::default()
-        };
-        let mut output = Vec::new();
-
-        render_recommendations_command(
-            Some("clear"),
-            None,
-            None,
-            &crate::types::ShellEvent::user_input_intercepted(
-                "test-session",
-                "/recommendations clear",
-            ),
-            &AdapterInstance::Fake(FakeAgentAdapter),
-            &mut state,
-            &mut output,
-        )
-        .unwrap();
-
-        assert!(String::from_utf8(output)
-            .unwrap()
-            .contains("Damaged recommendation data"));
-        assert!(
-            !state
-                .personalization
-                .writer
-                .as_ref()
-                .unwrap()
-                .poll_status()
-                .unwrap()
-                .enabled
-        );
-        assert!(!root.join("state.quarantine").exists());
-        let mut writer = state.personalization.writer.take().unwrap();
-        writer
-            .shutdown(1, std::time::Duration::from_secs(1))
-            .unwrap();
-        let _ = std::fs::remove_dir_all(root);
-    }
 }

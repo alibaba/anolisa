@@ -4,11 +4,43 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.13.0] — Unreleased
+## [0.14.0] — Unreleased
+
+## [0.13.0] — 2026-07-26
 
 ### Added
-- Interactive session recovery: discover, select, resume, continue, inspect, and clear provider sessions from the shell via `/session`, `/resume`, and the `--resume` launch option (#1546)
-- Workspace-scoped session persistence with schema versioning, legacy-session migration, and a provider-free `--session-control` management protocol in cosh-core (#1546)
+- Interactive session recovery via `/session`, `/resume`, and the `--resume` launch option (#1546, #1592)
+- Workspace-scoped session persistence with schema versioning and legacy-session migration (#1546, #1592)
+- MCP tool support for extensible agent capabilities (#1530)
+- Contextual shell insight interactions (#1537)
+- Secret redaction across core and shell layers (#1555)
+- Diagnostic bundle export via `cosh doctor` (#1576, #1597)
+- Extension platform in core and shell (#1583)
+- Personalized prompt recommendations (#1606)
+- Session compaction to manage persistence growth (#1668)
+- PostToolUse response replacement and hook adaptation (#1669)
+- Gated startup suggestions (#1671)
+- Audit logging across core and shell (#1679)
+- Improved session UX with slash command refinements and sysom `/auth` shortcut (#1726, #1813)
+- Route unresolved natural-language input to Agent (#1742)
+- Cancel active agent runs with ESC (#1761)
+- Turn-scope batch approval consent (#1825)
+
+### Changed
+- Revert persisted credential encryption (#1748)
+- Align task scope documentation (#1445)
+- Stabilize core and shell test gates (#1699)
+- Speed up raw CLI tests and fake stream pacing (#1797)
+- Track cosh-shell test inventory at 2469 (#1827)
+
+### Fixed
+- Session command parsing, signal exits, slash argument handling, and prompt ghost ESC (#1632, #1634, #1636, #1663, #1724, #1843)
+- Agent question interaction, suggestion controls, recommendation scopes, and tab redraw (#1725, #1741, #1749, #1758, #1821)
+- Approval card layout, blocked-title alignment, and empty enter handling (#1786, #1788, #1838)
+- Auth and trust hardening: validate providers, harden auth, preserve trust blocks, encrypt credentials, and expand paths (#1627, #1673, #1701, #1722, #1777, #1784, #1791, #1809, #1816, #1841)
+- Audit logging fixes: kill trees, split compound commands, redact secrets, scope claims, and preserve export path (#1611, #1613, #1635, #1765, #1772, #1840, #1842)
+- Core runtime stability: JSONL validation, tool selection errors, streamed state, ai-like tables, revision clock, free-text clearing, layout gates, and SysOM terminator (#1599, #1661, #1689, #1730, #1731, #1799, #1800, #1803, #1839)
+- Platform and CLI correctness: honor dry-run, handle skipped checkpoints, allow search patterns, fix package dry-run/search results, respect cargo config, sync Bash HISTFILE, validate workspace paths, route --help to stdout, add skill arg checks, warn on redacted writes, skip DEBUG trap, restore utility tools, stop BASHOPTS extdebug leak, handle null redirection, keep provider handoffs alive, update DashScope URL, raw action relay watchdog, restore startup health row, hide receipt audit ref, and update test inventory baseline (#1426, #1440, #1633, #1637, #1642, #1646, #1672, #1675, #1676, #1710, #1719, #1733, #1783, #1787, #1790, #1795, #1808, #1812, #1818, #1820, #1845)
 
 ## [0.12.0] — 2026-07-12
 

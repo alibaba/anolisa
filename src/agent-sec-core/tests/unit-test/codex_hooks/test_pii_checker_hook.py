@@ -5,12 +5,11 @@ Coverage targets:
   - Text extraction from different event types
   - Fail-open paths (invalid JSON, empty text, subprocess errors)
   - Mode-based decisions (observe vs deny)
-  - Output formatting (_format_block_reason)
+  - Output formatting for warnings and block reasons
   - Evidence sanitization (no raw PII in output)
   - Trace context injection
 """
 
-import importlib.util
 import io
 import json
 import os
@@ -21,6 +20,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 # ---------------------------------------------------------------------------
 # Hook path & module import
@@ -33,34 +33,10 @@ _HOOKS_DIR = str(
     / "hooks-plugin"
     / "hooks"
 )
-if _HOOKS_DIR not in sys.path:
-    sys.path.insert(0, _HOOKS_DIR)
-
-# Temporarily register codex's trace_context so the hook's internal
-# "from trace_context import ..." resolves to the codex version,
-# not cosh-extension's same-named module that may already be cached.
-_saved_tc = sys.modules.pop("trace_context", None)
-_tc_spec = importlib.util.spec_from_file_location(
-    "trace_context", os.path.join(_HOOKS_DIR, "trace_context.py")
-)
-_tc_mod = importlib.util.module_from_spec(_tc_spec)
-sys.modules["trace_context"] = _tc_mod
-_tc_spec.loader.exec_module(_tc_mod)
-
-# Register hook under a unique sys.modules key to avoid collision.
-_spec = importlib.util.spec_from_file_location(
+pii_checker_hook = load_standalone_hook(
     "codex_pii_checker_hook",
-    os.path.join(_HOOKS_DIR, "pii_checker_hook.py"),
+    Path(_HOOKS_DIR) / "pii_checker_hook.py",
 )
-pii_checker_hook = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = pii_checker_hook
-_spec.loader.exec_module(pii_checker_hook)
-
-# Restore original trace_context to avoid polluting other test modules.
-if _saved_tc is not None:
-    sys.modules["trace_context"] = _saved_tc
-else:
-    sys.modules.pop("trace_context", None)
 
 _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "pii_checker_hook.py")
 
@@ -172,6 +148,17 @@ _PII_DENY_RESULT = json.dumps(
 )
 
 
+def _assert_warning_output(output: dict, hook_event: str) -> str:
+    """Assert the common non-blocking warning contract."""
+    assert set(output) == {"systemMessage"}
+    message = output["systemMessage"]
+    assert "phone_cn" in message
+    assert "138****8000" in message
+    assert hook_event in message
+    assert "执行将继续" in message
+    return message
+
+
 # ---------------------------------------------------------------------------
 # Subprocess-based (black-box) tests
 # ---------------------------------------------------------------------------
@@ -235,7 +222,7 @@ class TestTextExtraction:
     """Verify text extraction for different hook events."""
 
     def test_post_tool_use_string_response(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(
             {
                 "hook_event_name": "PostToolUse",
@@ -246,7 +233,7 @@ class TestTextExtraction:
         assert output["decision"] == "block"
 
     def test_post_tool_use_dict_response(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(
             {
                 "hook_event_name": "PostToolUse",
@@ -273,7 +260,7 @@ class TestTextExtraction:
         assert output == {}
 
     def test_pre_tool_use_string_input(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -284,7 +271,7 @@ class TestTextExtraction:
         assert output["decision"] == "block"
 
     def test_pre_tool_use_dict_input(self, mock_cli):
-        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(
             {
                 "hook_event_name": "PreToolUse",
@@ -351,7 +338,7 @@ class TestObserveMode:
 
 
 class TestDenyMode:
-    """In deny mode, PII triggers block."""
+    """Deny mode preserves scanner warn and deny severity."""
 
     def test_pass_verdict_allows(self, mock_cli):
         env = mock_cli(
@@ -369,30 +356,29 @@ class TestDenyMode:
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
 
-    def test_warn_verdict_blocks_user_prompt(self, mock_cli):
+    def test_warn_verdict_alerts_user_prompt(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
-        assert output["decision"] == "block"
-        assert "phone_cn" in output["reason"]
-        assert "138****8000" in output["reason"]
-        assert "UserPromptSubmit" in output["reason"]
-        assert "请移除敏感信息" in output["reason"]
+        _assert_warning_output(output, "UserPromptSubmit")
 
-    def test_warn_verdict_blocks_post_tool_use(self, mock_cli):
+    def test_warn_verdict_alerts_post_tool_use(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(_POST_TOOL_USE_EVENT, env_override=env)
-        assert output["decision"] == "block"
-        assert "PostToolUse" in output["reason"]
-        assert "工具输出已被拦截" in output["reason"]
+        _assert_warning_output(output, "PostToolUse")
 
-    def test_deny_verdict_blocks(self, mock_cli):
+    @pytest.mark.parametrize(
+        "event_data",
+        [_USER_PROMPT_EVENT, _PRE_TOOL_USE_EVENT, _POST_TOOL_USE_EVENT],
+    )
+    def test_deny_verdict_blocks(self, mock_cli, event_data):
         env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
-        output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
+        output = _run_hook(event_data, env_override=env)
         assert output["decision"] == "block"
         assert "credential" in output["reason"]
+        assert event_data["hook_event_name"] in output["reason"]
 
     def test_no_raw_pii_in_output(self, mock_cli):
-        """Block reason must never contain raw PII content."""
+        """Warning output must never contain raw PII content."""
         env = mock_cli(
             output=json.dumps(
                 {
@@ -410,15 +396,33 @@ class TestDenyMode:
             extra={"PII_CHECKER_MODE": "deny"},
         )
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
-        assert "13800138000" not in output["reason"]
-        assert "138****8000" in output["reason"]
+        message = _assert_warning_output(output, "UserPromptSubmit")
+        assert "13800138000" not in message
 
-    def test_warn_verdict_blocks_pre_tool_use(self, mock_cli):
+    def test_warn_verdict_alerts_pre_tool_use(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
+        _assert_warning_output(output, "PreToolUse")
+
+    def test_unknown_verdict_with_findings_preserves_block(self, mock_cli):
+        env = mock_cli(
+            output=json.dumps(
+                {
+                    "verdict": "unexpected",
+                    "findings": [
+                        {
+                            "type": "unknown",
+                            "severity": "unexpected",
+                            "evidence_redacted": "[REDACTED]",
+                        }
+                    ],
+                }
+            ),
+            extra={"PII_CHECKER_MODE": "deny"},
+        )
         output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
         assert output["decision"] == "block"
         assert "PreToolUse" in output["reason"]
-        assert "该工具调用已被阻止" in output["reason"]
 
 
 class TestUnknownMode:
@@ -600,8 +604,8 @@ class TestMainMonkeypatch:
         )
         assert captured["input"] == "my phone 13800138000"
 
-    def test_deny_mode_blocks_with_findings(self, monkeypatch, capsys):
-        """deny mode + PII findings → block."""
+    def test_deny_mode_alerts_warn_findings(self, monkeypatch, capsys):
+        """deny mode + warn findings → non-blocking system message."""
 
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
@@ -629,8 +633,9 @@ class TestMainMonkeypatch:
             {"hook_event_name": "UserPromptSubmit", "prompt": "my phone 13800138000"},
             mode="deny",
         )
-        assert output["decision"] == "block"
-        assert "phone_cn" in output["reason"]
+        assert set(output) == {"systemMessage"}
+        assert "phone_cn" in output["systemMessage"]
+        assert "执行将继续" in output["systemMessage"]
 
     def test_deny_mode_blocks_post_tool_use(self, monkeypatch, capsys):
         """deny mode + PostToolUse PII → block with tool output message."""
@@ -879,3 +884,26 @@ class TestFormatBlockReason:
             findings, "UserPromptSubmit", "用户输入"
         )
         assert "请移除敏感信息" in reason
+
+
+class TestFormatWarningMessage:
+    """Test non-blocking warning output formatting."""
+
+    def test_includes_redacted_details_and_continuation(self):
+        findings = [
+            {
+                "type": "phone_cn",
+                "severity": "warn",
+                "evidence_redacted": "138****8000",
+                "raw_evidence": "13800138000",
+            }
+        ]
+        message = pii_checker_hook._format_warning_message(
+            findings, "PreToolUse", "工具输入"
+        )
+        assert "隐私告警" in message
+        assert "phone_cn" in message
+        assert "138****8000" in message
+        assert "13800138000" not in message
+        assert "PreToolUse" in message
+        assert "执行将继续" in message

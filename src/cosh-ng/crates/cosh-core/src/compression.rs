@@ -18,7 +18,7 @@ impl ChatCompression {
     pub fn estimate_tokens(messages: &[Message]) -> u64 {
         let total_chars: usize = messages
             .iter()
-            .map(|m| m.content_text().len() + m.role.len() + 4)
+            .map(|m| m.content.as_text().len() + m.role.len() + 4)
             .sum();
         (total_chars / CHARS_PER_TOKEN) as u64
     }
@@ -55,7 +55,7 @@ impl ChatCompression {
         let mut parts = Vec::new();
 
         for msg in messages {
-            let text = msg.content_text();
+            let text = msg.content.as_text();
             if text.is_empty() {
                 continue;
             }
@@ -68,24 +68,6 @@ impl ChatCompression {
         }
 
         parts.join("\n")
-    }
-}
-
-impl Message {
-    pub fn content_text(&self) -> String {
-        match &self.content {
-            crate::provider::MessageContent::Text(t) => t.clone(),
-            crate::provider::MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .map(|b| match b {
-                    crate::provider::MessageContentBlock::Text { text } => text.clone(),
-                    crate::provider::MessageContentBlock::ToolResult { content, .. } => {
-                        content.clone()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
     }
 }
 
@@ -131,7 +113,7 @@ mod tests {
         assert!(compressed.len() < messages.len());
 
         let last = &compressed[compressed.len() - 1];
-        assert_eq!(last.content_text(), "message 9");
+        assert_eq!(last.content.as_text(), "message 9");
     }
 
     #[test]

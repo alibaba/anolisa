@@ -736,15 +736,23 @@ mod tests {
     // --- parse_installed_version tests ---
 
     #[test]
-    fn test_parse_installed_version_bash() {
-        // bash is installed on virtually every system
+    fn test_parse_installed_version_bash_matches_backend_ownership() {
         let distro = Distro::detect();
         let mgr = distro.pkg_manager();
         if mgr == PkgManager::Unknown {
-            return; // skip on unsupported platforms
+            assert!(parse_installed_version("bash", mgr).is_empty());
+            return;
         }
         let version = parse_installed_version("bash", mgr);
-        assert!(!version.is_empty(), "Expected non-empty version for bash");
+        if mgr == PkgManager::Brew {
+            assert_eq!(
+                !version.is_empty(),
+                get_installed_names(mgr).contains("bash"),
+                "brew version lookup must match formula ownership"
+            );
+        } else {
+            assert!(!version.is_empty(), "Expected package-owned bash version");
+        }
     }
 
     #[test]

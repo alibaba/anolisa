@@ -1,13 +1,40 @@
 use serde_json::Value;
 
 use super::cosh_core::CoshCoreAdapter;
+use super::cosh_core_registry::{
+    extension_mutation_requires_reload, registry_timeout, RegistryQueryError,
+    REGISTRY_MUTATION_TIMEOUT, REGISTRY_READ_TIMEOUT,
+};
+
+#[test]
+fn candidate_building_mutations_share_the_mutation_timeout() {
+    for action in [
+        "enable",
+        "disable",
+        "select-source",
+        "settings-set",
+        "settings-unset",
+        "commit",
+        "update-all-commit",
+        "uninstall",
+        "recover",
+        "reload",
+    ] {
+        assert!(extension_mutation_requires_reload("extensions", action));
+        assert_eq!(
+            registry_timeout("extensions", action),
+            REGISTRY_MUTATION_TIMEOUT,
+            "{action}"
+        );
+    }
+    assert_eq!(
+        registry_timeout("extensions", "list"),
+        REGISTRY_READ_TIMEOUT
+    );
+}
 
 fn test_adapter_with_program(program: &str) -> CoshCoreAdapter {
-    CoshCoreAdapter {
-        program: program.to_string(),
-        allow_model_call: false,
-        session: Default::default(),
-    }
+    CoshCoreAdapter::new(program, false)
 }
 
 fn write_mock_script(label: &str, body: &str) -> std::path::PathBuf {
@@ -74,6 +101,31 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     assert!(
         err.contains("extension not found"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn registry_query_classifies_failure_response() {
+    let script = write_mock_script(
+        "classified-failure",
+        r#"read REQUEST
+printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":false,"error":"candidate validation failed"}'
+"#,
+    );
+
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let result = adapter.registry_query_classified(
+        "extensions",
+        "commit",
+        serde_json::json!({"operation_id": "op-1"}),
+    );
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(
+        result,
+        Err(RegistryQueryError::Response(
+            "candidate validation failed".to_string()
+        ))
     );
 }
 

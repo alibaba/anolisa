@@ -57,6 +57,87 @@ pub(crate) fn to_redacted_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string(&value).unwrap_or_default()
 }
 
+/// Hook payload subtrees holding tool declarations. These are JSON Schema —
+/// a property named `api_key` is a *declaration*, not a secret, so key-based
+/// redaction would replace the property object with `"<redacted>"` and hand
+/// the model (or the hook) a corrupt schema. Both the canonical
+/// `llm_request.config.tools` and the legacy `llm_request.tools` positions are
+/// listed so hook output written against either survives intact.
+pub(crate) const TOOL_DECLARATION_PATHS: &[&[&str]] = &[
+    &["llm_request", "config", "tools"],
+    &["llm_request", "tools"],
+];
+
+/// Like [`to_redacted_json`], but applies structure-preserving redaction to the
+/// subtrees at `schema_paths` instead of key-based redaction. Paths that are
+/// absent are ignored, so this is safe to use for every hook event.
+pub(crate) fn to_redacted_json_with_schemas<T: Serialize>(
+    value: &T,
+    schema_paths: &[&[&str]],
+) -> String {
+    let Ok(mut value) = serde_json::to_value(value) else {
+        return String::new();
+    };
+    redact_value_with_schemas(&mut value, schema_paths);
+    serde_json::to_string(&value).unwrap_or_default()
+}
+
+pub(crate) fn redact_value_with_schemas(value: &mut Value, schema_paths: &[&[&str]]) {
+    let detached: Vec<Option<Value>> = schema_paths
+        .iter()
+        .map(|path| detach_path(value, path))
+        .collect();
+
+    redact_value(value);
+
+    for (path, subtree) in schema_paths.iter().zip(detached) {
+        if let Some(mut subtree) = subtree {
+            redact_schema_value(&mut subtree);
+            reattach_path(value, path, subtree);
+        }
+    }
+}
+
+/// Structure-preserving redaction: scrubs secret *shapes* out of string leaves
+/// but never replaces a value because its key name looks sensitive.
+fn redact_schema_value(value: &mut Value) {
+    match value {
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_schema_value(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_schema_value(value);
+            }
+        }
+        Value::String(text) => *text = redact_text(text),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+/// Removes the subtree at `path`, leaving `Null` behind so [`reattach_path`]
+/// can find the slot again after the surrounding value has been redacted.
+fn detach_path(value: &mut Value, path: &[&str]) -> Option<Value> {
+    let mut cursor = value;
+    for key in path {
+        cursor = cursor.as_object_mut()?.get_mut(*key)?;
+    }
+    (!cursor.is_null()).then(|| cursor.take())
+}
+
+fn reattach_path(value: &mut Value, path: &[&str], subtree: Value) {
+    let mut cursor = value;
+    for key in path {
+        let Some(next) = cursor.as_object_mut().and_then(|map| map.get_mut(*key)) else {
+            return;
+        };
+        cursor = next;
+    }
+    *cursor = subtree;
+}
+
 pub(crate) fn redact_messages(messages: &mut [Message]) {
     for message in messages {
         redact_message(message);

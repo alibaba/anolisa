@@ -154,7 +154,7 @@ fn parse_args(args: &[String]) -> Result<ExportOptions, String> {
 }
 
 fn print_help() {
-    eprintln!("Usage: cosh-shell diagnostics export [--output PATH] [--since-hours HOURS]");
+    println!("Usage: cosh-shell diagnostics export [--output PATH] [--since-hours HOURS]");
 }
 
 fn default_output_path() -> PathBuf {

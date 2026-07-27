@@ -310,6 +310,7 @@ All optional features are **enabled by default**. Disable them individually via 
 | Audit | `features.audit` | `true` | LLM call audit event persistence |
 | Token Consumption | `features.token_consumption` | `false` | Aggregated token consumption records |
 | SLS Logtail | `features.sls_logtail` | `false` | Write to SLS log file |
+| Trajectory Collection | `features.trajectory_collection.enabled` | `false` | Periodically scan Qoder/QoderWork session JSONL, convert to ATIF v1.7 and store in `trajectories.db` (trace mode only; `scan_interval_secs` default 30, `scan_dirs` overrides scan roots) |
 
 ### Runtime Resource Limits (`runtime_limits`)
 

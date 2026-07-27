@@ -1,6 +1,7 @@
 #[allow(dead_code, unused_imports)]
 #[path = "agent_render/mod.rs"]
 pub(crate) mod agent_render;
+mod question;
 #[path = "renderer.rs"]
 mod renderer;
 

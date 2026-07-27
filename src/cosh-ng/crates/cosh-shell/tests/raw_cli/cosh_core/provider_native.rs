@@ -55,7 +55,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (b"\n".to_vec(), Duration::from_millis(2_000)),
             (b"/debug session\n".to_vec(), Duration::from_millis(6_000)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
         ],
     );
     let _ = fs::remove_dir_all(&home);

@@ -3,6 +3,7 @@
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SessionCommand<'a> {
     OpenPicker,
+    New,
     Status,
     List,
     Resume(&'a str),
@@ -15,6 +16,7 @@ pub(super) fn parse_session_command(arguments: &str) -> SessionCommand<'_> {
     let tokens = arguments.split_whitespace().collect::<Vec<_>>();
     match tokens.as_slice() {
         [] | ["resume"] => SessionCommand::OpenPicker,
+        ["new"] => SessionCommand::New,
         ["status"] => SessionCommand::Status,
         ["list"] => SessionCommand::List,
         ["resume", session_id] => SessionCommand::Resume(session_id),
@@ -37,7 +39,11 @@ pub(super) fn parse_session_command(arguments: &str) -> SessionCommand<'_> {
 }
 
 fn is_bare_session_id(value: &str) -> bool {
-    !value.starts_with('-') && !matches!(value, "status" | "list" | "resume" | "clear" | "compact")
+    !value.starts_with('-')
+        && !matches!(
+            value,
+            "new" | "status" | "list" | "resume" | "clear" | "compact"
+        )
 }
 
 #[cfg(test)]
@@ -50,6 +56,7 @@ mod tests {
     fn parses_session_command_grammar_without_fallthrough() {
         let cases = [
             ("", SessionCommand::OpenPicker),
+            ("new", SessionCommand::New),
             ("status", SessionCommand::Status),
             ("list", SessionCommand::List),
             ("resume", SessionCommand::OpenPicker),
@@ -69,6 +76,7 @@ mod tests {
             ("compact status", SessionCommand::Compact(Some("status"))),
             ("compact cancel", SessionCommand::Compact(Some("cancel"))),
             (SESSION_ID, SessionCommand::Resume(SESSION_ID)),
+            ("new extra", SessionCommand::Usage),
             ("status extra", SessionCommand::Usage),
             ("list extra", SessionCommand::Usage),
             ("--all", SessionCommand::Usage),

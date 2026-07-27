@@ -72,6 +72,14 @@ persist_dir = "~/.copilot-shell/cosh-core/sessions"
 # Disable to keep turns in memory only; emitted IDs will not be resumed
 auto_persist = true
 
+[session.compaction]
+enabled = true
+auto = true
+trigger_ratio = 0.70
+emergency_ratio = 0.90
+target_ratio = 0.30
+preserve_recent_runs = 2
+
 [logging]
 level = "warn"
 ```
@@ -81,6 +89,30 @@ The project layer is loaded from
 through `--workspace` or the session-management request. Relative
 `session.persist_dir` values are resolved from that workspace, not from the
 Core process's launcher directory.
+
+## Session Compaction
+
+Compaction keeps the persisted transcript complete and replaces only the
+model-visible prefix with a summary projection. The automatic and emergency
+paths retain recent runs according to `preserve_recent_runs`; an explicit
+`/session compact` may summarize the latest complete run.
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `session.compaction.enabled` | `true` | Enable manual, automatic, and emergency compaction |
+| `session.compaction.auto` | `true` | Recommend background compaction at an idle boundary |
+| `session.compaction.auto_compact_token_limit` | unset | Optional absolute automatic trigger, clamped to the usable model budget |
+| `session.compaction.trigger_ratio` | `0.70` | Fraction of usable history that triggers automatic compaction |
+| `session.compaction.emergency_ratio` | `0.90` | Fraction that arms in-run emergency protection |
+| `session.compaction.target_ratio` | `0.30` | Best-effort retained-history target after compaction |
+| `session.compaction.preserve_recent_runs` | `2` | Complete recent runs kept verbatim by automatic and emergency compaction |
+| `session.compaction.model_context_window` | model-derived | Explicit model context-window override |
+| `session.compaction.model_max_output_tokens` | model-derived | Explicit maximum-output reserve override |
+
+Ratios must satisfy `target_ratio <= trigger_ratio <= emergency_ratio`.
+Invalid ratio groups fall back to the compiled defaults. See
+[Session Compaction](shell/session-compaction.md) for commands, safety
+guarantees, and manual-versus-automatic behavior.
 
 ## MCP Servers
 
@@ -152,6 +184,23 @@ analysis_mode = "smart"
 approval_mode = "auto"
 ```
 
+## Audit Configuration
+
+Audit uses the existing configuration files, but its authority order is intentionally stricter:
+`/etc/copilot-shell/config.toml` is authoritative when it contains `[audit]`; otherwise the user
+file is used. Project `[audit]` tables are ignored.
+
+```toml
+[audit]
+mode = "best_effort" # best_effort | required
+retention_days = 30
+max_disk_bytes = 1073741824
+```
+
+`COSH_AUDIT_DIR` overrides only the storage root. Without it, storage uses
+`$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. See the
+[audit operations guide](cli/audit.md) for failure and retention behavior.
+
 ## Environment Variable Overrides
 
 | Environment Variable | Purpose | Mapped Configuration |
@@ -166,6 +215,7 @@ approval_mode = "auto"
 | `COSH_SHELL_ADAPTER` | Shell adapter | `shell.adapter_default` |
 | `COSH_SHELL_DEBUG` | Maps to debug level | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell language | — |
+| `COSH_AUDIT_DIR` | Unified audit storage root | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | Alibaba Cloud AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Alibaba Cloud SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | Provider resolution chain |

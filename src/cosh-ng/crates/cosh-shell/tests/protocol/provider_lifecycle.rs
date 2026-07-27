@@ -35,7 +35,13 @@ fn mock_provider_script(name: &str, body: &str) -> PathBuf {
         "cosh-provider-lifecycle-{name}-{}-{nonce}.sh",
         std::process::id()
     ));
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write mock provider");
+    let persistent_handshake = if name.starts_with("cosh-core-") && !body.contains("read -r init") {
+        "IFS= read -r _\nIFS= read -r _\n"
+    } else {
+        ""
+    };
+    fs::write(&path, format!("#!/bin/sh\n{persistent_handshake}{body}\n"))
+        .expect("write mock provider");
     let mut permissions = fs::metadata(&path)
         .expect("mock provider metadata")
         .permissions();
@@ -63,29 +69,26 @@ fn claude_adapter(program: &Path) -> ClaudeCodeAdapter {
 }
 
 fn cosh_core_restore_adapter(program: &Path) -> CoshCoreAdapter {
+    let workspace_scope = test_workspace_scope();
     let mut session = SessionRuntimeState::with_active(
         "00000000-0000-4000-8000-000000000000",
-        test_workspace_scope(),
+        workspace_scope.clone(),
     );
     session.recovery.state = SessionRecoveryState::Selected;
     session.recovery.selected_session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
-    session.recovery.selected_workspace_scope = Some(test_workspace_scope());
-    CoshCoreAdapter {
-        program: program.display().to_string(),
-        allow_model_call: true,
-        session: Arc::new(Mutex::new(session)),
-    }
+    session.recovery.selected_workspace_scope = Some(workspace_scope);
+    let adapter = CoshCoreAdapter::new(program.display().to_string(), true);
+    *adapter.session.lock().unwrap() = session;
+    adapter
 }
 
 fn cosh_core_active_adapter(program: &Path) -> CoshCoreAdapter {
-    CoshCoreAdapter {
-        program: program.display().to_string(),
-        allow_model_call: true,
-        session: Arc::new(Mutex::new(SessionRuntimeState::with_active(
-            "00000000-0000-4000-8000-000000000000",
-            test_workspace_scope(),
-        ))),
-    }
+    let adapter = CoshCoreAdapter::new(program.display().to_string(), true);
+    *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+        "00000000-0000-4000-8000-000000000000",
+        test_workspace_scope(),
+    );
+    adapter
 }
 
 fn cosh_core_active_with_unrelated_selection(program: &Path) -> CoshCoreAdapter {
@@ -96,11 +99,9 @@ fn cosh_core_active_with_unrelated_selection(program: &Path) -> CoshCoreAdapter 
     session.recovery.state = SessionRecoveryState::Selected;
     session.recovery.selected_session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
     session.recovery.selected_workspace_scope = Some(test_workspace_child("workspace-a"));
-    CoshCoreAdapter {
-        program: program.display().to_string(),
-        allow_model_call: true,
-        session: Arc::new(Mutex::new(session)),
-    }
+    let adapter = CoshCoreAdapter::new(program.display().to_string(), true);
+    *adapter.session.lock().unwrap() = session;
+    adapter
 }
 
 fn make_request(id: &str) -> AgentRequest {
@@ -125,6 +126,7 @@ fn make_request(id: &str) -> AgentRequest {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -874,8 +876,9 @@ fn selected_structured_failures_preserve_metadata_for_every_runner() {
 fn cancelled_async_runners_apply_already_parsed_session_failure() {
     let script = mock_provider_script(
         "cosh-core-persist-conflict-then-cancel",
-        r#"printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"errors":["session persistence failed [conflict]: parsed before cancellation"],"session_error_code":"conflict","session_error_phase":"persist"}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}'
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock","tools":[]}'
+IFS= read -r _
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"errors":["session persistence failed [conflict]: parsed before cancellation"],"session_error_code":"conflict","session_error_phase":"persist"}'
 exec sleep 30"#,
     );
 
@@ -947,8 +950,9 @@ fn cancelled_selected_runners_preserve_already_parsed_session_failure() {
         let script = mock_provider_script(
             &format!("cosh-core-selected-{failure}-then-cancel"),
             &format!(
-                r#"printf '%s\n' '{{"type":"result","subtype":"error","session_id":"11111111-1111-4111-8111-111111111111","is_error":true,"errors":["{message}"],"session_error_code":"{code}","session_error_phase":"{phase}"}}'
-printf '%s\n' '{{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111","model":"mock","tools":[]}}'
+                r#"printf '%s\n' '{{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111","model":"mock","tools":[]}}'
+IFS= read -r _
+printf '%s\n' '{{"type":"result","subtype":"error","session_id":"11111111-1111-4111-8111-111111111111","is_error":true,"errors":["{message}"],"session_error_code":"{code}","session_error_phase":"{phase}"}}'
 exec sleep 30"#
             ),
         );
@@ -1034,6 +1038,59 @@ exit 1"#,
             Some("conflict")
         );
     }
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn cosh_core_pending_question_nonzero_exit_reports_only_protocol_failure() {
+    let script = mock_provider_script(
+        "cosh-core-question-then-nonzero",
+        r#"read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","model":"mock"}'
+read -r user_message
+printf '%s\n' '{"type":"control_request","request_id":"ask-pending","request":{"subtype":"ask_user","question":"Choose","options":[{"label":"One"}],"allow_free_text":false,"multi_select":false}}'
+printf '%s\n' 'provider stderr must stay hidden' >&2
+exit 7"#,
+    );
+    let adapter = cosh_core_active_adapter(&script);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-question-nonzero"),
+        CoshApprovalMode::Auto,
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut events = Vec::new();
+    let mut errors = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "provider did not finish");
+        match handle.poll_event_timeout(Duration::from_millis(100)) {
+            Ok(AgentRunPoll::Event(event)) => events.push(event),
+            Ok(AgentRunPoll::Timeout) => {}
+            Ok(AgentRunPoll::Finished) => break,
+            Err(error) => errors.push(error.message),
+        }
+    }
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::UserQuestion { .. })),
+        "question was not emitted: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentFailed { .. })),
+        "generic process failure must not precede protocol failure: {events:?}"
+    );
+    assert_eq!(
+        errors,
+        vec!["cosh-core-question-protocol:premature-completion"]
+    );
+    assert!(
+        !format!("{events:?}{errors:?}").contains("provider stderr must stay hidden"),
+        "provider stderr leaked through the protocol failure"
+    );
     let _ = fs::remove_file(script);
 }
 

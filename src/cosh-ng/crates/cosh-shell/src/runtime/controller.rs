@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::question::runtime::pending_question_capture;
 use crate::runtime::prelude::*;
+use crate::runtime::question_terminal::redraw_active_question_if_width_changed;
 use crate::runtime::state::{ApprovalRequestStatus, CoshApprovalMode, InlineState};
 
 use super::dispatcher::RuntimeDispatcher;
@@ -22,7 +23,15 @@ fn render_raw_inline_events<W: Write>(
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    if let Some(audit) = inline_state.audit.as_mut() {
+        audit.observe_shell_events(events);
+    }
     let mut terminal_output = CrLfWriter::new(output);
+    redraw_active_question_if_width_changed(
+        inline_state,
+        &mut terminal_output,
+        RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
+    )?;
     let snapshot = ShellEventSnapshot::new(events);
     let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,
@@ -35,7 +44,7 @@ fn render_raw_inline_events<W: Write>(
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(snapshot.events().len())
     {
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
@@ -245,7 +254,10 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
         .find(|request| request.status == ApprovalRequestStatus::Pending)
         .map(|request| RawInputCapture::Approval {
             id: request.id.clone(),
-            is_hook: request.subject.contains("HOOK:"),
+            action_set: crate::approval::panel::approval_action_set_for(
+                request,
+                &state.approvals.requests,
+            ),
         })
 }
 
@@ -260,7 +272,9 @@ pub(crate) fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool
             ShellEventKind::CommandStarted => {
                 active.insert(command_id.as_str());
             }
-            ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed => {
+            ShellEventKind::CommandCompleted
+            | ShellEventKind::CommandFailed
+            | ShellEventKind::UserInputIntercepted => {
                 active.remove(command_id.as_str());
             }
             _ => {}
@@ -400,7 +414,7 @@ mod tests {
         state
             .control
             .shell_handoff_mut()
-            .emit_next_approved()
+            .emit_next_approved(0)
             .expect("emit handoff");
         state
             .control
@@ -440,7 +454,7 @@ mod tests {
         state
             .control
             .shell_handoff_mut()
-            .emit_next_approved()
+            .emit_next_approved(0)
             .expect("emit handoff");
         state
             .control
@@ -544,6 +558,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

@@ -7,9 +7,11 @@ use crate::input::{InputClassifier, InputDecision, InterceptReason};
 
 use super::event_parser::{
     candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
-    starts_intercept_candidate, starts_native_intercept_candidate, CandidateLineBuffer,
-    CandidateLineStatus, NativeLineState,
+    redact_extension_setting_value, starts_intercept_candidate, starts_native_intercept_candidate,
+    CandidateLineBuffer, CandidateLineStatus, NativeLineState,
 };
+use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
+use super::mode::new_delay_input_mode;
 use super::{write_all_pty, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
 pub(super) struct InputRelayContext<'a> {
@@ -17,9 +19,32 @@ pub(super) struct InputRelayContext<'a> {
     pub(super) input_classifier: &'a InputClassifier,
     pub(super) input_events: &'a Sender<RawInputEvent>,
     pub(super) input_mode: &'a Arc<Mutex<RawInputMode>>,
+    pub(super) input_generation: &'a UserPtyInputGeneration,
+    pub(super) line_submits: &'a mut LineSubmitCounter,
     pub(super) line_buffer: &'a mut CandidateLineBuffer,
     pub(super) native_line_state: &'a mut NativeLineState,
     pub(super) exit_tracker: &'a mut ExplicitExitTracker,
+}
+
+/// Writes real user bytes to the PTY, bumping the shared input generation
+/// first so replayed-prompt state armed for an older generation expires
+/// before the resulting PTY output can be parsed. The event also reports how
+/// many line submissions the write carried, so the output loop can match
+/// them against shell prompt boundaries.
+pub(super) fn write_user_bytes_to_pty(
+    master: &mut File,
+    input_generation: &UserPtyInputGeneration,
+    line_submits: &mut LineSubmitCounter,
+    input_events: &Sender<RawInputEvent>,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let line_submits = line_submits.count(bytes);
+    let generation = input_generation.bump();
+    let _ = input_events.send(RawInputEvent::PtyUserWrite {
+        generation,
+        line_submits,
+    });
+    write_all_pty(master, bytes)
 }
 
 pub(super) fn send_raw_input_events(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
@@ -81,7 +106,13 @@ fn relay_passthrough_input_with_activity(
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(bytes);
-    write_all_pty(relay.master, bytes)?;
+    write_user_bytes_to_pty(
+        relay.master,
+        relay.input_generation,
+        relay.line_submits,
+        relay.input_events,
+        bytes,
+    )?;
     Ok(false)
 }
 
@@ -91,37 +122,6 @@ pub(super) fn relay_prompt_ghost_input(
     route: &PromptGhostRoute,
     relay: &mut InputRelayContext<'_>,
 ) -> io::Result<bool> {
-    if let PromptGhostRoute::AgentSelection {
-        candidates,
-        active,
-        pending_escape,
-    } = route
-    {
-        if !pending_escape.is_empty() {
-            let mut combined = pending_escape.clone();
-            combined.extend_from_slice(bytes);
-            let resumed = PromptGhostRoute::AgentSelection {
-                candidates: candidates.clone(),
-                active: *active,
-                pending_escape: Vec::new(),
-            };
-            return relay_prompt_ghost_input(&combined, ghost_text, &resumed, relay);
-        }
-        if b"\x1b[Z".starts_with(bytes) && bytes.len() < 3 {
-            let paused = PromptGhostRoute::AgentSelection {
-                candidates: candidates.clone(),
-                active: *active,
-                pending_escape: bytes.to_vec(),
-            };
-            if let Ok(mut mode) = relay.input_mode.lock() {
-                *mode = RawInputMode::PromptGhost {
-                    text: ghost_text.to_string(),
-                    route: paused,
-                };
-            }
-            return Ok(true);
-        }
-    }
     if bytes.starts_with(b"\x1b[Z") {
         if let PromptGhostRoute::AgentSelection {
             candidates, active, ..
@@ -133,7 +133,6 @@ pub(super) fn relay_prompt_ghost_input(
                 let next_route = PromptGhostRoute::AgentSelection {
                     candidates: candidates.clone(),
                     active: next,
-                    pending_escape: Vec::new(),
                 };
                 if let Ok(mut mode) = relay.input_mode.lock() {
                     *mode = RawInputMode::PromptGhost {
@@ -175,7 +174,7 @@ pub(super) fn relay_prompt_ghost_input(
                     });
                 send_shell_input_state(true, relay.input_events);
                 if let Ok(mut mode) = relay.input_mode.lock() {
-                    *mode = RawInputMode::Delay;
+                    *mode = new_delay_input_mode();
                 }
                 return Ok(true);
             }
@@ -195,12 +194,24 @@ pub(super) fn relay_prompt_ghost_input(
                 relay
                     .exit_tracker
                     .observe_shell_bytes(ghost_text.as_bytes());
-                write_all_pty(relay.master, ghost_text.as_bytes())?;
+                write_user_bytes_to_pty(
+                    relay.master,
+                    relay.input_generation,
+                    relay.line_submits,
+                    relay.input_events,
+                    ghost_text.as_bytes(),
+                )?;
                 if !remainder.is_empty() {
                     send_raw_input_events(remainder, relay.input_events);
                     relay.native_line_state.observe_shell_bytes(remainder);
                     relay.exit_tracker.observe_shell_bytes(remainder);
-                    write_all_pty(relay.master, remainder)?;
+                    write_user_bytes_to_pty(
+                        relay.master,
+                        relay.input_generation,
+                        relay.line_submits,
+                        relay.input_events,
+                        remainder,
+                    )?;
                 }
             }
             PromptGhostRoute::AgentIntercept { suggestion_id } => {
@@ -241,6 +252,13 @@ pub(super) fn relay_prompt_ghost_input(
         }
         return Ok(true);
     }
+    dismiss_prompt_ghost_input(bytes, relay)
+}
+
+pub(super) fn dismiss_prompt_ghost_input(
+    bytes: &[u8],
+    relay: &mut InputRelayContext<'_>,
+) -> io::Result<bool> {
     if let Ok(mut mode) = relay.input_mode.lock() {
         *mode = RawInputMode::Passthrough;
     }
@@ -282,17 +300,12 @@ fn relay_native_passthrough(
         || starts_native_intercept_candidate(bytes, relay.native_line_state)
     {
         relay.line_buffer.push(bytes);
-        redraw_candidate_line(relay.input_events, relay.line_buffer);
         if native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer) {
-            return flush_candidate_line_to_shell(
-                relay.master,
-                relay.input_events,
-                relay.line_buffer,
-                relay.native_line_state,
-                relay.exit_tracker,
-                emit_activity,
-            );
+            return flush_candidate_line_to_shell(relay, emit_activity);
         }
+        // Control bytes such as Tab must reach readline without first changing
+        // the outer terminal cursor, whose display width differs from byte count.
+        redraw_candidate_line(relay.input_events, relay.line_buffer);
         return relay_candidate_line(relay, emit_activity);
     }
     // Non-slash input: send directly to PTY. Shell marker's preexec/
@@ -303,7 +316,13 @@ fn relay_native_passthrough(
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(bytes);
-    write_all_pty(relay.master, bytes)?;
+    write_user_bytes_to_pty(
+        relay.master,
+        relay.input_generation,
+        relay.line_submits,
+        relay.input_events,
+        bytes,
+    )?;
     Ok(false)
 }
 
@@ -320,25 +339,18 @@ fn relay_candidate_line(
             send_shell_input_state(true, relay.input_events);
             Ok(true)
         }
-        CandidateLineStatus::Unsafe => flush_candidate_line_to_shell(
-            relay.master,
-            relay.input_events,
-            relay.line_buffer,
-            relay.native_line_state,
-            relay.exit_tracker,
-            emit_activity,
-        ),
+        CandidateLineStatus::Unsafe => flush_candidate_line_to_shell(relay, emit_activity),
         CandidateLineStatus::Complete { line, line_len } => {
             let force_agent_intercept = relay.line_buffer.force_agent_intercept;
             let suggestion_id = relay.line_buffer.forced_agent_suggestion_id.clone();
             let mut bytes = relay.line_buffer.take();
             let remainder = bytes.split_off(line_len);
             if force_agent_intercept {
-                let _ = relay
-                    .input_events
-                    .send(RawInputEvent::CandidateCommit(line.as_bytes().to_vec()));
+                let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
+                    redact_extension_setting_value(line.as_bytes()),
+                ));
                 if let Ok(mut mode) = relay.input_mode.lock() {
-                    *mode = RawInputMode::Delay;
+                    *mode = new_delay_input_mode();
                 }
                 let _ = relay
                     .input_events
@@ -354,11 +366,11 @@ fn relay_candidate_line(
             }
             match relay.input_classifier.classify(&line) {
                 InputDecision::Intercept { input, reason } => {
-                    let _ = relay
-                        .input_events
-                        .send(RawInputEvent::CandidateCommit(line.as_bytes().to_vec()));
+                    let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
+                        redact_extension_setting_value(line.as_bytes()),
+                    ));
                     if let Ok(mut mode) = relay.input_mode.lock() {
-                        *mode = RawInputMode::Delay;
+                        *mode = new_delay_input_mode();
                     }
                     let _ = relay
                         .input_events
@@ -380,7 +392,13 @@ fn relay_candidate_line(
                         );
                     }
                     relay.exit_tracker.observe_shell_bytes(&bytes);
-                    write_all_pty(relay.master, &bytes)?;
+                    write_user_bytes_to_pty(
+                        relay.master,
+                        relay.input_generation,
+                        relay.line_submits,
+                        relay.input_events,
+                        &bytes,
+                    )?;
                     if !remainder.is_empty() {
                         relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
                     }
@@ -400,22 +418,24 @@ fn relay_candidate_line(
 }
 
 fn flush_candidate_line_to_shell(
-    master: &mut File,
-    input_events: &Sender<RawInputEvent>,
-    line_buffer: &mut CandidateLineBuffer,
-    native_line_state: &mut NativeLineState,
-    exit_tracker: &mut ExplicitExitTracker,
+    relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
 ) -> io::Result<bool> {
-    let bytes = line_buffer.take();
-    let _ = input_events.send(RawInputEvent::CandidateClearLine);
-    send_raw_input_events(&bytes, input_events);
-    native_line_state.observe_shell_bytes(&bytes);
+    let bytes = relay.line_buffer.take();
+    let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
+    send_raw_input_events(&bytes, relay.input_events);
+    relay.native_line_state.observe_shell_bytes(&bytes);
     if emit_activity && !bytes.is_empty() {
-        send_shell_input_state(native_line_state.is_empty(), input_events);
+        send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
-    exit_tracker.observe_shell_bytes(&bytes);
-    write_all_pty(master, &bytes)?;
+    relay.exit_tracker.observe_shell_bytes(&bytes);
+    write_user_bytes_to_pty(
+        relay.master,
+        relay.input_generation,
+        relay.line_submits,
+        relay.input_events,
+        &bytes,
+    )?;
     Ok(false)
 }
 
@@ -423,8 +443,9 @@ fn redraw_candidate_line(
     input_events: &Sender<RawInputEvent>,
     line_buffer: &mut CandidateLineBuffer,
 ) {
-    let visible = line_buffer.visible_line_bytes().to_vec();
-    send_shell_input_state(visible.is_empty(), input_events);
+    let original = line_buffer.visible_line_bytes();
+    send_shell_input_state(original.is_empty(), input_events);
+    let visible = redact_extension_setting_value(original);
     let hint = std::str::from_utf8(&visible)
         .ok()
         .and_then(candidate_inline_hint);

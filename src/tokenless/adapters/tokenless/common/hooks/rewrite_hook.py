@@ -37,8 +37,8 @@ from hook_utils import (
     _TOKENLESS_LOCAL_SHARE,
     build_cosh_ng_pre_tool_output,
     forward_stderr,
-    is_cosh_ng_runtime,
     parse_version,
+    resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
     skip,
@@ -49,18 +49,10 @@ from hook_utils import (
 # -- constants ---------------------------------------------------------------
 
 _MIN_RTK_VERSION = (0, 35, 0)
-_FALLBACK_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
-_COSH_NG_AGENT_ID = "cosh-ng"
+_AGENT_ID = resolve_agent_id()
 
 
 # -- helpers -------------------------------------------------------------------
-
-
-def _resolve_agent_id(is_cosh_ng: bool) -> str:
-    """Return the appropriate agent ID for stats attribution."""
-    if is_cosh_ng:
-        return _COSH_NG_AGENT_ID
-    return _FALLBACK_AGENT_ID
 
 
 def _is_cosh_ng_pre_tool(input_data: dict) -> bool:
@@ -71,10 +63,10 @@ def _is_cosh_ng_pre_tool(input_data: dict) -> bool:
     since tool_response is not available in PreToolUse input.
     """
     # Cosh-NG sends hook_event_name (snake_case from HookInput struct)
-    if input_data.get("hook_event_name") == "PreToolUse":
+    if input_data.get('hook_event_name') == 'PreToolUse':
         return True
     # Fallback: check for Cosh-NG specific fields
-    if "hook_event_name" in input_data:
+    if 'hook_event_name' in input_data:
         return True
     return False
 
@@ -124,7 +116,7 @@ def main() -> None:
 
     # 5. Detect Cosh-NG runtime
     cosh_ng = _is_cosh_ng_pre_tool(input_data)
-    agent_id = _resolve_agent_id(cosh_ng)
+    agent_id = _AGENT_ID
 
     # 6. Extract command
     tool_input = input_data.get("tool_input", {})

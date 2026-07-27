@@ -45,6 +45,10 @@ impl InputClassifier {
         self.conservative
     }
 
+    pub(crate) fn ai_enabled(&self) -> bool {
+        self.ai_enabled
+    }
+
     pub(crate) fn is_slash_control_candidate(&self, token: &str) -> bool {
         self.is_slash_control_input(token)
     }
@@ -70,33 +74,6 @@ impl InputClassifier {
             return InputDecision::Intercept {
                 input: input.to_string(),
                 reason: InterceptReason::AgentMarker,
-            };
-        }
-
-        if self.conservative {
-            if looks_like_pure_natural_language(trimmed) {
-                if !self.ai_enabled {
-                    return InputDecision::Consume;
-                }
-                return InputDecision::Intercept {
-                    input: input.to_string(),
-                    reason: InterceptReason::NaturalLanguage,
-                };
-            }
-            return InputDecision::SendToShell(input.to_string());
-        }
-
-        if starts_with_shell_command(trimmed) {
-            return InputDecision::SendToShell(input.to_string());
-        }
-
-        if looks_like_natural_language(trimmed) {
-            if !self.ai_enabled {
-                return InputDecision::Consume;
-            }
-            return InputDecision::Intercept {
-                input: input.to_string(),
-                reason: InterceptReason::NaturalLanguage,
             };
         }
 
@@ -141,39 +118,6 @@ impl InterceptReason {
     }
 }
 
-fn starts_with_shell_command(input: &str) -> bool {
-    let Some(token) = command_token(input) else {
-        return false;
-    };
-
-    is_path_like_command(token) || is_known_shell_command(token)
-}
-
-fn command_token(input: &str) -> Option<&str> {
-    input
-        .split_whitespace()
-        .find(|token| !is_env_assignment(token))
-}
-
-fn is_env_assignment(token: &str) -> bool {
-    let Some((name, _)) = token.split_once('=') else {
-        return false;
-    };
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn is_path_like_command(token: &str) -> bool {
-    token.starts_with('/')
-        || token.starts_with("./")
-        || token.starts_with("../")
-        || token.starts_with("~/")
-}
-
 fn is_slash_hint_candidate(token: &str, slash_commands: &[String]) -> bool {
     if token == "/" {
         return true;
@@ -212,110 +156,9 @@ fn edit_distance(left: &str, right: &str) -> usize {
     prev[right_chars.len()]
 }
 
-fn is_known_shell_command(token: &str) -> bool {
-    matches!(
-        token,
-        "awk"
-            | "bash"
-            | "bat"
-            | "brew"
-            | "bun"
-            | "cargo"
-            | "cat"
-            | "cd"
-            | "chmod"
-            | "chown"
-            | "cp"
-            | "curl"
-            | "docker"
-            | "du"
-            | "echo"
-            | "env"
-            | "fd"
-            | "find"
-            | "git"
-            | "grep"
-            | "head"
-            | "less"
-            | "ls"
-            | "make"
-            | "mkdir"
-            | "mv"
-            | "node"
-            | "npm"
-            | "npx"
-            | "nvim"
-            | "pnpm"
-            | "printf"
-            | "ps"
-            | "pwd"
-            | "python"
-            | "python3"
-            | "rg"
-            | "rm"
-            | "sed"
-            | "sh"
-            | "sudo"
-            | "tail"
-            | "top"
-            | "touch"
-            | "tree"
-            | "vi"
-            | "vim"
-            | "yarn"
-    )
-}
-
-fn looks_like_natural_language(input: &str) -> bool {
-    if input.chars().any(|ch| !ch.is_ascii() && ch.is_alphabetic()) {
-        return true;
-    }
-
-    let lower = input.to_ascii_lowercase();
-    let first = lower.split_whitespace().next().unwrap_or_default();
-    matches!(first, "why" | "how" | "what" | "explain" | "fix" | "please")
-        && lower.split_whitespace().count() > 1
-}
-
-const SHELL_META_CHARS: &[char] = &[';', '|', '&', '>', '<', '$', '`', '(', ')', '{', '}'];
-
-fn has_command_like_tokens(input: &str) -> bool {
-    for token in input.split_whitespace() {
-        if token.starts_with('-') {
-            return true;
-        }
-        if token.contains('/') || token.contains('~') {
-            return true;
-        }
-        if token.chars().any(|ch| SHELL_META_CHARS.contains(&ch)) {
-            return true;
-        }
-    }
-    false
-}
-
-fn looks_like_pure_natural_language(input: &str) -> bool {
-    if has_command_like_tokens(input) {
-        return false;
-    }
-
-    let first_token = input.split_whitespace().next().unwrap_or_default();
-    if first_token
-        .chars()
-        .any(|ch| !ch.is_ascii() && ch.is_alphabetic())
-    {
-        return true;
-    }
-
-    let lower = input.to_ascii_lowercase();
-    let first = lower.split_whitespace().next().unwrap_or_default();
-    matches!(first, "why" | "how" | "what" | "explain" | "fix" | "please")
-        && lower.split_whitespace().count() > 1
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{has_command_like_tokens, InputClassifier, InputDecision, InterceptReason};
+    use super::{InputClassifier, InputDecision, InterceptReason};
 
     #[test]
     fn classifies_known_slash_commands_without_capturing_paths() {
@@ -437,14 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn classifies_natural_language_and_marker_inputs() {
+    fn classifies_ordinary_and_marker_inputs() {
         let classifier = InputClassifier::default();
         assert_eq!(
             classifier.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
-            InputDecision::Intercept {
-                input: "\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string(),
-                reason: InterceptReason::NaturalLanguage
-            }
+            InputDecision::SendToShell("\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string())
         );
         assert_eq!(
             classifier.classify("?? last command"),
@@ -457,6 +297,28 @@ mod tests {
             classifier.classify("echo why not"),
             InputDecision::SendToShell("echo why not".to_string())
         );
+    }
+
+    #[test]
+    fn ordinary_input_is_always_shell_first() {
+        for classifier in [
+            InputClassifier::default(),
+            InputClassifier::conservative(),
+            InputClassifier::default().with_ai_enabled(false),
+        ] {
+            for input in [
+                "Who are you",
+                "how file",
+                "please explain this",
+                "\u{5e2e}\u{6211}\u{770b}\u{770b}\u{5f53}\u{524d}\u{76ee}\u{5f55}",
+            ] {
+                assert_eq!(
+                    classifier.classify(input),
+                    InputDecision::SendToShell(input.to_string()),
+                    "{input:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -521,43 +383,20 @@ mod tests {
     }
 
     #[test]
-    fn conservative_intercepts_pure_natural_language() {
+    fn conservative_sends_natural_language_to_shell() {
         let c = InputClassifier::conservative();
-        assert_eq!(
-            c.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
-            InputDecision::Intercept {
-                input: "\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string(),
-                reason: InterceptReason::NaturalLanguage,
-            }
-        );
-        assert_eq!(
-            c.classify("why is the build failing"),
-            InputDecision::Intercept {
-                input: "why is the build failing".to_string(),
-                reason: InterceptReason::NaturalLanguage,
-            }
-        );
-        assert_eq!(
-            c.classify("how do I reset my password"),
-            InputDecision::Intercept {
-                input: "how do I reset my password".to_string(),
-                reason: InterceptReason::NaturalLanguage,
-            }
-        );
-        assert_eq!(
-            c.classify("what is a mutex"),
-            InputDecision::Intercept {
-                input: "what is a mutex".to_string(),
-                reason: InterceptReason::NaturalLanguage,
-            }
-        );
-        assert_eq!(
-            c.classify("explain the error"),
-            InputDecision::Intercept {
-                input: "explain the error".to_string(),
-                reason: InterceptReason::NaturalLanguage,
-            }
-        );
+        for input in [
+            "\u{5e2e}\u{6211}\u{5206}\u{6790}",
+            "why is the build failing",
+            "how do I reset my password",
+            "what is a mutex",
+            "explain the error",
+        ] {
+            assert_eq!(
+                c.classify(input),
+                InputDecision::SendToShell(input.to_string())
+            );
+        }
     }
 
     #[test]
@@ -648,19 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn has_command_like_tokens_detects_flags_paths_metas() {
-        assert!(has_command_like_tokens("-v"));
-        assert!(has_command_like_tokens("foo --bar"));
-        assert!(has_command_like_tokens("foo /etc/passwd"));
-        assert!(has_command_like_tokens("foo ~/dir"));
-        assert!(has_command_like_tokens("a | b"));
-        assert!(has_command_like_tokens("echo $VAR"));
-        assert!(!has_command_like_tokens("why is the sky blue"));
-        assert!(!has_command_like_tokens("explain the error"));
-    }
-
-    #[test]
-    fn default_mode_unchanged_for_known_shell_commands() {
+    fn default_mode_sends_all_ordinary_inputs_to_shell() {
         let d = InputClassifier::default();
         assert_eq!(
             d.classify("git status"),
@@ -668,10 +495,7 @@ mod tests {
         );
         assert_eq!(
             d.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
-            InputDecision::Intercept {
-                input: "\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string(),
-                reason: InterceptReason::NaturalLanguage,
-            }
+            InputDecision::SendToShell("\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string())
         );
     }
 
@@ -679,10 +503,13 @@ mod tests {
     fn ai_disabled_consumes_agent_inputs_but_keeps_shell_and_slash() {
         let d = InputClassifier::default().with_ai_enabled(false);
         assert_eq!(d.classify("?? last command"), InputDecision::Consume);
-        assert_eq!(d.classify("why is this failing"), InputDecision::Consume);
+        assert_eq!(
+            d.classify("why is this failing"),
+            InputDecision::SendToShell("why is this failing".to_string())
+        );
         assert_eq!(
             d.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
-            InputDecision::Consume
+            InputDecision::SendToShell("\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string())
         );
         assert_eq!(
             d.classify("/help"),

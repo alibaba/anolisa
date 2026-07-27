@@ -43,7 +43,7 @@ MANIFEST_PATH="${EXTENSION_DIR}/qwen-extension.json"
 OBSERVABILITY_HOOK_PATH="${EXTENSION_DIR}/hooks/observability_hook.py"
 SKILL_LEDGER_HOOK_PATH="${EXTENSION_DIR}/hooks/skill_ledger_hook.py"
 CODE_SCANNER_HOOK_PATH="${EXTENSION_DIR}/hooks/code_scanner_hook.py"
-TRACE_CONTEXT_PATH="${EXTENSION_DIR}/hooks/qwen_trace_context.py"
+TRACE_CONTEXT_PATH="${EXTENSION_DIR}/hooks/trace_context.py"
 
 [[ -f "${MANIFEST_PATH}" ]] || fail "missing extension manifest: ${MANIFEST_PATH}"
 [[ -f "${OBSERVABILITY_HOOK_PATH}" ]] || fail \

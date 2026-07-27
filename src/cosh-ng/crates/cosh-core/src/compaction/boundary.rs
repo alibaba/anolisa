@@ -143,6 +143,61 @@ pub(crate) fn is_safe_split_point(messages: &[Message], index: usize) -> bool {
     }
 }
 
+fn last_compactable_run_index(runs: &[RunSpan], preserve_recent_runs: usize) -> Option<usize> {
+    let preserve = preserve_recent_runs.max(1);
+    (runs.len() > preserve).then(|| runs.len() - preserve)
+}
+
+fn choose_target_cut(
+    messages: &[Message],
+    candidates: impl IntoIterator<Item = usize>,
+    target_tokens: u64,
+) -> Option<usize> {
+    let mut fallback = None;
+    for cut in candidates {
+        fallback = Some(cut);
+        let retained = super::budget::estimate_messages_tokens(&messages[cut..]);
+        if retained <= target_tokens {
+            return Some(cut);
+        }
+    }
+    fallback
+}
+
+fn transcript_ends_with_complete_agent_run(messages: &[Message], run: RunSpan) -> bool {
+    messages[run.start..run.end]
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role.as_str(), "user" | "assistant" | "tool"))
+        .is_some_and(|message| {
+            message.role == "assistant"
+                && message
+                    .tool_calls
+                    .as_ref()
+                    .is_none_or(|calls| calls.is_empty())
+        })
+}
+
+/// Reports whether automatic compaction can advance beyond the active
+/// projection while preserving the configured number of recent runs.
+///
+/// This deliberately checks only boundary feasibility. The compactor still
+/// owns target-aware cut selection, but an automatic recommendation must not
+/// launch it when every eligible prefix is already compacted or protected.
+///
+/// # Errors
+///
+/// Propagates [`BoundaryError`] so malformed transcripts fail closed.
+pub(crate) fn has_new_compactable_prefix(
+    messages: &[Message],
+    preserve_recent_runs: usize,
+    compacted_through: usize,
+) -> Result<bool, BoundaryError> {
+    let runs = group_agent_runs(messages)?;
+    Ok(last_compactable_run_index(&runs, preserve_recent_runs)
+        .is_some_and(|index| runs[index].start > compacted_through))
+}
+
 /// Selects the compaction cut for a transcript, or `None` when no safe cut
 /// frees at least one complete Agent run.
 ///
@@ -159,22 +214,72 @@ pub(crate) fn select_compacted_through(
     preserve_recent_runs: usize,
     target_tokens: u64,
 ) -> Result<Option<usize>, BoundaryError> {
+    select_compacted_through_after(messages, preserve_recent_runs, target_tokens, 0)
+}
+
+/// Selects a safe cut strictly after an already compacted transcript prefix.
+///
+/// This prevents a later compaction from selecting the active projection's
+/// boundary merely because its retained suffix still fits the target.
+///
+/// # Errors
+///
+/// Propagates [`BoundaryError`] so malformed transcripts are never compacted.
+pub(crate) fn select_compacted_through_after(
+    messages: &[Message],
+    preserve_recent_runs: usize,
+    target_tokens: u64,
+    compacted_through: usize,
+) -> Result<Option<usize>, BoundaryError> {
     let runs = group_agent_runs(messages)?;
-    let preserve = preserve_recent_runs.max(1);
-    if runs.len() <= preserve {
+    let Some(last_candidate) = last_compactable_run_index(&runs, preserve_recent_runs) else {
         return Ok(None);
-    }
+    };
     // Candidate cuts are run starts from runs[1] (compact at least one run)
     // through runs[len - preserve] (keep the required recent runs).
-    let last_candidate = runs.len() - preserve;
-    for span in &runs[1..=last_candidate] {
-        let cut = span.start;
-        let retained = super::budget::estimate_messages_tokens(&messages[cut..]);
-        if retained <= target_tokens {
-            return Ok(Some(cut));
+    let candidates = runs[1..=last_candidate]
+        .iter()
+        .map(|span| span.start)
+        .filter(|cut| *cut > compacted_through);
+    Ok(choose_target_cut(messages, candidates, target_tokens))
+}
+
+/// Selects a manual compaction cut, including the transcript end when the
+/// latest Agent run is complete.
+///
+/// Manual compaction is an explicit request, so it does not reserve recent
+/// runs unconditionally. It still preserves as much verbatim history as the
+/// target permits and only summarizes the latest run when no earlier cut can
+/// satisfy the request.
+///
+/// # Errors
+///
+/// Propagates [`BoundaryError`] so malformed transcripts are never compacted.
+pub(crate) fn select_manual_compacted_through_after(
+    messages: &[Message],
+    target_tokens: u64,
+    compacted_through: usize,
+) -> Result<Option<usize>, BoundaryError> {
+    let runs = group_agent_runs(messages)?;
+    if runs.is_empty() {
+        return Ok(None);
+    }
+    let mut candidates = Vec::with_capacity(runs.len());
+    let mut prefix_is_complete = true;
+    for (index, run) in runs.iter().copied().enumerate() {
+        prefix_is_complete &= transcript_ends_with_complete_agent_run(messages, run);
+        if !prefix_is_complete {
+            continue;
+        }
+        let cut = runs
+            .get(index + 1)
+            .map(|next| next.start)
+            .unwrap_or(messages.len());
+        if cut > compacted_through {
+            candidates.push(cut);
         }
     }
-    Ok(Some(runs[last_candidate].start))
+    Ok(choose_target_cut(messages, candidates, target_tokens))
 }
 
 #[cfg(test)]
@@ -210,6 +315,68 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0], RunSpan { start: 0, end: 4 });
         assert_eq!(runs[1], RunSpan { start: 4, end: 8 });
+    }
+
+    #[test]
+    fn automatic_preflight_requires_a_new_eligible_boundary() {
+        let mut messages = run_with_tools("first", "call-1");
+        messages.extend(run_with_tools("second", "call-2"));
+
+        assert!(!has_new_compactable_prefix(&messages, 2, 0).unwrap());
+        assert!(has_new_compactable_prefix(&messages, 1, 0).unwrap());
+
+        let first_cut = group_agent_runs(&messages).unwrap()[1].start;
+        assert!(!has_new_compactable_prefix(&messages, 1, first_cut).unwrap());
+    }
+
+    #[test]
+    fn target_selection_advances_past_the_active_projection() {
+        let mut messages = run_with_tools("first", "call-1");
+        messages.extend(run_with_tools("second", "call-2"));
+        messages.extend(run_with_tools("third", "call-3"));
+        let runs = group_agent_runs(&messages).unwrap();
+
+        assert_eq!(
+            select_compacted_through_after(&messages, 1, u64::MAX, runs[1].start).unwrap(),
+            Some(runs[2].start)
+        );
+    }
+
+    #[test]
+    fn manual_selection_can_compact_one_complete_run() {
+        let messages = run_with_tools("first", "call-1");
+
+        assert_eq!(
+            select_manual_compacted_through_after(&messages, u64::MAX, 0).unwrap(),
+            Some(messages.len())
+        );
+    }
+
+    #[test]
+    fn manual_selection_only_cuts_complete_run_prefixes() {
+        let user_only = vec![Message::user("unfinished")];
+        assert_eq!(
+            select_manual_compacted_through_after(&user_only, u64::MAX, 0).unwrap(),
+            None
+        );
+
+        let tool_tail = vec![
+            Message::user("unfinished tool run"),
+            Message::assistant_with_tool_calls("", vec![tool_call("call-1")]),
+            Message::tool_result("call-1", "output", false),
+        ];
+        assert_eq!(
+            select_manual_compacted_through_after(&tool_tail, u64::MAX, 0).unwrap(),
+            None
+        );
+
+        let mut older_complete = run_with_tools("first", "call-1");
+        let first_run_end = older_complete.len();
+        older_complete.push(Message::user("unfinished second run"));
+        assert_eq!(
+            select_manual_compacted_through_after(&older_complete, u64::MAX, 0).unwrap(),
+            Some(first_run_end)
+        );
     }
 
     #[test]

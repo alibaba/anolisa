@@ -3,10 +3,13 @@ import { NavLink, useLocation } from 'react-router-dom';
 
 const navItems = [
   { path: '/', label: 'Agent 可观测', icon: '📊' },
+  { path: '/sessions', label: '会话列表', icon: '🗂️' },
   { path: '/savings', label: 'Token 节省', icon: '⚡' },
+  { path: '/optimization', label: '优化分析', icon: '🔬' },
   { path: '/skills', label: 'Skill 指标', icon: '🧩' },
   { path: '/security', label: '安全可观测', icon: '🛡️' },
-  { path: '/atif', label: 'ATIF 查看器', icon: '🔍' },
+  { path: '/atif', label: '轨迹查看', icon: '🔍' },
+  { path: '/settings', label: '设置', icon: '⚙️' },
 ];
 
 export const NavBar: React.FC = () => {

@@ -93,6 +93,7 @@ fn block(exit_code: i32) -> CommandBlock {
             terminal_output_bytes: 10,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 

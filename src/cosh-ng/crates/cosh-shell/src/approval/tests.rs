@@ -171,7 +171,7 @@ fn provider_shell_permission_approval_records_foreground_metadata() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
     assert_eq!(handoff.source, "approved_provider_shell_tool");
 }
@@ -276,7 +276,7 @@ fn streamed_tool_fallback_handoff_strips_control_request_id() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
 
     assert_eq!(handoff.command, "echo fallback");
@@ -301,7 +301,7 @@ fn provider_tool_call_fallback_handoff_keeps_provider_source() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
 
     assert_eq!(handoff.command, "echo provider-fallback");
@@ -482,6 +482,7 @@ fn control_shell_permission_uses_same_command_assessment_risk() {
             tool_input: serde_json::json!({ "command": "ps aux --sort=-%mem | head -20" }),
             tool_use_id: "toolu-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     };
 
@@ -516,6 +517,7 @@ fn control_shell_permission_missing_command_blocks_as_unsafe_binding() {
             tool_input: serde_json::json!({ "description": "missing command" }),
             tool_use_id: "toolu-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     };
 
@@ -600,7 +602,7 @@ fn provider_approval_without_owner_starts_origin_preserving_recovery() {
     recover_undelivered_provider_approval(
         ProviderApprovalDelivery::OwnerUnavailable,
         &request,
-        7,
+        Some(7),
         &adapter,
         &mut state,
         &mut output,
@@ -788,6 +790,7 @@ fn provider_tool_request(
 ) -> RuntimeApprovalRequest {
     RuntimeApprovalRequest {
         id: "req-1".to_string(),
+        audit_ref: None,
         run_id: "run-1".to_string(),
         origin: AgentRunOrigin::Standard,
         session_id: "sess-1".to_string(),
@@ -838,6 +841,7 @@ fn active_run_for_approval_test() -> (std::path::PathBuf, ActiveAgentRun) {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -915,11 +919,7 @@ exit 1
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-core");
-    let adapter = CoshCoreAdapter {
-        program: program.to_string_lossy().to_string(),
-        allow_model_call: true,
-        session: std::sync::Arc::default(),
-    };
+    let adapter = CoshCoreAdapter::new(program.to_string_lossy().to_string(), true);
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
@@ -949,6 +949,7 @@ fn governed_provider_tool_permission(request_id: &str, tool_use_id: &str) -> Gov
             tool_input: serde_json::json!({ "command": "df -h" }),
             tool_use_id: tool_use_id.to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     }
 }
@@ -995,4 +996,227 @@ fn command_matches_trust_key_basic() {
 fn command_matches_trust_key_empty_set() {
     let trusted = HashSet::new();
     assert!(!command_matches_trust_key("npm test", &trusted));
+}
+
+// ─── Turn-scope batch consent (issue #1773) ─────────────────────────
+
+use crate::approval::panel::approval_action_set_for;
+use crate::approval::resolution::{apply_batch_consent_decision, batch_consent_covers_request};
+
+fn turn_request(
+    id: &str,
+    run_id: &str,
+    command: &str,
+    risk: &'static str,
+) -> RuntimeApprovalRequest {
+    let mut request = provider_tool_request(
+        "run_shell_command",
+        Some(serde_json::json!({ "command": command })),
+    );
+    request.id = id.to_string();
+    request.run_id = run_id.to_string();
+    request.risk = risk;
+    request
+}
+
+/// FAIL→PASS 对照（S2 探针转正）：同 run 内给出轮次级同意后，另一条
+/// 不同命令必须被覆盖（SC1/V1）；同时 session trust 零写入（N7）。
+#[test]
+fn approve_turn_covers_other_commands_in_same_run() {
+    let mut state = InlineState::default();
+    state.approvals.requests.push(turn_request(
+        "req-1",
+        "run-1",
+        "systemctl status nginx",
+        "medium",
+    ));
+
+    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
+        .expect("approval decision");
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    assert_eq!(state.control.trust.run_batch_consent(), Some("run-1"));
+    assert_eq!(
+        state.approvals.journal.last().map(|entry| entry.actor),
+        Some("user_batch")
+    );
+    assert!(state.control.trust.session_trusted_commands().is_empty());
+
+    let other = turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium");
+    let consented_run = state
+        .control
+        .trust
+        .run_batch_consent()
+        .expect("consent granted");
+    assert!(
+        batch_consent_covers_request(&other, consented_run),
+        "a different command from the same run should be covered by batch consent"
+    );
+}
+
+/// 放行谓词的 fail-closed 边界：high risk、hook、异 run、非 bash tool、
+/// 已 resolve 状态均不被覆盖（N1/N3/N4/N9/I2）。
+#[test]
+fn run_batch_consent_covers_is_fail_closed() {
+    let covered = turn_request("req-2", "run-1", "ss -lntp", "medium");
+    assert!(batch_consent_covers_request(&covered, "run-1"));
+
+    let high = turn_request("req-3", "run-1", "rm -rf /var/log/nginx", "high");
+    assert!(!batch_consent_covers_request(&high, "run-1"));
+
+    let mut hooked = turn_request("req-4", "run-1", "ss -lntp", "medium");
+    hooked.hook_requires_approval = true;
+    assert!(!batch_consent_covers_request(&hooked, "run-1"));
+
+    let foreign_run = turn_request("req-5", "run-2", "ss -lntp", "medium");
+    assert!(!batch_consent_covers_request(&foreign_run, "run-1"));
+
+    let non_bash = provider_tool_request("Write", None);
+    assert!(!batch_consent_covers_request(&non_bash, "run-1"));
+
+    let mut resolved = turn_request("req-6", "run-1", "ss -lntp", "medium");
+    resolved.status = ApprovalRequestStatus::Approved;
+    assert!(!batch_consent_covers_request(&resolved, "run-1"));
+
+    // 未授权（consent 已清除）时，到达路径根本不会进入清扫。
+    let mut state = InlineState::default();
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
+    state.control.trust.clear_run_batch_consent();
+    assert_eq!(state.control.trust.run_batch_consent(), None);
+}
+
+/// Blocked turn decisions keep the blocked title and never grant consent.
+#[test]
+fn approve_turn_blocked_request_does_not_grant_consent() {
+    let mut state = InlineState::default();
+    // `run_shell_command` without a command payload fails shell-handoff
+    // validation and resolves Blocked.
+    state
+        .approvals
+        .requests
+        .push(provider_tool_request("run_shell_command", None));
+
+    let direct_decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
+        .expect("approval decision");
+    assert_eq!(
+        direct_decision.request.status,
+        ApprovalRequestStatus::Blocked
+    );
+    assert_eq!(
+        direct_decision.title,
+        MessageId::ApprovalResolutionBlockedTitle
+    );
+    assert_eq!(state.control.trust.run_batch_consent(), None);
+
+    state
+        .approvals
+        .requests
+        .push(provider_tool_request("run_shell_command", None));
+    let batch_decision =
+        apply_batch_consent_decision(&mut state, 1).expect("batch consent decision");
+    assert_eq!(
+        batch_decision.request.status,
+        ApprovalRequestStatus::Blocked
+    );
+    assert_eq!(
+        batch_decision.title,
+        MessageId::ApprovalResolutionBlockedTitle
+    );
+}
+
+/// 批量清扫决策复用同一管线，journal 逐条留痕 actor=batch_consent，
+/// preview/risk/run_id 完整（V2/G4/I3）。
+#[test]
+fn batch_consent_decision_journals_batch_actor() {
+    let mut state = InlineState::default();
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
+    state.approvals.requests.push(turn_request(
+        "req-2",
+        "run-1",
+        "journalctl -u nginx -n 50",
+        "medium",
+    ));
+
+    let decision = apply_batch_consent_decision(&mut state, 0).expect("batch decision");
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    let entry = state.approvals.journal.last().expect("journal entry");
+    assert_eq!(entry.actor, "batch_consent");
+    assert_eq!(entry.run_id, "run-1");
+    assert_eq!(entry.preview, "$ journalctl -u nginx -n 50");
+    assert_eq!(entry.risk, "medium");
+    // Sweep resolutions never (re-)grant or widen consent scope.
+    assert_eq!(state.control.trust.run_batch_consent(), Some("run-1"));
+    assert!(state.control.trust.session_trusted_commands().is_empty());
+}
+
+/// run 结束（stop 出口）即清除授权，不跨 run 泄漏（N2/G3/I4）。
+#[test]
+fn stopping_active_run_clears_batch_consent() {
+    let mut state = InlineState::default();
+    let (dir, active_run) = active_run_for_approval_test();
+    state.agent_run.active = Some(active_run);
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
+
+    let mut output = Vec::new();
+    stop_active_agent_run_without_rendering(&mut state, &mut output).expect("stop run");
+    assert_eq!(state.control.trust.run_batch_consent(), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 展示条件矩阵（D7）：单卡轮 Standard；队列多条首卡即 TurnConsent；
+/// 串行第 2 卡 TurnConsent（前序已 resolve 也计入）；新 run 回到
+/// Standard；hook 永远 Hook（SC7/SC8/V9/N8/N9）。
+#[test]
+fn approval_action_set_matrix() {
+    // 单卡轮次：Standard。
+    let solo = vec![turn_request("req-1", "run-1", "git status", "medium")];
+    assert_eq!(
+        approval_action_set_for(&solo[0], &solo),
+        ApprovalActionSet::Standard
+    );
+
+    // 队列批量到达：首卡即 TurnConsent。
+    let queued = vec![
+        turn_request("req-1", "run-1", "systemctl status nginx", "medium"),
+        turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium"),
+    ];
+    assert_eq!(
+        approval_action_set_for(&queued[0], &queued),
+        ApprovalActionSet::TurnConsent
+    );
+
+    // 串行到达：前序已 resolve 也计入，第 2 卡 TurnConsent。
+    let mut serial = vec![
+        turn_request("req-1", "run-1", "systemctl status nginx", "medium"),
+        turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium"),
+    ];
+    serial[0].status = ApprovalRequestStatus::Approved;
+    assert_eq!(
+        approval_action_set_for(&serial[1], &serial),
+        ApprovalActionSet::TurnConsent
+    );
+
+    // 新 run 首卡：上轮请求不同 run_id，回到 Standard。
+    let mut next_turn = serial.clone();
+    next_turn.push(turn_request("req-3", "run-2", "free -m", "medium"));
+    assert_eq!(
+        approval_action_set_for(&next_turn[2], &next_turn),
+        ApprovalActionSet::Standard
+    );
+
+    // hook 请求永远 Hook，即使同 run 多条（C4）。
+    let mut hooked = turn_request("req-4", "run-1", "git status", "medium");
+    hooked.subject = "HOOK: PreToolUse".to_string();
+    assert_eq!(
+        approval_action_set_for(&hooked, &queued),
+        ApprovalActionSet::Hook
+    );
 }

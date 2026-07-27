@@ -91,6 +91,29 @@ async fn compact_persist_reload_preserves_identity_and_transcript() {
 }
 
 #[tokio::test]
+async fn manual_compaction_can_summarize_one_complete_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 1);
+    let provider = summary_provider();
+
+    let (report, updated) = compact(&store, &session, &provider, &CoreConfig::default())
+        .await
+        .expect("manual compaction committed");
+
+    assert_eq!(report.compacted_through, session.messages.len());
+    assert_eq!(updated.messages.len(), session.messages.len());
+    assert_eq!(
+        updated
+            .compaction
+            .as_ref()
+            .expect("projection")
+            .compacted_through,
+        session.messages.len()
+    );
+}
+
+#[tokio::test]
 async fn sessions_without_projection_load_compatibly() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);
@@ -375,7 +398,7 @@ async fn compact_in_memory_reduces_and_respects_disabled_policy() {
     let messages = bulky_messages(5);
     let provider = summary_provider();
     let config = CoreConfig::default();
-    let candidate = compact_in_memory(&messages, None, &provider, "mock-model", &config, 0)
+    let candidate = compact_in_memory(&messages, None, 0, &provider, "mock-model", &config, 0)
         .await
         .expect("in-memory candidate");
     assert!(candidate.compacted_through > 0);
@@ -385,7 +408,7 @@ async fn compact_in_memory_reduces_and_respects_disabled_policy() {
     disabled.session.compaction.enabled = false;
     let provider = summary_provider();
     assert!(
-        compact_in_memory(&messages, None, &provider, "mock-model", &disabled, 0)
+        compact_in_memory(&messages, None, 0, &provider, "mock-model", &disabled, 0)
             .await
             .is_none()
     );
@@ -518,14 +541,371 @@ async fn summary_request_never_exceeds_a_small_model_window() {
     );
 }
 
+/// Locates the persisted envelope for `session_id` under the temp store.
+fn session_file(temp: &tempfile::TempDir, session_id: &ProviderSessionId) -> std::path::PathBuf {
+    let filename = format!("{session_id}.json");
+    let mut pending = vec![temp.path().to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read session directory") {
+            let path = entry.expect("session directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(filename.as_str()) {
+                return path;
+            }
+        }
+    }
+    panic!("no persisted envelope for session {session_id}");
+}
+
+/// Rewrites the persisted envelope through `edit`.
+///
+/// Tests own this so they can construct damaged or legacy on-disk shapes that
+/// the engine itself must never produce; production code only ever sees the
+/// typed [`PersistedSession`].
+fn edit_envelope<F>(temp: &tempfile::TempDir, session_id: &ProviderSessionId, edit: F)
+where
+    F: FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+{
+    let path = session_file(temp, session_id);
+    let bytes = std::fs::read(&path).expect("read envelope");
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse envelope");
+    edit(value.as_object_mut().expect("envelope object"));
+    std::fs::write(&path, serde_json::to_vec(&value).expect("encode envelope"))
+        .expect("write envelope");
+}
+
+/// Replaces one field of the stored projection, leaving the rest intact.
+fn corrupt_projection_field(
+    temp: &tempfile::TempDir,
+    session_id: &ProviderSessionId,
+    field: &str,
+    value: serde_json::Value,
+) {
+    let field = field.to_string();
+    edit_envelope(temp, session_id, move |envelope| {
+        let projection = envelope
+            .get_mut("compaction")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("stored projection");
+        projection.insert(field, value);
+    });
+}
+
 #[tokio::test]
-async fn nothing_to_compact_for_short_sessions() {
+async fn rejected_projection_preserves_revision_monotonicity() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);
-    let session = persisted(&store, 2);
+    let session = persisted(&store, 8);
+    let config = CoreConfig::default();
+
+    let provider = summary_provider();
+    let (first, _) = compact(&store, &session, &provider, &config)
+        .await
+        .expect("first compaction");
+    assert_eq!(first.revision, 1);
+
+    // An externally rewritten prefix invalidates the digest; the projection is
+    // no longer usable but its revision was published once.
+    corrupt_projection_field(
+        &temp,
+        &session.session_id,
+        "source_digest",
+        serde_json::Value::String("0".repeat(64)),
+    );
+
+    let loaded = store
+        .load(&session.session_id)
+        .expect("load after corruption");
+    assert!(
+        loaded.compaction.is_none(),
+        "an invalid projection must degrade to the complete transcript"
+    );
+    assert_eq!(
+        loaded.compaction_revision, 1,
+        "the revision floor must survive a rejected projection"
+    );
+
+    // The next successful commit continues the clock instead of reusing 1.
+    let provider = summary_provider();
+    let (second, _) = compact(&store, &loaded, &provider, &config)
+        .await
+        .expect("second compaction");
+    assert_eq!(second.revision, 2);
+
+    let reloaded = store.load(&session.session_id).expect("reload");
+    assert_eq!(
+        reloaded.compaction.expect("projection persisted").revision,
+        2
+    );
+    assert_eq!(reloaded.compaction_revision, 2);
+}
+
+#[tokio::test]
+async fn empty_summary_on_disk_preserves_the_revision_floor() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let provider = summary_provider();
+    compact(&store, &session, &provider, &CoreConfig::default())
+        .await
+        .expect("first compaction");
+
+    corrupt_projection_field(
+        &temp,
+        &session.session_id,
+        "summary",
+        serde_json::Value::String("   \n ".to_string()),
+    );
+    let loaded = store.load(&session.session_id).expect("load");
+    assert!(loaded.compaction.is_none());
+    assert_eq!(loaded.compaction_revision, 1);
+}
+
+#[tokio::test]
+async fn future_prompt_version_preserves_the_revision_floor() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let provider = summary_provider();
+    compact(&store, &session, &provider, &CoreConfig::default())
+        .await
+        .expect("first compaction");
+
+    corrupt_projection_field(
+        &temp,
+        &session.session_id,
+        "prompt_version",
+        serde_json::json!(COMPACTION_PROMPT_VERSION + 1),
+    );
+    let loaded = store.load(&session.session_id).expect("load");
+    assert!(loaded.compaction.is_none());
+    assert_eq!(loaded.compaction_revision, 1);
+}
+
+#[tokio::test]
+async fn revision_floor_is_the_maximum_of_clock_and_projection() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let provider = summary_provider();
+    compact(&store, &session, &provider, &CoreConfig::default())
+        .await
+        .expect("first compaction");
+
+    // Projection ahead of the clock: the projection wins.
+    corrupt_projection_field(&temp, &session.session_id, "revision", serde_json::json!(7));
+    let loaded = store.load(&session.session_id).expect("load");
+    assert_eq!(loaded.compaction.expect("valid projection").revision, 7);
+    assert_eq!(loaded.compaction_revision, 7);
+
+    // Clock ahead of the projection: the clock wins.
+    edit_envelope(&temp, &session.session_id, |envelope| {
+        envelope.insert("compaction_revision".to_string(), serde_json::json!(9));
+    });
+    let loaded = store.load(&session.session_id).expect("load");
+    assert_eq!(loaded.compaction.expect("valid projection").revision, 7);
+    assert_eq!(loaded.compaction_revision, 9);
+}
+
+#[tokio::test]
+async fn exhausted_revision_clock_fails_closed_without_calling_provider() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    edit_envelope(&temp, &session.session_id, |envelope| {
+        envelope.insert(
+            "compaction_revision".to_string(),
+            serde_json::json!(u64::MAX),
+        );
+    });
+
+    let error = compact(&store, &session, &PanicProvider, &CoreConfig::default())
+        .await
+        .expect_err("exhausted revision clock");
+    assert_eq!(error.code(), "revision_exhausted");
+    let after = store.load(&session.session_id).expect("load");
+    assert!(after.compaction.is_none());
+    assert_eq!(after.messages.len(), session.messages.len());
+}
+
+#[tokio::test]
+async fn provider_failure_does_not_consume_a_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let config = CoreConfig::default();
+    let provider = summary_provider();
+    compact(&store, &session, &provider, &config)
+        .await
+        .expect("first compaction");
+
+    let mut grown = store.load(&session.session_id).expect("load committed");
+    grown.messages.extend(bulky_messages(3));
+    store.persist(&mut grown).expect("grow transcript");
+
+    let failing = MockProvider::partial_error();
+    let error = compact(&store, &grown, &failing, &config)
+        .await
+        .expect_err("provider failure");
+    assert_eq!(error.code(), "provider_error");
+    assert_eq!(
+        store
+            .load(&session.session_id)
+            .expect("load")
+            .compaction_revision,
+        1
+    );
+
+    // The burned attempt did not advance the clock: the next commit is 2.
+    let provider = summary_provider();
+    let (report, _) = compact(&store, &grown, &provider, &config)
+        .await
+        .expect("retry compaction");
+    assert_eq!(report.revision, 2);
+}
+
+#[tokio::test]
+async fn generation_conflict_does_not_consume_a_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let persist_dir = temp.path().join("sessions").to_str().unwrap().to_string();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    let conflicting = ConflictingProvider {
+        persist_dir,
+        workspace: temp.path().to_path_buf(),
+        session_id: session.session_id.clone(),
+        inner: summary_provider(),
+    };
+    let error = compact(&store, &session, &conflicting, &CoreConfig::default())
+        .await
+        .expect_err("generation conflict");
+    assert_eq!(error.code(), "conflict");
+    assert_eq!(
+        store
+            .load(&session.session_id)
+            .expect("load")
+            .compaction_revision,
+        0
+    );
+
+    let provider = summary_provider();
+    let (report, _) = compact(&store, &session, &provider, &CoreConfig::default())
+        .await
+        .expect("retry compaction");
+    assert_eq!(report.revision, 1);
+}
+
+#[tokio::test]
+async fn emergency_compaction_continues_from_the_saved_revision_floor() {
+    let messages = bulky_messages(5);
+    let config = CoreConfig::default();
+
+    // Sanitization dropped the projection, so `previous` is `None` while the
+    // runtime clock still remembers revision 4.
+    let provider = summary_provider();
+    let candidate = compact_in_memory(&messages, None, 4, &provider, "mock-model", &config, 0)
+        .await
+        .expect("in-memory candidate");
+    assert_eq!(candidate.revision, 5);
+
+    // An exhausted clock takes the existing fail-closed emergency path.
+    let provider = summary_provider();
+    assert!(compact_in_memory(
+        &messages,
+        None,
+        u64::MAX,
+        &provider,
+        "mock-model",
+        &config,
+        0
+    )
+    .await
+    .is_none());
+}
+
+#[test]
+fn runtime_revision_clock_outlives_a_rejected_projection() {
+    let mut runtime = crate::compaction::CompactionRuntime::default();
+    assert_eq!(runtime.revision(), 0);
+    // Loading a session whose projection was rejected keeps the clock.
+    runtime.load_state(None, 4);
+    assert!(runtime.state().is_none());
+    assert_eq!(runtime.revision(), 4);
+}
+
+#[tokio::test]
+async fn legacy_envelope_recovers_the_floor_from_its_projection() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 8);
+    let config = CoreConfig::default();
+    let provider = summary_provider();
+    compact(&store, &session, &provider, &config)
+        .await
+        .expect("first compaction");
+
+    // Pre-`compaction_revision` shape: the clock exists only inside the
+    // projection, and that projection is no longer valid.
+    edit_envelope(&temp, &session.session_id, |envelope| {
+        envelope.remove("compaction_revision");
+        let projection = envelope
+            .get_mut("compaction")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("stored projection");
+        projection.insert(
+            "source_digest".to_string(),
+            serde_json::Value::String("0".repeat(64)),
+        );
+    });
+
+    let loaded = store
+        .load(&session.session_id)
+        .expect("load legacy envelope");
+    assert!(loaded.compaction.is_none());
+    assert_eq!(loaded.compaction_revision, 1);
+    let provider = summary_provider();
+    let (report, _) = compact(&store, &loaded, &provider, &config)
+        .await
+        .expect("compaction after legacy load");
+    assert_eq!(report.revision, 2);
+}
+
+#[tokio::test]
+async fn legacy_envelope_without_projection_starts_at_zero() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 4);
+    edit_envelope(&temp, &session.session_id, |envelope| {
+        envelope.remove("compaction_revision");
+    });
+
+    let loaded = store
+        .load(&session.session_id)
+        .expect("load legacy envelope");
+    assert!(loaded.compaction.is_none());
+    assert_eq!(loaded.compaction_revision, 0);
+    let provider = summary_provider();
+    let (report, _) = compact(&store, &loaded, &provider, &CoreConfig::default())
+        .await
+        .expect("first compaction");
+    assert_eq!(report.revision, 1);
+}
+
+#[tokio::test]
+async fn nothing_to_compact_without_a_complete_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let mut session = PersistedSession::new(
+        ProviderSessionId::new(),
+        store.workspace_scope().to_string(),
+        "mock-model".to_string(),
+        vec![Message::user("unfinished request")],
+    );
+    store.persist(&mut session).unwrap();
     let provider = summary_provider();
     let error = compact(&store, &session, &provider, &CoreConfig::default())
         .await
-        .expect_err("too few runs");
+        .expect_err("incomplete run");
     assert_eq!(error.code(), "nothing_to_compact");
 }

@@ -289,6 +289,7 @@ impl FrameworkDriver for OpenClawDriver {
             bundle_digest: bundle.digest.clone(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources,
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: RES_STATE_DIR.to_string(),
@@ -3389,6 +3390,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::CleanupFailed,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "openclaw_config_0".to_string(),
@@ -3578,6 +3580,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![ClaimResource {
                 id: RES_PLUGIN.to_string(),
                 purpose: "openclaw_plugin".to_string(),

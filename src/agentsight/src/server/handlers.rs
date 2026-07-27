@@ -87,6 +87,15 @@ pub async fn auth_verify(data: web::Data<AppState>, req: actix_web::HttpRequest)
         return HttpResponse::Ok().json(json!({"authenticated": true}));
     }
 
+    // Loopback requests are trusted — consistent with AuthMiddleware bypass.
+    let is_loopback = req
+        .peer_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false);
+    if is_loopback {
+        return HttpResponse::Ok().json(json!({"authenticated": true}));
+    }
+
     // Check session cookie
     let authenticated = req
         .cookie("agentsight_session")
@@ -836,6 +845,7 @@ mod tests {
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
     use crate::storage::sqlite::genai::{PendingCallInfo, PendingOrigin};
+    use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
     use super::*;
 
@@ -1071,6 +1081,8 @@ mod tests {
             evaluation_store: Arc::clone(&evaluation_store),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
+            trajectory_store: None,
         });
         let app = awtest::init_service(App::new().app_data(data).service(latest_grader)).await;
 
@@ -1275,6 +1287,8 @@ mod tests {
             interruption_store: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
+            trajectory_store: None,
         })
     }
 
@@ -1402,6 +1416,8 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
+            optimize: None,
+            trajectory_store: None,
         })
     }
 
@@ -1499,6 +1515,8 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
+            trajectory_store: None,
         })
     }
 
@@ -1635,6 +1653,8 @@ mod tests {
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
+            trajectory_store: None,
         })
     }
 
@@ -1656,6 +1676,8 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
+            trajectory_store: None,
         })
     }
 
@@ -1668,6 +1690,188 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    // ─── Trajectory handler tests ────────────────────────────────────────
+
+    fn trajectory_record(session_id: &str, project: &str, source: &str) -> TrajectoryRecord {
+        TrajectoryRecord {
+            session_id: session_id.to_string(),
+            schema_version: "ATIF-v1.7".to_string(),
+            agent_name: "qoder".to_string(),
+            model_name: Some("qwen-max".to_string()),
+            num_steps: 2,
+            total_prompt_tokens: Some(100),
+            total_completion_tokens: Some(20),
+            start_time: Some("2026-07-25T10:00:00Z".to_string()),
+            end_time: Some("2026-07-25T10:00:05Z".to_string()),
+            first_user_message: Some("修个 bug".to_string()),
+            last_user_message: Some("跑下测试".to_string()),
+            atif_json: format!(
+                "{{\"schema_version\":\"ATIF-v1.7\",\"session_id\":\"{session_id}\"}}"
+            ),
+            project: project.to_string(),
+            source: source.to_string(),
+            is_subagent: false,
+            file_path: format!("/root/.qoder/projects/{project}/{session_id}.jsonl"),
+            file_size: 512,
+            file_mtime_ns: 7,
+        }
+    }
+
+    fn test_app_state_with_trajectory_store(
+        store: Option<Arc<TrajectoryStore>>,
+    ) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            trajectory_store: store,
+        })
+    }
+
+    fn seeded_trajectory_store(tag: &str) -> Arc<TrajectoryStore> {
+        let db = unique_handler_db(tag);
+        let store = TrajectoryStore::new_with_path(&db).unwrap();
+        store
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        store
+            .upsert_trajectory(&trajectory_record("s-2", "proj-b", "qoderwork"))
+            .unwrap();
+        Arc::new(store)
+    }
+
+    #[actix_web::test]
+    async fn trajectory_list_returns_rows_and_filters() {
+        let data = test_app_state_with_trajectory_store(Some(seeded_trajectory_store("list")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let all_resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories")
+                .to_request(),
+        )
+        .await;
+        let all: serde_json::Value = awtest::read_body_json(all_resp).await;
+        assert_eq!(all.as_array().unwrap().len(), 2);
+
+        let filtered_resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?project=proj-a")
+                .to_request(),
+        )
+        .await;
+        let filtered: serde_json::Value = awtest::read_body_json(filtered_resp).await;
+        let arr = filtered.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["session_id"], "s-1");
+    }
+
+    #[actix_web::test]
+    async fn trajectory_detail_returns_raw_atif_and_404() {
+        let data = test_app_state_with_trajectory_store(Some(seeded_trajectory_store("detail")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/s-1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body()).await.unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(doc["session_id"], "s-1");
+
+        let miss = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/nope")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn trajectory_filters_route_not_captured_by_session_id() {
+        let data = test_app_state_with_trajectory_store(Some(seeded_trajectory_store("filters")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/filters")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = awtest::read_body_json(resp).await;
+        // `filters` must hit the filters handler (object), not the detail handler (404).
+        assert_eq!(body["projects"], serde_json::json!(["proj-a", "proj-b"]));
+        assert_eq!(body["sources"], serde_json::json!(["qoder", "qoderwork"]));
+    }
+
+    #[actix_web::test]
+    async fn trajectory_endpoints_graceful_when_store_absent() {
+        let data = test_app_state_with_trajectory_store(None);
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let list = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let rows: serde_json::Value = awtest::read_body_json(list).await;
+        assert_eq!(rows, serde_json::json!([]));
+
+        let filters = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/filters")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(filters.status(), StatusCode::OK);
     }
 
     fn make_interruption_event(
@@ -1840,6 +2044,8 @@ mod tests {
                         timeout_ms: 0,
                     },
                     auth,
+                    optimize: None,
+                    trajectory_store: None,
                 }))
                 .service(metrics),
         )
@@ -2188,6 +2394,25 @@ mod tests {
             );
             let body = service_response_json(response).await;
             assert!(body.is_object(), "{uri} should return a JSON document");
+            // The export must speak the shared ATIF schema, same as the
+            // collector-ingested trajectories served by /api/trajectories.
+            assert_eq!(
+                body["schema_version"],
+                agentsight_atif::ATIF_SCHEMA_VERSION,
+                "{uri} should export the shared ATIF schema version"
+            );
+            assert!(
+                body["session_id"].is_string(),
+                "{uri} should carry the queried id as session_id"
+            );
+            assert!(
+                body["steps"].as_array().is_some_and(|s| !s.is_empty()),
+                "{uri} should export at least one step"
+            );
+            // Round-trip through the shared validator: catches field drift and
+            // non-contiguous step_ids that a plain is_object() check would miss.
+            agentsight_atif::validate_trajectory_str(&body.to_string())
+                .unwrap_or_else(|e| panic!("{uri} export failed ATIF validation: {e}"));
         }
 
         for (uri, message) in [
@@ -2269,6 +2494,8 @@ mod tests {
                         timeout_ms: 0,
                     },
                     auth,
+                    optimize: None,
+                    trajectory_store: None,
                 }))
                 .service(list_sessions)
                 .service(list_agent_names)
@@ -2533,7 +2760,7 @@ pub async fn restart_agent_health(
 
 /// GET /api/export/atif/trace/{trace_id}
 ///
-/// Exports a single trace as an ATIF v1.6 trajectory document.
+/// Exports a single trace as an ATIF trajectory document (shared v1.7 schema).
 #[get("/export/atif/trace/{trace_id}")]
 pub async fn export_atif_trace(
     data: web::Data<AppState>,
@@ -2572,7 +2799,7 @@ pub async fn export_atif_trace(
 
 /// GET /api/export/atif/session/{session_id}
 ///
-/// Exports a full session (all traces) as an ATIF v1.6 trajectory document.
+/// Exports a full session (all traces) as an ATIF trajectory document (v1.7).
 #[get("/export/atif/session/{session_id}")]
 pub async fn export_atif_session(
     data: web::Data<AppState>,
@@ -2611,7 +2838,7 @@ pub async fn export_atif_session(
 
 /// GET /api/export/atif/conversation/{conversation_id}
 ///
-/// Exports all LLM calls for a conversation as an ATIF v1.6 trajectory document.
+/// Exports all LLM calls for a conversation as an ATIF trajectory document (v1.7).
 #[get("/export/atif/conversation/{conversation_id}")]
 pub async fn export_atif_conversation(
     data: web::Data<AppState>,
@@ -2995,6 +3222,128 @@ pub async fn get_interruption(
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+// ─── Trajectory collection endpoints ────────────────────────────────────
+
+/// Query parameters for `/api/trajectories`.
+#[derive(Debug, Deserialize)]
+pub struct TrajectoryQuery {
+    pub project: Option<String>,
+    pub source: Option<String>,
+    pub agent_name: Option<String>,
+    /// Max rows returned (default 200).
+    pub limit: Option<i64>,
+}
+
+/// Default and hard-cap for the trajectory list `limit` parameter.
+const TRAJECTORY_DEFAULT_LIMIT: i64 = 200;
+const TRAJECTORY_MAX_LIMIT: i64 = 1000;
+
+/// GET /api/trajectories?project=&source=&agent_name=&limit=
+///
+/// Lists collected trajectories (newest first) without the bulky `atif_json`
+/// column. When the trajectory store is unavailable (collection never ran),
+/// returns an empty list with 200 for graceful UI degradation.
+#[get("/trajectories")]
+pub async fn list_trajectories(
+    data: web::Data<AppState>,
+    query: web::Query<TrajectoryQuery>,
+) -> impl Responder {
+    let Some(ref tstore) = data.trajectory_store else {
+        return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
+    };
+    // Normalize: <= 0 falls back to default; cap at hard upper bound to
+    // prevent unbounded full-table scans (SQLite treats negative LIMIT as
+    // "no limit").
+    let limit = match query.limit {
+        Some(v) if v > 0 => v.min(TRAJECTORY_MAX_LIMIT),
+        _ => TRAJECTORY_DEFAULT_LIMIT,
+    };
+    match tstore.list_summaries(
+        query.project.as_deref(),
+        query.source.as_deref(),
+        query.agent_name.as_deref(),
+        limit,
+    ) {
+        Ok(rows) => HttpResponse::Ok().json(rows),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// GET /api/trajectories/filters
+///
+/// Returns distinct project / source / agent_name values for the list UI
+/// dropdowns. Must be registered before `/trajectories/{session_id}`.
+#[get("/trajectories/filters")]
+pub async fn trajectory_filters(data: web::Data<AppState>) -> impl Responder {
+    let Some(ref tstore) = data.trajectory_store else {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "projects": [], "sources": [], "agent_names": []
+        }));
+    };
+    match tstore.list_filters() {
+        Ok(filters) => HttpResponse::Ok().json(filters),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// GET /api/trajectories/{session_id}
+///
+/// Returns the stored ATIF v1.7 JSON document for one trajectory. When the
+/// session has subagent rows (`<session_id>:subagent:%`), they are embedded
+/// into the document's `subagent_trajectories` array so the frontend can
+/// navigate them via breadcrumb.
+#[get("/trajectories/{session_id}")]
+pub async fn get_trajectory_detail(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let Some(ref tstore) = data.trajectory_store else {
+        return HttpResponse::NotFound().json(
+            serde_json::json!({"error": "not_found", "message": "Trajectory store not available"}),
+        );
+    };
+    let session_id = path.into_inner();
+    match tstore.get_atif_json(&session_id) {
+        Ok(Some(atif_json)) => {
+            // Inject subagent_trajectories if any exist.
+            let enriched = match tstore.get_subagent_atif_jsons(&session_id) {
+                Ok(subs) if !subs.is_empty() => inject_subagents(&atif_json, &subs),
+                _ => atif_json,
+            };
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .body(enriched)
+        }
+        Ok(None) => HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "not_found", "message": "Trajectory not found"})),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Parse the parent ATIF JSON, embed subagent documents into
+/// `subagent_trajectories`, and re-serialize.
+fn inject_subagents(parent_json: &str, sub_jsons: &[String]) -> String {
+    let mut doc: serde_json::Value = match serde_json::from_str(parent_json) {
+        Ok(v) => v,
+        Err(_) => return parent_json.to_string(),
+    };
+    let subs: Vec<serde_json::Value> = sub_jsons
+        .iter()
+        .filter_map(|s| serde_json::from_str(s).ok())
+        .collect();
+    if subs.is_empty() {
+        return parent_json.to_string();
+    }
+    doc["subagent_trajectories"] = serde_json::Value::Array(subs);
+    serde_json::to_string(&doc).unwrap_or_else(|_| parent_json.to_string())
 }
 
 // ─── Skill Metrics endpoints ─────────────────────────────────────────────────

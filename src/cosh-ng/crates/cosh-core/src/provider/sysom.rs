@@ -17,9 +17,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{
-    ContentGenerator, GenerateConfig, GenerateEvent, GenerateStream, Message, ToolDeclaration,
-};
+use super::{ContentGenerator, GenerateConfig, GenerateStream, Message, ToolDeclaration};
+
+use self::stream::sysom_event_stream;
+
+mod stream;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -325,79 +327,13 @@ impl SysomProvider {
         }
 
         let cancelled = Arc::clone(&self.cancelled);
-        let byte_stream = response.bytes_stream();
+        // Normalizing to owned bytes keeps the SSE state machine testable with a
+        // plain in-memory stream instead of a live HTTP response.
+        let byte_stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|e| e.to_string()));
 
-        // State for cumulative → incremental conversion
-        let state = SseParseState::default();
-
-        let event_stream = futures::stream::unfold(
-            (byte_stream, String::new(), cancelled, state),
-            |(mut stream, mut buf, cancelled, mut state)| async move {
-                loop {
-                    if cancelled.load(Ordering::SeqCst) || state.stream_ended {
-                        return None;
-                    }
-
-                    // Try to extract a complete SSE event from buffer
-                    if let Some(pos) = buf.find("\n\n") {
-                        let event_block = buf[..pos].to_string();
-                        buf = buf[pos + 2..].to_string();
-
-                        if event_block.trim().is_empty() {
-                            continue;
-                        }
-
-                        if let Some(event) = parse_sysom_sse_event(&event_block, &mut state) {
-                            return Some((event, (stream, buf, cancelled, state)));
-                        }
-                        continue;
-                    }
-
-                    // Need more data
-                    match stream.next().await {
-                        Some(Ok(bytes)) => {
-                            buf.push_str(&String::from_utf8_lossy(&bytes));
-                        }
-                        Some(Err(e)) => {
-                            return Some((
-                                GenerateEvent::Error(format!("stream error: {e}")),
-                                (stream, buf, cancelled, state),
-                            ));
-                        }
-                        None => {
-                            // Stream ended — try to flush remaining buffer
-                            if !buf.trim().is_empty() {
-                                let event_block = buf.trim().to_string();
-                                buf.clear();
-                                if let Some(event) = parse_sysom_sse_event(&event_block, &mut state)
-                                {
-                                    return Some((event, (stream, buf, cancelled, state)));
-                                }
-                            }
-                            // Emit final Usage if available
-                            if let Some((prompt, completion, total)) = state.latest_usage.take() {
-                                state.stream_ended = true;
-                                return Some((
-                                    GenerateEvent::Usage {
-                                        prompt_tokens: prompt,
-                                        completion_tokens: completion,
-                                        total_tokens: total,
-                                    },
-                                    (stream, buf, cancelled, state),
-                                ));
-                            }
-                            state.stream_ended = true;
-                            return Some((
-                                GenerateEvent::MessageEnd,
-                                (stream, buf, cancelled, state),
-                            ));
-                        }
-                    }
-                }
-            },
-        );
-
-        Ok(Box::pin(event_stream))
+        Ok(sysom_event_stream(Box::pin(byte_stream), cancelled))
     }
 
     /// Check if an error indicates STS credential expiration.
@@ -450,147 +386,6 @@ fn is_sts_error(error: &str) -> bool {
     error.contains("InvalidSecurityToken")
         || error.contains("SecurityTokenExpired")
         || error.contains("InvalidAccessKeyId")
-}
-
-// ---------------------------------------------------------------------------
-// SSE parsing helpers
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct SseParseState {
-    last_content_len: usize,
-    last_tool_use_count: usize,
-    /// Track accumulated arguments length per tool index
-    last_tool_args_len: Vec<usize>,
-    message_ended: bool,
-    stream_ended: bool,
-    /// Latest usage info (updated every frame, emitted at stream end)
-    latest_usage: Option<(u32, u32, u32)>,
-}
-
-/// Parse a single SSE event block (lines between \n\n).
-/// Returns a GenerateEvent if the block contains useful data.
-fn parse_sysom_sse_event(block: &str, state: &mut SseParseState) -> Option<GenerateEvent> {
-    if state.message_ended {
-        return None;
-    }
-
-    let mut event_type = String::new();
-    let mut data_str = String::new();
-
-    for line in block.lines() {
-        if let Some(val) = line.strip_prefix("event:") {
-            event_type = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("data:") {
-            data_str = val.trim().to_string();
-        }
-        // id: line is ignored
-    }
-
-    if event_type == "Failed" {
-        state.message_ended = true;
-        return Some(GenerateEvent::Error(format!(
-            "SysOM stream failed: {}",
-            data_str
-        )));
-    }
-
-    if event_type != "OK" || data_str.is_empty() {
-        return None;
-    }
-
-    let data: Value = serde_json::from_str(&data_str).ok()?;
-
-    let choices = data.get("choices").and_then(|c| c.as_array());
-
-    // --- Text delta (cumulative → incremental) ---
-    if let Some(choices_arr) = choices {
-        if let Some(message) = choices_arr.first().and_then(|c| c.get("message")) {
-            let content = message
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            if content.len() > state.last_content_len {
-                let delta = &content[state.last_content_len..];
-                state.last_content_len = content.len();
-                return Some(GenerateEvent::TextDelta(delta.to_string()));
-            }
-
-            // --- Tool use (cumulative tool_use array) ---
-            if let Some(tool_use) = message.get("tool_use").and_then(|t| t.as_array()) {
-                if !tool_use.is_empty() {
-                    // New tool call appeared
-                    if tool_use.len() > state.last_tool_use_count {
-                        let new_tc = &tool_use[state.last_tool_use_count];
-                        state.last_tool_use_count = tool_use.len();
-                        state.last_tool_args_len.push(0);
-
-                        let id = new_tc
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = new_tc
-                            .get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let index =
-                            new_tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
-
-                        return Some(GenerateEvent::ToolCallStart { index, id, name });
-                    }
-
-                    // Check for arguments growth on last tool call
-                    let last_idx = tool_use.len() - 1;
-                    if let Some(tc) = tool_use.get(last_idx) {
-                        let args = tc
-                            .get("function")
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("");
-                        let prev_len = state.last_tool_args_len.get(last_idx).copied().unwrap_or(0);
-                        if args.len() > prev_len {
-                            let delta = &args[prev_len..];
-                            if let Some(slot) = state.last_tool_args_len.get_mut(last_idx) {
-                                *slot = args.len();
-                            }
-                            return Some(GenerateEvent::ToolCallDelta {
-                                index: last_idx as u32,
-                                arguments_delta: delta.to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // If no content/tool delta, check if this is the final frame
-    // (no new content growth + has usage = stream is done)
-    if let Some(usage) = data.get("usage").and_then(|u| u.as_object()) {
-        // SysOM returns usage on every frame, but we only emit Usage event
-        // when content has stopped growing (i.e., this parse produced no text delta above)
-        let prompt = usage
-            .get("prompt_tokens")
-            .or_else(|| usage.get("input_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        let completion = usage
-            .get("completion_tokens")
-            .or_else(|| usage.get("output_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        let total = usage
-            .get("total_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        // Store latest usage but don't emit yet — only emit when stream ends
-        state.latest_usage = Some((prompt, completion, total));
-    }
-
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -727,27 +522,5 @@ fn hex_hmac_sha256(key: &[u8], data: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn region_id_strips_single_zone_suffix() {
-        assert_eq!(
-            region_id_from_zone_id("cn-hangzhou-j").as_deref(),
-            Some("cn-hangzhou")
-        );
-        assert_eq!(
-            region_id_from_zone_id("cn-beijing").as_deref(),
-            Some("cn-beijing")
-        );
-        assert_eq!(region_id_from_zone_id(""), None);
-    }
-
-    #[test]
-    fn generate_console_url_uses_region_and_instance_id() {
-        assert_eq!(
-            generate_console_url("i-test123", "cn-hangzhou"),
-            "https://alinux.console.aliyun.com/cn-hangzhou/guide/cosh?instance=i-test123"
-        );
-    }
-}
+#[path = "sysom/tests.rs"]
+mod tests;

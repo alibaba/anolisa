@@ -37,6 +37,8 @@ from agent_sec_cli.daemon.handlers.security_query import (
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.runtime import DaemonRuntime
 from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
+from agent_sec_cli.security_middleware.result import ActionResult
+from agent_sec_cli.skill_ledger import cli as skill_ledger_cli
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.core import decision as decision_core
 from agent_sec_cli.skill_ledger.core import live_root as live_root_core
@@ -1559,6 +1561,131 @@ def test_audit_corrupted_version_file_reports_error_without_traceback(ws):
         error["versionId"] == "v000002" and "prior version manifest" in error["error"]
         for error in out["errors"]
     )
+
+
+def test_audit_projects_backing_paths_across_cli_events_and_daemon(ws, monkeypatch):
+    """Corrupted manifests expose only the canonical root through public channels."""
+    backing = make_skill(ws.skills_dir, "audit-path-projection", {"f.txt": "safe"})
+    backing_marker = f"{ws.skills_dir.name}/{backing.name}"
+    canonical = ws.root / "fuse-view" / backing.name
+    findings = write_findings_file(
+        ws.fixtures,
+        "audit-path-projection.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    env = ws.env()
+    certified = run_skill_ledger(
+        ["certify", str(backing), "--findings", str(findings)],
+        env_extra=env,
+    )
+    assert certified.returncode == 0, certified.stderr
+
+    meta_dir = backing / ".skill-meta"
+    manifest_path = meta_dir / "versions" / "v000001.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["userDecision"] = {"action": str(backing)}
+    manifest_path.write_text(json.dumps(manifest))
+
+    state_before = {
+        str(path.relative_to(meta_dir)): path.read_bytes()
+        for path in sorted(meta_dir.rglob("*"))
+        if path.is_file()
+    }
+    root = ResolvedSkillRoot(canonical, backing, "skillfs")
+    resolver_calls: list[Path] = []
+
+    def fake_resolve(_resolver, canonical_skill_dir):
+        resolver_calls.append(Path(canonical_skill_dir))
+        return root
+
+    monkeypatch.setattr(live_root_core.SkillRootResolver, "resolve", fake_resolve)
+
+    forwarded: list[ActionResult] = []
+    original_forward = skill_ledger_cli._forward
+
+    def capture_forward(result: ActionResult) -> None:
+        forwarded.append(result)
+        original_forward(result)
+
+    monkeypatch.setattr(skill_ledger_cli, "_forward", capture_forward)
+
+    event_data = ws.root / "events_audit_path_projection"
+    event_data.mkdir()
+    audit_env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
+    reset_security_event_writers()
+    try:
+        cli_result = run_skill_ledger(
+            ["audit", str(canonical)],
+            env_extra=audit_env,
+        )
+    finally:
+        reset_security_event_writers()
+
+    assert resolver_calls == [canonical]
+    assert cli_result.returncode == 1
+    assert "Traceback" not in cli_result.stderr
+    assert str(backing) not in cli_result.stdout + cli_result.stderr
+    assert backing_marker not in cli_result.stdout + cli_result.stderr
+    stdout_result = parse_json_output(cli_result.stdout)
+    assert stdout_result["canonicalSkillDir"] == str(canonical)
+    assert stdout_result["valid"] is False
+    assert stdout_result["versions_checked"] == 1
+    assert any(error["versionId"] == "v000001" for error in stdout_result["errors"])
+
+    assert len(forwarded) == 1
+    action_result = forwarded[0]
+    assert action_result.success is False
+    assert action_result.exit_code == 1
+    assert json.loads(action_result.stdout) == stdout_result
+    assert action_result.data["command"] == "audit"
+    assert action_result.data["valid"] is False
+    assert str(backing) not in json.dumps(action_result.data)
+    assert str(backing) not in action_result.stdout
+    assert str(backing) not in action_result.error
+    assert backing_marker not in json.dumps(action_result.data)
+    assert backing_marker not in action_result.stdout
+    assert backing_marker not in action_result.error
+
+    state_after = {
+        str(path.relative_to(meta_dir)): path.read_bytes()
+        for path in sorted(meta_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert state_after == state_before
+
+    jsonl_events = read_security_events(event_data)
+    audit_jsonl = next(
+        event
+        for event in jsonl_events
+        if event["details"]["result"].get("command") == "audit"
+    )
+    assert audit_jsonl["result"] == "failed"
+    assert audit_jsonl["details"]["result"]["valid"] is False
+    assert str(backing) not in json.dumps(audit_jsonl)
+    assert backing_marker not in json.dumps(audit_jsonl)
+
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(event_data))
+    runtime = DaemonRuntime(socket_path=event_data / "daemon.sock")
+    list_result = security_events_list_handler(
+        DaemonRequest(
+            method="sec.events.list",
+            params={
+                "category": "skill_ledger",
+                "result": "failed",
+                "include_details": True,
+            },
+        ),
+        runtime,
+    )
+    daemon_audit = next(
+        item
+        for item in list_result.data["items"]
+        if item["event_id"] == audit_jsonl["event_id"]
+    )
+    assert daemon_audit["details"]["result"]["command"] == "audit"
+    assert daemon_audit["details"]["result"]["valid"] is False
+    assert str(backing) not in json.dumps(daemon_audit)
+    assert backing_marker not in json.dumps(daemon_audit)
 
 
 def test_audit_verify_snapshots(ws):

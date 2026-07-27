@@ -22,11 +22,59 @@ fn raw_cli_session_picker_navigates_selects_and_restores_prompt() {
 
     assert!(output.contains("Agent sessions"), "{output}");
     assert!(output.contains("second prompt"), "{output}");
+    assert!(output.contains("00000000…"), "{output}");
+    assert!(output.contains("11111111…"), "{output}");
     assert!(output.contains("Session selected"), "{output}");
     assert!(output.contains(SESSION_TWO), "{output}");
     assert!(output.contains("recovery state: selected"), "{output}");
     assert!(output.contains("after-session-select"), "{output}");
     assert!(!output.contains("bash: /session"), "{output}");
+}
+
+#[test]
+fn raw_cli_session_list_prints_full_canonical_ids() {
+    let fixture = SessionFixture::new("list-full-ids", FixtureMode::Ready);
+    let output = fixture.run(
+        &[],
+        vec![
+            (b"/session list\n".to_vec(), Duration::from_millis(400)),
+            (
+                b"echo after-session-list\nexit\n".to_vec(),
+                Duration::from_millis(200),
+            ),
+        ],
+    );
+
+    // Full canonical UUIDs must be copyable into /session resume|clear even
+    // though both fixture sessions carry a non-empty first prompt.
+    assert!(output.contains(SESSION_ONE), "{output}");
+    assert!(output.contains(SESSION_TWO), "{output}");
+    assert!(output.contains("first prompt"), "{output}");
+    assert!(output.contains("second prompt"), "{output}");
+    assert!(output.contains("after-session-list"), "{output}");
+}
+
+#[test]
+fn raw_cli_session_picker_space_then_enter_resumes_without_deleting() {
+    let fixture = SessionFixture::new("picker-space-enter", FixtureMode::Ready);
+    let output = fixture.run(
+        &[],
+        vec![
+            (b"/session\n".to_vec(), Duration::from_millis(400)),
+            (b" ".to_vec(), Duration::from_millis(300)),
+            (b"\n".to_vec(), Duration::from_millis(300)),
+            (
+                b"echo after-space-enter\nexit\n".to_vec(),
+                Duration::from_millis(200),
+            ),
+        ],
+    );
+
+    assert!(output.contains("Session selected"), "{output}");
+    assert!(output.contains(SESSION_ONE), "{output}");
+    assert!(!output.contains("Confirm session clear"), "{output}");
+    assert!(output.contains("after-space-enter"), "{output}");
+    assert!(!fixture.clear_log.exists());
 }
 
 #[test]
@@ -159,6 +207,7 @@ fn raw_cli_session_multi_clear_requires_confirmation_and_cancel_is_safe() {
         ],
     );
     let request = fs::read_to_string(&confirmed.clear_log).expect("clear request log");
+    assert!(output.contains("Confirm session clear"), "{output}");
     assert!(request.contains(SESSION_ONE), "{request}");
     assert!(request.contains(SESSION_TWO), "{request}");
     assert!(
@@ -221,17 +270,20 @@ fn raw_cli_session_clear_all_skips_active_session_in_request() {
 #[test]
 fn raw_cli_session_clear_all_reports_when_every_session_is_protected() {
     let fixture = SessionFixture::new("clear-protected-only", FixtureMode::ProtectedOnly);
-    let output = fixture.run(
+    let output = fixture.run_marker(
         &[],
-        vec![
+        &[
             (
-                format!("/session resume {SESSION_ONE}\n?? activate selected session\n")
-                    .into_bytes(),
-                Duration::from_millis(1_200),
+                "cosh-osc$",
+                format!("/session resume {SESSION_ONE}\n?? activate selected session\n"),
             ),
             (
-                b"/session clear --all\necho after-protected-only\nexit\n".to_vec(),
-                Duration::from_millis(400),
+                "resumed provider session",
+                "/session clear --all\n".to_string(),
+            ),
+            (
+                "Active or selected provider sessions are protected",
+                "echo after-protected-only\nexit\n".to_string(),
             ),
         ],
     );
@@ -256,7 +308,7 @@ fn raw_cli_session_selection_race_is_recoverable() {
             (b"\n".to_vec(), Duration::from_millis(300)),
             (
                 b"echo after-missing-session\nexit\n".to_vec(),
-                Duration::from_millis(200),
+                Duration::from_millis(1_000),
             ),
         ],
     );
@@ -332,6 +384,87 @@ fn raw_cli_launch_resume_value_and_picker_share_session_manager() {
     assert!(output.contains("after-launch-picker"), "{output}");
 }
 
+#[test]
+fn raw_cli_session_new_detaches_active_without_deleting_or_forcing_resume() {
+    let fixture = SessionFixture::new("session-new-detach", FixtureMode::Ready);
+    let output = fixture.run(
+        &[],
+        vec![
+            (
+                format!("/session resume {SESSION_ONE}\n?? activate first session\n").into_bytes(),
+                Duration::from_millis(1_200),
+            ),
+            (
+                b"/session new\n/session status\n".to_vec(),
+                Duration::from_millis(400),
+            ),
+            (
+                b"?? continue on a fresh conversation\n".to_vec(),
+                Duration::from_millis(1_200),
+            ),
+            (
+                b"/session status\n/session list\nexit\n".to_vec(),
+                Duration::from_millis(400),
+            ),
+        ],
+    );
+
+    // The fresh-session notice reports the detached id and the fresh contract.
+    assert!(
+        output.contains(&format!("Detached from provider session {SESSION_ONE}")),
+        "{output}"
+    );
+    assert!(
+        output.contains("The next Agent request starts a fresh conversation"),
+        "{output}"
+    );
+    // The next Agent request must not carry the old --resume id; the mock only
+    // reports its default provider id when invoked without --resume.
+    assert!(
+        output.contains("active provider session: 33333333-3333-4333-8333-333333333333"),
+        "{output}"
+    );
+    // Old persisted sessions survive the detach and remain listable.
+    assert!(output.contains("first prompt"), "{output}");
+    assert!(output.contains("second prompt"), "{output}");
+    assert!(!output.contains("bash: /session"), "{output}");
+    // Detach never deletes persisted sessions.
+    assert!(!fixture.clear_log.exists());
+}
+
+#[test]
+fn raw_cli_new_alias_starts_fresh_without_reaching_bash_or_changing_cwd() {
+    let fixture = SessionFixture::new("session-new-alias", FixtureMode::Ready);
+    let workspace = fixture.workspace.to_string_lossy().into_owned();
+    let output = fixture.run(
+        &[],
+        vec![
+            (b"pwd\n".to_vec(), Duration::from_millis(300)),
+            (b"/new\n".to_vec(), Duration::from_millis(400)),
+            (
+                b"pwd\necho after-new-alias\nexit\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+        ],
+    );
+
+    // `/new` is intercepted as the session `new` path, never sent to bash.
+    assert!(!output.contains("bash: /new"), "{output}");
+    assert!(output.contains("Fresh session"), "{output}");
+    // No session was attached, so the alias reports the idempotent contract.
+    assert!(
+        output.contains("No provider session was attached"),
+        "{output}"
+    );
+    assert!(
+        output.contains("The next Agent request starts a fresh conversation"),
+        "{output}"
+    );
+    // The shell keeps running with an unchanged cwd after the fresh session.
+    assert!(output.contains("after-new-alias"), "{output}");
+    assert!(output.contains(&workspace), "{output}");
+}
+
 #[derive(Clone, Copy)]
 enum FixtureMode {
     Ready,
@@ -358,6 +491,7 @@ impl SessionFixture {
         let bin = home.join("bin");
         fs::create_dir_all(&workspace).expect("create session workspace");
         fs::create_dir_all(&bin).expect("create session fixture bin");
+        let workspace = fs::canonicalize(workspace).expect("canonical session workspace");
         let core = bin.join("cosh-core");
         let clear_log = home.join("clear-request.json");
         let request_log = home.join("session-requests.jsonl");
@@ -435,12 +569,29 @@ impl SessionFixture {
     fn run(&self, args: &[&str], chunks: Vec<(Vec<u8>, Duration)>) -> String {
         let home = self.home.to_string_lossy().into_owned();
         let core = self.core.to_string_lossy().into_owned();
-        run_raw_cli_with_args_env_current_dir_and_delayed_input(
+        run_raw_cli_with_args_env_current_dir_and_delayed_input_after_marker(
             "cosh-core",
             args,
             &[("HOME", &home), ("COSH_CORE_PATH", &core)],
             &self.workspace,
+            "cosh-osc$ ",
             chunks,
+        )
+    }
+
+    fn run_marker(&self, args: &[&str], steps: &[(&str, String)]) -> String {
+        let home = self.home.to_string_lossy().into_owned();
+        let core = self.core.to_string_lossy().into_owned();
+        let borrowed_steps: Vec<(&str, &[u8])> = steps
+            .iter()
+            .map(|(marker, input)| (*marker, input.as_bytes()))
+            .collect();
+        run_raw_cli_with_args_env_current_dir_and_marker_input(
+            "cosh-core",
+            args,
+            &[("HOME", &home), ("COSH_CORE_PATH", &core)],
+            &self.workspace,
+            &borrowed_steps,
         )
     }
 }

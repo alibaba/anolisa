@@ -66,11 +66,12 @@ from hook_utils import (
     build_cosh_ng_post_tool_output,
     classify_env_error,
     cosh_ng_supports_replacement,
+    detect_cosh_ng_runtime,
     extract_llm_content,
     get_thresholds,
-    is_cosh_ng_runtime,
     is_skill_file,
     parse_version,
+    resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
     secure_write_text,
@@ -82,9 +83,6 @@ from hook_utils import (
 
 # -- constants ---------------------------------------------------------------
 
-_FALLBACK_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
-# Cosh-NG gets a distinct agent ID for stats attribution.
-_COSH_NG_AGENT_ID = "cosh-ng"
 _MIN_RESPONSE_CHARS = 200
 
 # Claude Code added hookSpecificOutput.updatedToolOutput (normal-path tool
@@ -102,13 +100,6 @@ _CLAUDE_VERSION_CACHE = os.path.join(
 
 
 # -- helpers -------------------------------------------------------------------
-
-
-def _resolve_agent_id(is_cosh_ng: bool) -> str:
-    """Return the appropriate agent ID for stats attribution."""
-    if is_cosh_ng:
-        return _COSH_NG_AGENT_ID
-    return _FALLBACK_AGENT_ID
 
 
 def _build_additional_context(
@@ -240,7 +231,19 @@ def _warn_subprocess(label: str, proc: subprocess.CompletedProcess) -> None:
 
 
 def main() -> None:
-    # 1. Resolve binaries
+    # 1. Detect runtime (Cosh-NG vs copilot-shell)
+    cosh_ng_version = detect_cosh_ng_runtime()
+    cosh_ng_detected = cosh_ng_version is not None
+
+    # If Cosh-NG is detected but unsupported version, fail open
+    if cosh_ng_detected and cosh_ng_version == (0, 0, 0):
+        warn("Unsupported Cosh-NG version. Response compression disabled (fail open).")
+        skip()
+
+    # 2. Resolve agent ID based on runtime
+    agent_id = resolve_agent_id()
+
+    # 3. Resolve binaries
     tokenless_bin = resolve_binary(
         "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
     )
@@ -248,18 +251,17 @@ def main() -> None:
         warn("tokenless is not installed. Response compression hook disabled.")
         skip()
 
-    # 2. Read stdin JSON
+    # 4. Read stdin JSON
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError, ValueError):
         warn("failed to read PostToolUse payload. Passing through unchanged.")
         skip()
 
-    # 3. Detect Cosh-NG runtime
-    cosh_ng = is_cosh_ng_runtime(input_data)
-    agent_id = _resolve_agent_id(cosh_ng)
+    # 5. Detect Cosh-NG runtime (data-based confirmation)
+    cosh_ng = cosh_ng_detected
 
-    # 4. Cosh-NG version guard: fail open if replacement not supported.
+    # 6. Cosh-NG version guard: fail open if replacement not supported.
     # When Cosh-NG doesn't support the replacement field (version too old
     # or version info unavailable), compression would inject duplicate
     # content (original + compressed summary). Conservatively disable.
@@ -271,10 +273,10 @@ def main() -> None:
         )
         skip()
 
-    # 5. Extract tool_name
+    # 7. Extract tool_name
     tool_name = input_data.get("tool_name", "unknown")
 
-    # 6. Extract tool_response -- Cosh-NG path: extract llmContent only.
+    # 8. Extract tool_response -- Cosh-NG path: extract llmContent only.
     tool_response_raw = input_data.get("tool_response", "")
     if not tool_response_raw or tool_response_raw == "{}":
         skip()
@@ -314,11 +316,11 @@ def main() -> None:
         else:
             tool_response = tool_response_str
 
-    # 7. Extract caller context
+    # 9. Extract caller context
     session_id = input_data.get("session_id", "")
     tool_use_id = resolve_tool_call_id(agent_id, input_data)
 
-    # 8. Environment attribution analysis
+    # 10. Environment attribution analysis
     env_attribution = ""
     attr_category, attr_fix_hint = classify_env_error(parsed)
     if attr_category:
@@ -327,16 +329,16 @@ def main() -> None:
             f"{attr_category} ({attr_fix_hint}). Skip retry."
         )
 
-    # 9. Content retrieval -- skip entirely (preserve integrity)
+    # 11. Content retrieval -- skip entirely (preserve integrity)
     if tool_name in SKIP_TOOLS:
         _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
 
-    # 10. All other tools -- skip small responses, but still inject
+    # 12. All other tools -- skip small responses, but still inject
     # env attribution for error cases.
     if len(tool_response) < _MIN_RESPONSE_CHARS:
         _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
 
-    # 11. Step 1: Response compression with 3-layer thresholds
+    # 13. Step 1: Response compression with 3-layer thresholds
     compressed = tool_response
     used_resp_compression = False
 
@@ -370,7 +372,7 @@ def main() -> None:
         except Exception as e:
             warn(f"Response compression error: {e}")
 
-    # 12. Step 2: TOON encoding
+    # 14. Step 2: TOON encoding
     toon_output = ""
 
     if tokenless_bin:
@@ -404,7 +406,7 @@ def main() -> None:
     if not used_resp_compression and not toon_output:
         _emit_attribution_or_skip(env_attribution, cosh_ng=cosh_ng)
 
-    # 13. Build response -- runtime-specific output format.
+    # 15. Build response -- runtime-specific output format.
     if cosh_ng:
         # Cosh-NG: emit replacement (model-visible compressed content) +
         # additionalContext (environment attribution).

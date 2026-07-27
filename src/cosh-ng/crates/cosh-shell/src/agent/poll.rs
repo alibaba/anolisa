@@ -406,6 +406,8 @@ fn poll_active_agent_run_with_policy<W: Write>(
             active_run.handle.cancel();
             active_run.status_animation.clear(output)?;
         }
+        // Turn-scope batch consent never outlives its run (issue #1773).
+        state.control.trust.clear_run_batch_consent();
         render_fresh_turn_recovery_notice(state, output)?;
         // Fresh-turn recovery is an internal fallback continuation.
         start_agent_run_with_origin(
@@ -692,6 +694,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

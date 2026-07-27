@@ -7,7 +7,7 @@ use super::super::summary::{
 };
 use super::*;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -46,6 +46,106 @@ fn versioned_persist_and_load_round_trip() {
     assert_eq!(loaded.generation, 1);
     assert_eq!(loaded.messages.len(), 2);
     assert_eq!(loaded.workspace_scope, store.workspace_scope());
+}
+
+/// Builds a projection carrying `revision`.
+///
+/// The summary and digest are placeholders: these tests exercise the revision
+/// clock at the persistence boundary, not projection validity.
+fn projection(revision: u64) -> crate::compaction::CompactionState {
+    crate::compaction::CompactionState {
+        revision,
+        compacted_through: 1,
+        summary: "summary".to_string(),
+        model: "mock-model".to_string(),
+        prompt_version: 1,
+        source_digest: "digest".to_string(),
+        tokens_before: None,
+        tokens_after: None,
+        created_at_ms: 0,
+    }
+}
+
+/// Reads the stored envelope as untyped JSON.
+fn envelope_json(store: &SessionStore, session_id: &ProviderSessionId) -> serde_json::Value {
+    let bytes = fs::read(store.session_file(session_id)).expect("read persisted session envelope");
+    serde_json::from_slice(&bytes).expect("parse persisted session envelope JSON")
+}
+
+#[test]
+fn persist_rejects_a_lower_compaction_revision_clock() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let mut session = new_session(&store, "hello");
+    session.compaction_revision = 5;
+    store.persist(&mut session).unwrap();
+
+    // Same generation, lower clock: accepting this would let a later commit
+    // republish a revision that reached disk once already.
+    let mut regressing = session.clone();
+    regressing.compaction_revision = 2;
+    let error = store.persist(&mut regressing).unwrap_err();
+    assert_eq!(error.code(), "conflict");
+    assert_eq!(
+        store.load(&session.session_id).unwrap().compaction_revision,
+        5
+    );
+}
+
+#[test]
+fn persist_fails_closed_when_the_stored_clock_advanced_without_a_generation_bump() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let mut session = new_session(&store, "hello");
+    store.persist(&mut session).unwrap();
+
+    // An externally rewritten envelope raises the clock while leaving the
+    // generation untouched, so the generation check alone cannot catch it.
+    let mut value = envelope_json(&store, &session.session_id);
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("compaction_revision".to_string(), serde_json::json!(9));
+    fs::write(
+        store.session_file(&session.session_id),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+
+    let mut stale = session.clone();
+    let error = store.persist(&mut stale).unwrap_err();
+    assert_eq!(error.code(), "conflict");
+    // The tampered floor survives the rejected write.
+    let reloaded = store.load(&session.session_id).unwrap();
+    assert_eq!(reloaded.compaction_revision, 9);
+
+    // Conflict keeps the normal recovery path open: reload, then commit above
+    // the observed floor.
+    let mut recovered = reloaded;
+    recovered.compaction_revision = 10;
+    store.persist(&mut recovered).unwrap();
+    assert_eq!(
+        store.load(&session.session_id).unwrap().compaction_revision,
+        10
+    );
+}
+
+#[test]
+fn persist_raises_the_clock_to_the_stored_projection_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let mut session = new_session(&store, "hello");
+    // A caller that forgets to advance the clock must not leave a projection
+    // whose revision the clock would forget on the next load.
+    session.compaction = Some(projection(4));
+    session.compaction_revision = 0;
+    store.persist(&mut session).unwrap();
+
+    assert_eq!(session.compaction_revision, 4);
+    assert_eq!(
+        envelope_json(&store, &session.session_id)["compaction_revision"],
+        serde_json::json!(4)
+    );
 }
 
 #[test]
@@ -128,7 +228,9 @@ fn loading_legacy_sessions_redacts_before_replay() {
     assert!(loaded.messages[0].content.as_text().contains("<redacted>"));
 }
 
-#[cfg(unix)]
+// Linux-only: macOS APFS rejects invalid UTF-8 filenames with EILSEQ before
+// the scope-hashing rejection path can be exercised.
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_workspace_paths_are_rejected_before_scope_hashing() {
     let temp = tempfile::tempdir().unwrap();
@@ -408,7 +510,9 @@ fn legacy_array_loads_and_upgrades_on_write() {
     assert!(!legacy_file.exists());
 }
 
-#[cfg(unix)]
+// Linux-only: on macOS unlinking from a mode-0o500 directory still succeeds,
+// so the simulated legacy-removal failure never triggers.
+#[cfg(target_os = "linux")]
 #[test]
 fn legacy_cleanup_failure_is_reported_and_retried_after_migration() {
     let temp = tempfile::tempdir().unwrap();
@@ -449,7 +553,8 @@ fn legacy_cleanup_failure_is_reported_and_retried_after_migration() {
     assert_eq!(store.load(&id).unwrap().messages.len(), 2);
 }
 
-#[cfg(unix)]
+// Linux-only: same macOS permission semantics as the cleanup-failure test above.
+#[cfg(target_os = "linux")]
 #[test]
 fn clear_keeps_scoped_history_when_legacy_removal_fails() {
     let temp = tempfile::tempdir().unwrap();
@@ -792,7 +897,10 @@ fn default_legacy_source_is_only_the_workspace_sessions_directory() {
     let store = SessionStore::for_workspace(DEFAULT_SESSION_PERSIST_DIR, &workspace).unwrap();
 
     assert_eq!(store.legacy_dirs.len(), 1);
-    assert_eq!(store.legacy_dirs[0].path, workspace.join("sessions"));
+    assert_eq!(
+        store.legacy_dirs[0].path,
+        fs::canonicalize(workspace.join("sessions")).unwrap()
+    );
 }
 
 #[test]

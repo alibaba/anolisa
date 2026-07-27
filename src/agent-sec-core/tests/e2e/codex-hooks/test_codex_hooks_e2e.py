@@ -167,7 +167,7 @@ class TestPIICheckerE2E:
         )
         assert output == {}
 
-    def test_phone_in_prompt_blocks_deny(self):
+    def test_phone_in_prompt_warns_deny(self):
         output = _run_hook(
             "pii_checker_hook.py",
             {
@@ -176,11 +176,9 @@ class TestPIICheckerE2E:
             },
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
-        assert output.get("decision") == "block"
-        assert (
-            "phone" in output.get("reason", "").lower()
-            or "pii" in output.get("reason", "").lower()
-        )
+        assert set(output) == {"systemMessage"}
+        assert "phone_cn" in output["systemMessage"]
+        assert "执行将继续" in output["systemMessage"]
 
     def test_phone_in_prompt_passes_observe(self):
         output = _run_hook(
@@ -193,7 +191,7 @@ class TestPIICheckerE2E:
         )
         assert output == {}
 
-    def test_email_in_tool_output_blocks_deny(self):
+    def test_email_in_tool_output_warns_deny(self):
         output = _run_hook(
             "pii_checker_hook.py",
             {
@@ -202,8 +200,9 @@ class TestPIICheckerE2E:
             },
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
-        assert output.get("decision") == "block"
-        assert "PostToolUse" in output.get("reason", "")
+        assert set(output) == {"systemMessage"}
+        assert "email" in output["systemMessage"]
+        assert "PostToolUse" in output["systemMessage"]
 
     def test_email_in_tool_output_passes_observe(self):
         output = _run_hook(
@@ -227,7 +226,7 @@ class TestPIICheckerE2E:
         )
         assert output == {}
 
-    def test_phone_in_tool_input_blocks_deny(self):
+    def test_phone_in_tool_input_warns_deny(self):
         output = _run_hook(
             "pii_checker_hook.py",
             {
@@ -238,8 +237,21 @@ class TestPIICheckerE2E:
             },
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
+        assert set(output) == {"systemMessage"}
+        assert "phone_cn" in output["systemMessage"]
+        assert "PreToolUse" in output["systemMessage"]
+
+    def test_api_key_in_prompt_blocks_deny(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "API key: sk-00000000000000000000000000000000",
+            },
+            env_extra={"PII_CHECKER_MODE": "deny"},
+        )
         assert output.get("decision") == "block"
-        assert "PreToolUse" in output.get("reason", "")
+        assert "api_key" in output.get("reason", "")
 
     def test_phone_in_tool_input_passes_observe(self):
         output = _run_hook(

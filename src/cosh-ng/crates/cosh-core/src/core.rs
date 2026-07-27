@@ -1,32 +1,45 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures::StreamExt;
 use tokio::io::AsyncBufReadExt;
 
 use cosh_platform::audit::LoadedPolicy;
-use cosh_types::audit::Outcome;
+use cosh_types::audit::{AuditOutcomeStatus, AuditProviderData, AuditToolData, Outcome};
 
-use crate::auth::{
-    apply_auth_credentials, builtin_auth_providers, is_auth_error, wait_for_auth_response,
-};
+use crate::audit::{CoreAuditRecorder, CoreAuditScope};
+use crate::auth::is_auth_error;
 use crate::compaction::CompactionRuntime;
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
+use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
 use crate::hook::{HookDecision, HookNotification, HookSystem};
 use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
 use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
-use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message};
+use crate::provider::{
+    ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
+};
+use crate::tool::ask_user_question;
 use crate::tool::{ToolContext, ToolKind, ToolRegistry, ToolResult};
 use crate::truncator::OutputTruncator;
+
+use self::tool_execution::{
+    hash_bytes, hash_json, invalid_arguments_message, json_shape, parse_in_band_question,
+    parse_tool_arguments, InBandQuestion,
+};
+
+mod auth;
+mod extensions;
+mod tool_execution;
 
 pub struct CoshCore {
     pub config: CoreConfig,
     pub provider: Box<dyn ContentGenerator>,
-    pub tools: ToolRegistry,
+    pub tools: Arc<ToolRegistry>,
     pub session_id: String,
     pub messages: Vec<Message>,
     /// Compaction runtime state: the active projection over the transcript
@@ -37,9 +50,13 @@ pub struct CoshCore {
     pub compaction: CompactionRuntime,
     pub model: String,
     pub shell_context: Option<ShellContext>,
+    pub extension_context: Option<String>,
     pub extra_params: Option<serde_json::Value>,
     pub hook_system: HookSystem,
     pub metrics: TurnMetrics,
+    pub(crate) audit: CoreAuditRecorder,
+    pub extension_generation: GenerationController,
+    bound_extension_generation: u64,
     loaded_policy: LoadedPolicy,
     request_counter: AtomicU32,
     truncator: OutputTruncator,
@@ -47,38 +64,6 @@ pub struct CoshCore {
 }
 
 impl CoshCore {
-    pub fn new(
-        config: CoreConfig,
-        provider: Box<dyn ContentGenerator>,
-        tools: ToolRegistry,
-    ) -> Self {
-        let model = config.resolve_provider().model;
-        let (loaded_policy, warning) = LoadedPolicy::load();
-        if let Some(w) = warning {
-            tracing::warn!("{w}");
-        }
-
-        let hook_system = HookSystem::from_config(&config.hooks);
-
-        Self {
-            config,
-            provider,
-            tools,
-            session_id: uuid::Uuid::new_v4().to_string(),
-            messages: Vec::new(),
-            compaction: CompactionRuntime::default(),
-            model,
-            shell_context: None,
-            extra_params: None,
-            hook_system,
-            metrics: TurnMetrics::default(),
-            loaded_policy,
-            request_counter: AtomicU32::new(0),
-            truncator: OutputTruncator::default(),
-            loop_detector: LoopDetector::new(),
-        }
-    }
-
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.names()
     }
@@ -127,12 +112,13 @@ impl CoshCore {
     /// reserve inside [`crate::compaction::estimate_prefix_tokens`] instead
     /// of being rendered here.
     pub(crate) fn estimate_prefix_tokens(&self) -> u64 {
-        let system_prompt = ContextBuilder::build_system_prompt(
+        let system_prompt = ContextBuilder::build_system_prompt_with_extensions(
             &self.cwd(),
             &self.tool_names(),
             &[],
             &self.config.agent.approval_mode,
             self.config.ai.output_language.as_deref(),
+            self.extension_context.as_deref(),
         );
         let declarations = serde_json::to_string(&self.tools.declarations()).unwrap_or_default();
         crate::compaction::estimate_prefix_tokens(&system_prompt, &declarations)
@@ -166,9 +152,17 @@ impl CoshCore {
             return Outcome::Allow;
         }
 
+        if kind == ToolKind::Network {
+            return Outcome::RequireApproval;
+        }
+
         // MCP servers are external programs. Do not infer their side effects
         // from a server-provided description or schema.
         if kind == ToolKind::Mcp {
+            return Outcome::RequireApproval;
+        }
+
+        if kind == ToolKind::External {
             return Outcome::RequireApproval;
         }
 
@@ -203,9 +197,11 @@ impl CoshCore {
     {
         let content = crate::redaction::redact_text(content);
 
+        self.bind_current_extension_snapshot();
+        let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
         let run_id = uuid::Uuid::new_v4().to_string();
-        self.hook_system.set_run_id(run_id);
+        self.hook_system.set_run_id(run_id.clone());
 
         // ─── Hook: UserPromptSubmit ───
         let cwd_str = self.cwd().to_string_lossy().to_string();
@@ -213,6 +209,12 @@ impl CoshCore {
             .hook_system
             .fire_user_prompt_submit(&self.session_id, &cwd_str, &content)
             .await;
+        self.audit.record_hook_decision(
+            CoreAuditScope::run(&run_id),
+            "user_prompt_submit",
+            hook_outcome(&prompt_result.decision),
+            hook_decision_name(&prompt_result.decision),
+        );
 
         if let HookDecision::Block(reason) = &prompt_result.decision {
             // Block: no approval panel, notifications go to Governance fallback
@@ -259,19 +261,35 @@ impl CoshCore {
                 );
             }
 
+            let approval_scope = CoreAuditScope::request(&run_id, None, &request_id, None);
+            let audit_ref =
+                self.audit
+                    .record_approval_requested(approval_scope, "hook", "hook_ask", None);
+
             // Emit approval request with HOOK: prefix and empty input.
             self.emit(
                 writer,
-                &OutputMessage::can_use_tool(
+                &OutputMessage::can_use_tool_with_audit_ref(
                     &request_id,
                     &format!("HOOK:{hook_name}"),
                     serde_json::json!({}),
                     &synthetic_id,
                     true, // hook_requires_approval
+                    audit_ref,
                 ),
             );
 
-            match self.wait_for_approval(&request_id, false, reader).await {
+            let approval = self.wait_for_approval(&request_id, false, reader).await;
+            let (approval_status, approval_decision) = approval_audit_outcome(&approval);
+            self.audit.record_approval_resolved(
+                approval_scope,
+                "hook",
+                approval_status,
+                None,
+                approval_decision,
+                None,
+            )?;
+            match approval {
                 ApprovalResult::Allowed => { /* user confirmed, continue */ }
                 ApprovalResult::Denied(reason) => {
                     self.emit(
@@ -316,12 +334,13 @@ impl CoshCore {
             extra_params: self.extra_params.clone(),
         };
 
-        let system_prompt = ContextBuilder::build_system_prompt(
+        let system_prompt = ContextBuilder::build_system_prompt_with_extensions(
             &self.cwd(),
             &self.tool_names(),
             &skill_summaries,
             &self.config.agent.approval_mode,
             self.config.ai.output_language.as_deref(),
+            self.extension_context.as_deref(),
         );
         // Runtime prefix estimate (P): system prompt + serialized tool
         // declarations + the compaction module's reserve for hook context
@@ -349,18 +368,56 @@ impl CoshCore {
             )
             .await?;
 
+            let turn_id = uuid::Uuid::new_v4().to_string();
+            let turn_scope = CoreAuditScope::turn(&run_id, &turn_id);
+            self.audit.record_turn_started(turn_scope);
             let mut provider_messages = self.compaction.effective_messages(&self.messages);
             crate::redaction::redact_messages(&mut provider_messages);
 
             // ─── Hook: BeforeModel ───
             let before_model_result = self
                 .hook_system
-                .fire_before_model(&self.session_id, &cwd_str, &self.model, &provider_messages)
+                .fire_before_model(
+                    &self.session_id,
+                    &cwd_str,
+                    &self.model,
+                    &provider_messages,
+                    &tool_decls,
+                )
                 .await;
             self.emit_hook_notifications(writer, &before_model_result.notifications, None);
+            self.audit.record_hook_decision(
+                turn_scope,
+                "before_model",
+                AuditOutcomeStatus::Success,
+                "observed",
+            );
+
+            // A BeforeModel hook's rewritten declarations apply to this provider
+            // call only — `tool_decls` and the ToolRegistry stay authoritative
+            // for the next turn.
+            let turn_tool_decls = before_model_result
+                .updated_tools
+                .as_deref()
+                .unwrap_or(&tool_decls);
 
             let mut msgs_with_system = vec![Message::system(&system_prompt)];
             msgs_with_system.extend(provider_messages);
+
+            let provider_request_id = uuid::Uuid::new_v4().to_string();
+            let resolved_provider = self.config.resolve_provider();
+            let provider_data = AuditProviderData {
+                provider: resolved_provider.provider_type.clone(),
+                model: Some(self.model.clone()),
+                ..AuditProviderData::default()
+            };
+            let provider_scope =
+                CoreAuditScope::request(&run_id, Some(&turn_id), &provider_request_id, None);
+            self.audit.record_provider_started(
+                provider_scope,
+                &resolved_provider.provider_type,
+                &provider_data,
+            )?;
 
             // ─── SLS: API request timing ───
             self.metrics.api_requests += 1;
@@ -368,7 +425,7 @@ impl CoshCore {
 
             let stream_result = self
                 .provider
-                .generate(&msgs_with_system, &tool_decls, &generate_config)
+                .generate(&msgs_with_system, turn_tool_decls, &generate_config)
                 .await;
 
             let mut stream = match stream_result {
@@ -376,6 +433,19 @@ impl CoshCore {
                 Err(e) if is_auth_error(&e) => {
                     self.metrics.api_errors += 1;
                     self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                    self.audit.record_provider_terminal(
+                        provider_scope,
+                        &resolved_provider.provider_type,
+                        &provider_data,
+                        AuditOutcomeStatus::Failed,
+                        "auth_error",
+                        api_start.elapsed().as_millis() as u64,
+                    );
+                    self.audit.record_turn_terminal(
+                        turn_scope,
+                        AuditOutcomeStatus::Failed,
+                        Some("provider_auth_error"),
+                    );
                     // Attempt re-auth
                     if self.try_reauth(reader, writer).await {
                         continue; // Retry the turn with new credentials
@@ -385,6 +455,19 @@ impl CoshCore {
                 Err(e) => {
                     self.metrics.api_errors += 1;
                     self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                    self.audit.record_provider_terminal(
+                        provider_scope,
+                        &resolved_provider.provider_type,
+                        &provider_data,
+                        AuditOutcomeStatus::Failed,
+                        "request_error",
+                        api_start.elapsed().as_millis() as u64,
+                    );
+                    self.audit.record_turn_terminal(
+                        turn_scope,
+                        AuditOutcomeStatus::Failed,
+                        Some("provider_request_error"),
+                    );
                     return Err(e);
                 }
             };
@@ -397,10 +480,25 @@ impl CoshCore {
             let mut thinking_block_started = false;
             let mut suppress_stream_text = false;
             let mut tool_call_seen = false;
+            let mut message_end_seen = false;
+            // Only the in-band question route may hide assistant text. With the
+            // question tool disabled the marker can never become a question, so
+            // suppressing the text would drop the reply with nothing to replace it.
+            let in_band_questions_enabled = self.tools.supports_ask_user_question();
 
             self.emit(writer, &OutputMessage::stream_message_start());
 
             while let Some(event) = stream.next().await {
+                // Tool indices size `tool_calls` below, so an out-of-range index
+                // would let one malformed frame allocate billions of slots. Fail
+                // the stream instead of trusting or silently dropping it.
+                let event = match event.tool_call_index() {
+                    Some(index) if index > MAX_TOOL_CALL_INDEX => GenerateEvent::Error(format!(
+                        "provider reported tool call index {index}, above the supported \
+                         maximum of {MAX_TOOL_CALL_INDEX}"
+                    )),
+                    _ => event,
+                };
                 match event {
                     GenerateEvent::ThinkingDelta(delta) => {
                         if !thinking_block_started {
@@ -424,7 +522,7 @@ impl CoshCore {
                         }
                         text_buf.push_str(&delta);
                         if !suppress_stream_text && !tool_call_seen {
-                            if text_buf.contains("COSH_QUESTION:") {
+                            if in_band_questions_enabled && text_buf.contains("COSH_QUESTION:") {
                                 suppress_stream_text = true;
                             } else {
                                 self.emit(
@@ -454,6 +552,7 @@ impl CoshCore {
                         tool_calls[idx].name = name.clone();
                         tool_calls[idx].block_index = block_index;
                         tool_calls[idx].block_closed = false;
+                        tool_calls[idx].start_seen = true;
                         self.emit(
                             writer,
                             &OutputMessage::stream_tool_use_start(block_index, &id, &name),
@@ -474,10 +573,12 @@ impl CoshCore {
                             &OutputMessage::stream_tool_use_delta(bi, &arguments_delta),
                         );
                         tool_calls[idx].arguments.push_str(&arguments_delta);
+                        tool_calls[idx].delta_count += 1;
                     }
                     GenerateEvent::ToolCallEnd { index } => {
                         let idx = index as usize;
                         if idx < tool_calls.len() {
+                            tool_calls[idx].end_seen = true;
                             let bi = tool_calls[idx].block_index;
                             self.emit(writer, &OutputMessage::stream_block_stop(bi));
                             tool_calls[idx].block_closed = true;
@@ -500,16 +601,78 @@ impl CoshCore {
                     }
                     GenerateEvent::MessageEnd => {
                         self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                        message_end_seen = true;
                         break;
+                    }
+                    GenerateEvent::Cancelled => {
+                        self.audit.record_provider_terminal(
+                            provider_scope,
+                            &resolved_provider.provider_type,
+                            &provider_data,
+                            AuditOutcomeStatus::Cancelled,
+                            "cancelled",
+                            api_start.elapsed().as_millis() as u64,
+                        );
+                        self.audit.record_turn_terminal(
+                            turn_scope,
+                            AuditOutcomeStatus::Cancelled,
+                            Some("provider_cancelled"),
+                        );
+                        return Err("provider request cancelled".to_string());
                     }
                     GenerateEvent::Error(e) => {
                         self.metrics.api_errors += 1;
                         self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                        self.audit.record_provider_terminal(
+                            provider_scope,
+                            &resolved_provider.provider_type,
+                            &provider_data,
+                            AuditOutcomeStatus::Failed,
+                            "stream_error",
+                            api_start.elapsed().as_millis() as u64,
+                        );
+                        self.audit.record_turn_terminal(
+                            turn_scope,
+                            AuditOutcomeStatus::Failed,
+                            Some("provider_stream_error"),
+                        );
                         return Err(e);
                     }
                 }
             }
             drop(stream);
+            if !message_end_seen {
+                self.audit.record_provider_terminal(
+                    provider_scope,
+                    &resolved_provider.provider_type,
+                    &provider_data,
+                    AuditOutcomeStatus::Failed,
+                    "unexpected_eof",
+                    api_start.elapsed().as_millis() as u64,
+                );
+                self.audit.record_turn_terminal(
+                    turn_scope,
+                    AuditOutcomeStatus::Failed,
+                    Some("provider_unexpected_eof"),
+                );
+                return Err("provider stream ended without a terminal event".to_string());
+            }
+            let (input_tokens, output_tokens) = usage_info
+                .map(|(input, output, _)| (Some(u64::from(input)), Some(u64::from(output))))
+                .unwrap_or((None, None));
+            let completed_provider_data = AuditProviderData {
+                input_tokens,
+                output_tokens,
+                ..provider_data.clone()
+            };
+            self.audit.record_provider_terminal(
+                provider_scope,
+                &resolved_provider.provider_type,
+                &completed_provider_data,
+                AuditOutcomeStatus::Success,
+                "completed",
+                api_start.elapsed().as_millis() as u64,
+            );
 
             // ─── Hook: AfterModel ───
             let after_model_result = self
@@ -525,6 +688,12 @@ impl CoshCore {
                 )
                 .await;
             self.emit_hook_notifications(writer, &after_model_result.notifications, None);
+            self.audit.record_hook_decision(
+                turn_scope,
+                "after_model",
+                AuditOutcomeStatus::Success,
+                "observed",
+            );
 
             if thinking_block_started {
                 self.emit(writer, &OutputMessage::stream_block_stop(block_index));
@@ -543,7 +712,7 @@ impl CoshCore {
             }
             let emit_visible_text = tool_calls.is_empty()
                 && !text_buf.is_empty()
-                && !text_buf.contains("COSH_QUESTION:");
+                && !(in_band_questions_enabled && text_buf.contains("COSH_QUESTION:"));
             let _ = block_index;
             self.emit(writer, &OutputMessage::stream_message_stop());
 
@@ -556,20 +725,49 @@ impl CoshCore {
 
             if tool_calls.is_empty() {
                 if self.tools.supports_ask_user_question() {
-                    if let Some(synthetic) = parse_cosh_question_text(&text_buf) {
-                        let result = self
-                            .handle_ask_user("synthetic-ask", &synthetic, reader, writer)
-                            .await;
-                        if result.is_error {
+                    match parse_in_band_question(&text_buf) {
+                        InBandQuestion::Valid(synthetic) => {
+                            let result = self.handle_ask_user(&synthetic, reader, writer).await;
+                            if result.is_error {
+                                self.messages.push(Message::assistant(&text_buf));
+                                self.audit.record_turn_terminal(
+                                    turn_scope,
+                                    AuditOutcomeStatus::Failed,
+                                    Some("question_failed"),
+                                );
+                                return Ok(());
+                            }
                             self.messages.push(Message::assistant(&text_buf));
-                            return Ok(());
+                            self.messages.push(Message::user(&format!(
+                                "User answered the question: {}",
+                                result.output
+                            )));
+                            self.audit.record_turn_terminal(
+                                turn_scope,
+                                AuditOutcomeStatus::Success,
+                                Some("question_answered"),
+                            );
+                            continue;
                         }
-                        self.messages.push(Message::assistant(&text_buf));
-                        self.messages.push(Message::user(&format!(
-                            "User answered the question: {}",
-                            result.output
-                        )));
-                        continue;
+                        // The marker already suppressed the visible text, so a
+                        // rejected payload must fail the turn loudly instead of
+                        // ending it as an ordinary answer the user never saw.
+                        InBandQuestion::Invalid(error) => {
+                            tracing::warn!(
+                                provider_type = %resolved_provider.provider_type,
+                                validation_error_code = error.code(),
+                                text_bytes = text_buf.len(),
+                                "rejected in-band COSH_QUESTION payload"
+                            );
+                            self.messages.push(Message::assistant(&text_buf));
+                            self.audit.record_turn_terminal(
+                                turn_scope,
+                                AuditOutcomeStatus::Failed,
+                                Some("question_invalid"),
+                            );
+                            return Err(tool_execution::in_band_question_error(error));
+                        }
+                        InBandQuestion::Absent => {}
                     }
                 }
 
@@ -579,15 +777,28 @@ impl CoshCore {
                     .fire_stop(&self.session_id, &cwd_str, &text_buf)
                     .await;
                 self.emit_hook_notifications(writer, &stop_result.notifications, None);
+                self.audit.record_hook_decision(
+                    turn_scope,
+                    "stop",
+                    hook_outcome(&stop_result.decision),
+                    hook_decision_name(&stop_result.decision),
+                );
                 if let HookDecision::Block(reason) = &stop_result.decision {
                     self.messages.push(Message::assistant(&text_buf));
                     self.messages.push(Message::user(&format!(
                         "[Hook rejected response] {reason}. Please revise your answer."
                     )));
+                    self.audit.record_turn_terminal(
+                        turn_scope,
+                        AuditOutcomeStatus::Success,
+                        Some("stop_hook_retry"),
+                    );
                     continue;
                 }
 
                 self.messages.push(Message::assistant(&text_buf));
+                self.audit
+                    .record_turn_terminal(turn_scope, AuditOutcomeStatus::Success, None);
                 return Ok(());
             }
 
@@ -638,21 +849,83 @@ impl CoshCore {
                     continue;
                 }
 
-                let params: serde_json::Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                let tool_kind = self
+                    .tools
+                    .get(&tc.name)
+                    .map(|tool| format!("{:?}", tool.kind()).to_ascii_lowercase())
+                    .unwrap_or_else(|| "virtual".to_string());
+                let tool_scope = CoreAuditScope::tool(&run_id, &turn_id, &tc.id);
 
-                if tc.name == "ask_user_question" && self.tools.supports_ask_user_question() {
-                    let result = self.handle_ask_user(&tc.id, &params, reader, writer).await;
-                    self.messages.push(Message::tool_result(
-                        &tc.id,
-                        &result.output,
-                        result.is_error,
-                    ));
+                if tc.name == ask_user_question::TOOL_NAME
+                    && self.tools.supports_ask_user_question()
+                {
+                    let dispatched = self
+                        .dispatch_ask_user_tool_call(
+                            tool_scope,
+                            tc,
+                            &resolved_provider.provider_type,
+                            &tool_kind,
+                            reader,
+                            writer,
+                        )
+                        .await?;
+                    if let Some(result) = dispatched {
+                        self.messages.push(Message::tool_result(
+                            &tc.id,
+                            &result.output,
+                            result.is_error,
+                        ));
+                    }
                     if interrupted {
                         return Ok(());
                     }
                     continue;
                 }
+
+                let parsed_params = parse_tool_arguments(&tc.arguments);
+                let tool_data = AuditToolData {
+                    tool_kind,
+                    input_shape: Some(match &parsed_params {
+                        Ok(params) => json_shape(params).to_string(),
+                        Err(error) => error.audit_shape().to_string(),
+                    }),
+                    input_hash: Some(match &parsed_params {
+                        Ok(params) => hash_json(params),
+                        Err(_) => hash_bytes(tc.arguments.as_bytes()),
+                    }),
+                    ..AuditToolData::default()
+                };
+                self.audit
+                    .record_tool_requested(tool_scope, &tc.name, &tool_data);
+
+                let params = match parsed_params {
+                    Ok(params) => params,
+                    Err(parse_error) => {
+                        // Executing a tool with `null` parameters used to look like
+                        // a call with every field absent; fail the call instead so
+                        // the model can re-issue it.
+                        tracing::warn!(
+                            provider_type = %resolved_provider.provider_type,
+                            tool_call_id = %tc.id,
+                            tool_name = %tc.name,
+                            start_seen = tc.start_seen,
+                            delta_count = tc.delta_count,
+                            end_seen = tc.end_seen,
+                            argument_bytes = tc.arguments.len(),
+                            json_parse_status = parse_error.json_parse_status(),
+                            validation_error_code = parse_error.code(),
+                            "rejected malformed tool arguments"
+                        );
+                        self.reject_tool_arguments(
+                            tool_scope,
+                            &tc.name,
+                            &tc.id,
+                            &tool_data,
+                            invalid_arguments_message(&tc.name, &parse_error),
+                        );
+                        continue;
+                    }
+                };
 
                 if self
                     .tools
@@ -660,9 +933,20 @@ impl CoshCore {
                     .map(|tool| tool.kind() == ToolKind::ShellEvidence)
                     .unwrap_or(false)
                 {
+                    self.audit
+                        .record_tool_execution_started(tool_scope, &tc.name, &tool_data)?;
+                    let tool_start = Instant::now();
                     let result = self
                         .handle_shell_evidence(&tc.id, &params, reader, writer)
                         .await;
+                    self.audit.record_tool_terminal(
+                        tool_scope,
+                        &tc.name,
+                        &tool_data,
+                        result.is_error,
+                        tool_start.elapsed().as_millis() as u64,
+                        result.output.len() as u64,
+                    );
                     self.emit_provider_native_tool_result(writer, &tc.id, &result);
                     self.messages.push(Message::tool_result(
                         &tc.id,
@@ -714,6 +998,12 @@ impl CoshCore {
                     )
                     .await;
                 self.emit_hook_notifications(writer, &hook_result.notifications, Some(&tc.id));
+                self.audit.record_hook_decision(
+                    tool_scope,
+                    "pre_tool_use",
+                    hook_outcome(&hook_result.decision),
+                    hook_decision_name(&hook_result.decision),
+                );
 
                 let (outcome, params) = match hook_result.decision {
                     HookDecision::Block(reason) => {
@@ -726,6 +1016,14 @@ impl CoshCore {
                             &result.output,
                             result.is_error,
                         ));
+                        self.audit.record_tool_terminal(
+                            tool_scope,
+                            &tc.name,
+                            &tool_data,
+                            result.is_error,
+                            0,
+                            result.output.len() as u64,
+                        );
                         continue;
                     }
                     HookDecision::Ask => {
@@ -754,6 +1052,8 @@ impl CoshCore {
                 let tool_start = Instant::now();
                 let result = match outcome {
                     Outcome::Allow => {
+                        self.audit
+                            .record_tool_execution_started(tool_scope, &tc.name, &tool_data)?;
                         let result = self.execute_tool(&tc.name, params, &ctx).await;
                         self.emit_provider_native_tool_result(writer, &tc.id, &result);
                         tool_result_already_emitted = true;
@@ -763,14 +1063,31 @@ impl CoshCore {
                         let hook_requires_approval =
                             matches!(hook_result.decision, HookDecision::Ask);
                         let request_id = self.next_request_id();
+                        let approval_scope = CoreAuditScope::request(
+                            &run_id,
+                            Some(&turn_id),
+                            &request_id,
+                            Some(&tc.id),
+                        );
+                        let audit_ref = self.audit.record_approval_requested(
+                            approval_scope,
+                            &tc.name,
+                            if hook_requires_approval {
+                                "hook_ask"
+                            } else {
+                                "policy_approval"
+                            },
+                            Some(hash_json(&params)),
+                        );
                         self.emit(
                             writer,
-                            &OutputMessage::can_use_tool(
+                            &OutputMessage::can_use_tool_with_audit_ref(
                                 &request_id,
                                 &tc.name,
                                 params.clone(),
                                 &tc.id,
                                 hook_requires_approval,
+                                audit_ref,
                             ),
                         );
 
@@ -784,12 +1101,27 @@ impl CoshCore {
                         let approval_result = self
                             .wait_for_approval(&request_id, accepts_host_executed_shell, reader)
                             .await;
-                        self.metrics.approval_wait_ms +=
-                            approval_start.elapsed().as_millis() as u64;
+                        let approval_wait_ms = approval_start.elapsed().as_millis() as u64;
+                        let (approval_status, approval_decision) =
+                            approval_audit_outcome(&approval_result);
+                        if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. }) {
+                            self.audit.record_approval_resolved(
+                                approval_scope,
+                                &tc.name,
+                                approval_status,
+                                None,
+                                approval_decision,
+                                Some(approval_wait_ms),
+                            )?;
+                        }
+                        self.metrics.approval_wait_ms += approval_wait_ms;
                         self.metrics.approval_count += 1;
                         match approval_result {
                             ApprovalResult::Allowed => {
                                 self.metrics.approval_allow += 1;
+                                self.audit.record_tool_execution_started(
+                                    tool_scope, &tc.name, &tool_data,
+                                )?;
                                 let result = self.execute_tool(&tc.name, params, &ctx).await;
                                 self.emit_provider_native_tool_result(writer, &tc.id, &result);
                                 tool_result_already_emitted = true;
@@ -848,6 +1180,12 @@ impl CoshCore {
                     )
                     .await;
                 self.emit_hook_notifications(writer, &post_hook.notifications, Some(&tc.id));
+                self.audit.record_hook_decision(
+                    tool_scope,
+                    "post_tool_use",
+                    hook_outcome(&post_hook.decision),
+                    hook_decision_name(&post_hook.decision),
+                );
 
                 // Precedence: block/deny > updated response > original,
                 // then append additional context.
@@ -896,6 +1234,17 @@ impl CoshCore {
                         )
                         .await;
                     self.emit_hook_notifications(writer, &failure_hook.notifications, Some(&tc.id));
+                    let bypass_requested = failure_hook.sandbox_bypass_request.is_some();
+                    self.audit.record_hook_decision(
+                        tool_scope,
+                        "post_tool_use_failure",
+                        AuditOutcomeStatus::Success,
+                        if bypass_requested {
+                            "sandbox_bypass_requested"
+                        } else {
+                            "observed"
+                        },
+                    );
 
                     // ─── Sandbox Bypass ───
                     // If a hook requests sandbox bypass, present an approval
@@ -913,20 +1262,53 @@ impl CoshCore {
                             ),
                         );
                         let request_id = self.next_request_id();
-                        let bypass_tool_use_id = format!("{}-bypass", tc.id);
+                        let approval_scope = CoreAuditScope::request(
+                            &run_id,
+                            Some(&turn_id),
+                            &request_id,
+                            Some(&tc.id),
+                        );
+                        let audit_ref = self.audit.record_approval_requested(
+                            approval_scope,
+                            &tc.name,
+                            "sandbox_bypass",
+                            Some(hash_json(&serde_json::json!({
+                                "command": &bypass.original_command
+                            }))),
+                        );
                         self.emit(
                             writer,
-                            &OutputMessage::can_use_tool(
+                            &OutputMessage::can_use_tool_with_audit_ref(
                                 &request_id,
                                 &tc.name,
                                 serde_json::json!({"command": &bypass.original_command}),
-                                &bypass_tool_use_id,
+                                &tc.id,
                                 true,
+                                audit_ref,
                             ),
                         );
 
-                        match self.wait_for_approval(&request_id, true, reader).await {
+                        let approval_start = Instant::now();
+                        let approval_result =
+                            self.wait_for_approval(&request_id, true, reader).await;
+                        let (approval_status, approval_decision) =
+                            approval_audit_outcome(&approval_result);
+                        if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. }) {
+                            self.audit.record_approval_resolved(
+                                approval_scope,
+                                &tc.name,
+                                approval_status,
+                                Some("sandbox_bypass"),
+                                approval_decision,
+                                Some(approval_start.elapsed().as_millis() as u64),
+                            )?;
+                        }
+
+                        match approval_result {
                             ApprovalResult::Allowed => {
+                                self.audit.record_tool_execution_started(
+                                    tool_scope, &tc.name, &tool_data,
+                                )?;
                                 self.hook_system.set_hook_disabled("sandbox-guard", true);
                                 let retry_params =
                                     serde_json::json!({"command": &bypass.original_command});
@@ -953,6 +1335,14 @@ impl CoshCore {
                     }
                 }
 
+                self.audit.record_tool_terminal(
+                    tool_scope,
+                    &tc.name,
+                    &tool_data,
+                    result.is_error,
+                    tool_start.elapsed().as_millis() as u64,
+                    result.output.len() as u64,
+                );
                 self.messages.push(Message::tool_result(
                     &tc.id,
                     &result.output,
@@ -965,9 +1355,16 @@ impl CoshCore {
                 }
 
                 if interrupted {
+                    self.audit.record_turn_terminal(
+                        turn_scope,
+                        AuditOutcomeStatus::Cancelled,
+                        Some("interrupted"),
+                    );
                     return Ok(());
                 }
             }
+            self.audit
+                .record_turn_terminal(turn_scope, AuditOutcomeStatus::Success, None);
         }
 
         Err(format!("Agent exceeded max turns ({max_turns})"))
@@ -1008,72 +1405,6 @@ impl CoshCore {
         ToolResult {
             output,
             is_error: result.is_error,
-        }
-    }
-
-    async fn handle_ask_user<W, R>(
-        &self,
-        _tool_use_id: &str,
-        params: &serde_json::Value,
-        reader: &mut tokio::io::Lines<R>,
-        writer: &mut W,
-    ) -> ToolResult
-    where
-        W: Write,
-        R: AsyncBufReadExt + Unpin,
-    {
-        let question = params
-            .get("question")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Agent needs your input")
-            .to_string();
-        let options: Vec<crate::protocol::AskUserOption> = params
-            .get("options")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| {
-                        let label = item
-                            .get("label")
-                            .and_then(|l| l.as_str())
-                            .or_else(|| item.as_str())?;
-                        Some(crate::protocol::AskUserOption {
-                            label: label.to_string(),
-                            description: item
-                                .get("description")
-                                .and_then(|d| d.as_str())
-                                .map(|s| s.to_string()),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let allow_free_text = params
-            .get("allow_free_text")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let multi_select = params
-            .get("multi_select")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let request_id = self.next_request_id();
-        self.emit(
-            writer,
-            &OutputMessage::ControlRequest {
-                request_id: request_id.clone(),
-                request: crate::protocol::CoreControlRequest::AskUser {
-                    question,
-                    options,
-                    allow_free_text,
-                    multi_select,
-                },
-            },
-        );
-
-        match self.wait_for_answer(&request_id, reader).await {
-            Some(answer) => ToolResult::success(answer),
-            None => ToolResult::error("User did not answer (interrupted or disconnected)"),
         }
     }
 
@@ -1369,71 +1700,6 @@ impl CoshCore {
         }
         ApprovalResult::Interrupted
     }
-
-    /// Attempt to re-authenticate by sending auth_required to Shell.
-    /// Returns true if re-auth succeeded and provider was rebuilt.
-    async fn try_reauth<W, R>(&mut self, reader: &mut tokio::io::Lines<R>, writer: &mut W) -> bool
-    where
-        W: Write,
-        R: AsyncBufReadExt + Unpin,
-    {
-        use crate::protocol::AuthReason;
-
-        let request_id = self.next_request_id();
-        let providers = builtin_auth_providers();
-
-        let auth_msg = OutputMessage::auth_required(
-            &request_id,
-            AuthReason::Invalid,
-            Some("API authentication failed (401/403)".to_string()),
-            providers,
-        );
-        self.emit(writer, &auth_msg);
-
-        let auth_result = wait_for_auth_response(&request_id, reader).await;
-        // Note: buffered_lines during mid-session re-auth are discarded since
-        // the retry loop will re-send if needed.
-        let response = match auth_result.response {
-            Some(r) => r,
-            None => return false,
-        };
-
-        apply_auth_credentials(&mut self.config, &response);
-
-        if response.persist {
-            if let Err(e) = config::persist_config(&self.config) {
-                tracing::warn!("failed to persist config: {e}");
-            }
-        }
-
-        // Rebuild provider
-        let resolved = self.config.resolve_provider();
-        if resolved.provider_type == "aliyun" {
-            if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
-                self.provider =
-                    Box::new(crate::provider::sysom::SysomProvider::from_ecs_ram_role());
-            } else if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
-                self.provider = Box::new(crate::provider::sysom::SysomProvider::new(
-                    &resolved.access_key_id,
-                    &resolved.access_key_secret,
-                    resolved.security_token.as_deref(),
-                ));
-            } else {
-                tracing::warn!("Aliyun auth response missing AK/SK");
-                return false;
-            }
-        } else {
-            let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
-            self.provider = Box::new(crate::provider::openai_compat::OpenAICompatProvider::new(
-                &resolved.base_url,
-                &resolved.api_key,
-                profile,
-            ));
-        }
-
-        self.emit(writer, &OutputMessage::system_status("auth_ok"));
-        true
-    }
 }
 
 enum ApprovalResult {
@@ -1446,6 +1712,33 @@ enum ApprovalResult {
     Interrupted,
 }
 
+fn hook_decision_name(decision: &HookDecision) -> &'static str {
+    match decision {
+        HookDecision::Allow => "allow",
+        HookDecision::Block(_) => "block",
+        HookDecision::Ask => "ask",
+        HookDecision::Passthrough => "passthrough",
+    }
+}
+
+fn hook_outcome(decision: &HookDecision) -> AuditOutcomeStatus {
+    match decision {
+        HookDecision::Allow | HookDecision::Passthrough => AuditOutcomeStatus::Allowed,
+        HookDecision::Block(_) => AuditOutcomeStatus::Denied,
+        HookDecision::Ask => AuditOutcomeStatus::Started,
+    }
+}
+
+fn approval_audit_outcome(approval: &ApprovalResult) -> (AuditOutcomeStatus, &'static str) {
+    match approval {
+        ApprovalResult::Allowed | ApprovalResult::HostExecutedShell { .. } => {
+            (AuditOutcomeStatus::Allowed, "allow")
+        }
+        ApprovalResult::Denied(_) => (AuditOutcomeStatus::Denied, "deny"),
+        ApprovalResult::Interrupted => (AuditOutcomeStatus::Cancelled, "interrupted"),
+    }
+}
+
 #[derive(Default, Clone)]
 struct PendingToolCall {
     id: String,
@@ -1453,1330 +1746,14 @@ struct PendingToolCall {
     arguments: String,
     block_index: u32,
     block_closed: bool,
-}
-
-fn parse_cosh_question_text(text: &str) -> Option<serde_json::Value> {
-    let marker = "COSH_QUESTION:";
-    let json_text = text.split_once(marker)?.1.trim().lines().next()?.trim();
-    serde_json::from_str(json_text).ok()
+    /// Stream-shape facts kept for bounded diagnostics when arguments are
+    /// rejected: they distinguish "provider never sent arguments" from
+    /// "arguments arrived but were malformed".
+    start_seen: bool,
+    delta_count: u32,
+    end_seen: bool,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider::mock::MockProvider;
-    use crate::tool::{Tool, ToolResult};
-    use async_trait::async_trait;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-    use tokio::io::BufReader;
-
-    async fn empty_reader() -> tokio::io::Lines<BufReader<&'static [u8]>> {
-        BufReader::new(&b""[..]).lines()
-    }
-
-    fn make_core(provider: MockProvider) -> CoshCore {
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::new();
-        CoshCore::new(config, Box::new(provider), tools)
-    }
-
-    struct CountingShellTool {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[test]
-    fn allowlisted_tools_bypass_strict_approval() {
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "strict".to_string();
-        config.agent.allowed_tools.insert("shell".to_string());
-        let mut tools = ToolRegistry::new();
-        tools.register(Box::new(CountingShellTool {
-            calls: Arc::new(AtomicUsize::new(0)),
-        }));
-        let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
-
-        assert_eq!(
-            core.classify_tool("shell", &serde_json::json!({})),
-            Outcome::Allow
-        );
-    }
-
-    #[test]
-    fn mcp_tools_require_approval_outside_trust_mode() {
-        for mode in ["auto", "balanced", "suggest", "strict"] {
-            let mut config = CoreConfig::default();
-            config.agent.approval_mode = mode.to_string();
-            let mut tools = ToolRegistry::new();
-            tools.register(Box::new(TestMcpTool));
-            let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
-
-            assert_eq!(
-                core.classify_tool("mcp__remote__search", &serde_json::json!({})),
-                Outcome::RequireApproval,
-                "MCP tool should require approval in {mode} mode"
-            );
-        }
-    }
-
-    #[test]
-    fn exact_mcp_allowlist_entry_bypasses_approval() {
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "strict".to_string();
-        config
-            .agent
-            .allowed_tools
-            .insert("mcp__remote__search".to_string());
-        let mut tools = ToolRegistry::new();
-        tools.register(Box::new(TestMcpTool));
-        let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
-
-        assert_eq!(
-            core.classify_tool("mcp__remote__search", &serde_json::json!({})),
-            Outcome::Allow
-        );
-    }
-
-    #[async_trait]
-    impl Tool for CountingShellTool {
-        fn name(&self) -> &str {
-            "shell"
-        }
-
-        fn description(&self) -> &str {
-            "counting shell"
-        }
-
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string" }
-                },
-                "required": ["command"]
-            })
-        }
-
-        fn kind(&self) -> ToolKind {
-            ToolKind::ShellExec
-        }
-
-        async fn invoke(
-            &self,
-            _params: serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> Result<ToolResult, String> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ToolResult::success("provider-native shell executed"))
-        }
-    }
-
-    struct TestMcpTool;
-
-    #[async_trait]
-    impl Tool for TestMcpTool {
-        fn name(&self) -> &str {
-            "mcp__remote__search"
-        }
-
-        fn description(&self) -> &str {
-            "test MCP tool"
-        }
-
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "object" })
-        }
-
-        fn kind(&self) -> ToolKind {
-            ToolKind::Mcp
-        }
-
-        async fn invoke(
-            &self,
-            _params: serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> Result<ToolResult, String> {
-            Ok(ToolResult::success("called"))
-        }
-    }
-
-    struct CountingMcpTool {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl Tool for CountingMcpTool {
-        fn name(&self) -> &str {
-            "mcp__remote__search"
-        }
-
-        fn description(&self) -> &str {
-            "counting MCP tool"
-        }
-
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "object" })
-        }
-
-        fn kind(&self) -> ToolKind {
-            ToolKind::Mcp
-        }
-
-        async fn invoke(
-            &self,
-            _params: serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> Result<ToolResult, String> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ToolResult::success("called"))
-        }
-    }
-
-    fn mcp_tool_provider() -> MockProvider {
-        MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "mcp__remote__search".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: "{}".to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("Done.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ])
-    }
-
-    #[tokio::test]
-    async fn mcp_tools_do_not_execute_before_approval() {
-        for mode in ["auto", "balanced", "suggest", "strict"] {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let mut config = CoreConfig::default();
-            config.agent.approval_mode = mode.to_string();
-            let mut tools = ToolRegistry::new();
-            tools.register(Box::new(CountingMcpTool {
-                calls: Arc::clone(&calls),
-            }));
-            let mut core = CoshCore::new(config, Box::new(mcp_tool_provider()), tools);
-            let deny = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"deny"}}}"#;
-            let mut reader = BufReader::new(deny.as_bytes()).lines();
-            let mut output = Vec::new();
-
-            core.handle_user_message("search", &mut reader, &mut output)
-                .await
-                .unwrap();
-
-            assert_eq!(
-                calls.load(Ordering::SeqCst),
-                0,
-                "MCP tool ran in {mode} mode"
-            );
-            assert!(String::from_utf8(output).unwrap().contains("can_use_tool"));
-        }
-    }
-
-    #[tokio::test]
-    async fn text_only_response() {
-        let provider = MockProvider::text_only("Hello from AI!");
-        let mut core = make_core(provider);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        core.handle_user_message("hi", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains("Hello from AI!"));
-        assert_eq!(core.messages.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn unknown_tool_returns_error_result() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::TextDelta("Let me try.".to_string()),
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "nonexistent".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"x":1}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("Sorry, that didn't work.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut core = make_core(provider);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        core.handle_user_message("do something", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        assert!(core.messages.len() >= 4);
-        let tool_result_msg = &core.messages[2];
-        assert_eq!(tool_result_msg.role, "tool");
-    }
-
-    #[tokio::test]
-    async fn multi_turn_with_tool() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "shell".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"command":"echo hello"}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("The command output was: hello".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults_for_test();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        core.handle_user_message("run echo hello", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains("hello"));
-        assert!(
-            output_str.find(r#""type":"user""#) < output_str.find("The command output was: hello"),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains(r#""type":"tool_result""#),
-            "{output_str}"
-        );
-        assert!(core.messages.len() >= 4);
-    }
-
-    #[tokio::test]
-    async fn incomplete_tool_call_stops_without_consuming_turn_budget() {
-        let provider = MockProvider::new(vec![vec![
-            GenerateEvent::ToolCallDelta {
-                index: 0,
-                arguments_delta: r#"{"command":"pwd"}"#.to_string(),
-            },
-            GenerateEvent::MessageEnd,
-        ]]);
-        let mut core = make_core(provider);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        let error = core
-            .handle_user_message("inspect this project", &mut reader, &mut output)
-            .await
-            .expect_err("an unnamed tool call must fail immediately");
-
-        assert_eq!(
-            error,
-            "Provider emitted an incomplete tool call without a function name"
-        );
-        assert_eq!(core.messages.len(), 1, "must not append an empty turn");
-    }
-
-    #[tokio::test]
-    async fn mixed_tool_calls_stop_when_any_call_is_incomplete() {
-        let provider = MockProvider::new(vec![vec![
-            GenerateEvent::ToolCallStart {
-                index: 0,
-                id: "call-valid".to_string(),
-                name: "shell".to_string(),
-            },
-            GenerateEvent::ToolCallDelta {
-                index: 0,
-                arguments_delta: r#"{"command":"pwd"}"#.to_string(),
-            },
-            GenerateEvent::ToolCallDelta {
-                index: 1,
-                arguments_delta: r#"{"command":"id"}"#.to_string(),
-            },
-            GenerateEvent::MessageEnd,
-        ]]);
-        let mut core = make_core(provider);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        let error = core
-            .handle_user_message("inspect this project", &mut reader, &mut output)
-            .await
-            .expect_err("any unnamed tool call with arguments must fail the turn");
-
-        assert_eq!(
-            error,
-            "Provider emitted an incomplete tool call without a function name"
-        );
-        assert_eq!(core.messages.len(), 1, "must not execute the named tool");
-    }
-
-    #[tokio::test]
-    async fn text_after_tool_call_is_not_visible_before_tool_result() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::TextDelta("Preparing to run the command.".to_string()),
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "shell".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"command":"echo hello"}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::TextDelta("SHOULD NOT BE VISIBLE BEFORE TOOL RESULT".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("The command output was: hello".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults_for_test();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        core.handle_user_message("run echo hello", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains("Preparing to run the command."),
-            "{output_str}"
-        );
-        assert!(
-            !output_str.contains("SHOULD NOT BE VISIBLE BEFORE TOOL RESULT"),
-            "{output_str}"
-        );
-        assert!(
-            output_str.find(r#""type":"tool_result""#)
-                < output_str.find("The command output was: hello"),
-            "{output_str}"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_block_is_closed_when_stream_ends_without_tool_call_end() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "shell".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"command":"echo hello"}"#.to_string(),
-                },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("done".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults_for_test();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        core.handle_user_message("run echo hello", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains(r#""type":"content_block_stop","index":0"#));
-        assert!(
-            output_str.find(r#""type":"content_block_stop","index":0"#)
-                < output_str.find(r#""type":"tool_result""#),
-            "{output_str}"
-        );
-    }
-
-    #[tokio::test]
-    async fn multiple_tool_call_blocks_are_closed_with_distinct_indexes_without_tool_call_end() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "first_unknown".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"value":1}"#.to_string(),
-                },
-                GenerateEvent::ToolCallStart {
-                    index: 1,
-                    id: "call-2".to_string(),
-                    name: "second_unknown".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 1,
-                    arguments_delta: r#"{"value":2}"#.to_string(),
-                },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("done".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::new();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        core.handle_user_message("run two tools", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        let first_message = output_str
-            .split(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#)
-            .next()
-            .expect("first stream message");
-        assert_eq!(
-            first_message
-                .matches(r#""type":"content_block_start","index":0"#)
-                .count(),
-            1,
-            "{output_str}"
-        );
-        assert_eq!(
-            first_message
-                .matches(r#""type":"content_block_start","index":1"#)
-                .count(),
-            1,
-            "{output_str}"
-        );
-        assert_eq!(
-            first_message
-                .matches(r#""type":"content_block_stop","index":0"#)
-                .count(),
-            1,
-            "{output_str}"
-        );
-        assert_eq!(
-            first_message
-                .matches(r#""type":"content_block_stop","index":1"#)
-                .count(),
-            1,
-            "{output_str}"
-        );
-        assert!(
-            output_str.find(r#""type":"content_block_stop","index":1"#)
-                < output_str.find(r#""type":"tool_result""#),
-            "{output_str}"
-        );
-    }
-
-    #[tokio::test]
-    async fn approval_flow_allow() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "shell".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"command":"echo approved"}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("Done.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "suggest".to_string();
-        let tools = ToolRegistry::with_defaults_for_test();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let allow_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"allow"}}}"#;
-        let input = format!("{allow_response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("run echo approved", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains("can_use_tool"));
-        assert!(core.messages.len() >= 4);
-    }
-
-    #[tokio::test]
-    async fn approval_flow_deny() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "shell".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"command":"rm -rf /"}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("I understand, the command was denied.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "suggest".to_string();
-        let tools = ToolRegistry::with_defaults_for_test();
-
-        let deny_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"deny","message":"Too dangerous"}}}"#;
-        let input = format!("{deny_response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-        let mut output = Vec::new();
-
-        core.handle_user_message("delete everything", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let tool_result = core.messages.iter().find(|m| m.role == "tool").unwrap();
-        if let crate::provider::MessageContent::Blocks(blocks) = &tool_result.content {
-            if let crate::provider::MessageContentBlock::ToolResult {
-                content, is_error, ..
-            } = &blocks[0]
-            {
-                assert!(is_error);
-                assert!(content.contains("denied"));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn request_id_skips_mismatched() {
-        let core = make_core(MockProvider::text_only(""));
-        let mismatched = r#"{"type":"control_response","response":{"subtype":"success","request_id":"wrong-id","response":{"behavior":"allow"}}}"#;
-        let correct = r#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"deny","message":"denied"}}}"#;
-        let input = format!("{mismatched}\n{correct}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-
-        let result = core
-            .wait_for_approval("expected-id", false, &mut reader)
-            .await;
-        assert!(matches!(result, ApprovalResult::Denied(_)));
-    }
-
-    #[tokio::test]
-    async fn approval_flow_host_executed_shell_uses_tool_result() {
-        let shell_calls = Arc::new(AtomicUsize::new(0));
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "shell".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"command":"df -h"}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("Received shell evidence.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "suggest".to_string();
-        let mut tools = ToolRegistry::new();
-        tools.register(Box::new(CountingShellTool {
-            calls: Arc::clone(&shell_calls),
-        }));
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"host_executed_shell","result":{"llmContent":"ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed","returnDisplay":"df -h completed","metadata":{"command":"df -h","status":"completed","exit_code":0}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("check disk", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            shell_calls.load(Ordering::SeqCst),
-            0,
-            "host-executed result must not run provider-native shell executor"
-        );
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains("Received shell evidence."),
-            "{output_str}"
-        );
-        assert!(
-            !output_str.contains(r#""type":"tool_result""#),
-            "{output_str}"
-        );
-        let tool_result = core
-            .messages
-            .iter()
-            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-1"))
-            .expect("tool result");
-        match &tool_result.content {
-            crate::provider::MessageContent::Text(content) => {
-                assert!(content.contains("ShellCommandCompleted evidence"));
-                assert!(content.contains("command: df -h"));
-            }
-            _ => panic!("expected text tool result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn approval_flow_rejects_host_executed_for_non_shell_tool() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-write".to_string(),
-                    name: "write_file".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta:
-                        r#"{"file_path":"/tmp/cosh-host-executed-non-shell","content":"bad"}"#
-                            .to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("Rejected.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "suggest".to_string();
-        let tools = ToolRegistry::with_defaults_for_test();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"host_executed_shell","result":{"llmContent":"should not be accepted","returnDisplay":null,"metadata":{"command":"echo bad","status":"completed","exit_code":0}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("write file", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let tool_result = core
-            .messages
-            .iter()
-            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-write"))
-            .expect("tool result");
-        match &tool_result.content {
-            crate::provider::MessageContent::Text(content) => {
-                assert!(content.contains("host_executed_shell is only valid for shell tools"));
-                assert!(!content.contains("should not be accepted"));
-            }
-            _ => panic!("expected text tool result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn ask_user_question_flow() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-1".to_string(),
-                    name: "ask_user_question".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"question":"Which language?","options":[{"label":"Rust"},{"label":"Python"}]}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("Great, you chose Rust!".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults_for_test();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let answer_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"answer":"Rust"}}}"#;
-        let input = format!("{answer_response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("what language?", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains("ask_user"));
-
-        let tool_result = core.messages.iter().find(|m| m.role == "tool").unwrap();
-        if let crate::provider::MessageContent::Blocks(blocks) = &tool_result.content {
-            if let crate::provider::MessageContentBlock::ToolResult { content, .. } = &blocks[0] {
-                assert!(content.contains("Rust"));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_read_output_uses_control_protocol_result() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-evidence".to_string(),
-                    name: "cosh_shell_evidence".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","direction":"tail","lines":42}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("I can see the captured output.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::new().with_shell_evidence();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session-a1b2/cmd-1\nexcerpt_status: available\nstdout","returnDisplay":"captured output","metadata":{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","excerpt_status":"available","is_error":false}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("read output", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains(r#""subtype":"shell_evidence""#),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains(r#""action":"read_output""#),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains(r#""tool_use_id":"call-evidence""#),
-            "{output_str}"
-        );
-        assert!(output_str.contains(r#""lines":42"#), "{output_str}");
-        assert!(
-            !output_str.contains(r#""bypass_recent_filter""#),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains(r#""type":"tool_result""#),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains("I can see the captured output."),
-            "{output_str}"
-        );
-
-        let tool_result = core
-            .messages
-            .iter()
-            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-evidence"))
-            .expect("tool result");
-        match &tool_result.content {
-            crate::provider::MessageContent::Text(content) => {
-                assert!(content.contains("ShellEvidenceExcerpt"));
-                assert!(content.contains("excerpt_status: available"));
-            }
-            _ => panic!("expected text tool result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_list_commands_uses_control_protocol_result() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-evidence".to_string(),
-                    name: "cosh_shell_evidence".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"action":"list_commands","limit":2}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("I can see the command index.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::new().with_shell_evidence();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceCommandIndex\ncommand_id: cmd-1\noutput_available: true","returnDisplay":null,"metadata":{"action":"list_commands","scope":"current_ledger","limit":2,"next_cursor":null,"is_error":false}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("list commands", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains(r#""subtype":"shell_evidence""#),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains(r#""action":"list_commands""#),
-            "{output_str}"
-        );
-        assert!(output_str.contains(r#""limit":2"#), "{output_str}");
-        assert!(
-            output_str.contains("I can see the command index."),
-            "{output_str}"
-        );
-
-        let tool_result = core
-            .messages
-            .iter()
-            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-evidence"))
-            .expect("tool result");
-        match &tool_result.content {
-            crate::provider::MessageContent::Text(content) => {
-                assert!(content.contains("ShellEvidenceCommandIndex"));
-                assert!(content.contains("output_available: true"));
-            }
-            _ => panic!("expected text tool result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_preserves_error_result() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-evidence".to_string(),
-                    name: "cosh_shell_evidence".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://old-session/cmd-1"}"#
-                        .to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("The output is stale.".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::new().with_shell_evidence();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://old-session/cmd-1\nexcerpt_status: unavailable\nreason: stale_session","returnDisplay":"stale output","metadata":{"action":"read_output","output_id":"terminal-output://old-session/cmd-1","excerpt_status":"unavailable","is_error":true,"reason":"stale_session"}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("read output", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains(r#""is_error":true"#), "{output_str}");
-        let tool_result = core
-            .messages
-            .iter()
-            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-evidence"))
-            .expect("tool result");
-        match &tool_result.content {
-            crate::provider::MessageContent::Text(content) => {
-                assert!(content.contains("excerpt_status: unavailable"));
-                assert!(content.contains("reason: stale_session"));
-            }
-            _ => panic!("expected text tool result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_read_output_forwards_bypass_recent_filter() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-evidence".to_string(),
-                    name: "cosh_shell_evidence".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","bypass_recent_filter":true}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![GenerateEvent::MessageEnd],
-        ]);
-
-        let tools = ToolRegistry::new().with_shell_evidence();
-        let mut core = CoshCore::new(CoreConfig::default(), Box::new(provider), tools);
-
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session-a1b2/cmd-1\nexcerpt_status: available\nstdout","returnDisplay":"captured output","metadata":{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","excerpt_status":"available","is_error":false}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("read output", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains(r#""bypass_recent_filter":true"#),
-            "{output_str}"
-        );
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_already_delivered_is_not_error() {
-        let core = make_core(MockProvider::new(vec![]));
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session/cmd-1\nexcerpt_status: already_delivered\nreason: already_delivered_recent_shell_tool_output","returnDisplay":null,"metadata":{"action":"read_output","output_id":"terminal-output://raw-session/cmd-1","excerpt_status":"already_delivered","is_error":false,"reason":"already_delivered_recent_shell_tool_output"}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-
-        let result = core.wait_for_shell_evidence("req-0", &mut reader).await;
-
-        assert!(!result.is_error, "{}", result.output);
-        assert!(result.output.contains("excerpt_status: already_delivered"));
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
-        let provider = MockProvider::new(vec![
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-list".to_string(),
-                    name: "cosh_shell_evidence".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"action":"list_commands","limit":2}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::ToolCallStart {
-                    index: 0,
-                    id: "call-read".to_string(),
-                    name: "cosh_shell_evidence".to_string(),
-                },
-                GenerateEvent::ToolCallDelta {
-                    index: 0,
-                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://raw-session/cmd-1"}"#.to_string(),
-                },
-                GenerateEvent::ToolCallEnd { index: 0 },
-                GenerateEvent::MessageEnd,
-            ],
-            vec![
-                GenerateEvent::TextDelta("evidence hooks bypassed".to_string()),
-                GenerateEvent::MessageEnd,
-            ],
-        ]);
-
-        let mut config = CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
-        config.hooks = config::HooksConfig {
-            enabled: true,
-            pre_tool_use: vec![config::HookDefinition {
-                command: "echo '{\"decision\":\"block\",\"reason\":\"pre hook should not run\"}'"
-                    .to_string(),
-                name: Some("block-evidence".to_string()),
-                matcher: Some("cosh_shell_evidence".to_string()),
-                timeout: Some(5000),
-                sequential: None,
-            }],
-            post_tool_use: vec![config::HookDefinition {
-                command: "echo '{\"decision\":\"block\",\"reason\":\"post hook should not run\"}'"
-                    .to_string(),
-                name: Some("deny-evidence".to_string()),
-                matcher: Some("cosh_shell_evidence".to_string()),
-                timeout: Some(5000),
-                sequential: None,
-            }],
-            ..Default::default()
-        };
-        let tools = ToolRegistry::new().with_shell_evidence();
-        let mut core = CoshCore::new(config, Box::new(provider), tools);
-
-        let list_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceCommandIndex\ncommand_id: cmd-1","returnDisplay":null,"metadata":{"action":"list_commands","is_error":false}}}}}"#;
-        let read_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session/cmd-1\nstdout","returnDisplay":"stdout","metadata":{"action":"read_output","is_error":false}}}}}"#;
-        let input = format!("{list_response}\n{read_response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        core.handle_user_message("inspect shell evidence", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains(r#""action":"list_commands""#),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains(r#""action":"read_output""#),
-            "{output_str}"
-        );
-        assert!(
-            output_str.contains("evidence hooks bypassed"),
-            "{output_str}"
-        );
-        assert!(!output_str.contains("hook_notification"), "{output_str}");
-        assert!(!output_str.contains("Blocked by hook"), "{output_str}");
-        assert!(
-            !output_str.contains("Post-tool hook denied"),
-            "{output_str}"
-        );
-        assert!(
-            !output_str.contains("pre hook should not run"),
-            "{output_str}"
-        );
-        assert!(
-            !output_str.contains("post hook should not run"),
-            "{output_str}"
-        );
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_rejects_read_output_without_output_id() {
-        let core = make_core(MockProvider::new(vec![]));
-        let mut reader = empty_reader().await;
-        let mut output = Vec::new();
-
-        let result = core
-            .handle_shell_evidence(
-                "call-evidence",
-                &serde_json::json!({"action":"read_output"}),
-                &mut reader,
-                &mut output,
-            )
-            .await;
-
-        assert!(result.is_error);
-        assert!(result.output.contains("missing required output_id"));
-        assert!(String::from_utf8(output).unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_rejects_list_commands_read_output_fields() {
-        let core = make_core(MockProvider::new(vec![]));
-        let mut reader = empty_reader().await;
-        let mut output = Vec::new();
-
-        let result = core
-            .handle_shell_evidence(
-                "call-evidence",
-                &serde_json::json!({
-                    "action":"list_commands",
-                    "output_id":"terminal-output://raw-session/cmd-1"
-                }),
-                &mut reader,
-                &mut output,
-            )
-            .await;
-
-        assert!(result.is_error);
-        assert!(result.output.contains("accepts only limit and cursor"));
-        assert!(String::from_utf8(output).unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_list_commands_ignores_direction_hint() {
-        let core = make_core(MockProvider::new(vec![]));
-        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceCommandIndex\ncommand_id: cmd-1","returnDisplay":null,"metadata":{"action":"list_commands","scope":"current_ledger","limit":10,"next_cursor":null,"is_error":false}}}}}"#;
-        let input = format!("{response}\n");
-        let mut reader = BufReader::new(input.as_bytes()).lines();
-        let mut output = Vec::new();
-
-        let result = core
-            .handle_shell_evidence(
-                "call-evidence",
-                &serde_json::json!({
-                    "action":"list_commands",
-                    "direction":"tail",
-                    "limit":10
-                }),
-                &mut reader,
-                &mut output,
-            )
-            .await;
-
-        assert!(!result.is_error, "{}", result.output);
-        assert!(result.output.contains("ShellEvidenceCommandIndex"));
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains(r#""action":"list_commands""#), "{output}");
-        assert!(output.contains(r#""limit":10"#), "{output}");
-        assert!(!output.contains(r#""direction""#), "{output}");
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_rejects_invalid_limit_type() {
-        let core = make_core(MockProvider::new(vec![]));
-        let mut reader = empty_reader().await;
-        let mut output = Vec::new();
-
-        let result = core
-            .handle_shell_evidence(
-                "call-evidence",
-                &serde_json::json!({"action":"list_commands","limit":"many"}),
-                &mut reader,
-                &mut output,
-            )
-            .await;
-
-        assert!(result.is_error);
-        assert!(result.output.contains("limit must be an integer"));
-        assert!(String::from_utf8(output).unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cosh_shell_evidence_rejects_invalid_bypass_recent_filter_type() {
-        let core = make_core(MockProvider::new(vec![]));
-        let mut reader = empty_reader().await;
-        let mut output = Vec::new();
-
-        let result = core
-            .handle_shell_evidence(
-                "call-evidence",
-                &serde_json::json!({
-                    "action":"read_output",
-                    "output_id":"terminal-output://raw-session/cmd-1",
-                    "bypass_recent_filter":"true"
-                }),
-                &mut reader,
-                &mut output,
-            )
-            .await;
-
-        assert!(result.is_error);
-        assert!(result
-            .output
-            .contains("bypass_recent_filter must be a boolean"));
-        assert!(String::from_utf8(output).unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn thinking_delta_emits_stream_event() {
-        let provider = MockProvider::new(vec![vec![
-            GenerateEvent::ThinkingDelta("Step 1: analyze...".to_string()),
-            GenerateEvent::ThinkingDelta("Step 2: conclude.".to_string()),
-            GenerateEvent::TextDelta("The answer is 42.".to_string()),
-            GenerateEvent::MessageEnd,
-        ]]);
-        let mut core = make_core(provider);
-        let mut output = Vec::new();
-        let mut reader = empty_reader().await;
-
-        core.handle_user_message("think about this", &mut reader, &mut output)
-            .await
-            .unwrap();
-
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(output_str.contains("thinking_delta"));
-        assert!(output_str.contains("Step 1: analyze..."));
-        assert!(output_str.contains("The answer is 42."));
-        let thinking_line = output_str
-            .lines()
-            .find(|l| l.contains("thinking_delta"))
-            .expect("should have thinking_delta line");
-        let v: serde_json::Value = serde_json::from_str(thinking_line).unwrap();
-        assert_eq!(
-            v.pointer("/event/delta/thinking").and_then(|t| t.as_str()),
-            Some("Step 1: analyze...")
-        );
-    }
-}
+#[path = "core/tests.rs"]
+mod tests;

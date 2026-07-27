@@ -20,3 +20,19 @@ macro_rules! question_ids {
         );
     };
 }
+
+macro_rules! question_interaction_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            QuestionDefaultGhost,
+            QuestionRequiredGhost,
+            QuestionInvalidGhost,
+            QuestionSelectionRequired,
+            QuestionSelectionRequiredWithText,
+            QuestionAnswerNotSentTitle,
+            QuestionAnswerNotSentBody,
+        );
+    };
+}

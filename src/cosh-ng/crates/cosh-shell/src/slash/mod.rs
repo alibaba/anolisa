@@ -1,3 +1,4 @@
+pub(super) mod audit;
 pub(super) mod commands;
 pub(super) mod config;
 pub(super) mod debug;
@@ -13,9 +14,12 @@ pub(super) mod panel;
 pub(super) mod parser;
 pub(super) mod prompt;
 pub(super) mod recommendations;
+#[cfg(test)]
+mod recommendations_tests;
 pub(crate) mod registry;
 pub(super) mod runtime;
 pub(super) mod session;
 pub(super) mod skills;
 #[cfg(test)]
 mod skills_tests;
+pub(super) mod status;

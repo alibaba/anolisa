@@ -1025,12 +1025,12 @@ async fn cmd_mount(
     let control_plane_enabled = control_socket.is_some() || trusted_peer_exe.is_some();
     if control_plane_enabled {
         if !security {
-            return Err("control socket requires --security (the control socket \
+            return Err("--control-socket requires --security (the control socket \
                  writes activation state through the active resolver)"
                 .into());
         }
         if activation_mode != ActivationMode::File {
-            return Err("control socket requires --activation-mode file (the \
+            return Err("--control-socket requires --activation-mode file (the \
                  control socket writes activation files consumed by the \
                  file-based activation path)"
                 .into());
@@ -1964,7 +1964,9 @@ async fn cmd_mount(
         match (&effective_socket_path, &trusted_peer_exe) {
             (Some(socket_path), Some(exe_path)) => {
                 #[cfg(not(target_os = "linux"))]
-                return Err("control socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into());
+                return Err(
+                    "--control-socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into(),
+                );
 
                 #[cfg(target_os = "linux")]
                 {

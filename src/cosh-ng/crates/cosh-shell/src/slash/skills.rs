@@ -41,6 +41,14 @@ pub(super) fn render_skills_command<W: Write>(
         }
         "detail" => {
             let name = arg.unwrap_or("");
+            if name.is_empty() {
+                return render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashSkillsTitle),
+                    vec!["Usage: /skills detail <name>".to_string()],
+                    None,
+                );
+            }
             let params = serde_json::json!({ "name": name });
             match cosh_core.registry_query("skills", "detail", params) {
                 Ok(data) => {

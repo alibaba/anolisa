@@ -222,6 +222,7 @@ impl FrameworkDriver for HermesDriver {
                 bundle_digest: bundle.digest.clone(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
+                notices: Vec::new(),
                 resources,
                 driver_payload: DriverPayload::Hermes(HermesClaim {
                     home_resource: RES_HOME.to_string(),

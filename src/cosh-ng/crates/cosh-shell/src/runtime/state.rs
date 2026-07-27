@@ -25,6 +25,7 @@ pub(crate) use crate::runtime::state_prelude::CoshApprovalMode;
 use crate::runtime::state_prelude::{
     first_program_token, ApprovalPanelAction, CommandBlock, GovernedEvent, I18n, Language,
 };
+use crate::runtime::trust_state::ApprovalTrustState;
 use crate::slash::session::SessionControlState;
 use crate::types::AgentContextBinding;
 
@@ -111,6 +112,7 @@ pub(crate) struct InlineState {
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
     pub(crate) personalization: PersonalizationState,
+    pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
 }
 
 #[derive(Clone)]
@@ -410,9 +412,12 @@ pub(crate) struct QuestionState {
     pub(crate) pending_id: Option<String>,
     pub(crate) active_panel_id: Option<String>,
     pub(crate) active_panel_height: usize,
+    pub(crate) active_panel_cursor_row: Option<usize>,
+    pub(crate) active_panel_width: Option<u16>,
     pub(crate) handled_focus: HashSet<String>,
     pub(crate) handled_answers: HashSet<String>,
     pub(crate) handled_cancellations: HashSet<String>,
+    pub(crate) question_protocol_failure_reported: bool,
 }
 
 #[derive(Default)]
@@ -435,7 +440,7 @@ pub(crate) struct ControlState {
     shell_handoff: ShellHandoffState,
     selectable_commands: Vec<String>,
     selectable_after_event_index: Option<usize>,
-    session_trusted_commands: HashSet<String>,
+    pub(crate) trust: ApprovalTrustState,
     event_cursor: ShellEventCursor,
 }
 
@@ -739,12 +744,6 @@ impl ControlState {
     pub(crate) fn has_selectable_commands(&self) -> bool {
         !self.selectable_commands.is_empty()
     }
-    pub(crate) fn trust_session_command(&mut self, key: String) {
-        self.session_trusted_commands.insert(key);
-    }
-    pub(crate) fn session_trusted_commands(&self) -> &HashSet<String> {
-        &self.session_trusted_commands
-    }
     pub(crate) fn event_cursor(&self) -> ShellEventCursor {
         self.event_cursor
     }
@@ -882,6 +881,7 @@ impl AnalysisMode {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeApprovalRequest {
     pub(crate) id: String,
+    pub(crate) audit_ref: Option<String>,
     pub(crate) run_id: String,
     pub(crate) origin: AgentRunOrigin,
     pub(crate) session_id: String,
@@ -943,6 +943,7 @@ impl ProviderShellRequestKind {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeApprovalJournalEntry {
     pub(crate) id: String,
+    pub(crate) audit_ref: Option<String>,
     pub(crate) run_id: String,
     pub(crate) source: &'static str,
     pub(crate) kind: ApprovalRequestKind,

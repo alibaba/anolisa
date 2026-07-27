@@ -198,6 +198,41 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
+    let mut tokens = Vec::with_capacity(6);
+    let mut index = 0;
+    while index < input.len() && tokens.len() < 6 {
+        while index < input.len() && input[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index == input.len() {
+            break;
+        }
+        let start = index;
+        while index < input.len() && !input[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        tokens.push((start, index));
+    }
+
+    if tokens.len() < 6
+        || &input[tokens[0].0..tokens[0].1] != b"/extensions"
+        || &input[tokens[1].0..tokens[1].1] != b"settings"
+        || &input[tokens[2].0..tokens[2].1] != b"set"
+    {
+        return input.to_vec();
+    }
+
+    let value_start = tokens[5].0;
+    let mut redacted = input.to_vec();
+    for byte in &mut redacted[value_start..] {
+        if !byte.is_ascii_whitespace() {
+            *byte = b'*';
+        }
+    }
+    redacted
+}
+
 pub(super) fn starts_intercept_candidate(bytes: &[u8]) -> bool {
     let first = first_visible_input_byte(bytes);
     matches!(first, Some(b'/' | b'?')) || first.is_some_and(|byte| byte >= 0x80)

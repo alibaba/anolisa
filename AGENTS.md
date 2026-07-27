@@ -349,3 +349,67 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 ## 12. User Guide Documentation Standards
 
 > **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §4.6 for user-guide writing standards including installation priority, content boundaries, framing principles, and bilingual language rules. You MUST comply — skipping this spec and writing docs from assumptions is a blocking review issue.
+
+---
+
+## 13. Commit Discipline
+
+### Fix attribution rule
+
+Every fix commit must be attributed correctly:
+
+| Situation | Action |
+|-----------|--------|
+| Bug introduced by a commit **in this PR** | `git commit --fixup=<hash>` then `rebase --autosquash`. No separate commit. |
+| Bug introduced by a commit **already on main** | Standalone commit with `Fixes: <hash> ("<subject>")` in body. |
+| Enhancement supplementing a feature **already on main** | Standalone commit with `Supplements: <hash> ("<subject>")` in body. |
+| Brand-new feature or unrelated change | Standalone commit, no Fixes/Supplements needed. |
+
+**Never** create a standalone "fix" commit for something introduced earlier in the same PR branch. Always amend or fixup into the originating commit.
+
+### Version bump rule
+
+- Use `chore(<scope>): bump version to X.Y.Z` (not `release(...)` — commitlint rejects non-standard types).
+- Version bump is always the **last commit** in a feature branch.
+- All version-bearing files for the component must be updated atomically. This includes whichever of the following exist: `Cargo.toml` or `package.json`, `.anolisa/component.toml`, `manifests/<name>.toml`, `dist/<name>.spec`, and `CHANGELOG.md`.
+
+### Format check
+
+Run the component's applicable formatter before every commit (e.g. `cargo fmt --all` for Rust from the workspace root, `npm run format` for TypeScript, `make python-code-pretty` for Python). CI will reject formatting diffs. If a rebase introduces format changes, amend them into the commit that caused the change — do not create a standalone "style" commit.
+
+---
+
+## 14. Responding to Review
+
+### Triage before acting
+
+AI reviewers (qoderai, qoder) generate findings automatically. Before fixing:
+
+1. **Verify the claim**: Read the actual code at the cited line. AI reviewers hallucinate — they may reference wrong line numbers, misread logic, or flag non-issues.
+2. **Assess severity**: Only P0 (security) and P1 (correctness) warrant immediate code changes. P2 (style/docs) can be batched. P3+ can be deferred.
+3. **Check if pre-existing**: If the issue existed before this PR, it needs `Fixes:` attribution to the original commit. If it's a design limitation (not a bug), reply with rationale rather than patching.
+
+### Response format
+
+When replying to review findings:
+
+- **Fixed**: State what was done and which commit it landed in.
+- **Deferred**: Explain why it's out of scope for this PR and what the plan is.
+- **Not a real issue**: Explain why the finding is incorrect or not applicable. Cite specific code/design rationale.
+
+Never blindly accept and fix every AI finding. Some are false positives, some are architectural suggestions that require design discussion.
+
+### Inline reply discipline
+
+- Every inline review comment MUST receive exactly one thread reply via `in_reply_to`.
+- Reply at the same time as the code fix push — never push silently.
+- For stale comments resolved by a newer revision: reply "Resolved in latest revision" (one sentence).
+- Never duplicate replies on already-answered threads.
+- Before replying, query the API to identify which comments lack a response — avoid both omissions and repetition.
+
+### Common false positive patterns
+
+- "X is not tested" when X has a default impl that returns Err (intentional no-op)
+- "Missing error handling" when the `?` operator already propagates
+- "Config field unused" when it's reserved for a future phase
+- "Version mismatch" referencing stale file contents from a previous push

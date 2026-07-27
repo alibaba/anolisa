@@ -32,6 +32,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentStatusCompleted => "已完成",
         MessageId::AgentStatusFailed => "已失败",
         MessageId::AgentStatusCancelled => "已取消",
+        MessageId::AgentQuestionUnavailableTitle => "Agent 问题不可用",
+        MessageId::AgentQuestionUnavailableBody => "Agent 返回的问题不完整，请重试。",
+        MessageId::AgentAnswerDeliveryUnknownTitle => "Agent 回答送达状态未知",
+        MessageId::AgentAnswerDeliveryUnknownBody => {
+            "发送回答时 Agent 连接已关闭，无法确认是否送达。"
+        }
         MessageId::AgentStatusRunningApprovedProviderTool => "正在运行已批准的 provider tool",
         MessageId::AgentProviderTimeoutDroppedQueuedBody => {
             "provider 超时后已跳过 {dropped} 个排队请求"

@@ -1,6 +1,5 @@
 """Unit tests for the Qoder plugin framework shell."""
 
-import importlib.util
 import json
 import os
 import shlex
@@ -11,17 +10,17 @@ import textwrap
 import tomllib
 from pathlib import Path
 
+from standalone_hook_test_loader import load_module_from_path
+
 _CORE_DIR = Path(__file__).resolve().parents[3]
 _PLUGIN_DIR = _CORE_DIR / "qoder-plugin"
 _HOOKS_DIR = _PLUGIN_DIR / "hooks"
 _INSTALL_SCRIPT = _PLUGIN_DIR / "install.sh"
 
-_spec = importlib.util.spec_from_file_location(
-    "qoder_hook_common", _HOOKS_DIR / "qoder_hook_common.py"
+qoder_hook_common = load_module_from_path(
+    "qoder_framework_hook_common",
+    _HOOKS_DIR / "qoder_hook_common.py",
 )
-qoder_hook_common = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = qoder_hook_common
-_spec.loader.exec_module(qoder_hook_common)
 
 
 def _write_executable(path: Path, content: str) -> None:

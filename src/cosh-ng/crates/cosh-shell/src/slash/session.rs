@@ -1,5 +1,6 @@
 mod command;
 mod compact;
+mod fresh;
 mod panel;
 mod state;
 #[cfg(test)]
@@ -14,7 +15,7 @@ pub(crate) use self::compact::{
 use self::panel::{
     close_session_panel, core_adapter, partition_protected, redraw_session_panel,
     render_current_session_panel, render_not_ready, render_session_error, render_unavailable,
-    render_usage, session_card_action_from_event, session_management_idle, session_summary_line,
+    render_usage, session_card_action_from_event, session_list_lines, session_management_idle,
     workspace_scope, SessionCardAction,
 };
 pub(crate) use self::state::{
@@ -37,6 +38,10 @@ pub(crate) fn render_session_command<W: Write>(
 ) -> std::io::Result<bool> {
     match parse_session_command(arguments) {
         SessionCommand::OpenPicker => open_session_manager(blocks, adapter, state, output),
+        SessionCommand::New => {
+            fresh::start_fresh_session(adapter, state, output)?;
+            Ok(true)
+        }
         SessionCommand::Status => {
             render_session_status(blocks, adapter, state, output)?;
             Ok(true)
@@ -384,10 +389,7 @@ fn render_session_list<W: Write>(
     let mut body = if list.sessions.is_empty() {
         vec![state.i18n().t(MessageId::SessionEmptyBody).to_string()]
     } else {
-        list.sessions
-            .iter()
-            .map(|summary| session_summary_line(summary, false, false, false))
-            .collect()
+        list.sessions.iter().flat_map(session_list_lines).collect()
     };
     if list.next_cursor.is_some() {
         body.push("  …".to_string());

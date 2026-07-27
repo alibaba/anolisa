@@ -1,117 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+pub mod audit;
+mod continuation;
 pub mod hooks;
+mod shell_event_metadata;
+mod shell_handoff;
+
+pub(crate) use continuation::*;
 
 pub(crate) use hooks::BuiltinFactRecord;
 pub use hooks::{
     BuiltinFindingFacts, EvaluatedHookFinding, FindingSeverity, HighMemoryProcessFacts,
     HookFinding, HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,
 };
+pub use shell_event_metadata::{ShellCaptureLifecycle, ShellCaptureMetadata, ShellRoutingMetadata};
+pub use shell_handoff::ShellHandoffRequest;
+pub(crate) use shell_handoff::SHELL_HANDOFF_UNTRACKED_STATUS;
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;
-pub const SHELL_HANDOFF_BYPASS_PREFIX: &str = "COSH_SHELL_HANDOFF_BYPASS=1 ";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShellHandoffRequest {
-    pub command: String,
-    pub exact_preview: String,
-    pub source: String,
-    pub actor: String,
-    pub approval_id: String,
-    pub run_id: String,
-    pub request_id: Option<String>,
-    pub tool_use_id: Option<String>,
-    pub created_at_ms: u64,
-    pub preview_hash: String,
-}
-
-impl ShellHandoffRequest {
-    pub fn new(
-        command: impl Into<String>,
-        exact_preview: impl Into<String>,
-        source: impl Into<String>,
-        actor: impl Into<String>,
-        approval_id: impl Into<String>,
-        run_id: impl Into<String>,
-        created_at_ms: u64,
-    ) -> Result<Self, String> {
-        let exact_preview = exact_preview.into();
-        let request = Self {
-            command: command.into(),
-            preview_hash: preview_hash(&exact_preview),
-            exact_preview,
-            source: source.into(),
-            actor: actor.into(),
-            approval_id: approval_id.into(),
-            run_id: run_id.into(),
-            request_id: None,
-            tool_use_id: None,
-            created_at_ms,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.command.trim().is_empty() {
-            return Err("empty shell handoff command".to_string());
-        }
-        if self.command.contains('\0') {
-            return Err("shell handoff command contains NUL byte".to_string());
-        }
-        if self.command.chars().any(|ch| matches!(ch, '\n' | '\r')) {
-            return Err(
-                "shell handoff command contains newline; multiline handoff is not enabled"
-                    .to_string(),
-            );
-        }
-        if self
-            .command
-            .chars()
-            .any(|ch| ch.is_control() && !matches!(ch, '\t'))
-        {
-            return Err("shell handoff command contains blocked control character".to_string());
-        }
-        if self.exact_preview.is_empty() {
-            return Err("shell handoff preview is empty".to_string());
-        }
-        if self.approval_id.trim().is_empty() {
-            return Err("shell handoff approval id is empty".to_string());
-        }
-        if self.run_id.trim().is_empty() {
-            return Err("shell handoff run id is empty".to_string());
-        }
-        Ok(())
-    }
-
-    pub fn pty_bytes(&self) -> Result<Vec<u8>, String> {
-        self.validate()?;
-        let mut bytes = self.command.as_bytes().to_vec();
-        bytes.push(b'\n');
-        Ok(bytes)
-    }
-
-    pub fn handoff_pty_bytes(&self) -> Result<Vec<u8>, String> {
-        self.validate()?;
-        let mut bytes = SHELL_HANDOFF_BYPASS_PREFIX.as_bytes().to_vec();
-        bytes.extend_from_slice(self.command.as_bytes());
-        bytes.push(b'\n');
-        Ok(bytes)
-    }
-}
-
-fn preview_hash(value: &str) -> String {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    let mut hash = FNV_OFFSET;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("fnv1a64:{hash:016x}")
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +26,7 @@ pub enum ShellEventKind {
     ShellStarted,
     ShellReady,
     UserInputIntercepted,
+    CommandRoutingObserved,
     CommandStarted,
     CommandCompleted,
     CommandFailed,
@@ -138,6 +46,15 @@ pub enum CommandOrigin {
     ShellInternal,
     #[default]
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellCommandAuditIdentity {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +78,12 @@ pub struct ShellEvent {
     pub command_origin: Option<CommandOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_environment_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_identity: Option<ShellCommandAuditIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<ShellRoutingMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<ShellCaptureMetadata>,
 }
 
 impl ShellEvent {
@@ -189,6 +112,9 @@ impl ShellEvent {
             message: None,
             command_origin: Some(CommandOrigin::UserInteractive),
             shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
         }
     }
 
@@ -231,6 +157,9 @@ impl ShellEvent {
             message: None,
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
         }
     }
 
@@ -253,6 +182,9 @@ impl ShellEvent {
             message: None,
             command_origin: None,
             shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
         }
     }
 }
@@ -295,6 +227,8 @@ pub struct CommandBlock {
     pub output: OutputRefs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_environment_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_identity: Option<ShellCommandAuditIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +414,8 @@ pub enum AgentEvent {
         tool_input: serde_json::Value,
         tool_use_id: String,
         hook_requires_approval: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_ref: Option<String>,
     },
 
     ToolOutputDelta {
@@ -609,43 +545,7 @@ impl Default for Policy {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShellEvent, ShellHandoffRequest, SHELL_HANDOFF_BYPASS_PREFIX};
-
-    fn handoff(command: &str) -> Result<ShellHandoffRequest, String> {
-        ShellHandoffRequest::new(
-            command,
-            format!("$ {command}"),
-            "test",
-            "user",
-            "approval-1",
-            "run-1",
-            42,
-        )
-    }
-
-    #[test]
-    fn shell_handoff_rejects_empty_nul_newline_and_control_chars() {
-        for command in [
-            "",
-            "printf '\0'",
-            "printf one\nprintf two",
-            "printf '\u{1b}[31mred'",
-        ] {
-            assert!(handoff(command).is_err(), "{command:?}");
-        }
-    }
-
-    #[test]
-    fn shell_handoff_allows_visible_command_and_tab_separator() {
-        let request = handoff("printf\tok").expect("tab-separated command is visible input");
-
-        assert_eq!(request.pty_bytes().unwrap(), b"printf\tok\n");
-        assert_eq!(
-            request.handoff_pty_bytes().unwrap(),
-            format!("{SHELL_HANDOFF_BYPASS_PREFIX}printf\tok\n").as_bytes()
-        );
-        assert_eq!(request.preview_hash, "fnv1a64:7d74cbb1a6f6fb27");
-    }
+    use super::ShellEvent;
 
     #[test]
     fn shell_event_without_environment_generation_remains_compatible() {

@@ -251,16 +251,20 @@ class TestVersionDetection(unittest.TestCase):
 class TestAgentIDAttribution(unittest.TestCase):
     """Test that agent ID is correctly set for different runtimes."""
 
+    @patch.dict(os.environ, {"COSH_NG_VERSION": "0.6.0"}, clear=False)
     def test_cosh_ng_agent_id(self):
         """Cosh-NG hooks should use 'cosh-ng' as agent ID."""
-        from compress_response_hook import _resolve_agent_id
-        self.assertEqual(_resolve_agent_id(True), "cosh-ng")
+        from hook_utils import resolve_agent_id
+        self.assertEqual(resolve_agent_id(), "cosh-ng")
 
+    @patch.dict(os.environ, {"TOKENLESS_AGENT_ID": "tokenless"}, clear=False)
     def test_non_cosh_ng_agent_id(self):
         """Non-Cosh-NG hooks use the TOKENLESS_AGENT_ID env var."""
-        from compress_response_hook import _resolve_agent_id
-        # When not Cosh-NG, falls back to env var
-        result = _resolve_agent_id(False)
+        from hook_utils import resolve_agent_id
+        # Remove Cosh-NG env vars to ensure non-Cosh-NG path
+        os.environ.pop("COSH_NG_VERSION", None)
+        os.environ.pop("COSH_RUNTIME", None)
+        result = resolve_agent_id()
         self.assertNotEqual(result, "cosh-ng")
 
 

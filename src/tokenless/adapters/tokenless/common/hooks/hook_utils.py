@@ -432,6 +432,25 @@ def detect_cosh_ng_runtime() -> tuple | None:
     return None
 
 
+def resolve_agent_id(default: str = "tokenless") -> str:
+    """Resolve the agent ID used for stats attribution.
+
+    Runtime detection wins over ``TOKENLESS_AGENT_ID``. The shared extension
+    manifest sets that variable to ``copilot-shell``, and now that Cosh-NG
+    honours hook ``env`` (#1617) an unconditional read would attribute Cosh-NG
+    sessions to copilot-shell. ``COSH_RUNTIME`` / ``COSH_NG_VERSION`` are
+    injected by the host after the manifest env, so they take precedence over
+    the declared env map.
+
+    This is attribution only. The signal is cooperative — a manifest controls
+    its own ``command`` and could reassign these — so it must never gate
+    anything security-relevant.
+    """
+    if detect_cosh_ng_runtime() is not None:
+        return "cosh-ng"
+    return os.environ.get("TOKENLESS_AGENT_ID") or default
+
+
 def parse_version(version_str: str) -> tuple | None:
     """Parse a version string like '0.35.0' into a (major, minor, patch) tuple."""
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)

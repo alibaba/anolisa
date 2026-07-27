@@ -34,9 +34,10 @@ pub(crate) fn render_pending_command_insight<W: Write>(
         return Ok(());
     }
 
-    let summary = localized_summary(state.i18n(), &candidate.topic, &candidate.entity);
     match suggestion {
         PromptSuggestion::AgentPrompt { binding } => {
+            let summary =
+                localized_agent_summary(state.i18n(), &candidate.topic, &candidate.entity);
             let show_guidance = !state.shown_agent_prompt_guidance;
             write_insight(
                 output,
@@ -58,6 +59,7 @@ pub(crate) fn render_pending_command_insight<W: Write>(
             state.shown_agent_prompt_guidance |= show_guidance;
         }
         PromptSuggestion::ShellRewrite { text } => {
+            let summary = localized_summary(state.i18n(), &candidate.topic, &candidate.entity);
             let show_guidance = !state.shown_shell_rewrite_guidance;
             write_insight(
                 output,
@@ -74,6 +76,13 @@ pub(crate) fn render_pending_command_insight<W: Write>(
         }
     }
     Ok(())
+}
+
+fn localized_agent_summary(i18n: I18n, topic: &SuppressionTopic, entity: &EntityKey) -> String {
+    if *topic == SuppressionTopic::CommandNotFound {
+        return i18n.t(MessageId::InsightCommandNotFoundSummary).to_string();
+    }
+    localized_summary(i18n, topic, entity)
 }
 
 fn localized_summary(i18n: I18n, topic: &SuppressionTopic, entity: &EntityKey) -> String {
@@ -98,7 +107,7 @@ fn localized_summary(i18n: I18n, topic: &SuppressionTopic, entity: &EntityKey) -
 
 fn localized_agent_prompt(i18n: I18n, topic: &SuppressionTopic, entity: &EntityKey) -> String {
     let id = match topic {
-        SuppressionTopic::CommandNotFound => MessageId::InsightCommandTypoSummary,
+        SuppressionTopic::CommandNotFound => MessageId::InsightCommandNotFoundPrompt,
         SuppressionTopic::PermissionDenied => MessageId::InsightPermissionDeniedPrompt,
         SuppressionTopic::BuildOrTestFailure => MessageId::InsightBuildOrTestFailurePrompt,
         SuppressionTopic::RuntimeException => MessageId::InsightRuntimeExceptionPrompt,
@@ -282,6 +291,27 @@ mod tests {
             Some(PendingInputGhostBinding::Insight(ref actual)) if actual.as_ref() == &binding
         ));
         assert!(state.trigger_pty_prompt);
+    }
+
+    #[test]
+    fn command_not_found_uses_generic_agent_fallback_copy() {
+        let entity = EntityKey::Program("terraform".to_string());
+        assert_eq!(
+            localized_agent_summary(
+                I18n::new(Language::EnUs),
+                &SuppressionTopic::CommandNotFound,
+                &entity,
+            ),
+            "The previous input did not run successfully"
+        );
+        assert_eq!(
+            localized_agent_prompt(
+                I18n::new(Language::ZhCn),
+                &SuppressionTopic::CommandNotFound,
+                &entity,
+            ),
+            "分析并处理刚才未成功执行的输入"
+        );
     }
 
     #[test]

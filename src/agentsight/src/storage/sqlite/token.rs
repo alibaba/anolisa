@@ -665,7 +665,7 @@ impl<'a> TokenQuery<'a> {
             .collect();
 
         // Sort by total tokens descending
-        breakdown.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+        breakdown.sort_by_key(|entry| std::cmp::Reverse(entry.total_tokens));
         breakdown
     }
 }

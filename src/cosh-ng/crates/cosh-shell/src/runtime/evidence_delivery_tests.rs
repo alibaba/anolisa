@@ -1,7 +1,6 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::runtime::prelude::{
@@ -62,6 +61,7 @@ fn interactive_shell_handoff_completion_keeps_run_origin() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
 
     let evidence = record_shell_handoff_completion(&mut state, &handoff, &block, "completed");
@@ -111,6 +111,7 @@ fn host_executed_shell_result_uses_opaque_output_id_without_path() {
             terminal_output_bytes: 32,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
         &handoff,
@@ -217,6 +218,7 @@ fn host_executed_shell_result_budget_does_not_duplicate_preview() {
             terminal_output_bytes: preview.len() as u64,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
         &handoff,
@@ -293,6 +295,7 @@ fn host_executed_shell_result_escaped_preview_stays_within_delta_budget() {
             terminal_output_bytes: preview.len() as u64,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
         &handoff,
@@ -363,6 +366,7 @@ fn host_executed_delivery_channel_closed_records_recovery_and_releases_claim() {
             terminal_output_bytes: 32,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
         &handoff,
@@ -430,6 +434,7 @@ fn host_executed_delivery_does_not_use_an_unrelated_active_run() {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         "completed",
         AgentRunOrigin::Standard,
@@ -488,6 +493,7 @@ fn host_executed_delivery_refreshes_active_run_idle_clock() {
             terminal_output_bytes: 32,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
         &handoff,
@@ -552,11 +558,7 @@ exit 1
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-core");
-    let adapter = CoshCoreAdapter {
-        program: program.to_string_lossy().to_string(),
-        allow_model_call: true,
-        session: Arc::default(),
-    };
+    let adapter = CoshCoreAdapter::new(program.to_string_lossy().to_string(), true);
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_request = false;
@@ -583,8 +585,8 @@ exit 1
 
 fn closed_cosh_core_control_handle(request: &AgentRequest) -> AgentRunHandle {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let adapter = CoshCoreAdapter {
-        program: manifest_dir
+    let adapter = CoshCoreAdapter::new(
+        manifest_dir
             .join("tests")
             .join("fixtures")
             .join("provider")
@@ -592,9 +594,8 @@ fn closed_cosh_core_control_handle(request: &AgentRequest) -> AgentRunHandle {
             .join("mock_qwen_control_capabilities.sh")
             .to_string_lossy()
             .to_string(),
-        allow_model_call: true,
-        session: Arc::default(),
-    };
+        true,
+    );
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -661,6 +662,7 @@ fn test_request() -> AgentRequest {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),

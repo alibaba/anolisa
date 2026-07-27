@@ -133,6 +133,19 @@ fn inline_natural_language_intercept_waits_for_open_command_to_finish() {
 }
 
 #[test]
+fn correlated_natural_language_intercept_closes_open_command() {
+    let mut intercept = ShellEvent::user_input_intercepted("test-session", "Who are you");
+    intercept.command_id = Some("cmd-1".to_string());
+    intercept.component = Some("natural_language".to_string());
+    let events = vec![
+        ShellEvent::command_started("test-session", "cmd-1", "Who are you", "/tmp", 100),
+        intercept,
+    ];
+
+    assert!(!shell_has_active_foreground_command(&events));
+}
+
+#[test]
 fn smart_mode_top_memory_finding_uses_insight_owner_without_consultation() {
     let output_ref = write_hook_output("top-card", TOP_MEMORY_PRESSURE_OUTPUT);
     let events = command_events(

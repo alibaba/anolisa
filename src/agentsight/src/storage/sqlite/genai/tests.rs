@@ -446,8 +446,13 @@ fn test_list_sessions() {
     assert_eq!(r[0].session_id, "sess-1");
     assert_eq!(r[0].conversation_count, 2);
     assert_eq!(r[0].total_input_tokens, 500);
+    // Only call-3 in sess-1 carries a user_query, so it is both preview ends.
+    assert_eq!(r[0].first_user_query.as_deref(), Some("what is rust"));
+    assert_eq!(r[0].last_user_query.as_deref(), Some("what is rust"));
     assert_eq!(r[1].session_id, "sess-2");
     assert_eq!(r[1].total_input_tokens, 550);
+    assert_eq!(r[1].first_user_query, None);
+    assert_eq!(r[1].last_user_query, None);
     cleanup_db(&path);
 }
 
@@ -1081,6 +1086,44 @@ fn test_list_sessions_only_auxiliary_hidden() {
     );
     let sessions_all = store.list_sessions(0, 10000, true).unwrap();
     assert_eq!(sessions_all.len(), 1);
+}
+
+#[test]
+fn test_list_sessions_preview_honors_call_kind_filter() {
+    let store = make_store_with_pending(&[
+        ("c1", "sess-a", "conv-1", "recap", 1000),
+        ("c2", "sess-a", "conv-2", "main", 2000),
+    ]);
+    // Give both calls a user_query: the auxiliary one must not become the
+    // preview when auxiliary calls are excluded.
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE genai_events SET user_query = 'recap query' WHERE call_id = 'c1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE genai_events SET user_query = 'main query' WHERE call_id = 'c2'",
+            [],
+        )
+        .unwrap();
+    }
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].first_user_query.as_deref(), Some("main query"));
+    assert_eq!(sessions[0].last_user_query.as_deref(), Some("main query"));
+
+    // With auxiliary included, the earlier recap query becomes the first.
+    let sessions_all = store.list_sessions(0, 10000, true).unwrap();
+    assert_eq!(
+        sessions_all[0].first_user_query.as_deref(),
+        Some("recap query")
+    );
+    assert_eq!(
+        sessions_all[0].last_user_query.as_deref(),
+        Some("main query")
+    );
 }
 
 #[test]

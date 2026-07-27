@@ -15,7 +15,10 @@ use crate::context::ContextBuilder;
 use crate::provider::ContentGenerator;
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 
-use super::boundary::{group_agent_runs, select_compacted_through, BoundaryError};
+use super::boundary::{
+    group_agent_runs, select_compacted_through_after, select_manual_compacted_through_after,
+    BoundaryError,
+};
 use super::budget::{
     estimate_messages_tokens, estimate_text_tokens, measure_history, ContextBudget, ModelCapability,
 };
@@ -40,8 +43,12 @@ const CLI_TOOL_DECLARATION_RESERVE: u64 = 2_048;
 pub struct ExpectedRevision {
     /// Session store generation captured when the recommendation was emitted.
     pub generation: u64,
-    /// Projection revision captured when the recommendation was emitted
-    /// (`0` when no projection existed yet).
+    /// Compaction revision clock captured with the recommendation.
+    ///
+    /// Zero means the session has never committed a compaction. This tracks
+    /// the durable clock rather than the live projection, so a projection
+    /// rejected by sanitization does not make an in-flight recommendation
+    /// look stale.
     pub projection_revision: u64,
 }
 
@@ -93,6 +100,8 @@ pub enum CompactionError {
     Conflict,
     /// The summarized prefix changed between snapshot and commit.
     DigestMismatch,
+    /// The persisted compaction revision cannot be incremented.
+    RevisionExhausted,
     /// The session store rejected the operation.
     Session(SessionError),
 }
@@ -112,6 +121,7 @@ impl CompactionError {
             Self::OversizedInput => "oversized_input",
             Self::Conflict => "conflict",
             Self::DigestMismatch => "digest_mismatch",
+            Self::RevisionExhausted => "revision_exhausted",
             Self::Session(error) => error.code(),
         }
     }
@@ -122,7 +132,7 @@ impl std::fmt::Display for CompactionError {
         match self {
             Self::Disabled => write!(formatter, "session compaction is disabled"),
             Self::NothingToCompact => {
-                write!(formatter, "no complete Agent run is old enough to compact")
+                write!(formatter, "no complete Agent run is available to compact")
             }
             Self::Boundary(detail) => {
                 write!(formatter, "unsafe transcript boundary: {detail}")
@@ -149,6 +159,9 @@ impl std::fmt::Display for CompactionError {
                 formatter,
                 "summarized transcript prefix changed; candidate was discarded"
             ),
+            Self::RevisionExhausted => {
+                write!(formatter, "compaction revision is exhausted")
+            }
             Self::Session(error) => write!(formatter, "{error}"),
         }
     }
@@ -232,15 +245,22 @@ pub async fn compact_session(
         if base_generation != expected.generation {
             return Err(CompactionError::Conflict);
         }
-        let current_revision = session
-            .compaction
-            .as_ref()
-            .map(|state| state.revision)
-            .unwrap_or(0);
-        if current_revision != expected.projection_revision {
+        // Compare the durable revision clock, not whether a projection
+        // survived sanitization: a recommendation emitted at revision `N`
+        // stays valid when loading rejects the revision-`N` projection, and
+        // the next successful commit is still `N + 1`.
+        if session.compaction_revision != expected.projection_revision {
             return Err(CompactionError::Conflict);
         }
     }
+
+    // 1b. Reserve the next revision from the durable clock before any provider
+    //     work. The stored clock is untrusted disk input, so an exhausted
+    //     counter fails closed here instead of wrapping at commit time.
+    let next_revision = session
+        .compaction_revision
+        .checked_add(1)
+        .ok_or(CompactionError::RevisionExhausted)?;
 
     let model = if session.model.is_empty() {
         config.resolve_provider().model
@@ -256,20 +276,25 @@ pub async fn compact_session(
     let tokens_before = measure_history(provider_reported_history, estimated_before);
 
     // 2. Choose a safe prefix over the complete transcript.
-    let cut = select_compacted_through(
-        &session.messages,
-        policy.preserve_recent_runs,
-        budget.target_tokens,
-    )?
-    .ok_or(CompactionError::NothingToCompact)?;
     let previous_cut = session
         .compaction
         .as_ref()
         .map(|state| state.compacted_through)
         .unwrap_or(0);
-    if cut <= previous_cut {
-        return Err(CompactionError::NothingToCompact);
-    }
+    let cut = match trigger {
+        CompactionTrigger::Manual => select_manual_compacted_through_after(
+            &session.messages,
+            budget.target_tokens,
+            previous_cut,
+        ),
+        CompactionTrigger::Auto | CompactionTrigger::Emergency => select_compacted_through_after(
+            &session.messages,
+            policy.preserve_recent_runs,
+            budget.target_tokens,
+            previous_cut,
+        ),
+    }?
+    .ok_or(CompactionError::NothingToCompact)?;
 
     // 3. Bound the summarizer input by the summarizer model's own context
     //    window (plus the byte-level memory ceiling). The committed cut may
@@ -289,12 +314,7 @@ pub async fn compact_session(
 
     // 5. Validate the candidate before touching persistence.
     let candidate = CompactionState {
-        revision: session
-            .compaction
-            .as_ref()
-            .map(|state| state.revision)
-            .unwrap_or(0)
-            + 1,
+        revision: next_revision,
         compacted_through: cut,
         summary,
         model: model.clone(),
@@ -321,6 +341,10 @@ pub async fn compact_session(
     if current.messages.len() < cut || source_digest(&current.messages[..cut]) != digest {
         return Err(CompactionError::DigestMismatch);
     }
+    // The generation check above proves `current` is the same persisted
+    // version the snapshot read, so `next_revision` is still exactly one past
+    // this session's durable clock. Advance the clock with the projection.
+    current.compaction_revision = candidate.revision;
     current.compaction = Some(candidate.clone());
     match store.persist(&mut current) {
         Ok(()) => {}
@@ -348,11 +372,16 @@ pub async fn compact_session(
 /// running process is the session's only writer; the resulting projection is
 /// committed together with the run's transcript at the next persist.
 ///
-/// Returns `None` when no safe cut exists or the candidate fails validation;
-/// the caller keeps its previous projection in either case.
+/// `previous_revision` is the runtime's durable revision clock, which outlives
+/// any projection dropped by sanitization; the candidate takes the next value.
+///
+/// Returns `None` when no safe cut exists, the revision clock is exhausted, or
+/// the candidate fails validation; the caller keeps its previous projection in
+/// every case.
 pub(crate) async fn compact_in_memory(
     messages: &[crate::provider::Message],
     previous: Option<&CompactionState>,
+    previous_revision: u64,
     provider: &dyn ContentGenerator,
     model: &str,
     config: &CoreConfig,
@@ -362,11 +391,18 @@ pub(crate) async fn compact_in_memory(
     if !policy.enabled {
         return None;
     }
+    // Fail closed before any provider work; the caller's existing emergency
+    // path already treats `None` as "keep the current projection".
+    let revision = previous_revision.checked_add(1)?;
     let previous_cut = previous.map(|state| state.compacted_through).unwrap_or(0);
-    let cut = select_compacted_through(messages, policy.preserve_recent_runs, target_tokens)
-        .ok()
-        .flatten()
-        .filter(|cut| *cut > previous_cut)?;
+    let cut = select_compacted_through_after(
+        messages,
+        policy.preserve_recent_runs,
+        target_tokens,
+        previous_cut,
+    )
+    .ok()
+    .flatten()?;
     // Emergency compaction shares the exact model-aware input budget used by
     // the manual/automatic engine path, so the three triggers cannot drift.
     let capability = ModelCapability::resolve(policy, config.agent.session_token_limit, model);
@@ -383,7 +419,7 @@ pub(crate) async fn compact_in_memory(
 
     let estimated_before = estimate_messages_tokens(&effective_messages(messages, previous));
     let candidate = CompactionState {
-        revision: previous.map(|state| state.revision).unwrap_or(0) + 1,
+        revision,
         compacted_through: cut,
         summary,
         model: model.to_string(),

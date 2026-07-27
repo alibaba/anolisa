@@ -15,7 +15,9 @@ use cosh_platform::audit::{
     self, parse_action_string, split_compound_command, LoadedPolicy, ParseError,
 };
 use cosh_platform::detect::Distro;
-use cosh_types::audit::{Action, ActionSubsystem, Decision, LogEntry, LogSource, Outcome, Policy};
+use cosh_types::audit::{
+    Action, ActionSubsystem, AuditEventV1, Decision, LogSource, Outcome, Policy,
+};
 use cosh_types::error::{CoshError, ErrorCode};
 use cosh_types::output::ResponseMeta;
 
@@ -27,6 +29,16 @@ pub enum AuditCommands {
     Check(CheckArgs),
     /// View audit log entries for the current session (or filtered).
     Log(LogArgs),
+    /// Report audit storage, retention, and reader health.
+    Status,
+    /// Query a bounded page of canonical audit events.
+    Events(EventArgs),
+    /// Build a correlated timeline for an event or identity.
+    Trace(TraceArgs),
+    /// Create a fail-closed redacted audit incident bundle.
+    Export(ExportArgs),
+    /// Preview the deterministic retention plan.
+    Prune(PruneArgs),
     /// Inspect or validate audit policies.
     Policy {
         #[command(subcommand)]
@@ -76,6 +88,93 @@ pub struct LogArgs {
     limit: Option<usize>,
 }
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct EventArgs {
+    /// Inclusive lower bound as duration (for example `2h`) or RFC 3339 timestamp.
+    #[arg(long)]
+    since: Option<String>,
+    /// Inclusive RFC 3339 upper bound.
+    #[arg(long)]
+    until: Option<String>,
+    /// Event names, comma-separated or repeated.
+    #[arg(long = "event", value_delimiter = ',')]
+    event_types: Vec<String>,
+    /// Component names, comma-separated or repeated.
+    #[arg(long, value_delimiter = ',')]
+    component: Vec<String>,
+    /// Outcome names, comma-separated or repeated.
+    #[arg(long, value_delimiter = ',')]
+    outcome: Vec<String>,
+    /// Match an event ID or any correlation identity.
+    #[arg(long)]
+    identity: Option<String>,
+    /// Restrict to `v1` or `legacy_v0`.
+    #[arg(long)]
+    schema: Option<String>,
+    /// Page size from 1 through 1000.
+    #[arg(long, default_value_t = audit::query::DEFAULT_PAGE_SIZE)]
+    limit: usize,
+    /// Opaque continuation cursor from a prior page.
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TraceArgs {
+    /// Event, session, run, turn, request, Tool-use, or command ID.
+    id: String,
+    /// Inclusive lower bound as duration or RFC 3339 timestamp.
+    #[arg(long)]
+    since: Option<String>,
+    /// Inclusive RFC 3339 upper bound.
+    #[arg(long)]
+    until: Option<String>,
+    /// Page size from 1 through 1000.
+    #[arg(long, default_value_t = audit::query::DEFAULT_PAGE_SIZE)]
+    limit: usize,
+    /// Opaque continuation cursor from a prior trace page.
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ExportArgs {
+    /// Explicit output directory.
+    #[arg(long)]
+    output: PathBuf,
+    /// Replace only a directory containing a valid cosh audit manifest.
+    #[arg(long)]
+    force: bool,
+    /// Inclusive lower bound as duration or RFC 3339 timestamp.
+    #[arg(long)]
+    since: Option<String>,
+    /// Inclusive RFC 3339 upper bound.
+    #[arg(long)]
+    until: Option<String>,
+    /// Event names, comma-separated or repeated.
+    #[arg(long = "event", value_delimiter = ',')]
+    event_types: Vec<String>,
+    /// Component names, comma-separated or repeated.
+    #[arg(long, value_delimiter = ',')]
+    component: Vec<String>,
+    /// Outcome names, comma-separated or repeated.
+    #[arg(long, value_delimiter = ',')]
+    outcome: Vec<String>,
+    /// Match an event ID or any correlation identity.
+    #[arg(long, alias = "session")]
+    identity: Option<String>,
+    /// Restrict to `v1` or `legacy_v0`.
+    #[arg(long)]
+    schema: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PruneArgs {
+    /// Preview candidates without renaming or deleting anything.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 #[derive(Subcommand)]
 pub enum PolicyCommands {
     /// Show the active policy.
@@ -99,6 +198,11 @@ pub fn run(action: AuditCommands, distro: &Distro, start: Instant) -> i32 {
     match action {
         AuditCommands::Check(args) => run_check(args, distro, start),
         AuditCommands::Log(args) => run_log(args, distro, start),
+        AuditCommands::Status => run_status(distro, start),
+        AuditCommands::Events(args) => run_events(args, distro, start),
+        AuditCommands::Trace(args) => run_trace(args, distro, start),
+        AuditCommands::Export(args) => run_export(args, distro, start),
+        AuditCommands::Prune(args) => run_prune(args, distro, start),
         AuditCommands::Policy { action: pc } => run_policy(pc, distro, start),
     }
 }
@@ -136,7 +240,7 @@ struct PolicyExplainResult {
 
 #[derive(Debug, Clone, Serialize)]
 struct LogOutput {
-    entries: Vec<LogEntry>,
+    entries: Vec<AuditEventV1>,
     total: usize,
 }
 
@@ -250,46 +354,51 @@ fn run_check_evaluate(
 // ===========================================================================
 
 fn run_log(args: LogArgs, distro: &Distro, start: Instant) -> i32 {
-    let path = audit::log::audit_log_path();
-    let entries = match audit::log::read_entries(&path) {
-        Ok(e) => e,
-        Err(e) => return print_failure(e, build_meta("audit", distro, start, false)),
+    let requested_limit = args.limit;
+    let mut event_args = EventArgs {
+        since: args.since,
+        event_types: vec!["policy.decision".to_string()],
+        identity: args.session,
+        limit: audit::query::MAX_PAGE_SIZE,
+        ..EventArgs::default()
     };
-
-    let filtered = match filter_log_entries(entries, &args) {
-        Ok(es) => es,
-        Err(e) => return print_failure(e, build_meta("audit", distro, start, false)),
+    if let Some(outcome) = args.outcome {
+        event_args
+            .outcome
+            .push(match parse_outcome_filter(&outcome) {
+                Ok(Outcome::Allow) => "allowed".to_string(),
+                Ok(Outcome::Deny) => "denied".to_string(),
+                Ok(Outcome::RequireApproval) => "started".to_string(),
+                Err(error) => {
+                    return print_failure(error, build_meta("audit", distro, start, false))
+                }
+            });
+    }
+    let filter = match build_event_filter(&event_args) {
+        Ok(filter) => filter,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
     };
-    let total = filtered.len();
-    print_success(
-        LogOutput {
-            entries: filtered,
-            total,
-        },
-        build_meta("audit", distro, start, false),
-    )
-}
-
-fn filter_log_entries(
-    mut entries: Vec<LogEntry>,
-    args: &LogArgs,
-) -> Result<Vec<LogEntry>, CoshError> {
-    if let Some(s) = &args.session {
-        entries.retain(|e| &e.session_id == s);
-    }
-    if let Some(o) = &args.outcome {
-        let want = parse_outcome_filter(o)?;
-        entries.retain(|e| e.decision.outcome == want);
-    }
-    if let Some(d) = &args.since {
-        let dur = parse_duration_filter(d)?;
-        let cutoff = chrono::Utc::now() - dur;
-        entries.retain(|e| e.timestamp >= cutoff);
-    }
-    if let Some(limit) = args.limit {
+    let root = match audit::config::resolve_audit_root() {
+        Ok(root) => root,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let page = match audit::query::query_events(&root.path, filter, event_args.limit, None) {
+        Ok(page) => page,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let mut entries = page
+        .events
+        .into_iter()
+        .map(|stored| stored.event)
+        .collect::<Vec<_>>();
+    if let Some(limit) = requested_limit {
         entries = entries.into_iter().rev().take(limit).collect();
     }
-    Ok(entries)
+    let total = entries.len();
+    print_success(
+        LogOutput { entries, total },
+        build_meta("audit", distro, start, false),
+    )
 }
 
 fn parse_outcome_filter(s: &str) -> Result<Outcome, CoshError> {
@@ -344,11 +453,11 @@ fn parse_duration_filter(s: &str) -> Result<chrono::Duration, CoshError> {
             "audit",
         ));
     }
-    let dur = match unit {
-        's' => chrono::Duration::seconds(n),
-        'm' => chrono::Duration::minutes(n),
-        'h' => chrono::Duration::hours(n),
-        'd' => chrono::Duration::days(n),
+    let multiplier = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 24 * 60 * 60,
         other => {
             return Err(CoshError::new(
                 ErrorCode::InvalidInput,
@@ -357,7 +466,213 @@ fn parse_duration_filter(s: &str) -> Result<chrono::Duration, CoshError> {
             ));
         }
     };
-    Ok(dur)
+    let seconds = n.checked_mul(multiplier).ok_or_else(|| {
+        CoshError::new(
+            ErrorCode::InvalidInput,
+            "--since duration is outside the supported range",
+            "audit",
+        )
+    })?;
+    chrono::Duration::try_seconds(seconds).ok_or_else(|| {
+        CoshError::new(
+            ErrorCode::InvalidInput,
+            "--since duration is outside the supported range",
+            "audit",
+        )
+    })
+}
+
+// ===========================================================================
+// Operational audit commands
+// ===========================================================================
+
+fn run_status(distro: &Distro, start: Instant) -> i32 {
+    let loaded = match audit::config::load_audit_settings(None) {
+        Ok(loaded) => loaded,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let root = match audit::config::resolve_audit_root() {
+        Ok(root) => root,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    match audit::query::audit_status(&root.path, root.source, loaded.settings) {
+        Ok(status) => print_success(
+            status,
+            meta_with_optional_warning(distro, start, loaded.warnings.first().map(String::as_str)),
+        ),
+        Err(error) => print_failure(error, build_meta("audit", distro, start, false)),
+    }
+}
+
+fn run_events(args: EventArgs, distro: &Distro, start: Instant) -> i32 {
+    let filter = match build_event_filter(&args) {
+        Ok(filter) => filter,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let root = match audit::config::resolve_audit_root() {
+        Ok(root) => root,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    match audit::query::query_events(&root.path, filter, args.limit, args.cursor.as_deref()) {
+        Ok(page) => print_success(page, build_meta("audit", distro, start, false)),
+        Err(error) => print_failure(error, build_meta("audit", distro, start, false)),
+    }
+}
+
+fn run_trace(args: TraceArgs, distro: &Distro, start: Instant) -> i32 {
+    let since = match args.since.as_deref().map(parse_since_bound).transpose() {
+        Ok(value) => value,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let until = match args.until.as_deref().map(parse_timestamp).transpose() {
+        Ok(value) => value,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let root = match audit::config::resolve_audit_root() {
+        Ok(root) => root,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    match audit::query::trace_events(
+        &root.path,
+        &args.id,
+        since.map(|bound| bound.timestamp),
+        since.is_some_and(|bound| bound.relative),
+        until,
+        args.limit,
+        args.cursor.as_deref(),
+    ) {
+        Ok(trace) => print_success(trace, build_meta("audit", distro, start, false)),
+        Err(error) => print_failure(error, build_meta("audit", distro, start, false)),
+    }
+}
+
+fn run_export(args: ExportArgs, distro: &Distro, start: Instant) -> i32 {
+    let event_args = EventArgs {
+        since: args.since,
+        until: args.until,
+        event_types: args.event_types,
+        component: args.component,
+        outcome: args.outcome,
+        identity: args.identity,
+        schema: args.schema,
+        ..EventArgs::default()
+    };
+    let filter = match build_event_filter(&event_args) {
+        Ok(filter) => filter,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let root = match audit::config::resolve_audit_root() {
+        Ok(root) => root,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    match audit::export::create_export(&root.path, filter, &args.output, args.force) {
+        Ok(result) => print_success(result, build_meta("audit", distro, start, false)),
+        Err(error) => print_failure(error, build_meta("audit", distro, start, false)),
+    }
+}
+
+fn run_prune(args: PruneArgs, distro: &Distro, start: Instant) -> i32 {
+    if !args.dry_run {
+        return print_failure(
+            CoshError::new(
+                ErrorCode::InvalidInput,
+                "version 1 supports only `audit prune --dry-run`",
+                "audit",
+            ),
+            build_meta("audit", distro, start, false),
+        );
+    }
+    let loaded = match audit::config::load_audit_settings(None) {
+        Ok(loaded) => loaded,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    let root = match audit::config::resolve_audit_root() {
+        Ok(root) => root,
+        Err(error) => return print_failure(error, build_meta("audit", distro, start, false)),
+    };
+    match audit::retention::plan_retention_dry_run(&root.path, &loaded.settings, chrono::Utc::now())
+    {
+        Ok(plan) => print_success(plan, build_meta("audit", distro, start, true)),
+        Err(error) => print_failure(error, build_meta("audit", distro, start, true)),
+    }
+}
+
+fn build_event_filter(args: &EventArgs) -> Result<audit::query::AuditEventFilter, CoshError> {
+    let since = args.since.as_deref().map(parse_since_bound).transpose()?;
+    let until = args.until.as_deref().map(parse_timestamp).transpose()?;
+    if since
+        .map(|bound| bound.timestamp)
+        .zip(until)
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err(CoshError::new(
+            ErrorCode::InvalidInput,
+            "--since must not be later than --until",
+            "audit",
+        ));
+    }
+    let generation = match args.schema.as_deref() {
+        None => None,
+        Some("v1") => Some(audit::query::AuditSchemaGenerationFilter::V1),
+        Some("legacy_v0" | "v0") => Some(audit::query::AuditSchemaGenerationFilter::LegacyV0),
+        Some(_) => {
+            return Err(CoshError::new(
+                ErrorCode::InvalidInput,
+                "--schema must be v1 or legacy_v0",
+                "audit",
+            ))
+        }
+    };
+    Ok(audit::query::AuditEventFilter {
+        since: since.map(|bound| bound.timestamp),
+        since_is_relative: since.is_some_and(|bound| bound.relative),
+        until,
+        event_types: args.event_types.clone(),
+        components: args.component.clone(),
+        outcomes: args.outcome.clone(),
+        identity: args.identity.clone(),
+        generation,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct SinceBound {
+    timestamp: chrono::DateTime<chrono::Utc>,
+    relative: bool,
+}
+
+fn parse_since_bound(value: &str) -> Result<SinceBound, CoshError> {
+    if let Ok(duration) = parse_duration_filter(value) {
+        return chrono::Utc::now()
+            .checked_sub_signed(duration)
+            .map(|timestamp| SinceBound {
+                timestamp,
+                relative: true,
+            })
+            .ok_or_else(|| {
+                CoshError::new(
+                    ErrorCode::InvalidInput,
+                    "--since duration is outside the supported timestamp range",
+                    "audit",
+                )
+            });
+    }
+    parse_timestamp(value).map(|timestamp| SinceBound {
+        timestamp,
+        relative: false,
+    })
+}
+
+fn parse_timestamp(value: &str) -> Result<chrono::DateTime<chrono::Utc>, CoshError> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+        .map_err(|_| {
+            CoshError::new(
+                ErrorCode::InvalidInput,
+                format!("invalid timestamp '{value}': expected RFC 3339"),
+                "audit",
+            )
+        })
 }
 
 // ===========================================================================

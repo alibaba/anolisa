@@ -40,6 +40,12 @@ fn hydrate_hook_groups(groups: &mut [super::config::HookGroup], ext_path: &str, 
     for group in groups.iter_mut() {
         for hook in group.hooks.iter_mut() {
             hook.command = hydrate_string(&hook.command, ext_path, ws_path);
+            // Values only: an env *name* is an identifier, and substituting a
+            // path into it could synthesise a name the manifest never declared
+            // and the fingerprint never covered.
+            for value in hook.env.values_mut() {
+                *value = hydrate_string(value, ext_path, ws_path);
+            }
         }
     }
 }
@@ -118,6 +124,41 @@ mod tests {
             config.hooks.pre_tool_use[0].hooks[0].command,
             "/opt/ext/hooks/pre.sh --ws=/workspace"
         );
+    }
+
+    #[test]
+    fn hydrates_hook_env_values_but_never_names() {
+        let json = r#"{
+            "name": "test",
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "run.sh",
+                                "env": {
+                                    "CACHE_DIR": "${workspacePath}/.cache",
+                                    "${extensionPath}": "literal-name"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        let mut config: ExtensionConfig = serde_json::from_str(json).unwrap();
+        let ctx = VariableContext {
+            extension_path: &PathBuf::from("/opt/ext"),
+            workspace_path: &PathBuf::from("/workspace"),
+        };
+        hydrate_config(&mut config, &ctx);
+
+        let env = &config.hooks.pre_tool_use[0].hooks[0].env;
+        assert_eq!(env.get("CACHE_DIR").unwrap(), "/workspace/.cache");
+        // Names are identifiers: substitution there could synthesise a name the
+        // manifest never declared and the fingerprint never covered.
+        assert!(env.contains_key("${extensionPath}"));
     }
 
     #[test]

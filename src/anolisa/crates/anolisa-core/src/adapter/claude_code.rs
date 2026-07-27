@@ -85,6 +85,14 @@ impl FrameworkDriver for ClaudeCodeDriver {
         "claude-code"
     }
 
+    fn probe_bundle(&self, resource_root: &Path, _declared_entry: Option<&str>) -> bool {
+        // Mirrors read_bundle's mandatory checks: a Claude Code bundle
+        // requires both the marketplace and the plugin manifest,
+        // regardless of any contract-declared entry.
+        resource_root.join(MARKETPLACE_MANIFEST).is_file()
+            && resource_root.join(PLUGIN_MANIFEST).is_file()
+    }
+
     fn detect(&self, _env: &HostEnv) -> DetectResult {
         match find_binary_in_path(&claude_bin()) {
             Some(path) => DetectResult {
@@ -237,6 +245,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
                 bundle_digest: bundle.digest.clone(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
+                notices: Vec::new(),
                 resources,
                 driver_payload: DriverPayload::ClaudeCode(ClaudeCodeClaim {
                     marketplace_resource: RES_MARKETPLACE.to_string(),

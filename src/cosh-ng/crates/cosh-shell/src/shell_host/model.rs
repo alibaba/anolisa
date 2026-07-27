@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nix::libc;
 use nix::pty::Winsize;
@@ -65,6 +66,7 @@ pub struct ShellHostConfig {
     pub native_mode: bool,
     pub login_shell: bool,
     pub env_overrides: Vec<(String, String)>,
+    pub raw_action_watchdog: Duration,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
 }
@@ -83,6 +85,7 @@ impl ShellHostConfig {
             native_mode: true,
             login_shell: false,
             env_overrides: Vec::new(),
+            raw_action_watchdog: Duration::from_secs(120),
             shell_environment_observer: None,
             shell_history_file_observer: None,
         }
@@ -90,6 +93,11 @@ impl ShellHostConfig {
 
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_overrides.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn with_ai_enabled(mut self, enabled: bool) -> Self {
+        self.input_classifier = self.input_classifier.with_ai_enabled(enabled);
         self
     }
 

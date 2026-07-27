@@ -19,6 +19,8 @@ pub use budget::{ContextBudget, ModelCapability};
 pub use projection::CompactionState;
 pub use runtime::CompactionRuntime;
 
+pub(crate) use boundary::has_new_compactable_prefix;
+pub(crate) use budget::estimate_text_tokens;
 pub(crate) use engine::run_compact_cli;
 pub(crate) use preflight::run_context_preflight;
 pub(crate) use projection::sanitize_loaded_state;

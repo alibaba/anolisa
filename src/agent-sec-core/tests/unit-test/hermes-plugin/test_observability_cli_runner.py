@@ -4,14 +4,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
-_HERMES_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "hermes-plugin"
-sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
-
-from src.cli_runner import (  # noqa: E402
+from hermes_plugin_src.cli_runner import (
     CliResult,
     call_agent_sec_cli,
     record_hermes_observability,
@@ -31,7 +26,7 @@ def _record() -> dict:
     }
 
 
-@patch("src.cli_runner.call_agent_sec_cli")
+@patch("hermes_plugin_src.cli_runner.call_agent_sec_cli")
 def test_record_hermes_observability_uses_openclaw_cli_shape(mock_cli):
     mock_cli.side_effect = [
         CliResult(
@@ -65,7 +60,7 @@ def test_record_hermes_observability_uses_openclaw_cli_shape(mock_cli):
     assert payload["metadata"]["sessionId"] == "session-1"
 
 
-@patch("src.cli_runner.call_agent_sec_cli")
+@patch("hermes_plugin_src.cli_runner.call_agent_sec_cli")
 def test_record_hermes_observability_redacts_sensitive_payload(mock_cli):
     mock_cli.side_effect = [
         CliResult(
@@ -86,7 +81,7 @@ def test_record_hermes_observability_redacts_sensitive_payload(mock_cli):
     assert "a***@example.com" in payload_text
 
 
-@patch("src.cli_runner.subprocess.run")
+@patch("hermes_plugin_src.cli_runner.subprocess.run")
 def test_call_agent_sec_cli_prepends_trace_context(mock_run):
     mock_run.return_value = subprocess.CompletedProcess(
         args=[],

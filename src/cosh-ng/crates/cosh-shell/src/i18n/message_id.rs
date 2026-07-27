@@ -79,4 +79,13 @@ collect_message_ids!([
     session_compaction_ids,
     compaction_queue_ids,
     slash_parse_error_ids,
+    question_hardening_ids,
+    question_interaction_ids,
+    session_picker_ids,
+    session_fresh_ids,
+    approval_reason_ids,
+    routing_insight_ids,
+    activity_untracked_ids,
+    approval_turn_consent_ids,
+    status_query_ids,
 ],);

@@ -504,7 +504,98 @@ operation = "go"
 target = { one_of = ["version", "env", "list"] }
 
 # ==========================================================================
-# Shell: read-only single-token commands. Safe regardless of arguments.
+# Shell: sensitive-path guard.
+#
+# Intercepts any shell command that references sensitive system or
+# credential files. Must appear BEFORE shell-allow-readonly-singletons
+# so the first-match-wins semantics give RequireApproval instead of Allow.
+# Destructive commands (rm, sudo, mv, …) are already Deny'd by earlier
+# rules, so these guards only affect commands that would otherwise be
+# Allow'd by the readonly-singletons fall-through below.
+# ==========================================================================
+
+# Exact sensitive system files.
+[[rules]]
+name = "shell-sensitive-system-files"
+outcome = "RequireApproval"
+reason = "Command references sensitive system file"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { one_of = [
+  "/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/sudoers"
+] } }]
+
+# Sudoers drop-in directory.
+[[rules]]
+name = "shell-sensitive-sudoersd"
+outcome = "RequireApproval"
+reason = "Command references sensitive sudoers configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/etc/sudoers.d/*" } }]
+
+# /proc/self/* — environment, cmdline, fd, etc.
+[[rules]]
+name = "shell-sensitive-proc-self"
+outcome = "RequireApproval"
+reason = "Command references process self-info"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/proc/self/*" } }]
+
+# SSH keys and config: ~/.ssh/*, /home/*/.ssh/*, /root/.ssh/*
+[[rules]]
+name = "shell-sensitive-ssh-home"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-root"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.ssh/*" } }]
+
+[[rules]]
+name = "shell-sensitive-ssh-tilde"
+outcome = "RequireApproval"
+reason = "Command references SSH key or configuration"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.ssh/*" } }]
+
+# Shell history files: ~/.bash_history, /home/*/.bash_history, /root/.bash_history
+[[rules]]
+name = "shell-sensitive-shell-history-home"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/home/*/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-root"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "/root/.bash_history" } }]
+
+[[rules]]
+name = "shell-sensitive-shell-history-tilde"
+outcome = "RequireApproval"
+reason = "Command references shell command history"
+[rules.matches]
+subsystem = "shell"
+arg = [{ key = { glob = "~/.bash_history" } }]
+
+# ==========================================================================
+# Shell: read-only single-token commands. Safe unless arguments reference
+# sensitive paths (guarded above).
 # ==========================================================================
 
 [[rules]]

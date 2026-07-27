@@ -242,7 +242,7 @@ def test_deploy_rejects_missing_code_scanner_hook(tmp_path):
 def test_deploy_rejects_missing_trace_context_helper(tmp_path):
     source = tmp_path / "extension-source"
     shutil.copytree(_EXTENSION_DIR, source)
-    (source / "hooks" / "qwen_trace_context.py").unlink()
+    (source / "hooks" / "trace_context.py").unlink()
 
     result, calls, qwen_home = _run_deploy(tmp_path, source)
 

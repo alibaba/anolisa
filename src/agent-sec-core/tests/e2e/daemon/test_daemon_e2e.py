@@ -379,6 +379,74 @@ def test_daemon_skillfs_notify_refreshes_skill_ledger_activation(
     )
 
 
+def test_daemon_skillfs_notify_rejects_unknown_fields_without_state_change(
+    daemon_command: list[str], tmp_path: Path
+) -> None:
+    socket_path = tmp_path / "runtime" / "daemon.sock"
+    skill_dir = _make_skill(tmp_path / "skills", "weather")
+    original_files = sorted(
+        path.relative_to(skill_dir) for path in skill_dir.rglob("*")
+    )
+    listxattr = getattr(os, "listxattr", None)
+    original_xattrs = listxattr(skill_dir) if listxattr is not None else None
+    process = _start_daemon(daemon_command, socket_path, tmp_path)
+
+    requests = [
+        {
+            "schemaVersion": 2,
+            "canonicalSkillDir": str(skill_dir),
+            "skillId": "weather",
+            "eventKind": "unlink",
+            "paths": ["SKILL.md"],
+            "exists": False,
+        },
+        {
+            "schemaVersion": 2,
+            "canonicalSkillDir": str(skill_dir),
+            "skillId": "weather",
+            "eventKind": "unlink",
+            "paths": ["SKILL.md"],
+            "exists": True,
+        },
+        {
+            "schemaVersion": 2,
+            "canonicalSkillDir": str(skill_dir),
+            "skillId": "weather",
+            "eventKind": "write",
+            "paths": [".skill-meta/latest.json"],
+            "futureField": "unsupported",
+        },
+    ]
+
+    try:
+        responses = [
+            _call_daemon(
+                socket_path,
+                {
+                    "method": "skill_ledger.skillfs_notify_change",
+                    "params": params,
+                },
+            )
+            for params in requests
+        ]
+        time.sleep(1)
+    finally:
+        output = _stop_daemon(process)
+
+    assert all(response["ok"] is False for response in responses)
+    assert all(response["error"]["code"] == "bad_request" for response in responses)
+    assert all(
+        "unknown fields" in response["error"]["message"] for response in responses
+    )
+    assert sorted(path.relative_to(skill_dir) for path in skill_dir.rglob("*")) == (
+        original_files
+    )
+    if original_xattrs is not None:
+        assert listxattr(skill_dir) == original_xattrs
+    assert not (skill_dir / ".skill-meta").exists()
+    assert output.returncode == 0
+
+
 def _write_security_event(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)

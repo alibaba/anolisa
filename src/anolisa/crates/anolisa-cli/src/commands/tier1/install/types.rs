@@ -16,6 +16,10 @@ pub(crate) struct RawResolution {
     pub(crate) package: String,
     pub(crate) entry: DistributionEntry,
     pub(crate) artifact_url: String,
+    /// Repository base URL the index was fetched from, kept so a
+    /// version-pinned install can attribute the resolved candidate to its
+    /// source repository in the result envelope.
+    pub(crate) base_url: String,
     pub(crate) warnings: Vec<String>,
 }
 

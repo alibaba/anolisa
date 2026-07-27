@@ -80,13 +80,13 @@ codex plugin marketplace remove agent-sec
 | `PROMPT_SCANNER_TIMEOUT` | `10` | 提示词扫描 agent-sec-cli 超时秒数 |
 | `SKILL_LEDGER_MODE` | `observe` | Skill 完整性校验透出模式：`observe`(仅观察记录，不拦截) / `deny`(校验失败时拦截 prompt) |
 | `SKILL_LEDGER_TIMEOUT` | `5` | Skill 完整性校验 agent-sec-cli 超时秒数 |
-| `PII_CHECKER_MODE` | `observe` | PII 敏感信息检测透出模式：`observe`(仅观察记录，不拦截) / `deny`(检测到 PII 时阻断当次 payload，不做脱敏放行) |
+| `PII_CHECKER_MODE` | `observe` | PII 敏感信息检测透出模式：`observe`(仅观察记录) / `deny`(`warn` 告警放行，`deny` 阻断 payload) |
 | `PII_CHECKER_TIMEOUT` | `5` | PII 检测 agent-sec-cli 超时秒数 |
 
 启动示例：
 
 ```bash
-# 全部拦截模式
+# 全部强制策略模式（PII warn 告警放行、deny 阻断）
 CODE_SCANNER_MODE=deny PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=deny PII_CHECKER_MODE=deny codex
 
 # 仅代码扫描拦截
@@ -98,7 +98,7 @@ PROMPT_SCANNER_MODE=deny codex
 # 仅 Skill 完整性校验拦截
 SKILL_LEDGER_MODE=deny codex
 
-# 仅 PII 检测拦截
+# 仅启用 PII 分级处置
 PII_CHECKER_MODE=deny codex
 
 # 默认观察模式（仅记录，即使检测到危险操作也不拦截）
@@ -136,7 +136,7 @@ codex-plugin/
 |-----------|--------|---------|------|
 | `code_scanner_hook.py` | PreToolUse | `Bash` | 扫描 shell 命令，检测反弹shell、危险删除等 |
 | `prompt_scanner_hook.py` | UserPromptSubmit | (all) | 检测用户输入中的 prompt 注入攻击 |
-| `pii_checker_hook.py` | UserPromptSubmit + PreToolUse + PostToolUse | (all) | 检测用户输入、工具输入和工具输出中的 PII，deny 模式下阻断对应 payload（不支持脱敏放行） |
+| `pii_checker_hook.py` | UserPromptSubmit + PreToolUse + PostToolUse | (all) | 检测用户输入、工具输入和工具输出中的 PII，deny 模式下 `warn` 告警放行、`deny` 阻断（不支持脱敏放行） |
 | `skill_ledger_hook.py` | UserPromptSubmit | (all) | 解析 prompt 中的 $skill-name，验证 skill 文件完整性和签名 |
 | `observability_hook.py` | UserPromptSubmit + PreToolUse + PostToolUse + Stop | (all) | 记录 Turn/Tool 生命周期；不改变 Codex 决策 |
 
@@ -211,8 +211,10 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
   python3 hooks-plugin/hooks/observability_hook.py
 ```
 
-阻断模式扫描命中时输出：`{"decision": "block", "reason": "..."}`；可观测 Hook
-始终输出 `{}`，不会改变 Codex 行为。可通过以下命令查看最近一次会话：
+`PII_CHECKER_MODE=deny` 下，scanner `warn` 输出
+`{"systemMessage": "..."}` 并继续执行，scanner `deny` 输出
+`{"decision": "block", "reason": "..."}`；可观测 Hook 始终输出 `{}`，不会改变
+Codex 行为。可通过以下命令查看最近一次会话：
 
 ```bash
 agent-sec-cli observability report --last

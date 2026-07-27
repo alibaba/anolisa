@@ -1,39 +1,150 @@
-# ANOLISA — An Agentic OS Implementation
+<div align="center">
 
-[中文版](README_zh.md)
+<picture>
+  <source
+    media="(prefers-color-scheme: dark)"
+    srcset="docs/images/brand/anolisa-lockup-dark.svg"
+  >
+  <source
+    media="(prefers-color-scheme: light)"
+    srcset="docs/images/brand/anolisa-lockup-light.svg"
+  >
+  <img
+    src="docs/images/brand/anolisa-lockup-light.svg"
+    alt="ANOLISA"
+    width="320"
+  >
+</picture>
 
-ANOLISA, the Agentic evolution of Anolis OS, aims to deliver the
-best-practice implementation of Agentic OS — a server-side operating
-system built for AI Agent workloads.
+<sub>**A**gentic **N**exus **O**perating **L**ayer & **I**nterface **S**ystem **A**rchitecture</sub>
 
-> **A**gentic **N**exus **O**perating **L**ayer & **I**nterface **S**ystem **A**rchitecture
+**The operating system layer for Agent workloads.**
 
-## Components
+Let Agents drive the system straight from your terminal, and strip the tool
+responses that reach the model before they cost you — while keeping the Shell,
+Agent framework, and sandbox you already run.
 
-| Component | Description |
-|-----------|-------------|
-| [Copilot Shell](src/copilot-shell/) | AI-powered terminal assistant for code understanding, task automation, and system management. Built on [Qwen Code](https://github.com/QwenLM/qwen-code). |
-| [Agent Sec Core](src/agent-sec-core/) | OS-level security kernel — system hardening, sandboxing, asset integrity verification, and security decision-making. |
-| [AgentSight](src/agentsight/) | eBPF-based observability for AI Agents — zero-intrusion monitoring of LLM API calls, token consumption, and process behavior. |
-| [Token-less](src/tokenless/) | LLM token optimization toolkit — schema/response compression and command rewriting to reduce token consumption. |
-| [Agent Memory](src/agent-memory/) | CMA-style persistent filesystem memory for AI agents, served over MCP — sandboxed file tools, SQLite FTS5 BM25 index, optional git versioning and tar.gz snapshots. Linux only. |
-| [OS Skills](src/os-skills/) | Curated skill library for system administration, monitoring, security, DevOps, and cloud integration. |
-| [SkillFS](src/skillfs/) | FUSE-backed virtual filesystem for local agent skills and view-based `SKILL.md` exposure. Linux only. |
-| [ktuner](src/ktuner/) | Deterministic kernel-tuning engine for AI agents — evaluates 207 rules against the running system and outputs structured JSON tuning recommendations. Linux only. |
-| [Blaze](src/blaze/) | Per-host sandbox orchestrator daemon — manages sandbox instance lifecycles via HTTP API with policy-driven backend selection. Rust. |
+[中文版](README_zh.md) · [Website](https://agentic-os.sh/) ·
+[Quick Start](docs/QUICKSTART.md) ·
+[User Guide](docs/user-guide/en/README.md) ·
+[Contributing](CONTRIBUTING.md)
 
-See each component's README for detailed documentation.
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](docs/user-guide/en/installation.md)
 
-## Getting Started
+</div>
+
+---
+
+ANOLISA is a server-side operating layer for AI Agent workloads. It addresses
+three practical constraints of Agent execution: terminal entry, Token cost, and
+execution environments. Keep the Shell, Agent framework, and sandbox you
+already use. ANOLISA CLI provides a single installation entry point, while each
+capability can be enabled independently.
+
+<p align="center">
+  <img
+    src="docs/images/readme/highlights.png"
+    alt="ANOLISA product highlights"
+  />
+</p>
+
+## What it solves
+
+<p align="center"><strong>01 · AGENT INTERFACE</strong></p>
+
+<h3 align="center">Let the Agent work directly in the terminal</h3>
+
+cosh-ng gives Agents a structured, predictable interface for Shell and system
+operations. Keep the Agent framework and sandbox already in use, and bring
+system work into the existing terminal workflow.
+
+[Get started with cosh-ng →](docs/user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md)
+
+<p align="center"><strong>02 · CONTEXT EFFICIENCY</strong></p>
+
+<h3 align="center">See where Tokens go and cut waste before it reaches the model</h3>
+
+Token-less removes redundancy from tool schemas and responses.
+[Agent Memory](src/agent-memory/README.md) reuses context across sessions,
+[SkillFS](src/skillfs/README.md) exposes Skills as views and mounts them on
+demand so only the relevant ones enter the context, and
+[AgentSight](src/agentsight/README.md) records where Tokens are actually spent.
+
+<p align="center">
+  <img
+    src="docs/images/readme/tokenless-response.png"
+    alt="Token-less response compression in the terminal"
+  />
+</p>
+
+`debug` and `trace` are dropped by the field blacklist, `metadata` as null, and
+`tags` / `extra` as empty values. Compression runs between the Agent and the
+model, so no Agent framework code changes. Dropped array items stay retrievable
+through a `<<tokenless:KEY>>` marker, which keeps the compression reversible.
+
+| Tool responses | Tool schemas | Full pipeline |
+|----------------|--------------|---------------|
+| **65.8% fewer Tokens** | **47.3% fewer Tokens** | **62.9% fewer Tokens** |
+| ResponseCompressor · 46.85 µs | SchemaCompressor · 11.44 µs | 198.91 µs |
+
+Savings apply to the tool responses entering the context, not to the whole
+session bill — the [Token-less README](src/tokenless/README.md) explains how to
+estimate the effect for a given workload.
+
+[Get started with Token-less →](docs/user-guide/en/token-saving/tokenless/QUICKSTART.md)
+
+<p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
+
+<h3 align="center">Give every Agent execution a boundary and a way back</h3>
+
+ANOLISA is building out the Agent execution environment:
+[Agent Sec Core](src/agent-sec-core/README.md) isolates risky operations, and
+[ws-ckpt](src/ws-ckpt/README.md) keeps recovery points for workspace changes.
+
+[Start with ANOLISA CLI →](docs/user-guide/en/user-entrypoint/anolisa-cli.md)
+
+## Install
+
+ANOLISA CLI is the common installation entry point. Enable cosh-ng, Token-less,
+or other capabilities as needed.
 
 ```bash
-# Install all components via RPM
-sudo yum install copilot-shell agent-sec-core agentsight tokenless agent-memory os-skills
+curl -fsSL https://agentic-os.sh/install.sh | bash
 
-# Launch Copilot Shell
-cosh
+anolisa install cosh-ng
+anolisa install tokenless
 ```
+
+Run `cosh-ng` to enter the Agent-native shell, or point any existing Agent at
+it — Token-less applies to tool calls without further configuration.
+
+[Read the Quick Start →](docs/QUICKSTART.md)
+
+## Documentation
+
+[Quick Start](docs/QUICKSTART.md) ·
+[Installation](docs/user-guide/en/installation.md) ·
+[User Guide](docs/user-guide/en/README.md) ·
+[Troubleshooting](docs/user-guide/en/troubleshooting.md) ·
+[Build from Source](docs/BUILDING.md) ·
+[Changelog](CHANGELOG.md)
+
+## Community
+
+<div align="center">
+
+<img src="docs/images/readme/dingtalk-qr.png" alt="ANOLISA DingTalk community QR code" width="180"/>
+
+Scan with DingTalk to join the ANOLISA community.
+
+</div>
+
+- [Open an issue](https://github.com/alibaba/anolisa/issues) for bugs and
+  feature requests.
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
+- Report vulnerabilities through the [Security Policy](SECURITY.md).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+ANOLISA is released under the [Apache License 2.0](LICENSE).

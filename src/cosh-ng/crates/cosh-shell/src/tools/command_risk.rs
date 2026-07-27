@@ -1,18 +1,21 @@
 use super::broker::can_run_approved_bash_tool;
 use super::command_risk_build::{
-    assessment, dedupe_reasons, high_risk_program, high_risk_program_assessment, high_shell_syntax,
-    max_output_exposure, max_output_stability, min_confidence,
+    apply_null_redirection_policy, assessment, dedupe_reasons, high_risk_program,
+    high_risk_program_assessment, high_shell_syntax, max_output_exposure, max_output_stability,
+    min_confidence,
 };
+use super::command_risk_compound::{assess_stripped_compound, stripped_segments};
 use super::command_risk_parser::{is_env_assignment, parse_command, ParsedCommand};
 use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
 use super::readonly_pipeline::validate_readonly_pipeline;
 
 pub use super::command_risk_model::{
-    AssessmentConfidence, AssessmentPolicy, AssessmentSource, AssessmentSummary, AutoAllowEvidence,
-    AutoExecutionPolicy, AutoExecutionRoute, CommandAssessment, CommandShape, ExecutionDecision,
-    InteractionRequirement, OutputExposure, OutputStability, ReadonlyEvidence, RiskImpact,
-    RiskReason, SideEffectClass,
+    is_high_risk_explanation, AssessmentConfidence, AssessmentPolicy, AssessmentSource,
+    AssessmentSummary, AutoAllowEvidence, AutoExecutionPolicy, AutoExecutionRoute,
+    CommandAssessment, CommandShape, ExecutionDecision, InteractionRequirement, OutputExposure,
+    OutputStability, ReadonlyEvidence, RiskImpact, RiskReason, SideEffectClass,
+    HIGH_RISK_EXPLANATION_REASONS,
 };
 
 pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandAssessment {
@@ -73,40 +76,77 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
         return high_shell_syntax(policy.source, command, parsed.shape, "redirection-write");
     }
 
-    match parsed.shape {
-        CommandShape::Simple | CommandShape::EnvSimple => {
-            assess_simple_command(command, parsed, policy)
-        }
-        CommandShape::Pipeline => assess_pipeline(command, parsed, policy),
-        CommandShape::AndOrList | CommandShape::Sequence | CommandShape::RedirectionRead => {
-            let mut simple = assess_first_stage(command, &parsed, policy);
-            simple.shape = parsed.shape;
-            simple.execution = ExecutionDecision::AskUser;
-            simple.confidence = min_confidence(simple.confidence, AssessmentConfidence::Medium);
-            simple.reasons.push(match parsed.shape {
-                CommandShape::AndOrList => "and-or-list-not-auto-executable",
-                CommandShape::Sequence => "sequence-not-auto-executable",
-                CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
-                _ => "complex-shell-not-auto-executable",
-            });
-            simple
-        }
-        CommandShape::Complex => {
-            let mut simple = assess_first_stage(command, &parsed, policy);
-            simple.shape = parsed.shape;
-            simple.execution = ExecutionDecision::AskUser;
-            simple.confidence = AssessmentConfidence::Low;
-            if simple.impact < RiskImpact::Medium {
-                simple.impact = RiskImpact::Medium;
-            }
-            simple.reasons.push("complex-shell-not-auto-executable");
-            simple
-        }
-        CommandShape::Empty
-        | CommandShape::Unparseable
-        | CommandShape::CommandSubstitution
-        | CommandShape::RedirectionWrite => unreachable!("handled above"),
+    let null_redirections = parsed.null_redirections;
+    if null_redirections > 0 && parsed.shape == CommandShape::Complex {
+        // Subshells, brace groups, and background syntax cannot be
+        // reliably segmented; keep the pre-fix fail-closed classification
+        // for redirection-carrying complex commands.
+        return high_shell_syntax(
+            policy.source,
+            command,
+            CommandShape::RedirectionWrite,
+            "redirection-write",
+        );
     }
+    let mut result = if let Some(segments) = stripped_segments(&parsed) {
+        // Stripped commands are assessed per segment and aggregated so
+        // high-risk tails keep their full stage assessment (PR #1790
+        // review); unstripped commands keep the first-stage path below.
+        assess_stripped_compound(command, parsed.shape, &segments, policy)
+    } else {
+        match parsed.shape {
+            CommandShape::Simple | CommandShape::EnvSimple => {
+                assess_simple_command(command, parsed, policy)
+            }
+            CommandShape::Pipeline => assess_pipeline(command, parsed, policy),
+            CommandShape::AndOrList | CommandShape::Sequence | CommandShape::RedirectionRead => {
+                let mut simple = assess_first_stage(command, &parsed, policy);
+                simple.shape = parsed.shape;
+                simple.execution = ExecutionDecision::AskUser;
+                simple.confidence = min_confidence(simple.confidence, AssessmentConfidence::Medium);
+                insert_structural_reason(
+                    &mut simple.reasons,
+                    match parsed.shape {
+                        CommandShape::AndOrList => "and-or-list-not-auto-executable",
+                        CommandShape::Sequence => "sequence-not-auto-executable",
+                        CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
+                        _ => "complex-shell-not-auto-executable",
+                    },
+                );
+                simple
+            }
+            CommandShape::Complex => {
+                let mut simple = assess_first_stage(command, &parsed, policy);
+                simple.shape = parsed.shape;
+                simple.execution = ExecutionDecision::AskUser;
+                simple.confidence = AssessmentConfidence::Low;
+                if simple.impact < RiskImpact::Medium {
+                    simple.impact = RiskImpact::Medium;
+                }
+                insert_structural_reason(&mut simple.reasons, "complex-shell-not-auto-executable");
+                simple
+            }
+            CommandShape::Empty
+            | CommandShape::Unparseable
+            | CommandShape::CommandSubstitution
+            | CommandShape::RedirectionWrite => unreachable!("handled above"),
+        }
+    };
+    if null_redirections > 0 {
+        apply_null_redirection_policy(&mut result);
+    }
+    result
+}
+
+/// Conditional head-insert for structural reasons (ARP SDD design.md §1):
+/// structural verdicts outrank fallback/neutral observations from the first
+/// stage, but must not displace a high-risk explanation as the primary reason.
+pub(super) fn insert_structural_reason(reasons: &mut Vec<&'static str>, structural: &'static str) {
+    let index = match reasons.first() {
+        Some(first) if is_high_risk_explanation(first) => 1,
+        _ => 0,
+    };
+    reasons.insert(index.min(reasons.len()), structural);
 }
 
 pub fn blocked_shell_binding_assessment(
@@ -130,7 +170,7 @@ pub fn blocked_shell_binding_assessment(
     )
 }
 
-fn assess_simple_command(
+pub(super) fn assess_simple_command(
     command: &str,
     parsed: ParsedCommand,
     policy: AssessmentPolicy,
@@ -227,7 +267,7 @@ fn direct_readonly_evidence(command: &str) -> Option<ReadonlyEvidence> {
         .then_some(ReadonlyEvidence::DirectReadonlyBroker)
 }
 
-fn assess_pipeline(
+pub(super) fn assess_pipeline(
     command: &str,
     parsed: ParsedCommand,
     policy: AssessmentPolicy,
@@ -286,6 +326,11 @@ fn assess_pipeline(
         }
         if stage.reasons.contains(&"unknown-command") {
             any_unknown = true;
+        }
+        if stage.impact == RiskImpact::High {
+            // Keep a high-impact stage's named reason (e.g.
+            // `service-or-container-control`) in the verdict (PR #1790 review).
+            reasons.extend(stage.reasons);
         }
     }
 
@@ -363,6 +408,8 @@ fn assess_first_stage(
             CommandShape::Simple
         },
         stages: parsed.stages.first().cloned().into_iter().collect(),
+        null_redirections: 0,
+        segments: Vec::new(),
     };
     assess_simple_command(command, simple, policy)
 }

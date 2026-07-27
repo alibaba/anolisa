@@ -1,6 +1,5 @@
 """Unit tests for the Qwen Code observability command hook."""
 
-import importlib.util
 import io
 import json
 import sys
@@ -8,24 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 _ROOT = Path(__file__).resolve().parents[3]
 _EXTENSION_DIR = _ROOT / "qwen-code-extension"
 _HOOK_PATH = _EXTENSION_DIR / "hooks" / "observability_hook.py"
-sys.path.insert(0, str(_HOOK_PATH.parent))
 
-
-def _load_observability_hook():
-    spec = importlib.util.spec_from_file_location("qwen_observability_hook", _HOOK_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-observability_hook = _load_observability_hook()
+observability_hook = load_standalone_hook("qwen_observability_hook", _HOOK_PATH)
 
 _TS = "2026-07-14T10:00:00Z"
 
@@ -124,6 +112,21 @@ def test_pre_tool_use_prefers_tool_call_id_and_hashes_parameters():
             observability_hook.value_to_text(tool_input)
         ),
     }
+
+
+def test_observability_metadata_uses_bounded_shared_trace_context():
+    record = _record(
+        _base(
+            "PreToolUse",
+            tool_name="run_shell_command",
+            tool_input={"command": "pwd"},
+            session_id="s" * 300,
+            tool_call_id="t" * 300,
+        )
+    )
+
+    assert record["metadata"]["sessionId"] == "s" * 256
+    assert record["metadata"]["toolCallId"] == "t" * 256
 
 
 def test_post_tool_use_maps_nested_exit_code_and_result():

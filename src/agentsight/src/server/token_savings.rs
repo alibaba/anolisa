@@ -940,6 +940,8 @@ mod tests {
                 &crate::config::ServerAuthConfig { enabled: false },
                 std::path::Path::new("/tmp"),
             )),
+            optimize: None,
+            trajectory_store: None,
         }
     }
 

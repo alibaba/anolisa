@@ -151,6 +151,7 @@ pub(super) fn start_cancellable_claude_process(
         receiver,
         cancel,
         approval_sender: None,
+        question_answer_confirmation: None,
         auth_sender: None,
         control_capabilities: Arc::new(Mutex::new(
             control_protocol::ControlProtocolCapabilities::default(),
@@ -331,6 +332,7 @@ pub(super) fn start_control_protocol_claude_process(
                             tool_input,
                             tool_use_id,
                             hook_requires_approval,
+                            audit_ref,
                         } => {
                             let _ = pending_control_tool_call
                                 .borrow_mut()
@@ -356,6 +358,7 @@ pub(super) fn start_control_protocol_claude_process(
                                     tool_input,
                                     tool_use_id,
                                     hook_requires_approval,
+                                    audit_ref,
                                 },
                             );
                             return Ok(ProviderLineProgress::AwaitingApproval);
@@ -501,6 +504,7 @@ pub(super) fn start_control_protocol_claude_process(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
+        question_answer_confirmation: None,
         auth_sender: None,
         control_capabilities,
         pending_provider_session: Some(pending_session),

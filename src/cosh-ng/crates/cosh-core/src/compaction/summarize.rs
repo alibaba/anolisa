@@ -201,6 +201,7 @@ pub(super) async fn generate_summary(
                 completed = true;
                 break;
             }
+            GenerateEvent::Cancelled => return Err(SummaryError::Cancelled),
             GenerateEvent::Error(error) => return Err(SummaryError::Provider(error)),
         }
     }

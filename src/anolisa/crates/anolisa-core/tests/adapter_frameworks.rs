@@ -253,7 +253,7 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     assert_eq!(claim.adapter_type.as_deref(), Some("extension"));
 
@@ -311,7 +311,7 @@ fn cosh_dry_run_enable_writes_nothing() {
         .enable(COMPONENT, Some("cosh"), true)
         .expect("dry-run");
     match outcome {
-        EnableOutcome::Planned(plan) => {
+        EnableOutcome::Planned { plan, .. } => {
             assert_eq!(plan.framework, "cosh");
             assert!(
                 plan.actions
@@ -469,7 +469,7 @@ fn codex_enable_records_argv_and_builds_marketplace() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
 
     // Marketplace layout on disk.
@@ -551,7 +551,7 @@ fn codex_dry_run_enable_writes_nothing() {
     let outcome = manager
         .enable(COMPONENT, Some("codex"), true)
         .expect("dry-run");
-    assert!(matches!(outcome, EnableOutcome::Planned(_)));
+    assert!(matches!(outcome, EnableOutcome::Planned { .. }));
     assert!(
         !marketplace_root.exists(),
         "dry-run must not create marketplace dir"
@@ -744,7 +744,7 @@ fn codex_enable_succeeds_with_bundle_under_packaged_datadir() {
         .expect("enable must succeed with bundle under a packaged datadir")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     // The symlink target points at the packaged-datadir bundle, outside the
     // install-prefix layout roots — the very case that previously failed.
@@ -838,7 +838,7 @@ fn claude_code_enable_records_validate_marketplace_and_install() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     assert_eq!(claim.plugin_id.as_deref(), Some("tokenless"));
 
@@ -1121,7 +1121,7 @@ fn qoder_enable_installs_writes_receipt_and_merges_settings() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     assert_eq!(claim.plugin_id.as_deref(), Some("tokenless"));
 
@@ -1363,7 +1363,7 @@ fn qoder_dry_run_enable_writes_nothing() {
     let outcome = manager
         .enable(COMPONENT, Some("qoder"), true)
         .expect("dry-run");
-    assert!(matches!(outcome, EnableOutcome::Planned(_)));
+    assert!(matches!(outcome, EnableOutcome::Planned { .. }));
     assert!(!log.exists(), "dry-run must not invoke qodercli (no log)");
     assert!(!settings.exists(), "dry-run must not write settings.json");
     assert!(

@@ -33,6 +33,7 @@ ADAPTER_TEMPLATES := \
 # adapter payload tree so the contract is not mixed with adapter resources.
 # Shipped to %{_datadir}/anolisa/components/tokenless/component.toml.
 COMPONENT_CONTRACT := .anolisa/component.toml
+ANOLISA_COMPONENT_MANIFEST := ../anolisa/manifests/components/tokenless/component.toml
 TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -85,6 +86,12 @@ check-component-contract:
 		$(MAKE) -B "$(COMPONENT_CONTRACT)"; \
 		cmp -s "$$tmp" "$(COMPONENT_CONTRACT)" || { \
 			diff -u "$$tmp" "$(COMPONENT_CONTRACT)"; \
+			exit 1; \
+		}
+	@catalog_version=$$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
+		"$(ANOLISA_COMPONENT_MANIFEST)" | head -1); \
+		[ "$$catalog_version" = "$(VERSION)" ] || { \
+			echo "ANOLISA tokenless manifest version '$$catalog_version' does not match $(VERSION)"; \
 			exit 1; \
 		}
 
@@ -176,7 +183,7 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks
+test: test-tokenless test-hooks test-integration
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -185,6 +192,11 @@ test-tokenless:
 test-hooks:
 	@echo "==> Testing copilot-shell hooks..."
 	bash tests/run-all-tests.sh
+
+test-integration:
+	@echo "==> Testing hook integration (Python)..."
+	python3 tests/test_compress_response_hook.py
+	python3 tests/test_compress_schema_hook.py
 
 # Lint (rtk excluded — vendored third-party source)
 lint:

@@ -8,8 +8,10 @@
 //! The shape is intentionally concrete:
 //!
 //! 1. `begin` mints a sortable `operation_id`, snapshots the existing
-//!    `state_path` bytes (if any), and writes an empty journal file under
-//!    `journal_dir/<operation_id>.journal.toml`.
+//!    `state_path` bytes (if any) into a sidecar file under
+//!    `journal_dir/<operation_id>.state.snapshot`, and writes an empty
+//!    journal file under `journal_dir/<operation_id>.journal.toml` that
+//!    references the sidecar by path and sha256.
 //! 2. Each meaningful side effect (writing a file, modifying state,
 //!    starting a service, …) records a [`TransactionStep`] up front with
 //!    `Planned` status. The journal is rewritten atomically (`tmp` →
@@ -21,8 +23,24 @@
 //!    so a later `repair` command can finish or rewind the operation.
 //!
 //! Journal format is TOML (human-greppable, lines up with `installed.toml`
-//! and `enable-plan.toml`) and is rewritten in full on every mutation —
-//! steps lists are short (tens of entries per op at most) so the cost is
+//! and `enable-plan.toml`) and is rewritten in full on every mutation.
+//! That full-rewrite strategy is only cheap under two invariants that
+//! every caller must preserve:
+//!
+//! * **The journal never embeds data that grows with the managed state.**
+//!   Byte bodies, per-file inventories, or hash lists must live in
+//!   sidecar files referenced by path + sha256 (the state snapshot is the
+//!   canonical example — schema v1 embedded it as a TOML integer array,
+//!   which inflated a multi-MB state file ~9x and was re-serialised on
+//!   every step transition, producing near-quadratic I/O on components
+//!   with tens of thousands of owned files).
+//! * **Step count never scales with the number of owned files.** Steps
+//!   are phase-level (`PlaceFiles`, `RemoveOwnedFiles`, …); per-file
+//!   progress belongs in an externally referenced inventory, never in
+//!   per-file steps.
+//!
+//! With both invariants held the journal stays KB-sized, steps lists are
+//! short (tens of entries per op at most), the rewrite cost is
 //! negligible, and a single rewrite-and-rename guarantees the on-disk
 //! file always parses.
 //!
@@ -44,10 +62,43 @@ use sha2::{Digest, Sha256};
 use crate::domain::NativePm;
 
 /// Schema version for the transaction journal on disk. Bump on
-/// incompatible changes; old journals with a different version are
-/// reported as [`TransactionError::CorruptJournal`] so callers don't
-/// silently mis-parse them.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
+/// incompatible changes; journals with a *newer* version are reported as
+/// [`TransactionError::CorruptJournal`] so callers don't silently
+/// mis-parse them, while every version back to
+/// [`JOURNAL_SCHEMA_MIN_VERSION`] still loads.
+///
+/// v2 moved the state snapshot out of the journal into a sidecar file
+/// (the [`StateSnapshotRef`] under `state_snapshot_ref` replaces the
+/// embedded `state_snapshot` byte array) and made the record mandatory:
+/// every v2 journal states either `kind = "absent"` or a
+/// `kind = "sidecar"` reference, so a journal that *lost* the record
+/// (truncation, hand-editing, bit rot) is distinguishable from one that
+/// recorded "no state existed" and is rejected as corrupt at load. The
+/// bump is deliberate downgrade protection, not cosmetics: a pre-v2
+/// binary reading a v2 journal would see `state_snapshot = None`,
+/// interpret it as "the state file did not exist at begin", and *delete*
+/// `installed.toml` during recovery.
+/// Refusing with `CorruptJournal` fails closed instead.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+
+/// Oldest journal schema [`Transaction::load_journal`] still accepts.
+/// v1 journals carry the snapshot embedded in `state_snapshot`;
+/// [`Transaction::restore_state`] keeps honouring those bytes so pending
+/// v1 journals written by older binaries remain recoverable.
+pub const JOURNAL_SCHEMA_MIN_VERSION: u32 = 1;
+
+/// File-name suffix every journal file carries
+/// (`<operation_id>.journal.toml`). The single authority for the naming
+/// convention: directory scans (journal inventories, tests) must filter
+/// on this constant instead of repeating the literal, so a future rename
+/// cannot leave a scanner matching stale names.
+pub const JOURNAL_FILE_SUFFIX: &str = ".journal.toml";
+
+/// File-name suffix of the state-snapshot sidecar written by
+/// [`Transaction::begin`] (`<operation_id>.state.snapshot`). Lives beside
+/// the journal in the same directory; scanners looking for journals must
+/// not match it (see [`JOURNAL_FILE_SUFFIX`]).
+pub const STATE_SNAPSHOT_FILE_SUFFIX: &str = ".state.snapshot";
 
 /// Lifecycle status for a single recorded step.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,7 +184,10 @@ pub struct DelegatedPinnedArtifact {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RollbackActionKind {
-    /// Rewrite `state_path` from `Transaction::state_snapshot`.
+    /// Rewrite `state_path` from the snapshot captured at `begin` — the
+    /// v2 sidecar referenced by `Transaction::state_snapshot_ref`, or the
+    /// legacy v1 bytes embedded in `Transaction::state_snapshot`. See
+    /// [`Transaction::restore_state`].
     RestoreState,
     /// Copy bytes from `source` back to `dest`, optionally checked
     /// against `sha256`.
@@ -287,6 +341,38 @@ pub struct TransactionOutcome {
     pub steps_skipped: usize,
 }
 
+/// What [`Transaction::begin`] observed at `state_path`, recorded
+/// explicitly in every v2 journal.
+///
+/// An explicit tagged enum — not an `Option` — because the two "nothing
+/// here" cases must be distinguishable on disk: `Absent` is a positive
+/// assertion that the state file did not exist at `begin` (so rollback
+/// deletes it), while a *missing* `state_snapshot_ref` table in a v2
+/// journal means the journal lost data (truncation, hand-editing,
+/// bit rot) and is rejected as corrupt by [`Transaction::load_journal`]
+/// instead of silently deleting `installed.toml` during recovery.
+/// The `kind` tag makes each variant self-describing in TOML:
+/// `kind = "absent"`, or `kind = "sidecar"` plus both payload fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StateSnapshotRef {
+    /// The state file did not exist when the transaction began;
+    /// rollback restores that by deleting it.
+    Absent,
+    /// The state file existed; its bytes live in a write-once sidecar.
+    /// Both fields are mandatory by shape: the digest is what lets
+    /// [`Transaction::restore_state`] refuse a truncated or tampered
+    /// sidecar before writing its bytes over the state file, so a path
+    /// without a digest is unrepresentable rather than merely invalid.
+    Sidecar {
+        /// Sidecar file holding the raw `state_path` bytes observed at
+        /// `begin`.
+        path: PathBuf,
+        /// SHA-256 of the sidecar bytes, verified before every restore.
+        sha256: String,
+    },
+}
+
 /// Atomic lifecycle transaction journal.
 ///
 /// One `Transaction` corresponds to one user-facing operation
@@ -325,11 +411,26 @@ pub struct Transaction {
     /// Path to the state file the snapshot was taken from. Must be the
     /// same path `restore_state` will write back to.
     pub state_path: PathBuf,
-    /// Bytes of `state_path` as observed at `begin`. `None` means the
-    /// file did not exist; `restore_state` will delete the file to
-    /// match.
+    /// Legacy (schema v1) embedded snapshot: bytes of `state_path` as
+    /// observed at `begin`. Kept **read-only for deserialising v1
+    /// journals** — new journals never populate it, because TOML encodes
+    /// `Vec<u8>` as an integer array (~9 bytes per byte) and the whole
+    /// journal is rewritten on every step transition, which made journal
+    /// I/O scale with the managed state size. `restore_state` still
+    /// honours these bytes when present so pending v1 journals recover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_snapshot: Option<Vec<u8>>,
+    /// What `begin` observed at `state_path` (schema v2): either an
+    /// explicit [`StateSnapshotRef::Absent`], or a
+    /// [`StateSnapshotRef::Sidecar`] written exactly once by `begin` and
+    /// read at most once by `restore_state`. `Option` only so v1
+    /// journals (which carry [`state_snapshot`](Self::state_snapshot)
+    /// instead) can deserialise; [`Transaction::load_journal`] rejects a
+    /// v2 journal whose table is missing as corrupt, so a truncated or
+    /// hand-edited journal can never masquerade as "state was absent at
+    /// begin" and trick rollback into deleting the state file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_snapshot_ref: Option<StateSnapshotRef>,
     /// On-disk location of this journal file.
     pub journal_path: PathBuf,
     /// Recorded steps, ordered by insertion.
@@ -402,7 +503,7 @@ impl Transaction {
         let started_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
 
         // Snapshot the state file. Missing file is OK — first-run case.
-        let state_snapshot = match fs::read(&state_path) {
+        let state_bytes = match fs::read(&state_path) {
             Ok(bytes) => Some(bytes),
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => return Err(TransactionError::Io(state_path.clone(), err)),
@@ -413,7 +514,32 @@ impl Transaction {
                 .map_err(|err| TransactionError::Io(journal_dir.to_path_buf(), err))?;
         }
 
-        let journal_path = journal_dir.join(format!("{operation_id}.journal.toml"));
+        let journal_path = journal_dir.join(format!("{operation_id}{JOURNAL_FILE_SUFFIX}"));
+
+        // Write the snapshot bytes to a sidecar *before* the journal
+        // exists, so a crash between the two writes leaves only a harmless
+        // orphan sidecar (no journal references it) and never a journal
+        // pointing at a missing snapshot. The write is a hard gate: a
+        // transaction whose rollback source cannot be persisted must not
+        // start, and falling back to embedding the bytes in the journal
+        // would silently reintroduce the size blow-up the sidecar exists
+        // to prevent. A missing state file is recorded as an explicit
+        // `Absent` — never by omitting the table — so `load_journal` can
+        // tell "state did not exist" apart from "journal lost its
+        // snapshot record".
+        let state_snapshot_ref = match &state_bytes {
+            Some(bytes) => {
+                let sidecar =
+                    journal_dir.join(format!("{operation_id}{STATE_SNAPSHOT_FILE_SUFFIX}"));
+                write_atomic(&sidecar, bytes)
+                    .map_err(|err| TransactionError::Io(sidecar.clone(), err))?;
+                StateSnapshotRef::Sidecar {
+                    path: sidecar,
+                    sha256: sha256_hex(bytes),
+                }
+            }
+            None => StateSnapshotRef::Absent,
+        };
 
         let tx = Self {
             schema_version: JOURNAL_SCHEMA_VERSION,
@@ -424,7 +550,8 @@ impl Transaction {
             started_at,
             finished_at: None,
             state_path,
-            state_snapshot,
+            state_snapshot: None,
+            state_snapshot_ref: Some(state_snapshot_ref),
             journal_path,
             steps: Vec::new(),
             status: TransactionOutcomeStatus::InFlight,
@@ -545,22 +672,53 @@ impl Transaction {
 
     /// Restore `state_path` from the snapshot captured at `begin`.
     ///
-    /// If the snapshot is `None` the state file is removed (the pre-op
-    /// state was "did not exist"). All other errors are wrapped in
-    /// [`TransactionError::Rollback`] so callers can distinguish a
-    /// rollback failure from the original failure.
+    /// Sources, checked in order:
+    ///
+    /// 1. a legacy v1 embedded snapshot (`state_snapshot`) is written back
+    ///    verbatim;
+    /// 2. a v2 [`StateSnapshotRef::Sidecar`] is read, verified against
+    ///    its recorded sha256, and written back. A missing, unreadable,
+    ///    or digest-mismatched sidecar is a [`TransactionError::Rollback`]
+    ///    — it must **never** fall through to the deletion branch, because
+    ///    deleting the state file on a broken sidecar would destroy the
+    ///    very state the snapshot exists to protect;
+    /// 3. an explicit [`StateSnapshotRef::Absent`] (v2) or nothing at all
+    ///    (v1): the pre-op state was "did not exist", so the state file
+    ///    is removed. A v2 journal can only reach the "nothing at all"
+    ///    case through in-memory construction — [`Self::load_journal`]
+    ///    rejects v2 journals without a snapshot record as corrupt.
+    ///
+    /// All errors are wrapped in [`TransactionError::Rollback`] so callers
+    /// can distinguish a rollback failure from the original failure.
     pub fn restore_state(&self) -> Result<(), TransactionError> {
-        match &self.state_snapshot {
-            Some(bytes) => write_atomic(&self.state_path, bytes)
-                .map_err(|err| TransactionError::Rollback(err.to_string())),
-            None => match fs::remove_file(&self.state_path) {
-                Ok(()) => Ok(()),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(err) => Err(TransactionError::Rollback(format!(
-                    "remove {}: {err}",
-                    self.state_path.display()
-                ))),
-            },
+        if let Some(bytes) = &self.state_snapshot {
+            return write_atomic(&self.state_path, bytes)
+                .map_err(|err| TransactionError::Rollback(err.to_string()));
+        }
+        if let Some(StateSnapshotRef::Sidecar { path, sha256 }) = &self.state_snapshot_ref {
+            let bytes = fs::read(path).map_err(|err| {
+                TransactionError::Rollback(format!(
+                    "read state snapshot sidecar {}: {err}",
+                    path.display()
+                ))
+            })?;
+            let actual = sha256_hex(&bytes);
+            if actual != *sha256 {
+                return Err(TransactionError::Rollback(format!(
+                    "sha256 mismatch restoring state snapshot {}: expected {sha256}, got {actual}",
+                    path.display()
+                )));
+            }
+            return write_atomic(&self.state_path, &bytes)
+                .map_err(|err| TransactionError::Rollback(err.to_string()));
+        }
+        match fs::remove_file(&self.state_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(TransactionError::Rollback(format!(
+                "remove {}: {err}",
+                self.state_path.display()
+            ))),
         }
     }
 
@@ -634,7 +792,9 @@ impl Transaction {
         let tx: Self = toml::from_str(text).map_err(|err| {
             TransactionError::CorruptJournal(format!("{}: {err}", path.display()))
         })?;
-        if tx.schema_version != JOURNAL_SCHEMA_VERSION {
+        if tx.schema_version < JOURNAL_SCHEMA_MIN_VERSION
+            || tx.schema_version > JOURNAL_SCHEMA_VERSION
+        {
             return Err(TransactionError::CorruptJournal(format!(
                 "{}: unsupported journal schema_version {}",
                 path.display(),
@@ -645,6 +805,37 @@ impl Transaction {
             return Err(TransactionError::CorruptJournal(format!(
                 "{}: recovery context has no operation steps",
                 path.display()
+            )));
+        }
+        // Version-gated structural checks. From v2 on, `begin` always
+        // records what it observed at `state_path` — an explicit `Absent`
+        // or a `Sidecar` — so a v2 journal with no snapshot record has
+        // lost data (truncation, hand-editing, bit rot). It must not
+        // load: `restore_state` would read the gap as "state was absent
+        // at begin" and delete the state file it exists to protect. The
+        // reverse mixture is equally inconsistent: a v2 journal never
+        // embeds snapshot bytes, and a v1 journal cannot carry a v2
+        // snapshot record.
+        if tx.schema_version >= 2 {
+            if tx.state_snapshot_ref.is_none() {
+                return Err(TransactionError::CorruptJournal(format!(
+                    "{}: v{} journal is missing its state_snapshot_ref record",
+                    path.display(),
+                    tx.schema_version
+                )));
+            }
+            if tx.state_snapshot.is_some() {
+                return Err(TransactionError::CorruptJournal(format!(
+                    "{}: v{} journal must not embed state_snapshot bytes",
+                    path.display(),
+                    tx.schema_version
+                )));
+            }
+        } else if tx.state_snapshot_ref.is_some() {
+            return Err(TransactionError::CorruptJournal(format!(
+                "{}: v{} journal must not carry a state_snapshot_ref record",
+                path.display(),
+                tx.schema_version
             )));
         }
         Ok(tx)
@@ -900,6 +1091,14 @@ mod tests {
         (state_path, journal_dir)
     }
 
+    /// Unwrap the `Sidecar` variant or fail the test loudly.
+    fn sidecar_of(tx: &Transaction) -> (PathBuf, String) {
+        match tx.state_snapshot_ref.as_ref().expect("snapshot ref") {
+            StateSnapshotRef::Sidecar { path, sha256 } => (path.clone(), sha256.clone()),
+            other => panic!("expected sidecar snapshot, got {other:?}"),
+        }
+    }
+
     #[test]
     fn begin_creates_journal_file() {
         let tmp = tempdir().expect("tempdir");
@@ -915,23 +1114,80 @@ mod tests {
     }
 
     #[test]
-    fn begin_with_missing_state_yields_none_snapshot() {
+    fn begin_with_missing_state_records_explicit_absent() {
         let tmp = tempdir().expect("tempdir");
         let (state_path, journal_dir) = fresh(&tmp);
 
         let tx = Transaction::begin("enable", state_path.clone(), &journal_dir).expect("begin");
         assert!(tx.state_snapshot.is_none());
+        // "State did not exist" must be a positive record, never an
+        // omitted table — load_journal treats an absent record in a v2
+        // journal as corruption.
+        assert_eq!(tx.state_snapshot_ref, Some(StateSnapshotRef::Absent));
         assert!(!state_path.exists());
     }
 
     #[test]
-    fn begin_captures_existing_state_bytes() {
+    fn begin_captures_existing_state_bytes_in_sidecar() {
         let tmp = tempdir().expect("tempdir");
         let (state_path, journal_dir) = fresh(&tmp);
         std_fs::write(&state_path, b"prior bytes").expect("seed state");
 
         let tx = Transaction::begin("disable", state_path, &journal_dir).expect("begin");
-        assert_eq!(tx.state_snapshot.as_deref(), Some(b"prior bytes".as_ref()));
+
+        // v2 journals never embed the bytes — they live in the sidecar.
+        assert!(tx.state_snapshot.is_none());
+        let (sidecar, sha256) = sidecar_of(&tx);
+        assert!(sidecar.starts_with(&journal_dir));
+        assert_eq!(
+            std_fs::read(&sidecar).expect("read sidecar"),
+            b"prior bytes"
+        );
+        assert_eq!(sha256, sha256_hex(b"prior bytes"));
+    }
+
+    #[test]
+    fn journal_stays_small_when_state_is_large() {
+        // Size guard for the full-rewrite persistence strategy: the
+        // journal must never grow with the managed state. A multi-MB
+        // state file previously ballooned every journal rewrite to tens
+        // of MB (TOML integer-array encoding), producing near-quadratic
+        // I/O on components with tens of thousands of owned files. If
+        // this test starts failing, something is embedding bulk data in
+        // the journal again — externalise it as a sidecar instead.
+        const JOURNAL_SIZE_CEILING: u64 = 16 * 1024;
+
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        let big_state = vec![0xabu8; 5 * 1024 * 1024];
+        std_fs::write(&state_path, &big_state).expect("seed large state");
+
+        let mut tx = Transaction::begin("uninstall", state_path, &journal_dir).expect("begin");
+        for idx in 0..20 {
+            tx.record_step(TransactionStep::planned(
+                "owned-files",
+                format!("phase-{idx}"),
+                "remove_owned_files",
+                None,
+            ))
+            .expect("record step");
+            tx.mark_done(idx).expect("mark done");
+        }
+        tx.finish(TransactionOutcomeStatus::Ok).expect("finish");
+
+        let journal_len = std_fs::metadata(&tx.journal_path)
+            .expect("journal metadata")
+            .len();
+        assert!(
+            journal_len < JOURNAL_SIZE_CEILING,
+            "journal grew to {journal_len} bytes — bulk data must live in a sidecar, not the journal"
+        );
+        let (sidecar, _) = sidecar_of(&tx);
+        assert_eq!(
+            std_fs::read(&sidecar).expect("read sidecar"),
+            big_state,
+            "sidecar must hold the exact state bytes"
+        );
     }
 
     #[test]
@@ -1076,12 +1332,243 @@ mod tests {
     }
 
     #[test]
+    fn restore_state_survives_journal_round_trip() {
+        // Recovery never sees the in-memory transaction — it reloads the
+        // journal from disk. The sidecar reference must round-trip.
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        std_fs::write(&state_path, b"original").expect("seed");
+
+        let tx = Transaction::begin("install", state_path.clone(), &journal_dir).expect("begin");
+        std_fs::write(&state_path, b"mutated").expect("simulate mid-op write");
+
+        let reloaded = Transaction::load_journal(&tx.journal_path).expect("load");
+        reloaded.restore_state().expect("restore after reload");
+        assert_eq!(std_fs::read(&state_path).expect("read"), b"original");
+    }
+
+    #[test]
+    fn restore_state_rejects_tampered_sidecar() {
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        std_fs::write(&state_path, b"original").expect("seed");
+
+        let tx = Transaction::begin("install", state_path.clone(), &journal_dir).expect("begin");
+        let (sidecar, _) = sidecar_of(&tx);
+        std_fs::write(&sidecar, b"forged snapshot").expect("tamper sidecar");
+        std_fs::write(&state_path, b"mutated").expect("simulate mid-op write");
+
+        let err = tx.restore_state().expect_err("tampered sidecar must fail");
+        assert!(matches!(err, TransactionError::Rollback(_)));
+        assert_eq!(
+            std_fs::read(&state_path).expect("read"),
+            b"mutated",
+            "a failed restore must leave the state file untouched"
+        );
+    }
+
+    #[test]
+    fn restore_state_fails_closed_on_missing_sidecar() {
+        // A referenced-but-missing sidecar must be a hard error, never a
+        // fall-through to the "state did not exist" deletion branch.
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        std_fs::write(&state_path, b"original").expect("seed");
+
+        let tx = Transaction::begin("install", state_path.clone(), &journal_dir).expect("begin");
+        let (sidecar, _) = sidecar_of(&tx);
+        std_fs::remove_file(&sidecar).expect("drop sidecar");
+
+        let err = tx.restore_state().expect_err("missing sidecar must fail");
+        assert!(matches!(err, TransactionError::Rollback(_)));
+        assert!(
+            state_path.exists(),
+            "a broken sidecar must never delete the state file"
+        );
+    }
+
+    #[test]
+    fn v1_journal_with_embedded_snapshot_still_loads_and_restores() {
+        // Journals written by pre-v2 binaries embed the snapshot bytes
+        // directly. They must keep loading and restoring so pending v1
+        // operations survive an upgrade of the anolisa binary.
+        //
+        // The hand-written `state_snapshot = [<int>, ...]` line below is
+        // deliberate: it pins the on-disk v1 wire encoding (TOML integer
+        // array, one element per byte) independently of how serde happens
+        // to serialise `Vec<u8>` today. Any future change to the field's
+        // type or serialisation strategy that stops accepting this shape
+        // breaks this test loudly instead of silently orphaning pending
+        // v1 journals in the field.
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        std_fs::create_dir_all(&journal_dir).expect("mkdir journal");
+        let journal_path = journal_dir.join("op-install-20260101000000-abcdef.journal.toml");
+        let embedded: Vec<String> = b"legacy bytes".iter().map(|b| b.to_string()).collect();
+        let text = format!(
+            "schema_version = 1\n\
+             operation_id = \"op-install-20260101000000-abcdef\"\n\
+             operation = \"install\"\n\
+             started_at = \"2026-01-01T00:00:00Z\"\n\
+             state_path = {state_path:?}\n\
+             state_snapshot = [{embedded}]\n\
+             journal_path = {journal_path:?}\n",
+            state_path = state_path.display().to_string(),
+            embedded = embedded.join(", "),
+            journal_path = journal_path.display().to_string(),
+        );
+        std_fs::write(&journal_path, text).expect("seed v1 journal");
+
+        let tx = Transaction::load_journal(&journal_path).expect("v1 journal must load");
+        assert_eq!(tx.schema_version, 1);
+        assert_eq!(tx.state_snapshot.as_deref(), Some(b"legacy bytes".as_ref()));
+        assert!(tx.state_snapshot_ref.is_none());
+
+        std_fs::write(&state_path, b"mutated").expect("simulate write");
+        tx.restore_state().expect("v1 restore");
+        assert_eq!(std_fs::read(&state_path).expect("read"), b"legacy bytes");
+    }
+
+    #[test]
+    fn v2_journal_with_incomplete_snapshot_record_is_corrupt() {
+        // The tagged `StateSnapshotRef` enum makes half-configured
+        // snapshots unrepresentable in memory; this test guards the
+        // on-disk side of that invariant. A hand-edited (or bit-rotted)
+        // snapshot table that lost its tag or one of the sidecar fields
+        // must be rejected at load as corrupt — parsing it would defer
+        // the failure to rollback time, long after doctor/repair could
+        // have surfaced it.
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        std_fs::create_dir_all(&journal_dir).expect("mkdir journal");
+        let journal_path = journal_dir.join("op-install-20260101000000-abcdef.journal.toml");
+        for snapshot_table in [
+            // sidecar without its digest
+            "kind = \"sidecar\"\npath = \"/var/lib/anolisa/journal/op.state.snapshot\"\n",
+            // sidecar without its path
+            "kind = \"sidecar\"\nsha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n",
+            // untagged pre-enum shape (both fields, no kind)
+            "path = \"/var/lib/anolisa/journal/op.state.snapshot\"\nsha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n",
+            // unknown tag
+            "kind = \"mystery\"\n",
+        ] {
+            let text = format!(
+                "schema_version = 2\n\
+                 operation_id = \"op-install-20260101000000-abcdef\"\n\
+                 operation = \"install\"\n\
+                 started_at = \"2026-01-01T00:00:00Z\"\n\
+                 state_path = {state_path:?}\n\
+                 journal_path = {journal_path:?}\n\
+                 \n\
+                 [state_snapshot_ref]\n\
+                 {snapshot_table}",
+                state_path = state_path.display().to_string(),
+                journal_path = journal_path.display().to_string(),
+            );
+            std_fs::write(&journal_path, text).expect("seed incomplete journal");
+
+            let err = Transaction::load_journal(&journal_path)
+                .expect_err("incomplete snapshot ref must not load");
+            assert!(
+                matches!(err, TransactionError::CorruptJournal(_)),
+                "expected CorruptJournal for table {snapshot_table:?}, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_journal_missing_snapshot_record_entirely_is_corrupt() {
+        // The failure mode a truncated / hand-edited / bit-rotted v2
+        // journal actually produces: the whole `[state_snapshot_ref]`
+        // table is gone. Deserialisation alone cannot catch this — the
+        // field is `Option` so v1 journals can load — so load_journal
+        // must refuse it structurally. Without that check the gap would
+        // read as "state was absent at begin" and recovery would delete
+        // `installed.toml`.
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        std_fs::create_dir_all(&journal_dir).expect("mkdir journal");
+        std_fs::write(&state_path, b"must survive").expect("seed state");
+        let journal_path = journal_dir.join("op-install-20260101000000-abcdef.journal.toml");
+        let text = format!(
+            "schema_version = 2\n\
+             operation_id = \"op-install-20260101000000-abcdef\"\n\
+             operation = \"install\"\n\
+             started_at = \"2026-01-01T00:00:00Z\"\n\
+             state_path = {state_path:?}\n\
+             journal_path = {journal_path:?}\n",
+            state_path = state_path.display().to_string(),
+            journal_path = journal_path.display().to_string(),
+        );
+        std_fs::write(&journal_path, text).expect("seed truncated journal");
+
+        let err = Transaction::load_journal(&journal_path)
+            .expect_err("v2 journal without snapshot record must not load");
+        match &err {
+            TransactionError::CorruptJournal(msg) => {
+                assert!(
+                    msg.contains("missing its state_snapshot_ref record"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected CorruptJournal, got: {other:?}"),
+        }
+        assert_eq!(
+            std_fs::read(&state_path).expect("read state"),
+            b"must survive",
+            "refusing to load must leave the state file untouched"
+        );
+    }
+
+    #[test]
+    fn journal_with_mixed_version_snapshot_fields_is_corrupt() {
+        // Cross-version mixtures are structurally impossible for our
+        // writers, so they can only mean corruption or tampering:
+        // a v2 journal never embeds snapshot bytes, and a v1 journal
+        // cannot carry a v2 snapshot record.
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        std_fs::create_dir_all(&journal_dir).expect("mkdir journal");
+        let journal_path = journal_dir.join("op-install-20260101000000-abcdef.journal.toml");
+        for (schema_version, extra) in [
+            // v2 with v1 embedded bytes
+            (2u32, "state_snapshot = [1, 2, 3]\n".to_string()),
+            // v1 with a v2 snapshot record
+            (
+                1u32,
+                "\n[state_snapshot_ref]\nkind = \"absent\"\n".to_string(),
+            ),
+        ] {
+            let text = format!(
+                "schema_version = {schema_version}\n\
+                 operation_id = \"op-install-20260101000000-abcdef\"\n\
+                 operation = \"install\"\n\
+                 started_at = \"2026-01-01T00:00:00Z\"\n\
+                 state_path = {state_path:?}\n\
+                 journal_path = {journal_path:?}\n\
+                 {extra}",
+                state_path = state_path.display().to_string(),
+                journal_path = journal_path.display().to_string(),
+            );
+            std_fs::write(&journal_path, text).expect("seed mixed journal");
+
+            let err = Transaction::load_journal(&journal_path)
+                .expect_err("mixed-version snapshot fields must not load");
+            assert!(
+                matches!(err, TransactionError::CorruptJournal(_)),
+                "expected CorruptJournal for v{schema_version} mixture, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn restore_state_without_snapshot_removes_file() {
         let tmp = tempdir().expect("tempdir");
         let (state_path, journal_dir) = fresh(&tmp);
 
         let tx = Transaction::begin("install", state_path.clone(), &journal_dir).expect("begin");
         assert!(tx.state_snapshot.is_none());
+        assert_eq!(tx.state_snapshot_ref, Some(StateSnapshotRef::Absent));
 
         std_fs::write(&state_path, b"mutated").expect("simulate write");
         tx.restore_state().expect("restore");
@@ -1201,6 +1688,31 @@ mod tests {
         std_fs::write(
             &bad,
             br#"schema_version = 999
+operation_id = "op-x"
+operation = "install"
+started_at = "2026-01-01T00:00:00Z"
+state_path = "/dev/null"
+journal_path = "/tmp/x.journal.toml"
+"#,
+        )
+        .expect("seed");
+
+        let err = Transaction::load_journal(&bad).expect_err("must fail");
+        match err {
+            TransactionError::CorruptJournal(msg) => {
+                assert!(msg.contains("schema_version"), "msg: {msg}");
+            }
+            other => panic!("expected CorruptJournal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_journal_rejects_schema_below_minimum() {
+        let tmp = tempdir().expect("tempdir");
+        let bad = tmp.path().join("ancient.journal.toml");
+        std_fs::write(
+            &bad,
+            br#"schema_version = 0
 operation_id = "op-x"
 operation = "install"
 started_at = "2026-01-01T00:00:00Z"

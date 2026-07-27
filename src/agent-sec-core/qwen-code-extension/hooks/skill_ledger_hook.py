@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from qwen_trace_context import trace_context, with_trace_context
+from trace_context import trace_context, with_trace_context
 
 _TOOL_NAME = "skill"
 _CHECK_TIMEOUT_SECONDS = 5

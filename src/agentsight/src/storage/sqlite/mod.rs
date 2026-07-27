@@ -41,7 +41,7 @@ pub use genai::{GenAISqliteStore, PendingCallInfo, PendingOrigin, SseEnrichment}
 pub use interruption::{InterruptionRecord, InterruptionStore, InterruptionTypeStat};
 
 // Re-export connection utilities
-pub use connection::{create_connection, default_base_path};
+pub use connection::{create_connection, default_base_path, sibling_db_path};
 
 // Re-export tokenless stats storage
 pub use tokenless::{TokenlessStatsStore, TokenlessWindowSummary};

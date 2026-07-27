@@ -21,6 +21,7 @@ mod mvp_loop_tests;
 pub(crate) mod prelude;
 pub(crate) mod provider_cancellation_artifacts;
 pub(crate) mod provider_tool_state;
+pub(crate) mod question_terminal;
 pub(crate) mod shell_evidence;
 pub(crate) mod shell_handoff_state;
 pub(crate) mod startup;
@@ -29,3 +30,4 @@ mod state_prelude;
 #[cfg(test)]
 mod state_tests;
 pub(crate) mod terminal;
+pub(crate) mod trust_state;

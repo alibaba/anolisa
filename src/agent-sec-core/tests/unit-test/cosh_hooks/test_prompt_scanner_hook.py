@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from standalone_hook_test_loader import load_standalone_hook
+
 # Path to the standalone cosh hook script
 _COSH_HOOK = str(
     Path(__file__).resolve().parents[2]
@@ -26,9 +28,11 @@ _COSH_HOOK = str(
 )
 
 # Import helpers for direct unit testing
-sys.path.insert(0, str(Path(_COSH_HOOK).parent))
-import prompt_scanner_hook  # noqa: E402
-from prompt_scanner_hook import _format_cosh  # noqa: E402
+prompt_scanner_hook = load_standalone_hook(
+    "cosh_prompt_scanner_hook",
+    Path(_COSH_HOOK),
+)
+_format_cosh = prompt_scanner_hook._format_cosh
 
 # ---------------------------------------------------------------------------
 # Unit tests: _format_cosh

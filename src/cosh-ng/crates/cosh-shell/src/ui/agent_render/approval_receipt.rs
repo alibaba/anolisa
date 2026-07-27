@@ -45,7 +45,7 @@ impl RatatuiInlineRenderer {
             return self.plain_approval_receipt_panel_lines(model);
         }
         if !approval_receipt_has_body(&model) {
-            return compact_approval_receipt_lines(&model, self.styled);
+            return compact_approval_receipt_lines(&model, self.styles_enabled());
         }
 
         let i18n = self.i18n();
@@ -65,7 +65,7 @@ impl RatatuiInlineRenderer {
             return self.plain_approval_receipt_panel_lines(model);
         }
         if !approval_receipt_has_body(&model) {
-            return compact_approval_receipt_lines(&model, self.styled);
+            return compact_approval_receipt_lines(&model, self.styles_enabled());
         }
 
         let i18n = self.i18n();
@@ -74,7 +74,7 @@ impl RatatuiInlineRenderer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_approval_receipt_panel(&i18n, model, area, &mut buffer);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)

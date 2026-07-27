@@ -14,6 +14,7 @@ use crate::runtime::evidence_requests::{
     record_cosh_requests_from_active_run, render_pending_evidence_requests,
 };
 use crate::runtime::prelude::*;
+use crate::runtime::question_terminal::cleanup_question_for_terminal_owner;
 
 pub(crate) fn finish_active_agent_run<W: Write>(
     state: &mut InlineState,
@@ -23,7 +24,10 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     let Some(mut active_run) = state.agent_run.active.take() else {
         return Ok(());
     };
+    // Turn-scope batch consent never outlives its run (issue #1773).
+    state.control.trust.clear_run_batch_consent();
 
+    cleanup_question_for_terminal_owner(state, output, &active_run.request.id)?;
     active_run.status_animation.clear(output)?;
     if !active_run.held_events.is_empty() {
         if state_has_pending_interaction(state) || has_queued_run_before_held_text(state) {
@@ -286,6 +290,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

@@ -34,6 +34,12 @@ pub struct CompactionRuntime {
     /// The engine's transcript always stays complete; the provider only sees
     /// the projected effective context.
     state: Option<CompactionState>,
+    /// Highest revision this session has committed, independent of whether
+    /// the projection that carried it is still active.
+    ///
+    /// Kept separate from `state` so a projection rejected on load cannot let
+    /// the next emergency compaction reuse a published revision.
+    revision: u64,
     /// Provider-reported prompt tokens from the most recent request.
     last_prompt_tokens: Option<u64>,
 }
@@ -44,20 +50,31 @@ impl CompactionRuntime {
         self.state.as_ref()
     }
 
-    /// Replaces the projection with one loaded from a persisted session.
+    /// The monotonic compaction revision clock; `0` before the first commit.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Replaces the projection and revision clock with values loaded from a
+    /// persisted session.
+    ///
+    /// The clock is passed separately because `state` may have been dropped by
+    /// sanitization while its revision remains published.
     ///
     /// Any provider-reported usage measured the previous projection and is
     /// discarded with it.
-    pub fn load_state(&mut self, state: Option<CompactionState>) {
+    pub fn load_state(&mut self, state: Option<CompactionState>, revision: u64) {
         self.state = state;
+        self.revision = revision;
         self.last_prompt_tokens = None;
     }
 
-    /// Commits a freshly produced projection.
+    /// Commits a freshly produced projection and advances the revision clock.
     ///
     /// The last provider-reported usage measured the pre-compaction context
     /// and must not suppress the shrunken estimate, so it is cleared here.
     pub(super) fn commit_state(&mut self, state: CompactionState) {
+        self.revision = state.revision;
         self.state = Some(state);
         self.last_prompt_tokens = None;
     }

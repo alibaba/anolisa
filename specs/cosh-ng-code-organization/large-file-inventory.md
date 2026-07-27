@@ -28,18 +28,17 @@ new over-threshold file appears that is not listed here.
 |------:|------|-------|---------------------|
 | 1717 | `src/ui/agent_render/health.rs` | ui | Health banner rendering; pre-existing. Split per-severity renderers. |
 | 1628 | `src/diagnostics/health/collectors.rs` | diagnostics | Per-subsystem collectors; pre-existing. Split by collector family. |
-| 1378 | `src/auth/runtime.rs` | auth | Auth control-protocol runtime; pre-existing. Extract provider flows. |
 | 992 | `src/runtime/state.rs` | runtime | Central inline state; pre-existing. Extract per-domain state modules. |
 | 925 | `src/agent/heartbeat.rs` | agent | Heartbeat/status animation; pre-existing. Split timing from rendering. |
 | 912 | `src/evidence/output_policy.rs` | evidence | Output excerpt policy; pre-existing. Split bounding from classification. |
 | 906 | `src/adapter/fake.rs` | adapter | Test fake adapter; pre-existing. Split scripted-scenario builders. |
-| 898 | `src/ui/agent_render/approval.rs` | ui | Approval card rendering; pre-existing. Split per-card-kind renderers. |
-| 886 | `src/activity/runtime.rs` | activity | Activity runtime; pre-existing. Extract lifecycle from bookkeeping. |
+| 944 | `src/ui/agent_render/approval.rs` | ui | Approval card rendering; action-row rendering extracted to `approval_actions.rs` (turn consent, #1773). Split per-card-kind renderers next. |
+| 943 | `src/auth/runtime.rs` | auth | Auth control-protocol runtime; prompt rendering extracted to `auth/prompt.rs`, ESC back-navigation to `auth/navigation.rs` (#1760 added dispatcher glue only). Extract provider-specific flows next. |
+| 769 | `src/activity/runtime.rs` | activity | Activity runtime; pre-existing. Shell handoff row builders (tracked and untracked) extracted to `activity/shell_handoff.rs`; extract remaining lifecycle from bookkeeping. |
 | 859 | `src/agent/poll.rs` | agent | Agent run polling loop; pre-existing debt (main baseline 839). The compaction feature added the `compaction_recommended_v1` status capture; split event routing from rendering. |
 | 856 | `src/parser/mod.rs` | parser | Event parser (legacy `mod.rs`); pre-existing. Split per-event-kind parsers and rename off `mod.rs`. |
 | 855 | `src/activity/runtime_render.rs` | activity | Activity rendering; pre-existing. Split per-panel renderers. |
 | 853 | `src/i18n/en.rs` | i18n | English catalog; pre-existing. Partition by message domain. |
-| 848 | `src/shell_host/marker.rs` | shell_host | OSC marker state machine; pre-existing. Split parsing from state. |
 | 823 | `src/i18n/zh.rs` | i18n | Chinese catalog; pre-existing. Partition by message domain. |
 | 805 | `src/shell_host/osc.rs` | shell_host | OSC sequence handling; pre-existing. Split sequence kinds. |
 | 788 | `src/runtime/shell_evidence.rs` | runtime | Shell evidence runtime; pre-existing. Extract capture from rendering. |

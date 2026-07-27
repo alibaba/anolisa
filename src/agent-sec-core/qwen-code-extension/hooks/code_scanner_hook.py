@@ -7,6 +7,8 @@ import subprocess
 import sys
 from typing import Any
 
+from trace_context import with_trace_context
+
 _MODE = os.environ.get("CODE_SCANNER_MODE", "observe").strip().lower()
 _VALID_MODES = {"observe", "ask", "deny"}
 try:
@@ -64,36 +66,20 @@ def _extract_command(input_data: dict[str, Any]) -> str | None:
     return command
 
 
-def _trace_context(input_data: dict[str, Any]) -> dict[str, str]:
-    context: dict[str, str] = {"agent_name": "qwen-code"}
-    for key in ("trace_id", "session_id", "run_id", "call_id", "tool_call_id"):
-        value = input_data.get(key)
-        if isinstance(value, str) and value.strip():
-            context[key] = value.strip()
-    if "tool_call_id" not in context:
-        tool_use_id = input_data.get("tool_use_id")
-        if isinstance(tool_use_id, str) and tool_use_id.strip():
-            context["tool_call_id"] = tool_use_id.strip()
-    return context
-
-
 def _scan_code(input_data: dict[str, Any], command: str) -> dict[str, Any] | None:
     try:
         proc = subprocess.run(
-            [
-                "agent-sec-cli",
-                "--trace-context",
-                json.dumps(
-                    _trace_context(input_data),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                "scan-code",
-                "--code",
-                command,
-                "--language",
-                _LANGUAGE,
-            ],
+            with_trace_context(
+                [
+                    "agent-sec-cli",
+                    "scan-code",
+                    "--code",
+                    command,
+                    "--language",
+                    _LANGUAGE,
+                ],
+                input_data,
+            ),
             capture_output=True,
             check=False,
             text=True,

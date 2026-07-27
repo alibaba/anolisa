@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+mod audit;
 mod auth;
 mod cli;
 mod compaction;
@@ -18,7 +19,6 @@ mod metrics;
 mod migrate;
 mod process;
 mod protocol;
-mod provider;
 mod redaction;
 mod registry;
 mod session;
@@ -30,6 +30,7 @@ mod tool;
 mod truncator;
 
 use clap::Parser;
+use cosh_core::provider;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};

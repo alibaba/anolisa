@@ -5,6 +5,7 @@
 
 pub mod auth;
 mod handlers;
+pub mod optimize;
 mod token_savings;
 
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use crate::config::ServerAuthConfig;
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
 use crate::storage::sqlite::InterruptionStore;
+use agentsight_trajectory_collector::TrajectoryStore;
 
 use self::auth::{AuthMiddleware, DashboardAuth};
 
@@ -56,6 +58,10 @@ pub struct AppState {
     pub security_observability: SecurityObservabilityConfig,
     /// Dashboard authentication state
     pub auth: Arc<DashboardAuth>,
+    /// Optimization analysis state (LLM config + result store)
+    pub optimize: Option<Arc<optimize::OptimizeState>>,
+    /// Read-only store over collected trajectories (`trajectories.db`)
+    pub trajectory_store: Option<Arc<TrajectoryStore>>,
 }
 
 // ─── Static file handler ─────────────────────────────────────────────────────
@@ -189,6 +195,16 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::skill_metrics_usage_ratio)
                 .service(handlers::skill_metrics_distribution)
                 .service(handlers::skill_metrics_hotness)
+                // Optimization analysis API routes
+                .service(optimize::run_optimization)
+                .service(optimize::get_optimization_results)
+                .service(optimize::list_optimization_history)
+                .service(optimize::get_optimize_config)
+                .service(optimize::update_optimize_config)
+                // Trajectory collection API routes (filters before the dynamic segment)
+                .service(handlers::list_trajectories)
+                .service(handlers::trajectory_filters)
+                .service(handlers::get_trajectory_detail)
                 .default_service(web::route().to(api_not_found)),
         )
         // Health scope with not-found fallback
@@ -255,11 +271,7 @@ pub async fn run_server(
 
     // Initialize interruption store
     let interruption_store: Option<Arc<InterruptionStore>> = {
-        use crate::storage::sqlite::GenAISqliteStore;
-        let db_path = GenAISqliteStore::default_path()
-            .parent()
-            .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-            .join("interruption_events.db");
+        let db_path = crate::storage::sqlite::sibling_db_path("interruption_events.db");
         match InterruptionStore::new_with_path(&db_path) {
             Ok(store) => {
                 log::info!("Interruption store initialized at {db_path:?}");
@@ -283,6 +295,33 @@ pub async fn run_server(
     }
     checker.start();
 
+    // Initialize read-only trajectory store (collector writes it in `trace` mode;
+    // serve only consumes). Path is derived via the shared sibling_db_path helper
+    // so reader and writer always resolve the same file. A missing DB simply
+    // yields an empty table → empty API results (graceful degradation).
+    // Only open when the file already exists to avoid creating an empty DB as a
+    // persistent side-effect in serve mode when collection was never enabled.
+    let trajectory_store: Option<Arc<TrajectoryStore>> = {
+        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        if !db_path.exists() {
+            log::debug!("Trajectory store not found at {db_path:?}; endpoints degrade to empty");
+            None
+        } else {
+            match TrajectoryStore::new_with_path(&db_path) {
+                Ok(store) => {
+                    log::info!("Trajectory store initialized at {db_path:?}");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    log::warn!("Failed to open trajectory store: {e}");
+                    None
+                }
+            }
+        }
+    };
+
+    let optimize_state = optimize::OptimizeState::init(storage_base);
+
     let data = web::Data::new(AppState {
         storage_path,
         start_time: Instant::now(),
@@ -291,6 +330,8 @@ pub async fn run_server(
         evaluation_store,
         security_observability,
         auth: dashboard_auth.clone(),
+        optimize: Some(optimize_state),
+        trajectory_store,
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
@@ -411,6 +452,8 @@ mod tests {
             ),
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
+            optimize: None,
+            trajectory_store: None,
         })
     }
 }

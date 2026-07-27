@@ -89,8 +89,8 @@ pub use lifecycle::{
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{
-    AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind, PackageNames,
-    RuntimeDependency, ServiceScope, declared_unit_scope,
+    AdapterNotice, AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind,
+    NoticeLevel, NoticeWhen, PackageNames, RuntimeDependency, ServiceScope, declared_unit_scope,
 };
 pub use provisioner::{
     ManualDependency, ProvisionOutcome, ProvisionPlan, ProvisionStrategy, ProvisionablePackage,

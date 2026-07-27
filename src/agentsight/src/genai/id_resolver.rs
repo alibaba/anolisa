@@ -21,9 +21,28 @@
 //! 当传入的 `response_id` 为空、或 user message 文本为空时直接返回 `None`，
 //! 由调用方决定是否回写元数据；后续 `complete_pending` 阶段会带着真正的
 //! response_id 再次调用本模块完成回填。
+//!
+//! ## 滑动窗口 TTL：兜底的时间锚点
+//!
+//! 除了 `finish_conversation` 这种由调用方显式驱动的"轮结束"信号外，
+//! `conv_first_resp` 的每条锚定记录还带有 `anchored_at` 时间戳，构成一个
+//! **滑动窗口 TTL**：
+//! - 命中即续期：只要这个 key 还在被同一轮的后续调用（如工具调用循环）
+//!   持续访问，`anchored_at` 就会不断刷新，真正还在进行中的轮次不会
+//!   被误判为过期；
+//! - 静默超过 [`conversation_max_age`] 后视为过期：一旦这个 key 长时间
+//!   （默认 30 分钟）没有任何调用碰过，就说明上一轮早已结束，下一次
+//!   出现相同文本会重新锚定一个全新的 `response_id`。
+//!
+//! 这作为 `finish_conversation` 的兜底防线：即便某个 agent 集成尚未覆盖
+//! 可识别的终止态 `finish_reason`，或中断检测路径本身遗漏了某个场景，
+//! 超龄的锚点最终也会自然失效，不会无限期地把不相关的新轮次并入旧轮。
+//! `session_first_resp` 不设 TTL —— session_id 代表整个 agent 进程的完整
+//! 会话，语义上允许跨越很长时间，不应因为时间久了就被拆分。
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use lru::LruCache;
 use sha2::{Digest, Sha256};
@@ -36,16 +55,50 @@ const MAX_ENTRIES: usize = 10_000;
 const SESSION_DOMAIN: &str = "session";
 const CONVERSATION_DOMAIN: &str = "conversation";
 
+/// 覆盖 conversation 锚点 TTL（秒）的环境变量名。
+const CONVERSATION_MAX_AGE_ENV: &str = "AGENTSIGHT_CONVERSATION_MAX_AGE_SECS";
+
+/// conversation 锚点的默认 TTL：30 分钟。
+///
+/// 一轮对话即便包含多次工具调用循环，正常情况下也会在几分钟到十几分钟内
+/// 完成；30 分钟是相对宽松的上限，既能容纳偶尔较慢的长任务轮次，又能在
+/// `finish_reason`/中断检测都没有触发驱逐时，为固定模板文本（如系统
+/// recap nudge）或用户重发的相同 prompt 兜底止损，避免锚点无限期存活。
+fn conversation_max_age() -> Duration {
+    std::env::var(CONVERSATION_MAX_AGE_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30 * 60))
+}
+
+/// LRU 中缓存的一条锚定记录：首次见到该 key 时的 `response_id`，
+/// 以及最近一次被访问（创建或命中续期）的时间点。
+struct Anchor {
+    response_id: String,
+    anchored_at: Instant,
+}
+
+impl Anchor {
+    fn new(response_id: &str, now: Instant) -> Self {
+        Anchor {
+            response_id: response_id.to_string(),
+            anchored_at: now,
+        }
+    }
+}
+
 /// `IdResolver` 负责把"内容 key + 当前 response_id"折算为稳定的
 /// session_id / conversation_id。
 ///
 /// 内部使用 `Mutex<LruCache<...>>`，所以可以以 `&self` 形式安全地在
 /// `GenAIBuilder` 多线程上下文里调用。
 pub struct IdResolver {
-    /// session_key (SHA256 of first user message) → first_response_id.
-    session_first_resp: Mutex<LruCache<String, String>>,
-    /// conversation_key (SHA256 of last user message) → first_response_id.
-    conv_first_resp: Mutex<LruCache<String, String>>,
+    /// session_key (SHA256 of first user message) → 锚定记录。不设 TTL。
+    session_first_resp: Mutex<LruCache<String, Anchor>>,
+    /// conversation_key (SHA256 of last user message) → 锚定记录。
+    /// 受滑动窗口 TTL 约束，见模块文档。
+    conv_first_resp: Mutex<LruCache<String, Anchor>>,
 }
 
 impl Default for IdResolver {
@@ -92,6 +145,7 @@ impl IdResolver {
             pid,
             first_user_text,
             response_id,
+            None, // session_id 不设 TTL，见模块文档
         )
     }
 
@@ -102,6 +156,9 @@ impl IdResolver {
     /// - `last_user_text`：当前请求中"最后一条 user message"的原始文本，
     ///   作为 conversation_key 的素材。空字符串返回 `None`。
     /// - `response_id`：当前调用的 response_id；空字符串返回 `None`。
+    ///
+    /// 锚定记录受滑动窗口 TTL（[`conversation_max_age`]）约束：命中即续期，
+    /// 静默超龄则重新锚定，作为 `finish_conversation` 的兜底时间防线。
     pub fn resolve_conversation_id(
         &self,
         agent_name: &str,
@@ -116,37 +173,51 @@ impl IdResolver {
             pid,
             last_user_text,
             response_id,
+            Some(conversation_max_age()),
         )
     }
 
     /// 通用实现：定位/记录"首个 response_id"，再用域前缀 + first_response_id
     /// 计算最终 ID（取 SHA256 前 32 位 hex）。
+    ///
+    /// `max_age`：为 `Some(ttl)` 时启用滑动窗口 TTL——若现有锚点距上次
+    /// 访问已超过 `ttl`，视为过期并用本次 `response_id` 重新锚定；未过期
+    /// 则命中并刷新 `anchored_at` 续期。为 `None` 时不过期，行为与原来一致。
     fn resolve(
-        cache: &Mutex<LruCache<String, String>>,
+        cache: &Mutex<LruCache<String, Anchor>>,
         domain: &str,
         agent_name: &str,
         pid: i32,
         text: &str,
         response_id: &str,
+        max_age: Option<Duration>,
     ) -> Option<String> {
         if text.is_empty() || response_id.is_empty() {
             return None;
         }
 
         let key = compose_key(agent_name, pid, text);
-        let first_response_id = {
+        let now = Instant::now();
+        let anchored_response_id = {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-            // 已有条目时直接复用首个 response_id；否则把当前 response_id
-            // 写入作为锚点，让同一 key 后续调用得到稳定结果。
-            if let Some(existing) = guard.get(&key) {
-                existing.clone()
-            } else {
-                guard.put(key, response_id.to_string());
-                response_id.to_string()
+            let expired = match (max_age, guard.peek(&key)) {
+                (Some(ttl), Some(anchor)) => now.duration_since(anchor.anchored_at) > ttl,
+                _ => false,
+            };
+            if !expired {
+                if let Some(existing) = guard.get_mut(&key) {
+                    // 命中且未过期：继续复用旧 response_id，刷新访问时间实现
+                    // 滑动窗口续期，避免真正进行中的轮次因长时间运行而过期。
+                    existing.anchored_at = now;
+                    return Some(domain_hash(domain, &existing.response_id));
+                }
             }
+            // 未命中或已过期：把当前 response_id 写入作为新锚点。
+            guard.put(key, Anchor::new(response_id, now));
+            response_id.to_string()
         };
 
-        Some(domain_hash(domain, &first_response_id))
+        Some(domain_hash(domain, &anchored_response_id))
     }
 
     /// 只读查询 session_id：查 LRU 中是否已锁定 `(agent, pid, first_user_text)` 的
@@ -168,10 +239,13 @@ impl IdResolver {
             agent_name,
             pid,
             first_user_text,
+            None, // session_id 不设 TTL
         )
     }
 
-    /// 只读查询 conversation_id，用途与 `peek_session_id` 同。
+    /// 只读查询 conversation_id，用途与 `peek_session_id` 同。同样受滑动窗口 TTL
+    /// 约束：若锚点已超龄，视为未命中返回 `None`（与 `resolve_conversation_id`
+    /// 的过期判断保持一致，但本身不写入/不刷新访问时间）。
     pub fn peek_conversation_id(
         &self,
         agent_name: &str,
@@ -184,25 +258,66 @@ impl IdResolver {
             agent_name,
             pid,
             last_user_text,
+            Some(conversation_max_age()),
         )
     }
 
+    /// 标记一轮对话（turn）已经结束，驱逐 `(agent_name, pid, last_user_text)` 对应的
+    /// conversation anchor，使下一次出现相同 `last_user_text` 时重新锁定一个全新的
+    /// `first_response_id`，从而得到不同的 conversation_id。
+    ///
+    /// # 背景
+    ///
+    /// `resolve_conversation_id` 按设计需要让*同一轮*对话内的多次 LLM 调用（例如带
+    /// 工具调用的多步 agent loop）共享同一个 conversation_id，因此对同一个
+    /// `(agent_name, pid, last_user_text)` key 永久锚定“第一次见到”的 response_id。
+    ///
+    /// 但当同一段文本（例如固定模板的系统 nudge，如“The user stepped away and is
+    /// coming back...”）被复用于*不同*的真实对话轮次时，这个永久锚定会导致数十分钟
+    /// 甚至更久之后的全新对话轮次仍然复用第一次的锚点，产生相同的 conversation_id，
+    /// 继而让下游（如按 conversation_id 分组计数 step 的日志处理管道）误判为同一轮
+    /// 对话仍在继续。
+    ///
+    /// 调用方应在检测到本轮对话的终止信号（例如 `finish_reason` 不是
+    /// `tool_calls`/`tool_use` 等表示流程继续的取值）后调用本方法，显式结束该 key
+    /// 的锚定，使后续相同文本重新开启一轮对话。
+    pub fn finish_conversation(&self, agent_name: &str, pid: i32, last_user_text: &str) {
+        if last_user_text.is_empty() {
+            return;
+        }
+        let key = compose_key(agent_name, pid, last_user_text);
+        let mut guard = self
+            .conv_first_resp
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.pop(&key);
+    }
+
     /// `peek_*` 的通用实现：仅查询 LRU，不写入、不提升顺序。
+    ///
+    /// `max_age`、过期判断逻辑与 `resolve` 一致，但命中时不会刷新
+    /// `anchored_at`（保持本函数"只读不写"的语义）。
     fn peek(
-        cache: &Mutex<LruCache<String, String>>,
+        cache: &Mutex<LruCache<String, Anchor>>,
         domain: &str,
         agent_name: &str,
         pid: i32,
         text: &str,
+        max_age: Option<Duration>,
     ) -> Option<String> {
         if text.is_empty() {
             return None;
         }
         let key = compose_key(agent_name, pid, text);
-        let guard = cache.lock().ok()?;
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         // `LruCache::peek` 不会提升条目顺序，适合 crash 路径“只读不写”。
-        let first_resp = guard.peek(&key)?;
-        Some(domain_hash(domain, first_resp))
+        let anchor = guard.peek(&key)?;
+        if let Some(ttl) = max_age {
+            if Instant::now().duration_since(anchor.anchored_at) > ttl {
+                return None;
+            }
+        }
+        Some(domain_hash(domain, &anchor.response_id))
     }
 }
 
@@ -303,6 +418,62 @@ mod tests {
             .unwrap();
         assert_ne!(a, b);
         assert_eq!(a.len(), 32);
+    }
+
+    #[test]
+    fn finish_conversation_lets_repeated_text_start_a_new_turn() {
+        // 复现真实场景：固定模板文本（如系统 recap nudge）在同一 pid/agent 下
+        // 被复用于两轮相隔很久的真实对话。turn 结束后应显式驱逐锚点，
+        // 使下一次出现相同文本时锁定新的 response_id，得到不同的 conversation_id。
+        let resolver = IdResolver::new();
+        let recap_text = "The user stepped away and is coming back. Recap...";
+
+        let turn1 = resolver
+            .resolve_conversation_id(A, P, recap_text, "resp-turn1")
+            .unwrap();
+        // 模拟同一轮内的后续 LLM 调用（工具调用循环），conversation_id 应保持稳定。
+        let turn1_again = resolver
+            .resolve_conversation_id(A, P, recap_text, "resp-turn1-followup")
+            .unwrap();
+        assert_eq!(turn1, turn1_again, "同一轮内多次调用应共享 conversation_id");
+
+        // 检测到本轮 finish_reason=stop（非 tool_calls），显式结束该轮锚定。
+        resolver.finish_conversation(A, P, recap_text);
+
+        // 数十分钟后，同一段固定文本触发了一轮全新的真实对话。
+        let turn2 = resolver
+            .resolve_conversation_id(A, P, recap_text, "resp-turn2")
+            .unwrap();
+        assert_ne!(
+            turn1, turn2,
+            "finish_conversation 后相同文本应开启新的一轮对话"
+        );
+    }
+
+    #[test]
+    fn finish_conversation_on_unseen_key_is_noop() {
+        // 从未 resolve 过的 key 调用 finish_conversation 不应 panic 或产生副作用。
+        let resolver = IdResolver::new();
+        resolver.finish_conversation(A, P, "never-seen");
+        let id = resolver
+            .resolve_conversation_id(A, P, "never-seen", "resp-1")
+            .unwrap();
+        assert_eq!(id.len(), 32);
+    }
+
+    #[test]
+    fn finish_conversation_does_not_affect_session_id() {
+        // finish_conversation 仅驱逐 conversation anchor，不应影响 session_id
+        // （session_id 代表整个进程会话，语义上不随单轮对话结束而重置）。
+        let resolver = IdResolver::new();
+        let text = "hello";
+        let session1 = resolver.resolve_session_id(A, P, text, "resp-1").unwrap();
+        resolver.finish_conversation(A, P, text);
+        let session2 = resolver.resolve_session_id(A, P, text, "resp-2").unwrap();
+        assert_eq!(
+            session1, session2,
+            "finish_conversation 不应影响 session_id 锚点"
+        );
     }
 
     #[test]
@@ -506,5 +677,116 @@ mod tests {
             normal, crash,
             "正常 ID 与 crash fallback 需严格隔离以避免下游聚合错乱"
         );
+    }
+
+    // ── 滑动窗口 TTL 测试 ──
+    // 直接调用私有的 `resolve`/`peek` 并传入显式 `max_age`，而不是通过
+    // 公开包装函数 + 环境变量，避免进程级环境变量在并发测试中产生竞态。
+
+    #[test]
+    fn conversation_ttl_expires_stale_anchor_and_creates_new_one() {
+        let resolver = IdResolver::new();
+        let ttl = Duration::from_millis(0);
+        let turn1 = IdResolver::resolve(
+            &resolver.conv_first_resp,
+            CONVERSATION_DOMAIN,
+            A,
+            P,
+            "recap nudge",
+            "resp-1",
+            Some(ttl),
+        )
+        .unwrap();
+        // TTL=0：哪怕紧接着的下一次调用，也应视为已经超龄，重新锚定。
+        std::thread::sleep(Duration::from_millis(2));
+        let turn2 = IdResolver::resolve(
+            &resolver.conv_first_resp,
+            CONVERSATION_DOMAIN,
+            A,
+            P,
+            "recap nudge",
+            "resp-2",
+            Some(ttl),
+        )
+        .unwrap();
+        assert_ne!(
+            turn1, turn2,
+            "TTL 到期后应重新锚定，得到不同的 conversation_id"
+        );
+    }
+
+    #[test]
+    fn conversation_sliding_window_refreshes_on_hit() {
+        // 设置一个相对宽松的 TTL，在 TTL 内持续访问，验证每次命中都会
+        // 刷新续期、不会过期。
+        let resolver = IdResolver::new();
+        let ttl = Duration::from_secs(5);
+        let turn1 = IdResolver::resolve(
+            &resolver.conv_first_resp,
+            CONVERSATION_DOMAIN,
+            A,
+            P,
+            "hello",
+            "resp-1",
+            Some(ttl),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            let hit = IdResolver::resolve(
+                &resolver.conv_first_resp,
+                CONVERSATION_DOMAIN,
+                A,
+                P,
+                "hello",
+                "resp-ignored",
+                Some(ttl),
+            )
+            .unwrap();
+            assert_eq!(turn1, hit, "TTL 内命中应保持稳定，并刷新续期");
+        }
+    }
+
+    #[test]
+    fn peek_conversation_id_respects_ttl_expiry() {
+        let resolver = IdResolver::new();
+        let ttl = Duration::from_millis(0);
+        IdResolver::resolve(
+            &resolver.conv_first_resp,
+            CONVERSATION_DOMAIN,
+            A,
+            P,
+            "hello",
+            "resp-1",
+            Some(ttl),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(
+            IdResolver::peek(
+                &resolver.conv_first_resp,
+                CONVERSATION_DOMAIN,
+                A,
+                P,
+                "hello",
+                Some(ttl),
+            )
+            .is_none(),
+            "过期锚点应被 peek 视为未命中"
+        );
+    }
+
+    #[test]
+    fn conversation_ttl_does_not_affect_session_id() {
+        // session_id 走 resolve_session_id，内部固定传 max_age=None，不受
+        // conversation 域的 TTL 配置影响，即便时间过去也应保持稳定。
+        let resolver = IdResolver::new();
+        let s1 = resolver
+            .resolve_session_id(A, P, "hello", "resp-1")
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        let s2 = resolver
+            .resolve_session_id(A, P, "hello", "resp-2")
+            .unwrap();
+        assert_eq!(s1, s2, "session_id 不设 TTL，应保持稳定");
     }
 }

@@ -579,14 +579,19 @@ fn activity_row_is_control_permission(row: &RuntimeActivityRow) -> bool {
 }
 
 fn activity_detail_for_render(row: &RuntimeActivityRow, debug: bool) -> String {
-    if debug {
-        return row.detail.clone();
+    let mut detail = if debug {
+        row.detail.clone()
+    } else {
+        row.detail
+            .lines()
+            .filter(|line| !line.starts_with("debug_output_ref: "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if let Some(audit_ref) = &row.audit_ref {
+        detail.push_str(&format!("\naudit_ref: {audit_ref}"));
     }
-    row.detail
-        .lines()
-        .filter(|line| !line.starts_with("debug_output_ref: "))
-        .collect::<Vec<_>>()
-        .join("\n")
+    detail
 }
 
 fn activity_detail_for_render_with_state(state: &InlineState, row: &RuntimeActivityRow) -> String {

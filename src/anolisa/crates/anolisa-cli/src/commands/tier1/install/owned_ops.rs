@@ -23,7 +23,7 @@ use anolisa_core::domain::{
 use anolisa_core::install_runner::{InstallRunner, InstalledFile, PreparedFileSet};
 use anolisa_core::lifecycle::prepare_backup;
 use anolisa_core::owned_executor::{OwnedOpError, OwnedOps, StepSuccess};
-use anolisa_core::path_safety::validate_owned_path;
+use anolisa_core::path_safety::{lexical_roots, validate_owned_path};
 use anolisa_core::planner::{HookKind, RecordWrite};
 use anolisa_core::state::{FileOwner, ObjectKind, OwnedFile, OwnedFileKind, ServiceRef};
 use anolisa_core::state_store::StateStore;
@@ -588,6 +588,7 @@ impl OwnedOps for RawTeardownOps<'_> {
     /// on the legitimate files.
     fn remove_owned_files(&mut self) -> Result<StepSuccess, OwnedOpError> {
         let mut warnings = Vec::new();
+        let mut removed_parents: Vec<PathBuf> = Vec::new();
         for file in &self.prior.files {
             if let Err(boundary) = validate_owned_path(self.layout, &file.path) {
                 warnings.push(format!(
@@ -606,7 +607,11 @@ impl OwnedOps for RawTeardownOps<'_> {
                     )));
                 }
             }
+            if let Some(parent) = file.path.parent() {
+                removed_parents.push(parent.to_path_buf());
+            }
         }
+        prune_emptied_dirs(self.layout, removed_parents);
         Ok(StepSuccess::with_warnings(warnings))
     }
 
@@ -650,6 +655,51 @@ impl OwnedOps for RawTeardownOps<'_> {
 
     fn restore_backup(&mut self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+/// Best-effort removal of directories a file teardown emptied, walking
+/// each start directory upward. Without this, an uninstall leaves a bare
+/// directory skeleton behind, and a skeleton under one scope's datadir
+/// (e.g. `/usr/local/share/anolisa/extensions/<component>/`) can shadow
+/// adapter source probing for the same component in another scope.
+///
+/// Safety: `fs::remove_dir` refuses non-empty directories, and the climb
+/// stops at the *deepest* owned root containing the start path. The
+/// boundary must be per-path, not "parent is owned": owned roots can nest
+/// (user mode places `libexec_dir` inside `lib_dir`), so a parent check
+/// alone would delete the inner root itself. Errors are swallowed:
+/// pruning is cosmetic and must never fail an otherwise-successful
+/// teardown.
+fn prune_emptied_dirs(layout: &FsLayout, start_dirs: Vec<PathBuf>) {
+    let roots = lexical_roots(layout);
+    for start in start_dirs {
+        // Deepest owned root containing this path — the hard boundary
+        // that must survive the climb.
+        let Some(boundary) = roots
+            .iter()
+            .filter(|root| start.starts_with(root))
+            .max_by_key(|root| root.components().count())
+        else {
+            continue;
+        };
+        let mut dir = start;
+        while dir != **boundary {
+            if validate_owned_path(layout, &dir).is_err() {
+                break;
+            }
+            match fs::remove_dir(&dir) {
+                Ok(()) => {}
+                // Already pruned via another file's parent chain — keep
+                // climbing so shared ancestors are still considered.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                // Non-empty or unremovable: everything above is also
+                // non-empty, stop here.
+                Err(_) => break,
+            }
+            let Some(parent) = dir.parent() else { break };
+            dir = parent.to_path_buf();
+        }
     }
 }
 
@@ -1307,4 +1357,92 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
         s
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Teardown pruning must remove the directory chain the file removal
+    /// emptied (so no skeleton is left to shadow adapter source probing in
+    /// another scope), while keeping the ANOLISA-owned roots and any
+    /// directory that still has contents.
+    #[test]
+    fn prune_emptied_dirs_removes_skeleton_but_keeps_roots_and_nonempty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let datadir = layout.datadir.clone();
+
+        // Emptied chain: datadir/extensions/tokenless/hooks (files removed).
+        let emptied = datadir.join("extensions").join("tokenless").join("hooks");
+        fs::create_dir_all(&emptied).expect("emptied chain");
+        // Sibling that must survive because it still holds a file.
+        let kept = datadir.join("extensions").join("other");
+        fs::create_dir_all(&kept).expect("kept dir");
+        fs::write(kept.join("keep.txt"), b"keep").expect("keep file");
+
+        prune_emptied_dirs(&layout, vec![emptied.clone()]);
+
+        assert!(!emptied.exists(), "emptied chain must be pruned");
+        assert!(
+            !datadir.join("extensions").join("tokenless").exists(),
+            "emptied parent must be pruned"
+        );
+        assert!(
+            datadir.join("extensions").exists(),
+            "shared ancestor with surviving content must stay"
+        );
+        assert!(
+            kept.join("keep.txt").is_file(),
+            "unrelated content must stay"
+        );
+        assert!(datadir.exists(), "the owned datadir root itself must stay");
+    }
+
+    /// The owned root itself is never pruned, even when the teardown
+    /// emptied it completely: it is the per-path climb boundary.
+    #[test]
+    fn prune_emptied_dirs_never_removes_owned_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let datadir = layout.datadir.clone();
+        let only = datadir.join("components").join("tokenless");
+        fs::create_dir_all(&only).expect("chain");
+
+        prune_emptied_dirs(&layout, vec![only]);
+
+        assert!(
+            datadir.exists(),
+            "datadir root must survive even when fully emptied"
+        );
+        assert!(!datadir.join("components").exists(), "chain below pruned");
+    }
+
+    /// Owned roots can nest: the user layout places `libexec_dir` inside
+    /// `lib_dir`. Pruning the last libexec component must stop at
+    /// `libexec_dir` itself — a parent-is-owned check alone would climb
+    /// through it because `lib_dir` is also owned.
+    #[test]
+    fn prune_emptied_dirs_keeps_nested_user_mode_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).expect("home");
+        let layout = FsLayout::user(home);
+        assert!(
+            layout.libexec_dir.starts_with(&layout.lib_dir),
+            "precondition: user-mode libexec nests inside lib"
+        );
+
+        let emptied = layout.libexec_dir.join("tokenless");
+        fs::create_dir_all(&emptied).expect("chain");
+
+        prune_emptied_dirs(&layout, vec![emptied.clone()]);
+
+        assert!(!emptied.exists(), "component dir must be pruned");
+        assert!(
+            layout.libexec_dir.exists(),
+            "nested libexec root must survive the climb"
+        );
+        assert!(layout.lib_dir.exists(), "outer lib root must survive");
+    }
 }

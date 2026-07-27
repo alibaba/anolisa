@@ -16,16 +16,20 @@ pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
     Auth,
+    Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Mode(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
+    #[allow(dead_code)]
     Info(SlashInfoCommand),
     Health,
+    Status,
+    Stats(&'a str),
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
-    Extensions(Option<&'a str>, Option<&'a str>),
+    Extensions(&'a str),
     Skills(Option<&'a str>, Option<&'a str>),
     Session(&'a str),
     Recommendations(Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -44,7 +48,12 @@ impl<'a> SlashCommand<'a> {
         let Some(token) = parts.next() else {
             return Ok(None);
         };
-        if parser_owned_command(token) && input.contains(['\'', '"']) {
+        // Most parser-owned commands split arguments on whitespace, so quotes
+        // would silently produce wrong tokens. `/extensions` is the exception:
+        // it forwards its raw argument string to a quote-aware tokenizer.
+        let supports_quoted_arguments = token == "/extensions";
+        if parser_owned_command(token) && !supports_quoted_arguments && input.contains(['\'', '"'])
+        {
             return Err(SlashParseError::QuotedArgumentsUnsupported);
         }
         Ok(match token {
@@ -67,7 +76,9 @@ impl<'a> SlashCommand<'a> {
                 Some(Self::Removed(RemovedCommand::ApprovalDecision(token)))
             }
             "/answer" => Some(Self::Removed(RemovedCommand::QuestionAnswer)),
-            "/audit" => Some(Self::Info(SlashInfoCommand::Audit)),
+            "/audit" => Some(Self::Audit(
+                input.strip_prefix("/audit").unwrap_or_default().trim(),
+            )),
             "/config" => {
                 let sub = parts.next();
                 let value = parts.next();
@@ -75,10 +86,16 @@ impl<'a> SlashCommand<'a> {
             }
             "/debug" => Some(Self::Debug(parts.next())),
             "/health" => Some(Self::Health),
+            "/status" | "/about" => Some(Self::Status),
+            "/stats" => Some(Self::Stats(
+                input.strip_prefix("/stats").unwrap_or_default().trim(),
+            )),
             "/extensions" => {
-                let sub = parts.next();
-                let arg = parts.next();
-                Some(Self::Extensions(sub, arg))
+                let args = input
+                    .strip_prefix("/extensions")
+                    .expect("matched slash command prefix")
+                    .trim();
+                Some(Self::Extensions(args))
             }
             "/skills" => {
                 let sub = parts.next();
@@ -87,6 +104,13 @@ impl<'a> SlashCommand<'a> {
             }
             "/session" => Some(Self::Session(
                 input.strip_prefix("/session").unwrap_or_default().trim(),
+            )),
+            // Compatibility alias: `/new` routes to the same session parser and
+            // dispatch as `/session new`. Stripping only the leading slash
+            // keeps the `new` keyword (and any extra tokens) in the arguments,
+            // so `/new extra` renders usage exactly like `/session new extra`.
+            "/new" => Some(Self::Session(
+                input.strip_prefix('/').unwrap_or_default().trim(),
             )),
             "/resume" => Some(Self::Session(
                 input.strip_prefix("/resume").unwrap_or_default().trim(),
@@ -127,9 +151,13 @@ fn parser_owned_command(token: &str) -> bool {
             | "/config"
             | "/debug"
             | "/health"
+            | "/status"
+            | "/about"
+            | "/stats"
             | "/extensions"
             | "/skills"
             | "/session"
+            | "/new"
             | "/resume"
             | "/recommendations"
             | "/"
@@ -138,6 +166,7 @@ fn parser_owned_command(token: &str) -> bool {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SlashInfoCommand {
+    #[allow(dead_code)]
     Audit,
     Config,
 }
@@ -188,6 +217,23 @@ mod tests {
     }
 
     #[test]
+    fn new_alias_and_session_new_share_the_same_session_parser_path() {
+        for command in ["/session new", "/new"] {
+            match SlashCommand::parse(command) {
+                Ok(Some(SlashCommand::Session(arguments))) => assert_eq!(arguments, "new"),
+                _ => panic!("{command} did not parse as the session `new` path"),
+            }
+        }
+        // Extra tokens must survive so the session grammar can render usage.
+        for command in ["/session new extra", "/new extra"] {
+            match SlashCommand::parse(command) {
+                Ok(Some(SlashCommand::Session(arguments))) => assert_eq!(arguments, "new extra"),
+                _ => panic!("{command} dropped its extra argument"),
+            }
+        }
+    }
+
+    #[test]
     fn recommendations_preserves_subcommand_and_rejectable_extra_arguments() {
         match SlashCommand::parse("/recommendations on unexpected extra") {
             Ok(Some(SlashCommand::Recommendations(sub, arg, extra))) => {
@@ -200,12 +246,27 @@ mod tests {
     }
 
     #[test]
+    fn status_about_and_stats_parse_as_read_only_commands() {
+        for command in ["/status", "/about"] {
+            assert!(
+                matches!(SlashCommand::parse(command), Ok(Some(SlashCommand::Status))),
+                "{command}"
+            );
+        }
+        match SlashCommand::parse("/stats tools") {
+            Ok(Some(SlashCommand::Stats(arguments))) => assert_eq!(arguments, "tools"),
+            _ => panic!("/stats tools did not parse as stats"),
+        }
+    }
+
+    #[test]
     fn quoted_arguments_are_rejected_for_parser_owned_commands() {
         for command in [
             "/mode approval \"trust confirm\"",
             "/mode approval 'trust confirm'",
             "/config language \"en US\"",
             "/health \"quick\"",
+            "/stats \"model\"",
             "/recommendations \"on\"",
         ] {
             assert!(
@@ -215,6 +276,16 @@ mod tests {
                 ),
                 "{command}"
             );
+        }
+    }
+
+    #[test]
+    fn extensions_forwards_quoted_arguments_to_its_own_tokenizer() {
+        match SlashCommand::parse(r#"/extensions new "my extension" --template mcp"#) {
+            Ok(Some(SlashCommand::Extensions(arguments))) => {
+                assert_eq!(arguments, r#"new "my extension" --template mcp"#);
+            }
+            _ => panic!("quoted /extensions argument was not forwarded"),
         }
     }
 

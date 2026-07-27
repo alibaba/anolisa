@@ -140,6 +140,22 @@ impl GenAIBuilder {
             &response_id,
         );
 
+        // 若本次响应的 finish_reason 表明本轮对话已经结束（非 tool_calls/tool_use 等
+        // 表示流程尚在继续的取值），显式驱逐 (agent_name, pid, last_user_raw) 对应的
+        // conversation anchor。避免固定模板文本（如系统 recap nudge）被复用于不同真实
+        // 对话轮次时，因永久锚定而得到相同的 conversation_id（即下游的 turn.id），
+        // 进而导致下游按 turn.id 分组的 step 计数逻辑误将新轮对话归入旧轮。
+        if let Some(reason) = response
+            .messages
+            .last()
+            .and_then(|m| m.finish_reason.as_deref())
+        {
+            if Self::is_turn_terminal_finish_reason(reason) {
+                self.id_resolver
+                    .finish_conversation(&agent_name, pid_i32, &last_user_raw);
+            }
+        }
+
         // Extract error message from response body when status_code >= 400
         let error = if http.status_code >= 400 {
             http.response_body.as_ref().and_then(|body| {
@@ -271,6 +287,19 @@ impl GenAIBuilder {
                 meta
             },
         })
+    }
+
+    /// 判断 `finish_reason` 是否意味着本轮对话已经结束。
+    ///
+    /// `tool_calls`（OpenAI）/`tool_use`（Anthropic）/`function_call`（旧式 OpenAI）
+    /// 表示模型请求了工具调用，对话仍将在同一轮内继续；其余取值（`stop` /
+    /// `end_turn` / `length` / `max_tokens` / `content_filter` / `stop_sequence` 等）均意味着
+    /// 本轮对话已经得到最终回复，应视为轮结束。
+    fn is_turn_terminal_finish_reason(reason: &str) -> bool {
+        !matches!(
+            reason.to_ascii_lowercase().as_str(),
+            "tool_calls" | "tool_use" | "function_call"
+        )
     }
 
     /// Build LLMRequest from parsed message or HTTP record
@@ -551,13 +580,10 @@ impl GenAIBuilder {
                                 crate::analyzer::message::AnthropicContentBlock::Thinking {
                                     thinking,
                                     ..
-                                } => {
-                                    // Anthropic thinking: convert to MessagePart::Reasoning
-                                    if !thinking.is_empty() {
-                                        parts.push(MessagePart::Reasoning {
-                                            content: thinking.clone(),
-                                        });
-                                    }
+                                } if !thinking.is_empty() => {
+                                    parts.push(MessagePart::Reasoning {
+                                        content: thinking.clone(),
+                                    });
                                 }
                                 _ => {}
                             }

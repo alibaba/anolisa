@@ -162,6 +162,51 @@ fn raw_cli_fresh_home_initializes_recommendation_store() {
 }
 
 #[test]
+fn raw_cli_recommendations_off_renders_insight_cross_reference_hint() {
+    let home = temp_shell_home("recommendation-off-insight-hint");
+    let home_guard = TestDirectoryGuard::new(home.clone());
+    let home_str = home.to_string_lossy().to_string();
+    // Drive the real slash pipeline: off -> on -> clear. The cross-reference line
+    // must be rendered by the successful `off` result and by nothing else, so it
+    // catches a regression that drops the production wiring (a helper-only test
+    // would stay green). `on` and `clear` succeed but must not carry the hint.
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_HEALTH_SCAN", "disabled"),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("COSH_RECOMMENDATIONS_ENABLED", "1"),
+        ],
+        &home,
+        &[
+            (
+                "Prompt recommendations are on; the current AI uses recent Shell and Agent activity.",
+                b"/recommendations off\n",
+            ),
+            (
+                "Prompt recommendations are off and local recommendation data was cleared.",
+                b"/recommendations on\n",
+            ),
+            ("Prompt recommendations are on.", b"/recommendations clear\n"),
+            ("Local recommendation data was cleared.", b"exit\n"),
+        ],
+    );
+
+    let hint = "Command failure insights are controlled separately with /mode analysis manual.";
+    assert!(
+        output
+            .contains("Prompt recommendations are off and local recommendation data was cleared."),
+        "{output}"
+    );
+    // Rendered exactly once — emitted by `off`, withheld from `on` and `clear`.
+    assert_eq!(output.matches(hint).count(), 1, "{output}");
+    home_guard.remove();
+}
+
+#[test]
 fn raw_cli_selects_recommendation_without_executing_it() {
     let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "fake",

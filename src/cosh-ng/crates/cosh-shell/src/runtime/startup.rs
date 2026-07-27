@@ -346,7 +346,7 @@ fn passthrough_shell_args(args: &[String]) -> Vec<String> {
 }
 
 pub(crate) fn print_usage_help() {
-    eprintln!(
+    println!(
         "Usage: cosh-shell [OPTIONS]\n\
          \n\
          AI-augmented interactive shell wrapper.\n\

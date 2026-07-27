@@ -1,5 +1,6 @@
 use crate::runtime::mode::render_mode_command;
 use crate::runtime::prelude::*;
+use crate::slash::audit::render_audit_command;
 use crate::slash::config::render_config_command;
 use crate::slash::debug::render_debug_command;
 use crate::slash::extensions::render_extensions_command;
@@ -12,6 +13,7 @@ use crate::slash::parser::SlashCommand;
 use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
 use crate::slash::skills::render_skills_command;
+use crate::slash::status::{render_stats_command, render_status_command};
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
@@ -27,6 +29,10 @@ pub(super) fn render_slash_command<W: Write>(
         SlashCommand::Auth => {
             crate::auth::runtime::trigger_auth_from_slash(adapter, state, output)?;
             Ok(false)
+        }
+        SlashCommand::Audit(arguments) => {
+            render_audit_command(arguments, state, output)?;
+            Ok(true)
         }
         SlashCommand::Help => {
             render_help(state, output)?;
@@ -60,8 +66,8 @@ pub(super) fn render_slash_command<W: Write>(
             render_unknown(command, state, output)?;
             Ok(true)
         }
-        SlashCommand::Extensions(sub, arg) => {
-            render_extensions_command(sub, arg, adapter, state, output)?;
+        SlashCommand::Extensions(args) => {
+            render_extensions_command(args, adapter, state, output)?;
             Ok(true)
         }
         SlashCommand::Skills(sub, arg) => {
@@ -77,6 +83,14 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Health => {
             render_health_command(state, shell_cwd, output)?;
+            Ok(true)
+        }
+        SlashCommand::Status => {
+            render_status_command(adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Stats(arguments) => {
+            render_stats_command(arguments, adapter, state, output)?;
             Ok(true)
         }
     }

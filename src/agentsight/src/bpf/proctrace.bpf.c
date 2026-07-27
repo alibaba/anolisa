@@ -41,25 +41,17 @@ struct
     __type(value, struct proc_event_t);
 } event_scratch SEC(".maps");
 
-// Tracepoint for execve - captures new process execution
-// For syscall tracepoints, we need to use the raw tracepoint format
-struct sys_enter_execve_args
-{
-    unsigned short common_type;
-    unsigned char common_flags;
-    unsigned char common_preempt_count;
-    int common_pid;
-    int __syscall_nr;
-    const char *filename;
-    const char *const *argv;
-    const char *const *envp;
-};
-
+// Tracepoint for execve - captures new process execution.
+// Use the kernel's `struct syscall_trace_enter` (with `int nr`) rather than
+// `trace_event_raw_sys_enter`: on PREEMPT_LAZY kernels the widened
+// `struct trace_entry` shifts the latter's CO-RE offsets past the real
+// tracepoint record and the attach fails with EACCES. Syscall args are read
+// from ctx->args[] (args[0]=filename, args[1]=argv).
 SEC("tp/syscalls/sys_enter_execve")
-int trace_execve_enter(struct sys_enter_execve_args *args)
+int trace_execve_enter(struct syscall_trace_enter *ctx)
 {
-    const char *filename = args->filename;
-    const char *const *argv = args->argv;
+    const char *filename = (const char *)ctx->args[0];
+    const char *const *argv = (const char *const *)ctx->args[1];
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
     u32 tid = (u32)pid_tgid;
@@ -172,26 +164,18 @@ store:
     return 0;
 }
 
-// Tracepoint for execve exit - only submit event if execve succeeded
-struct sys_exit_execve_args
-{
-    unsigned short common_type;
-    unsigned char common_flags;
-    unsigned char common_preempt_count;
-    int common_pid;
-    int __syscall_nr;
-    long ret;
-};
+// Tracepoint for execve exit - only submit event if execve succeeded.
+// Uses `struct syscall_trace_exit` (see trace_execve_enter for why).
 
 // Maximum size for exec event (header + exec_data + full args_buf)
 #define MAX_EXEC_EVENT_SIZE (sizeof(struct proc_event_header) + sizeof(struct proc_exec_data) + LAST_ARG)
 
 SEC("tp/syscalls/sys_exit_execve")
-int trace_execve_exit(struct sys_exit_execve_args *args)
+int trace_execve_exit(struct syscall_trace_exit *ctx)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
-    long ret = args->ret;
+    long ret = ctx->ret;
     u64 cg_id = get_cgroup_id_compat();
 
     // Look up pending event

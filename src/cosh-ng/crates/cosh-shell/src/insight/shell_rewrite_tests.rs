@@ -45,6 +45,7 @@ fn resolve_block_with_diagnostic(
             terminal_output_bytes: 0,
         },
         shell_environment_generation: Some(1),
+        audit_identity: None,
     };
 
     resolve_shell_rewrite(

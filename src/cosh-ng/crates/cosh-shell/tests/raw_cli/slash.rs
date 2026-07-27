@@ -2,32 +2,55 @@ use super::*;
 
 #[test]
 fn raw_cli_help_renders_slash_command_reference() {
-    let output = run_raw_cli_with_input("fake", "/help\necho after-help\nexit\n");
+    // Pin the terminal type: the rich-border assertions below depend on the
+    // non-plain render path, which TERM=dumb hosts would downgrade.
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/help\necho after-help\nexit\n",
+        &[("TERM", "xterm-256color")],
+    );
+    let normalized = strip_ansi_escape(&output);
 
-    assert!(output.contains("Slash commands"), "{output}");
-    assert!(output.contains("Config"), "{output}");
-    assert!(output.contains("Modes"), "{output}");
-    assert!(output.contains("Hooks"), "{output}");
-    assert!(output.contains("Registry"), "{output}");
-    assert!(!output.contains("Inspect"), "{output}");
-    assert!(!output.contains("Recommendations"), "{output}");
+    assert!(normalized.contains("Slash commands"), "{output}");
+    // Group headers sit at column zero inside the panel.
+    assert!(normalized.contains("│ Config"), "{output}");
+    assert!(normalized.contains("│ Status"), "{output}");
+    assert!(normalized.contains("│ Modes"), "{output}");
+    assert!(normalized.contains("│ Hooks"), "{output}");
+    assert!(normalized.contains("│ Registry"), "{output}");
+    // Entries keep a two-space indent below their group header.
+    assert!(normalized.contains("│   /config language"), "{output}");
+    // Scope tags are right-aligned against the panel border.
+    assert!(normalized.contains("[config] │"), "{output}");
+    // Summaries sit on their own indented line.
     assert!(
-        output.contains("/config language [auto|en-US|zh-CN]"),
+        normalized.contains("│       configure UI language"),
+        "{output}"
+    );
+    assert!(!normalized.contains("Inspect"), "{output}");
+    assert!(!normalized.contains("Recommendations"), "{output}");
+    assert!(
+        normalized.contains("/config language [auto|en-US|zh-CN]"),
+        "{output}"
+    );
+    assert!(normalized.contains("/status"), "{output}");
+    assert!(normalized.contains("/stats [model|tools]"), "{output}");
+    assert!(
+        normalized.contains("/mode approval [recommend|auto|trust]"),
         "{output}"
     );
     assert!(
-        output.contains("/mode approval [recommend|auto|trust]"),
+        normalized.contains("/mode analysis [smart|auto|manual]"),
         "{output}"
     );
     assert!(
-        output.contains("/mode analysis [smart|auto|manual]"),
+        normalized.contains("/extensions <command> [options]"),
         "{output}"
     );
     assert!(
-        output.contains("/extensions [list|detail] [name]"),
+        normalized.contains("/skills [list|detail] [name]"),
         "{output}"
     );
-    assert!(output.contains("/skills [list|detail] [name]"), "{output}");
     assert!(!output.contains("/agent"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(!output.contains("/cancel"), "{output}");
@@ -50,6 +73,77 @@ fn raw_cli_help_renders_slash_command_reference() {
     assert!(output.contains("Mode: auto."), "{output}");
     assert!(output.contains("after-help"), "{output}");
     assert!(!output.contains("bash: /help"), "{output}");
+}
+
+#[test]
+fn raw_cli_status_about_and_stats_render_without_reaching_bash() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/status\n\
+         /about\n\
+         /stats\n\
+         /stats model\n\
+         /stats tools\n\
+         echo after-status-queries\n\
+         exit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    assert!(output.contains("cosh-shell:"), "{output}");
+    assert!(output.contains("Backend: fake"), "{output}");
+    assert!(output.contains("Provider: fake (test)"), "{output}");
+    assert!(output.contains("Model: fake"), "{output}");
+    assert!(output.contains("Session stats"), "{output}");
+    assert!(output.contains("Model stats"), "{output}");
+    assert!(output.contains("Tool stats"), "{output}");
+    assert!(
+        output.contains("No tool calls have been recorded in this session."),
+        "{output}"
+    );
+    assert!(output.contains("after-status-queries"), "{output}");
+    for command in ["/status", "/about", "/stats"] {
+        assert!(
+            !output.contains(&format!("bash: {command}:")),
+            "{command} reached bash: {output}"
+        );
+        assert!(
+            !output.contains(&format!("bash: {command}: No such file or directory")),
+            "{command} reached bash: {output}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_zsh_status_about_and_stats_render_without_reaching_zsh() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"/status\n".to_vec(), Duration::ZERO),
+            (b"/about\n".to_vec(), Duration::from_millis(100)),
+            (b"/stats tools\n".to_vec(), Duration::from_millis(100)),
+            (
+                b"echo after-zsh-status-queries\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+
+    assert!(output.contains("Backend: fake"), "{output}");
+    assert!(output.contains("Tool stats"), "{output}");
+    assert!(output.contains("after-zsh-status-queries"), "{output}");
+    for command in ["/status", "/about", "/stats"] {
+        assert!(
+            !output.contains(&format!("zsh: no such file or directory: {command}")),
+            "{command} reached zsh: {output}"
+        );
+    }
 }
 
 #[test]
@@ -93,7 +187,6 @@ fn raw_cli_informational_slash_commands_render_feedback() {
         "fake",
         "/extensions\n\
          /config\n\
-         /audit\n\
          echo after-info-slash\n\
          exit\n",
     );
@@ -107,11 +200,6 @@ fn raw_cli_informational_slash_commands_render_feedback() {
     assert!(output.contains("language:"), "{output}");
     assert!(output.contains("debug activity: off"), "{output}");
     assert!(output.contains("Use /config language"), "{output}");
-    assert!(output.contains("Audit"), "{output}");
-    assert!(
-        output.contains("Approval decisions are available with Details actions"),
-        "{output}"
-    );
     assert!(output.contains("after-info-slash"), "{output}");
     assert!(!output.contains("bash: /skill"), "{output}");
     assert!(!output.contains("bash: /config"), "{output}");
@@ -171,11 +259,12 @@ fn raw_cli_slash_cards_wrap_long_text_and_restore_prompt() {
     );
 
     assert!(output.contains("Slash commands"), "{output}");
+    let normalized = strip_ansi_escape(&output);
     assert!(
-        output.contains("/mode approval [recommend|auto|trust]"),
+        normalized.contains("/mode approval [recommend|auto|trust]"),
         "{output}"
     );
-    assert!(output.contains("change approval mode"), "{output}");
+    assert!(normalized.contains("change approval mode"), "{output}");
     assert!(output.contains("after-long-slash"), "{output}");
     assert_agent_block_width(&output, 72);
     assert!(!output.contains("[ask|auto]alias"), "{output}");
@@ -206,7 +295,7 @@ fn raw_cli_zsh_shell_arg_intercepts_fragmented_slash() {
 
     assert!(output.contains("Slash commands"), "{output}");
     assert!(
-        output.contains("/mode approval [recommend|auto|trust]"),
+        strip_ansi_escape(&output).contains("/mode approval [recommend|auto|trust]"),
         "{output}"
     );
     assert!(output.contains("after-zsh-slash"), "{output}");

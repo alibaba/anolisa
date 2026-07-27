@@ -7,6 +7,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HookAutoAnalyzedFooter => "Agent analysis is starting.",
         MessageId::InsightLabel => "Insight: ",
         MessageId::InsightCommandTypoSummary => "A likely command typo was found",
+        MessageId::InsightCommandNotFoundSummary => "The previous input did not run successfully",
+        MessageId::InsightCommandNotFoundPrompt => {
+            "Analyze and handle the previous input that did not run successfully"
+        }
         MessageId::InsightPermissionDeniedSummary => "The command was denied by permissions",
         MessageId::InsightBuildOrTestFailureSummary => "The build or test command failed",
         MessageId::InsightRuntimeExceptionSummary => {

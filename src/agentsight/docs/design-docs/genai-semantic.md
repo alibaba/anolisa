@@ -22,7 +22,7 @@ graph TB
 
     subgraph ATIF["ATIF Export"]
         GSE -->|query from SQLite| CONV[ATIF Converter]
-        CONV --> ATIF_DOC[AtifDocument v1.6]
+        CONV --> ATIF_DOC[AtifTrajectory v1.7]
     end
 ```
 
@@ -133,12 +133,12 @@ pub trait GenAIExporter: Send + Sync {
 
 ## ATIF Export
 
-ATIF (Agent Trajectory Interchange Format) v1.6 is a standardized Agent trajectory format, independent from the GenAI semantic layer:
+ATIF (Agent Trajectory Interchange Format) v1.7 is a standardized Agent trajectory format, independent from the GenAI semantic layer. The data model lives in the shared `agentsight-atif` crate, so this export and the collector-ingested trajectories emit the same schema:
 
 ```mermaid
 graph LR
     DB[(SQLite genai_events)] --> CONV[ATIF Converter]
-    CONV --> DOC[AtifDocument]
+    CONV --> DOC[AtifTrajectory]
     DOC --> API[/api/export/atif/...]
 ```
 
@@ -146,9 +146,9 @@ graph LR
 - **By session**: `/api/export/atif/session/{session_id}`
 - **By conversation**: `/api/export/atif/conversation/{conversation_id}`
 
-**ATIF structure**: `AtifAgent` → `Vec<AtifStep>` → `AtifToolCall` + `AtifObservation`
+**ATIF structure**: `Agent` → `Vec<Step>` → `ToolCall` + `Observation`
 
-**Source**: `src/atif/converter.rs`, `src/atif/schema.rs`
+**Source**: `src/atif/converter.rs` (conversion), `crates/agentsight-atif/src/lib.rs` (schema)
 
 ## Conversation Grader
 

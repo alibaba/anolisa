@@ -1,7 +1,7 @@
 //! Unified component state management.
 //!
-//! Manages persistent enable/disable state for extensions, hooks, and skills
-//! via JSON files in `~/.copilot-shell/states/`.
+//! Manages legacy component disabled sets for hooks and skills. Extension state
+//! uses the versioned store in `crate::extension::state`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -17,7 +17,7 @@ pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 /// Sub-directory under `~/.copilot-shell/` containing state files.
 const STATES_DIR: &str = "states";
 
-/// State file for extension enable/disable status.
+/// State file shared with the versioned extension state owner.
 pub const EXTENSIONS_STATE: &str = "extensions.json";
 /// State file for hook enable/disable status.
 pub const HOOKS_STATE: &str = "hooks.json";

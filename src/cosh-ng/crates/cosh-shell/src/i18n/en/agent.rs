@@ -34,6 +34,14 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentStatusCompleted => "completed",
         MessageId::AgentStatusFailed => "failed",
         MessageId::AgentStatusCancelled => "cancelled",
+        MessageId::AgentQuestionUnavailableTitle => "Agent question unavailable",
+        MessageId::AgentQuestionUnavailableBody => {
+            "The Agent returned an incomplete question. Please retry."
+        }
+        MessageId::AgentAnswerDeliveryUnknownTitle => "Agent answer delivery uncertain",
+        MessageId::AgentAnswerDeliveryUnknownBody => {
+            "The Agent connection closed while sending your answer. Delivery could not be confirmed."
+        }
         MessageId::AgentStatusRunningApprovedProviderTool => "running approved provider tool",
         MessageId::AgentProviderTimeoutDroppedQueuedBody => {
             "{dropped} queued requests skipped after provider timeout"

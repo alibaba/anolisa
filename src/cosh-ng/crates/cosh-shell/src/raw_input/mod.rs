@@ -3,13 +3,16 @@ use crate::input::InterceptReason;
 mod capture_bridge;
 mod card_capture;
 mod event_parser;
+mod generation;
 mod mode;
 mod pty;
 mod relay;
 mod relay_action;
 mod spawn;
 
-pub(crate) use mode::{update_input_mode, RawInputMode};
+pub(crate) use event_parser::redact_extension_setting_value;
+pub(crate) use generation::UserPtyInputGeneration;
+pub(crate) use mode::{update_input_mode, update_locked_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 pub(crate) use pty::{
     set_pty_winsize, signal_foreground_process_group, signal_process_group, write_all_pty,
@@ -19,13 +22,22 @@ pub(crate) use spawn::{spawn_raw_action_relay, spawn_raw_input_relay};
 
 pub(super) const CTRL_C: u8 = 0x03;
 pub(super) const CTRL_U: u8 = 0x15;
+pub(super) const ESC: u8 = 0x1b;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawInputEvent {
     ShellInputActivity {
         empty: bool,
     },
+    /// User bytes the relay wrote to the PTY: the write generation plus how
+    /// many line submissions (accept-line CR/LF) the write carried. Anchors
+    /// prompt replay state so real user input expires stale replays.
+    PtyUserWrite {
+        generation: u64,
+        line_submits: usize,
+    },
     CtrlC,
+    Esc,
     CandidateRedraw {
         input: Vec<u8>,
         hint: Option<String>,
@@ -45,18 +57,40 @@ pub(crate) enum RawInputEvent {
     },
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
+    CaptureSubmitted {
+        kind: &'static str,
+        target_id: String,
+        generation: u64,
+    },
+    CaptureDrained {
+        generation: u64,
+    },
+    CaptureExpired {
+        generation: u64,
+    },
+    CaptureOverflow {
+        generation: u64,
+    },
     CardFocus(String, usize),
     CardToggle(String, usize),
     CardInput(String, String),
     CardSecretInput(String, String),
     CardApprove(String),
+    CardApproveTurn(String),
     CardAlwaysTrust(String),
     CardDeny(String),
     CardDetails(String),
     CardCancel(String),
     CardAnswer(String),
+    QuestionSubmitAttempt(String),
     CardSecretAnswer(String),
     QuestionCancel(String),
+    /// Ctrl+C on a question capture: abandon the whole prompt.
+    ///
+    /// Distinct from [`RawInputEvent::QuestionCancel`] (ESC) only so a multi-step prompt can let
+    /// ESC step back while Ctrl+C keeps its usual meaning. Panels with a single step treat both
+    /// identically.
+    QuestionAbort(String),
     EvidenceSend(String),
     EvidenceIgnore(String),
     EvidenceCancel(String),
@@ -81,7 +115,8 @@ pub(crate) enum RawInputEvent {
 mod tests {
     use super::event_parser::{
         candidate_inline_hint, native_candidate_should_return_to_shell,
-        starts_native_intercept_candidate, CandidateLineBuffer, NativeLineState,
+        redact_extension_setting_value, starts_native_intercept_candidate, CandidateLineBuffer,
+        NativeLineState,
     };
     use super::relay::ExplicitExitTracker;
     use crate::input::InputClassifier;
@@ -99,6 +134,34 @@ mod tests {
             candidate_inline_hint("/sk"),
             Some("/skills [list|detail] [name]".to_string())
         );
+    }
+
+    #[test]
+    fn extension_setting_values_are_redacted_from_candidate_echo() {
+        let command = b"/extensions settings set fixture token secret-value --scope user";
+        let redacted = redact_extension_setting_value(command);
+        let shown = String::from_utf8(redacted).expect("redacted command remains UTF-8");
+        assert_eq!(
+            shown,
+            "/extensions settings set fixture token ************ ******* ****"
+        );
+        assert!(!shown.contains("secret-value"));
+    }
+
+    #[test]
+    fn extension_setting_value_is_redacted_from_first_typed_byte() {
+        let prefix = b"/extensions settings set fixture token ";
+        assert_eq!(redact_extension_setting_value(prefix), prefix);
+        assert_eq!(
+            redact_extension_setting_value(b"/extensions settings set fixture token s"),
+            b"/extensions settings set fixture token *"
+        );
+    }
+
+    #[test]
+    fn other_slash_values_are_not_redacted() {
+        let command = b"/extensions settings get fixture token";
+        assert_eq!(redact_extension_setting_value(command), command);
     }
 
     #[test]

@@ -87,12 +87,15 @@ User input in the shell is classified into the following types:
 | `/extensions [list\|enable\|disable] [name]` | Manage extensions |
 | `/skills [list\|enable\|disable] [name]` | Manage skills |
 | `/session [status\|list\|resume <id>\|clear ...]` | Manage provider conversations |
+| `/session compact [status\|cancel]` | Start, inspect, or cancel background session compaction |
 | `/resume [id]` | Alias for the session picker or session selection |
 | `/debug [state\|events\|adapter]` | Debug information |
 | `/auth` | Trigger authentication flow |
 
 See [Session Recovery](session-recovery.md) for picker keys, workspace scoping,
-clear confirmation, and recoverable error behavior.
+clear confirmation, and recoverable error behavior. See
+[Session Compaction](session-compaction.md) for manual and automatic compaction
+semantics.
 
 ## Startup Flow
 

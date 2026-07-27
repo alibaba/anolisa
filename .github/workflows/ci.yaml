@@ -648,13 +648,13 @@ jobs:
       - name: Lint
         run: |
           cd src/agentsight
-          cargo clippy --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests with coverage
         run: |
           cd src/agentsight
-          cargo llvm-cov --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
+          cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs)'
 
       - name: Generate coverage summary
         if: always()
@@ -769,6 +769,11 @@ jobs:
         run: |
           cd src/tokenless
           cargo test --workspace -- --test-threads=1
+
+      - name: Run hook integration tests (Python)
+        run: |
+          cd src/tokenless
+          python3 tests/test_compress_response_hook.py
 
   # =========================================================================
   # Step 7: Test ws-ckpt
@@ -962,8 +967,42 @@ jobs:
   # =========================================================================
   # Step 11: Test cosh-ng (Rust workspace)
   # =========================================================================
+  # Split into three parallel jobs so the critical path stays within the
+  # five-minute budget: integration (the longest gate, keeps the historical
+  # "Test cosh-ng" check name), fast checks (fmt/clippy/audits/fast gate,
+  # which repeats the audits run-test-gates.sh already performs), and the
+  # release build (no dependency on the test gates).
   test-cosh-ng:
     name: Test cosh-ng
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
+
+      - name: Run process and PTY integration tests
+        env:
+          # Raw CLI PTY tests are wait-bound, not CPU-bound; probe a wider
+          # shared gate on CI runners. Revert this env to fall back to the
+          # in-tree default (8) if timing flakes regress.
+          COSH_RAW_CLI_TEST_PARALLELISM: '16'
+        run: |
+          cd src/cosh-ng
+          scripts/run-test-gates.sh integration
+
+  test-cosh-ng-fast:
+    name: Test cosh-ng fast checks
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
@@ -981,7 +1020,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
 
       - name: Check formatting
         run: |
@@ -993,10 +1032,42 @@ jobs:
           cd src/cosh-ng
           cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run tests
+      - name: Validate stage E2E contract
         run: |
           cd src/cosh-ng
-          cargo test --workspace
+          python3 -m unittest discover -s e2e/tests -v
+          python3 e2e/run.py --plan --profile local
+
+      # run-test-gates.sh fast already runs the layout and inventory audits,
+      # so no separate audit step is needed here.
+      - name: Run fast regression tests
+        run: |
+          cd src/cosh-ng
+          scripts/run-test-gates.sh fast
+
+  test-cosh-ng-release-build:
+    name: Build cosh-ng release
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build release workspace
+        run: |
+          cd src/cosh-ng
+          cargo build --workspace --release --locked
 
   # =========================================================================
   # Step 12: Test ktuner (deterministic kernel-tuning engine)

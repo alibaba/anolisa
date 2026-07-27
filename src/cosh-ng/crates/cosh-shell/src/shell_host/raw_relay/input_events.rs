@@ -5,7 +5,7 @@ use std::sync::mpsc::Receiver;
 
 use crate::raw_input::RawInputEvent;
 
-use super::{clear_prompt_ghost_line, OscParser};
+use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker};
 
 pub(super) fn drain_raw_input_events<W: Write>(
     input_events: &Receiver<RawInputEvent>,
@@ -13,6 +13,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
     output: &mut W,
     prompt: &str,
     native_candidate_echoed_len: &mut usize,
+    prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
     let native_mode = prompt.is_empty();
     while let Ok(event) = input_events.try_recv() {
@@ -20,7 +21,12 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::ShellInputActivity { empty } => {
                 parser.push_shell_input_activity_event(empty)
             }
+            RawInputEvent::PtyUserWrite {
+                generation,
+                line_submits,
+            } => prompt_replay.observe_user_write(generation, line_submits),
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
+            RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::CandidateRedraw { input, hint } => {
                 if native_mode {
                     if input.len() >= *native_candidate_echoed_len {
@@ -93,6 +99,34 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 let session_id = parser.session_id.clone();
                 parser.push_intercept_event(&session_id, input, None, reason.as_str())
             }
+            RawInputEvent::CaptureSubmitted {
+                kind,
+                target_id,
+                generation,
+            } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Submitted,
+                generation,
+                Some(kind),
+                Some(&target_id),
+            ),
+            RawInputEvent::CaptureDrained { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Drained,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CaptureExpired { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Expired,
+                generation,
+                None,
+                None,
+            ),
+            RawInputEvent::CaptureOverflow { generation } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::Overflow,
+                generation,
+                None,
+                None,
+            ),
             RawInputEvent::CardFocus(id, selected) => {
                 parser.push_card_event("focus", &format!("{id}:{selected}"))
             }
@@ -106,15 +140,20 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 parser.push_secret_card_event("input", &format!("{id}:{text}"))
             }
             RawInputEvent::CardApprove(id) => parser.push_card_event("approve", &id),
+            RawInputEvent::CardApproveTurn(id) => parser.push_card_event("approve_turn", &id),
             RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
             RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
             RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
             RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
             RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
+            RawInputEvent::QuestionSubmitAttempt(id) => {
+                parser.push_card_event("question_submit_empty", &id)
+            }
             RawInputEvent::CardSecretAnswer(answer) => {
                 parser.push_secret_card_event("answer", &answer)
             }
             RawInputEvent::QuestionCancel(id) => parser.push_card_event("question_cancel", &id),
+            RawInputEvent::QuestionAbort(id) => parser.push_card_event("question_abort", &id),
             RawInputEvent::EvidenceSend(id) => parser.push_card_event("evidence_send", &id),
             RawInputEvent::EvidenceIgnore(id) => parser.push_card_event("evidence_ignore", &id),
             RawInputEvent::EvidenceCancel(id) => parser.push_card_event("evidence_cancel", &id),

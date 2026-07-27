@@ -1,10 +1,8 @@
 //! Keyboard navigation shared by interactive card captures.
 
-use crate::ui::hook_approval_action_max_index;
-
 use super::{
-    approval_action_max_index, is_csi_final_byte, question_choice_count, CardInputState,
-    RawInputCapture, RawInputEvent,
+    capture_action_set, is_csi_final_byte, question_choice_count, CardInputState, RawInputCapture,
+    RawInputEvent,
 };
 
 impl CardInputState {
@@ -69,12 +67,7 @@ impl CardInputState {
                 }
             }
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                let is_hook = matches!(capture, RawInputCapture::Approval { is_hook: true, .. });
-                let max_idx = if is_hook {
-                    hook_approval_action_max_index()
-                } else {
-                    approval_action_max_index()
-                };
+                let max_idx = capture_action_set(capture).max_index();
                 let previous = self.selected;
                 match code {
                     b'D' => self.selected = self.selected.saturating_sub(1),
@@ -149,12 +142,7 @@ impl CardInputState {
                 }
             }
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                let max_idx = if matches!(capture, RawInputCapture::Approval { is_hook: true, .. })
-                {
-                    hook_approval_action_max_index()
-                } else {
-                    approval_action_max_index()
-                };
+                let max_idx = capture_action_set(capture).max_index();
                 self.selected = (self.selected + 1).min(max_idx);
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))
             }

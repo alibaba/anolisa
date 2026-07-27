@@ -1,32 +1,19 @@
 """Unit tests for the Qwen Code PII checker command hook."""
 
-import importlib.util
 import io
 import json
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 _ROOT = Path(__file__).resolve().parents[3]
 _EXTENSION_DIR = _ROOT / "qwen-code-extension"
 _HOOK_PATH = _EXTENSION_DIR / "hooks" / "pii_checker_hook.py"
-sys.path.insert(0, str(_HOOK_PATH.parent))
 
-
-def _load_pii_checker_hook():
-    spec = importlib.util.spec_from_file_location("qwen_pii_checker_hook", _HOOK_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-pii_checker_hook = _load_pii_checker_hook()
+pii_checker_hook = load_standalone_hook("qwen_pii_checker_hook", _HOOK_PATH)
 
 
 @pytest.fixture(autouse=True)

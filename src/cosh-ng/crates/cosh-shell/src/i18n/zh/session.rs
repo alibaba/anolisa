@@ -17,8 +17,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "历史终端证据不会恢复；仅恢复模型可见的对话上下文。"
         }
         MessageId::SessionPickerFooter => {
-            "上/下或 j/k 移动 · Enter 恢复 · Space 标记清理 · d 清理 · Esc 取消"
+            "上/下或 j/k 移动 · Enter 恢复 · Space 切换清理标记 · d 打开清理确认 · Esc 取消"
         }
+        MessageId::SessionPickerMarkedCount => "已标记 {count}",
         MessageId::SessionClearConfirmTitle => "确认清理会话",
         MessageId::SessionClearConfirmCountLine => "将删除以下 {count} 个持久化会话：",
         MessageId::SessionClearConfirmFooter => "Enter 或 y 确认 · Esc、Ctrl+C 或 n 取消",
@@ -34,7 +35,14 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SessionCancelledTitle => "会话管理已关闭",
         MessageId::SessionCancelledBody => "模型会话和持久化文件均未改变。",
         MessageId::SessionUsageBody => {
-            "用法：/session [status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
+            "用法：/session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
+        }
+        MessageId::SessionNewTitle => "全新会话",
+        MessageId::SessionNewDetachedBody => {
+            "已从模型会话 {id} 分离。\n下一次智能体请求将开启全新对话。\n终端工作目录、历史和设置均未改变。"
+        }
+        MessageId::SessionNewAlreadyFreshBody => {
+            "当前没有绑定的模型会话。\n下一次智能体请求将开启全新对话。\n终端工作目录、历史和设置均未改变。"
         }
         MessageId::SessionNotReadyBody => "会话 {id} 的状态为 {health}，无法恢复，但仍可清理。",
         MessageId::SessionProtectedBody => "活动中或已选择的模型会话受保护，未被清理。",

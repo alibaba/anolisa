@@ -8,7 +8,7 @@ use anolisa_core::state::{
     InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
     Ownership, RpmMetadata,
 };
-use anolisa_core::transaction::{Transaction, TransactionOutcomeStatus};
+use anolisa_core::transaction::{JOURNAL_FILE_SUFFIX, Transaction, TransactionOutcomeStatus};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::common;
@@ -580,6 +580,14 @@ fn load_journals(layout: &FsLayout) -> Vec<Transaction> {
     let mut paths = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .map(|entry| entry.expect("journal entry").path())
+            // The journal dir also holds `<op>.state.snapshot` sidecars;
+            // only `*{JOURNAL_FILE_SUFFIX}` files are journals. Reusing
+            // the production constant keeps this filter in lockstep with
+            // `JournalInventory::load` if the naming convention changes.
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(JOURNAL_FILE_SUFFIX))
+            })
             .collect::<Vec<_>>(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(err) => panic!("read journals: {err}"),

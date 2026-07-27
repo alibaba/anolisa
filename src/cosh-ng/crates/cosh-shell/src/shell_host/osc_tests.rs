@@ -1,6 +1,7 @@
 use super::marker::{bash_marker_script, zsh_marker_script};
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use super::osc::*;
+use crate::ledger::build_command_blocks;
 use crate::types::{
     CommandOrigin, ShellEventKind, ShellHandoffRequest, COMMAND_OUTPUT_REF_MAX_BYTES,
     SESSION_OUTPUT_REF_MAX_BYTES,
@@ -9,6 +10,51 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
+
+#[test]
+fn routing_markers_require_matching_attempt_generation() {
+    let mut parser = parser_for_test("routing-generation");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"command\":\"Who are you\",\"cwd\":\"/tmp\",\"generation\":2}\x07")
+        .expect("feed preexec");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"top_level_missing\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"generation\":1,\"proven\":true,\"intent\":\"ambiguous\",\"sensitive\":false,\"unsafe\":false}\x07")
+        .expect("feed stale provenance");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"command\":\"stale input\",\"reason\":\"natural_language\",\"generation\":1,\"top_level_missing\":true}\x07")
+        .expect("feed stale intercept");
+
+    let stale = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
+        .expect("stale provenance event");
+    assert!(stale.command_id.is_none());
+    assert!(stale.routing.as_ref().is_some_and(|routing| {
+        routing.top_level_missing && !routing.proven && routing.generation == 1
+    }));
+    assert!(!parser.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("stale input")
+    }));
+
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-generation\",\"command\":\"Who are you\",\"reason\":\"natural_language\",\"generation\":2,\"top_level_missing\":true}\x07")
+        .expect("feed matching intercept");
+
+    let intercept = parser
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("Who are you")
+        })
+        .expect("matching intercept");
+    assert_eq!(intercept.command_id.as_deref(), Some("cmd-1"));
+    let ledger = build_command_blocks(&parser.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert!(ledger.blocks.is_empty());
+}
 
 #[test]
 fn trusted_history_file_marker_is_private_and_observed() {
@@ -64,6 +110,111 @@ fn bash_history_file_marker_is_native_only() {
     assert!(script.contains("\"event\":\"history_file\""));
     assert!(script.contains("[[:cntrl:]]"));
     assert!(!zsh_marker_script().contains("\"event\":\"history_file\""));
+}
+
+#[test]
+fn bash_extdebug_does_not_leak_via_exported_bashopts() {
+    let script = bash_marker_script();
+
+    // extdebug lands in BASHOPTS; when BASHOPTS arrived exported from the
+    // environment it stays exported (readonly keeps -x), leaking extdebug to
+    // every child bash which then fails to load bashdb on hosts without it.
+    // The user rcfile runs before this hook setup, so its DEBUG trap is live
+    // in between: the export attribute must be dropped *before* extdebug is
+    // enabled, or a trap-spawned child inherits the leak.
+    let shopt = script
+        .find("shopt -s extdebug")
+        .expect("extdebug setup should exist");
+    let unexport = script
+        .find("export -n BASHOPTS 2>/dev/null || true")
+        .expect("BASHOPTS export attribute must be dropped before enabling extdebug");
+    assert!(
+        unexport < shopt,
+        "export -n BASHOPTS must precede shopt -s extdebug"
+    );
+
+    // The unexport must land in the same hook-setup block, before the DEBUG
+    // trap is (re-)installed there, so no child spawned afterwards sees the
+    // leak. Anchor on the trap occurrence after the shopt line: earlier
+    // occurrences live inside recovery helper functions.
+    let debug_trap = script[shopt..]
+        .find("trap '_cosh_preexec_marker' DEBUG")
+        .map(|offset| shopt + offset)
+        .expect("hook-setup DEBUG trap installation should exist");
+    assert!(
+        unexport < debug_trap,
+        "export -n BASHOPTS must precede the DEBUG trap installation"
+    );
+
+    // BASHOPTS/extdebug are bash-only mechanisms; the zsh marker must not
+    // grow references to them.
+    assert!(!zsh_marker_script().contains("BASHOPTS"));
+}
+
+#[test]
+fn bash_preexec_marker_skips_completion_with_comp_type_guard() {
+    let script = bash_marker_script();
+
+    // Locate the start of _cosh_preexec_marker to ensure the guard is at the
+    // function entry, not somewhere later in the script.
+    let fn_start = script
+        .find("_cosh_preexec_marker() {")
+        .expect("_cosh_preexec_marker should exist");
+    let fn_body = &script[fn_start..];
+    let guard = fn_body
+        .find("if [[ -n \"${COMP_TYPE:-}\" && ( -n \"${COMP_LINE:-}\" || -n \"${COMP_POINT:-}\" ) ]]; then")
+        .expect("completion guard with COMP_TYPE should be present");
+
+    // Guard must appear before the first heavy operation (trap snapshot).
+    let trap_snapshot = fn_body
+        .find("trap_snapshot_file")
+        .expect("trap snapshot should exist");
+    assert!(
+        guard < trap_snapshot,
+        "completion guard should precede heavy trap snapshot logic"
+    );
+}
+
+#[test]
+fn prompt_ready_markers_follow_user_prompt_hooks() {
+    let bash = bash_marker_script();
+    let prompt_command = bash
+        .find("_cosh_run_user_prompt_command \"$status\"")
+        .expect("bash user prompt command");
+    let bash_ready = bash
+        .find("_cosh_emit_marker \"prompt_ready\"")
+        .expect("bash prompt-ready marker");
+    assert!(prompt_command < bash_ready);
+
+    let zsh = zsh_marker_script();
+    let precmd = zsh
+        .find("_cosh_emit_marker \"precmd\"")
+        .expect("zsh precmd marker");
+    let zsh_ready = zsh
+        .find("_cosh_emit_marker \"prompt_ready\"")
+        .expect("zsh prompt-ready marker");
+    assert!(precmd < zsh_ready);
+    assert!(zsh[..zsh_ready].ends_with(
+        "if [[ \"${precmd_functions[-1]:-}\" == \"_cosh_precmd_marker\" ]]; then\n    "
+    ));
+}
+
+#[test]
+fn prompt_hook_output_does_not_count_as_a_painted_prompt() {
+    let mut parser = parser_for_test("prompt-ready");
+    feed_precmd(&mut parser, 0);
+
+    parser
+        .feed(b"hook output")
+        .expect("feed prompt hook output");
+    assert!(!parser.has_prompt_painted_since_ready());
+
+    let ready = b"\x1b]1337;COSH;{\"event\":\"prompt_ready\",\"token\":\"test-marker-token\"}\x07";
+    parser.feed(ready).expect("feed prompt-ready marker");
+    assert!(!parser.has_prompt_painted_since_ready());
+
+    parser.feed(b"prompt> ").expect("feed prompt paint");
+    assert!(parser.has_prompt_painted_since_ready());
 }
 
 #[test]
@@ -705,6 +856,80 @@ fn parser_session_cap_preserves_command_facts_without_output_ref() {
     assert_eq!(
         event.message.as_deref(),
         Some("output_capture_status: unavailable; reason: session_output_cap_reached")
+    );
+}
+
+/// Regression for issue #1811: after a bash intercept, `last_prompt_display()`
+/// must not include the user-echoed command text.  bash echoes user input
+/// *before* the DEBUG trap fires, so those bytes are in the display buffer
+/// ahead of the intercept marker.  The intercept handler must advance
+/// `last_prompt_display_start` past the echo so that RestorePrompt only
+/// re-emits the new PS1 paint, not the duplicated command.
+#[test]
+fn intercept_advances_last_prompt_display_start_past_user_echo() {
+    let mut parser = parser_for_test("intercept-echo-dedup");
+    let sid = "intercept-echo-dedup";
+
+    // 1. Shell ready: precmd sets initial `last_prompt_display_start`.
+    parser
+        .feed(
+            format!(
+                "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"{TEST_MARKER_TOKEN}\",\"session_id\":\"{sid}\",\"cwd\":\"/tmp\",\"status\":0}}\x07"
+            )
+            .as_bytes(),
+        )
+        .expect("feed precmd");
+    let prompt = b"cosh-replay$ ";
+    parser.feed(prompt).expect("feed PS1 paint");
+
+    let prompt_start = parser.last_prompt_display();
+    assert!(
+        !prompt_start.is_empty(),
+        "precmd must set last_prompt_display_start"
+    );
+    assert_eq!(
+        prompt_start, prompt,
+        "after precmd, last_prompt_display() returns the PS1 paint"
+    );
+
+    // 2. User types `/skills detail\r\n` — bash echoes it before any trap.
+    let user_echo = b"/skills detail\r\n";
+    parser.feed(user_echo).expect("feed user echo");
+
+    // 3. DEBUG trap fires → intercept marker (bash skips command via extdebug).
+    parser
+        .feed(
+            format!(
+                "\x1b]1337;COSH;{{\"event\":\"intercept\",\"token\":\"{TEST_MARKER_TOKEN}\",\"session_id\":\"{sid}\",\"command\":\"/skills detail\",\"reason\":\"slash\",\"cwd\":\"/tmp\"}}\x07"
+            )
+            .as_bytes(),
+        )
+        .expect("feed intercept");
+
+    // After intercept, `last_prompt_display_start` must be past the user echo
+    // so that `last_prompt_display()` does NOT include the echoed command text.
+    let echo_text = std::str::from_utf8(parser.last_prompt_display()).unwrap_or("");
+    assert!(
+        !echo_text.contains("/skills detail"),
+        "last_prompt_display() must not contain the user-echoed command after intercept; got: {echo_text:?}"
+    );
+
+    // 4. precmd fires → bash repaints PS1.
+    parser
+        .feed(
+            format!(
+                "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"{TEST_MARKER_TOKEN}\",\"session_id\":\"{sid}\",\"cwd\":\"/tmp\",\"status\":0}}\x07"
+            )
+            .as_bytes(),
+        )
+        .expect("feed post-intercept precmd");
+    parser.feed(prompt).expect("feed new PS1 paint");
+
+    // `last_prompt_display()` must return only the new PS1, not the echo.
+    let final_display = std::str::from_utf8(parser.last_prompt_display()).unwrap_or("");
+    assert_eq!(
+        final_display, "cosh-replay$ ",
+        "after precmd, last_prompt_display() returns only the new PS1 paint"
     );
 }
 

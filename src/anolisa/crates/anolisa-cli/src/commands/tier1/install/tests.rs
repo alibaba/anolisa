@@ -182,6 +182,48 @@ pub fn write_local_repo(root: &Path) -> String {
     write_local_repo_component(root, "agentsight", "0.2.0", &["system"])
 }
 
+/// Local file:// repo publishing several versions of one component, so a
+/// version-pinned install can select a non-latest entry.
+pub fn write_local_repo_component_versions(
+    root: &Path,
+    component: &str,
+    versions: &[&str],
+    modes: &[&str],
+) -> String {
+    let v1 = root.join("v1");
+    std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+    let env = anolisa_env::EnvService::detect();
+    let modes_arr = toml_string_array(modes);
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
+    for version in versions {
+        let artifact = build_component_artifact(component, version, modes);
+        let artifact_name = format!("{component}-{version}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        index.push_str(&format!(
+            r#"
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_arr}
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ));
+    }
+    std::fs::write(v1.join("index.toml"), index).expect("write index");
+    format!("file://{}", v1.display())
+}
+
 pub fn write_local_repo_component(
     root: &Path,
     component: &str,

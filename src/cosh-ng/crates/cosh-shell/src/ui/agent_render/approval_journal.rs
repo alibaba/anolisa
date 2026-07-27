@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::{
-    approval::{approval_content_width, wrapped_preview_rows},
+    approval::{approval_content_width, audit_ref_line, audit_ref_rows, wrapped_preview_rows},
     approval_details::CommandAssessmentSummaryModel,
     buffer_to_lines, buffer_to_styled_lines, RatatuiInlineRenderer,
 };
@@ -32,6 +32,9 @@ pub struct ApprovalJournalEntryModel<'a> {
     pub command_block_id: Option<&'a str>,
     pub redaction_status: Option<&'a str>,
     pub assessment: Option<CommandAssessmentSummaryModel<'a>>,
+    /// Audit event ID linked to this approval entry. Rendered inside the owning
+    /// entry only when present so the pull-based audit log adds no placeholder.
+    pub audit_ref: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +86,7 @@ impl RatatuiInlineRenderer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_approval_journal_panel(model, area, &mut buffer, &i18n);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -159,6 +162,9 @@ impl RatatuiInlineRenderer {
                     .tool_use_id
                     .unwrap_or(i18n.t(crate::MessageId::ApprovalDetailsNoneValue))
             ));
+            if let Some(audit_ref) = entry.audit_ref {
+                lines.push(format!("  {}", audit_ref_line(audit_ref)));
+            }
             lines.push(format!(
                 "  {}: {}",
                 i18n.t(crate::MessageId::ApprovalJournalActorLabel),
@@ -217,7 +223,8 @@ fn approval_journal_panel_height(
             )
             .len()
             .max(1) as u16;
-            separator_rows + 8 + assessment_rows + preview_rows
+            let audit_rows = audit_ref_rows(entry.audit_ref, content_width).len() as u16;
+            separator_rows + 8 + assessment_rows + preview_rows + audit_rows
         })
         .sum::<u16>();
     2 + row_count
@@ -373,6 +380,11 @@ fn render_approval_journal_panel(
                     .to_string(),
             ),
         ]));
+        // Same content width as `approval_journal_panel_height`, so wrapped
+        // reference rows never push the trailing entry rows out of the panel.
+        for row in audit_ref_rows(entry.audit_ref, inner.width as usize) {
+            lines.push(Line::from(Span::raw(row)));
+        }
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{}: ", i18n.t(crate::MessageId::ApprovalJournalActorLabel)),

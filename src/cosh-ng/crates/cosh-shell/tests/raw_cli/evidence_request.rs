@@ -124,7 +124,7 @@ fn raw_cli_cosh_request_card_ignore_keeps_shell_usable() {
             ),
             (
                 b"?? request captured output evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"i\n".to_vec(), Duration::from_millis(1_500)),
             (
@@ -159,7 +159,7 @@ fn raw_cli_cosh_request_card_ctrl_c_cancels_only_evidence_request() {
             ),
             (
                 b"?? request captured output evidence\n".to_vec(),
-                Duration::from_millis(700),
+                Duration::from_secs(1),
             ),
             (vec![0x03], Duration::from_millis(2_000)),
             (
@@ -191,7 +191,7 @@ fn raw_cli_terminal_output_read_misroute_records_details_audit() {
             (b"printf 'misroute-output\\n'\n".to_vec(), Duration::ZERO),
             (
                 b"?? misroute terminal output read\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"/details tool-1\n".to_vec(), Duration::from_millis(1_200)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),

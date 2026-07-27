@@ -172,6 +172,45 @@ pub(crate) struct DelegatedPin {
     pub(crate) source_repo: Option<String>,
 }
 
+/// Resolved metadata for a version-pinned owned (raw) install, the owned
+/// analog of [`DelegatedPin`]. Built from the distribution entry the exact
+/// version query selected — the raw resolver only returns an entry whose
+/// `version` equals the request, and the contract validator later refuses an
+/// artifact whose embedded manifest disagrees with that entry, so these
+/// fields prove what will actually be placed.
+#[derive(Debug, Clone)]
+pub(crate) struct RawPin {
+    /// The `--version` value the caller requested.
+    requested_version: String,
+    /// Version of the resolved distribution entry (equals
+    /// `requested_version`, restated for an unambiguous JSON contract).
+    resolved_version: String,
+    /// Exact artifact URL the pinned entry downloads from — the raw analog
+    /// of the delegated pin's NEVRA.
+    artifact: String,
+    /// Repository base URL the distribution index was fetched from.
+    source_repo: String,
+}
+
+impl RawPin {
+    /// Capture the pin evidence from a settled raw resolution.
+    ///
+    /// Ordering is enforced by ownership, not convention:
+    /// [`validate_owned_install`] takes the [`RawResolution`] by value, so
+    /// the borrow here cannot compile after validation has consumed it. Any
+    /// future reshuffle that moves the resolution earlier surfaces as a
+    /// borrow error at this call site rather than as silently missing pin
+    /// evidence.
+    fn from_resolution(requested: &str, resolution: &RawResolution) -> Self {
+        Self {
+            requested_version: requested.to_string(),
+            resolved_version: resolution.entry.version.clone(),
+            artifact: resolution.artifact_url.clone(),
+            source_repo: resolution.base_url.clone(),
+        }
+    }
+}
+
 struct ResolvedInstallIdentity {
     component: String,
     pinned: bool,
@@ -520,12 +559,19 @@ fn execute_planned(
 
     let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
 
+    // Pin evidence for an owned `--version` install, captured while the
+    // resolution is still whole (contract validation consumes it below).
+    let raw_pin = match (args.version.as_deref(), resolution.as_ref()) {
+        (Some(requested), Some(resolution)) => Some(RawPin::from_resolution(requested, resolution)),
+        _ => None,
+    };
+
     if ctx.dry_run {
         for warning in resolution.iter().flat_map(|r| r.warnings.iter()) {
             eprintln!("warning: {warning}");
         }
-        // A pinned delegated dry-run reports the version it resolved against
-        // the repository, not the raw `--version` echo — the pin fields carry
+        // A pinned dry-run reports the version it resolved against the
+        // repository, not the raw `--version` echo — the pin fields carry
         // the exact candidate so the preview proves what would be installed.
         let base_version = resolution
             .as_ref()
@@ -547,6 +593,9 @@ fn execute_planned(
         };
         if let Some(pin) = &delegated_pin {
             payload = payload.with_pin(pin);
+        }
+        if let Some(pin) = &raw_pin {
+            payload = payload.with_raw_pin(pin);
         }
         render_result(ctx, &payload)?;
         return Ok(InstallOutcome::Installed);
@@ -570,6 +619,7 @@ fn execute_planned(
             &steps,
             &plan_labels,
             validated,
+            raw_pin.as_ref(),
             native_package.as_deref(),
             &provider,
             &command,
@@ -899,6 +949,7 @@ fn install_owned(
     steps: &[Step],
     plan_labels: &[String],
     validated: ValidatedInstall,
+    raw_pin: Option<&RawPin>,
     native_package: Option<&str>,
     provider: &DelegatedProvider,
     command: &str,
@@ -974,9 +1025,8 @@ fn install_owned(
         eprintln!("warning: {warning}");
     }
 
-    render_result(
-        ctx,
-        &InstallResultPayload {
+    render_result(ctx, &{
+        let mut payload = InstallResultPayload {
             component: target.to_string(),
             package: Some(package),
             version: Some(version),
@@ -989,8 +1039,12 @@ fn install_owned(
             artifact: None,
             dry_run: false,
             plan: plan_labels.to_vec(),
-        },
-    )?;
+        };
+        if let Some(pin) = raw_pin {
+            payload = payload.with_raw_pin(pin);
+        }
+        payload
+    })?;
     Ok(InstallOutcome::Installed)
 }
 
@@ -1415,10 +1469,12 @@ pub(crate) fn step_label(step: &Step) -> String {
 /// JSON payload for a completed (or previewed, or idempotent) install.
 ///
 /// The pin fields (`requested_version`, `resolved_version`, `source_repo`,
-/// `artifact`) are additive and only present for a version-pinned delegated
-/// install; `version` keeps its existing meaning (the effective/installed
-/// version) across every route, so the wire contract stays backward
-/// compatible.
+/// `artifact`) are additive and only present for a version-pinned install.
+/// Their concrete shape is backend-dependent — a delegated pin reports the
+/// resolved EVR and the exact NEVRA handed to dnf, an owned (raw) pin the
+/// resolved distribution version and the exact artifact URL — while
+/// `version` keeps its existing meaning (the effective/installed version)
+/// across every route, so the wire contract stays backward compatible.
 #[derive(Debug, Serialize)]
 struct InstallResultPayload {
     component: String,
@@ -1434,13 +1490,17 @@ struct InstallResultPayload {
     /// `--version` value the caller requested (version-pinned installs only).
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_version: Option<String>,
-    /// Full resolved EVR of the pinned candidate (version-pinned only).
+    /// Resolved candidate of the pin (version-pinned only): the full EVR for
+    /// a delegated install, the distribution entry version for a raw one.
     #[serde(skip_serializing_if = "Option::is_none")]
     resolved_version: Option<String>,
-    /// Source repository the pinned candidate came from (version-pinned only).
+    /// Source repository the pinned candidate came from (version-pinned
+    /// only): the dnf repo id for a delegated install, the raw repository
+    /// base URL for a raw one.
     #[serde(skip_serializing_if = "Option::is_none")]
     source_repo: Option<String>,
-    /// Exact NEVRA handed to dnf (version-pinned only).
+    /// Exact artifact the pin resolved to (version-pinned only): the NEVRA
+    /// handed to dnf for a delegated install, the artifact URL for a raw one.
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact: Option<String>,
     dry_run: bool,
@@ -1462,19 +1522,35 @@ impl InstallResultPayload {
         }
         self
     }
+
+    /// Copy the resolved-candidate fields from an owned (raw) version pin:
+    /// the resolved entry version, the exact artifact URL, and the source
+    /// repository — same additive contract as the delegated pin, so agents
+    /// read one shape for both backends.
+    fn with_raw_pin(mut self, pin: &RawPin) -> Self {
+        self.requested_version = Some(pin.requested_version.clone());
+        self.resolved_version = Some(pin.resolved_version.clone());
+        self.source_repo = Some(pin.source_repo.clone());
+        self.artifact = Some(pin.artifact.clone());
+        if self.version.is_none() {
+            self.version = Some(pin.resolved_version.clone());
+        }
+        self
+    }
 }
 
 /// Detail lines shown above the plan in a dry-run preview.
 ///
-/// For a version-pinned delegated install this makes the resolved candidate
-/// explicit — bare package, requested version, resolved EVR, exact artifact,
+/// For a version-pinned install this makes the resolved candidate explicit
+/// — package, requested version, resolved version (EVR for delegated,
+/// distribution version for raw), exact artifact (NEVRA or artifact URL),
 /// and source repository — so the preview proves what would be installed
-/// rather than echoing the request. Unpinned/owned installs contribute no pin
+/// rather than echoing the request. Unpinned installs contribute no pin
 /// fields and yield an empty list (the plan alone is shown).
 fn dry_run_detail_lines(payload: &InstallResultPayload) -> Vec<String> {
     let mut lines = Vec::new();
-    // Only a version pin populates these; guard on `artifact` so unpinned and
-    // owned dry-runs render exactly as before (plan only).
+    // Only a version pin populates these; guard on `artifact` so unpinned
+    // dry-runs render exactly as before (plan only).
     if payload.artifact.is_some() {
         if let Some(package) = &payload.package {
             lines.push(format!("package: {package}"));
@@ -1659,6 +1735,83 @@ mod tests {
         assert!(json.get("resolved_version").is_none());
         assert!(json.get("source_repo").is_none());
         assert!(json.get("artifact").is_none());
+    }
+
+    fn sample_raw_pin() -> RawPin {
+        RawPin {
+            requested_version: "0.1.0".to_string(),
+            resolved_version: "0.1.0".to_string(),
+            artifact: "https://example.com/anolisa/agentsight-0.1.0.tar.gz".to_string(),
+            source_repo: "https://example.com/anolisa".to_string(),
+        }
+    }
+
+    #[test]
+    fn raw_pinned_payload_json_exposes_requested_resolved_repo_and_artifact() {
+        // The owned pin must fill the same additive envelope fields as the
+        // delegated pin: requested/resolved version, source repo, and the
+        // exact artifact (the URL, the raw analog of a NEVRA). `version`
+        // starts as None so the pin's fallback fills it — the compatible
+        // field must stay answered on the pinned path too.
+        let payload = InstallResultPayload {
+            component: "agentsight".to_string(),
+            package: Some("agentsight".to_string()),
+            version: None,
+            backend: "raw".to_string(),
+            action: "installed",
+            operation_id: Some("op-install-1".to_string()),
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
+            dry_run: false,
+            plan: Vec::new(),
+        }
+        .with_raw_pin(&sample_raw_pin());
+
+        let json = serde_json::to_value(&payload).expect("serialize payload");
+        assert_eq!(json["backend"], "raw");
+        assert_eq!(json["requested_version"], "0.1.0");
+        assert_eq!(json["resolved_version"], "0.1.0");
+        assert_eq!(json["source_repo"], "https://example.com/anolisa");
+        assert_eq!(
+            json["artifact"],
+            "https://example.com/anolisa/agentsight-0.1.0.tar.gz"
+        );
+        // `version` was None going in — the pin must fill the compatible
+        // field with the resolved entry version.
+        assert_eq!(json["version"], "0.1.0");
+    }
+
+    #[test]
+    fn raw_pinned_dry_run_detail_lines_show_resolved_version_and_artifact() {
+        // The raw pinned preview shares the delegated detail contract: the
+        // resolved candidate is spelled out instead of echoing the request.
+        let payload = InstallResultPayload {
+            component: "agentsight".to_string(),
+            package: None,
+            version: None,
+            backend: "raw".to_string(),
+            action: "planned",
+            operation_id: None,
+            requested_version: None,
+            resolved_version: None,
+            source_repo: None,
+            artifact: None,
+            dry_run: true,
+            plan: Vec::new(),
+        }
+        .with_raw_pin(&sample_raw_pin());
+
+        assert_eq!(
+            dry_run_detail_lines(&payload),
+            vec![
+                "requested version: 0.1.0".to_string(),
+                "resolved version: 0.1.0".to_string(),
+                "artifact: https://example.com/anolisa/agentsight-0.1.0.tar.gz".to_string(),
+                "repository: https://example.com/anolisa".to_string(),
+            ]
+        );
     }
 
     #[test]
