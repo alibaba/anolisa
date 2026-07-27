@@ -603,6 +603,15 @@ _cosh_run_user_prompt_command() {
   if [[ -z "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     return "$status"
   fi
+  # bash's ENOEXEC fallback re-execs scripts without a shebang as
+  # "bash --debugger <script>" when extdebug is on, which tries to load
+  # /usr/share/bashdb/bashdb-main.inc and emits two error lines on systems
+  # that do not ship bashdb.  User prompt hooks originally ran without
+  # extdebug; disabling it here restores that contract while extdebug
+  # stays live for the DEBUG trap return-1 path that cosh actually needs.
+  local _cosh_extdebug_was_on=
+  if shopt -q extdebug 2>/dev/null; then _cosh_extdebug_was_on=1; fi
+  shopt -u extdebug 2>/dev/null || true
   if [[ "${_COSH_USER_PROMPT_COMMAND_IS_ARRAY:-0}" == 1 ]]; then
     local _cosh_prompt_command
     for _cosh_prompt_command in "${_COSH_USER_PROMPT_COMMAND[@]}"; do
@@ -610,6 +619,9 @@ _cosh_run_user_prompt_command() {
     done
   elif [[ -n "${_COSH_USER_PROMPT_COMMAND:-}" ]]; then
     eval "$_COSH_USER_PROMPT_COMMAND"
+  fi
+  if [[ "${_cosh_extdebug_was_on:-}" == 1 ]]; then
+    shopt -s extdebug 2>/dev/null || true
   fi
   return "$status"
 }

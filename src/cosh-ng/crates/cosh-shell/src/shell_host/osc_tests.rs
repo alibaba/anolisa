@@ -122,12 +122,18 @@ fn bash_extdebug_does_not_leak_via_exported_bashopts() {
     // The user rcfile runs before this hook setup, so its DEBUG trap is live
     // in between: the export attribute must be dropped *before* extdebug is
     // enabled, or a trap-spawned child inherits the leak.
-    let shopt = script
-        .find("shopt -s extdebug")
-        .expect("extdebug setup should exist");
+    //
+    // Anchor on the unique BASHOPTS unexport to locate the hook-setup block:
+    // earlier shopt -s extdebug lines may live inside helper functions that
+    // restore the option around user hook eval (e.g. ENOEXEC --debugger
+    // guard in _cosh_run_user_prompt_command).
     let unexport = script
         .find("export -n BASHOPTS 2>/dev/null || true")
         .expect("BASHOPTS export attribute must be dropped before enabling extdebug");
+    let shopt = script[unexport..]
+        .find("shopt -s extdebug")
+        .map(|offset| unexport + offset)
+        .expect("extdebug setup should exist in the hook-setup block");
     assert!(
         unexport < shopt,
         "export -n BASHOPTS must precede shopt -s extdebug"
