@@ -676,7 +676,10 @@ mod tests {
     #[test]
     fn test_classify_unexpected_eof() {
         let err = classify_io_error(
-            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"),
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ),
             "/tmp/test.sock",
             "read response length",
         );
@@ -687,11 +690,7 @@ mod tests {
             "socket path must not leak in message: {}",
             err.message
         );
-        assert!(err
-            .hint
-            .as_ref()
-            .unwrap()
-            .contains("crashed mid-response"));
+        assert!(err.hint.as_ref().unwrap().contains("crashed mid-response"));
         // socket_path should be in details, not message
         let details = err.details.as_ref().unwrap();
         assert_eq!(details["socket_path"], "/tmp/test.sock");
