@@ -805,8 +805,9 @@ impl HookSystem {
                     let json = input_json.clone();
                     let cmd = def.command.clone();
                     let timeout = Self::timeout_for(def);
+                    let env = def.env.clone();
                     async move {
-                        let output = Self::run_hook_cmd(&cmd, &json, timeout).await;
+                        let output = Self::run_hook_cmd(&cmd, &json, timeout, &env).await;
                         (i, output)
                     }
                 })
@@ -816,10 +817,15 @@ impl HookSystem {
     }
 
     async fn run_single_hook(def: &HookDefinition, input_json: &str) -> HookOutput {
-        Self::run_hook_cmd(&def.command, input_json, Self::timeout_for(def)).await
+        Self::run_hook_cmd(&def.command, input_json, Self::timeout_for(def), &def.env).await
     }
 
-    async fn run_hook_cmd(command: &str, input_json: &str, timeout: Duration) -> HookOutput {
+    async fn run_hook_cmd(
+        command: &str,
+        input_json: &str,
+        timeout: Duration,
+        hook_env: &std::collections::HashMap<String, String>,
+    ) -> HookOutput {
         use tokio::process::Command;
 
         use crate::process::{output_with_timeout, OutputError};
@@ -827,6 +833,12 @@ impl HookSystem {
         let safe_command = crate::redaction::redact_text(command);
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
+
+        // Apply hook-specific environment variables to the child process only.
+        // These override inherited process env but do not mutate the parent.
+        if !hook_env.is_empty() {
+            cmd.envs(hook_env);
+        }
 
         // The deadline covers the stdin write as well: a hook that never
         // reads stdin must not stall the session, and on timeout the whole
@@ -1208,6 +1220,7 @@ mod tests {
             matcher: Some("run_shell.*".to_string()),
             timeout: None,
             sequential: None,
+            env: HashMap::new(),
         };
         assert!(HookSystem::matches_tool(&def, "run_shell_command"));
         assert!(!HookSystem::matches_tool(&def, "read_file"));
@@ -1221,6 +1234,7 @@ mod tests {
             matcher: None,
             timeout: None,
             sequential: None,
+            env: HashMap::new(),
         };
         assert!(HookSystem::matches_tool(&def, "any_tool"));
     }
@@ -1236,6 +1250,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                    env: HashMap::new(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1274,6 +1289,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: None,
                 sequential: None,
+                    env: HashMap::new(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1308,6 +1324,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                    env: HashMap::new(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1333,6 +1350,7 @@ mod tests {
             matcher: Some(matcher.to_string()),
             timeout: None,
             sequential: None,
+            env: HashMap::new(),
         }
     }
 
@@ -1456,6 +1474,7 @@ mod tests {
                 matcher: Some("^run_shell_command$".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                    env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1497,6 +1516,7 @@ mod tests {
                 matcher: Some("skill".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                    env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1538,7 +1558,7 @@ mod tests {
         let pid_file = dir.path().join("pids");
         let script = leak_script(&marker, &pid_file);
 
-        let out = HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300)).await;
+        let out = HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300), &HashMap::new()).await;
         assert!(
             out.decision.is_none(),
             "timed-out hook must fall back to the default output"
@@ -1560,7 +1580,7 @@ mod tests {
         // blocked in the stdin write before the timeout even started.
         let payload = "x".repeat(1 << 20);
         let started = std::time::Instant::now();
-        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300)).await;
+        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300), &HashMap::new()).await;
         assert!(out.decision.is_none());
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -1640,6 +1660,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                    env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1685,6 +1706,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                env: HashMap::new(),
                 },
                 HookDefinition {
                     command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "second"}}))'"#.to_string(),
@@ -1692,6 +1714,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                        env: HashMap::new(),
                 },
             ],
             post_tool_use_failure: vec![],
@@ -1731,6 +1754,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                    env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1756,5 +1780,126 @@ mod tests {
             "No replacement when hook doesn't emit updatedToolResponse"
         );
         assert_eq!(result.additional_context.as_deref(), Some("just context"),);
+    }
+
+    #[tokio::test]
+    async fn hook_receives_env_variables() {
+        let mut env = HashMap::new();
+        env.insert("HOOK_TEST_VAR".to_string(), "hello_from_hook".to_string());
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: "echo \"{\\\"hookSpecificOutput\\\": {\\\"additionalContext\\\": \\\"$HOOK_TEST_VAR\\\"}}\""
+                    .to_string(),
+                name: Some("env-test".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+                env,
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.additional_context.as_deref(),
+            Some("hello_from_hook"),
+            "Hook should receive env variable in child process"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_env_does_not_leak_to_parent() {
+        let mut env = HashMap::new();
+        env.insert("HOOK_ISOLATION_TEST".to_string(), "isolated_value".to_string());
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![HookDefinition {
+                command: r#"sh -c 'echo "{"decision":"allow"}""#.to_string(),
+                name: Some("isolation-test".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+                env,
+            }],
+            post_tool_use: vec![],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let _ = sys
+            .fire_pre_tool_use("s1", "/tmp", "call-1", "shell", &serde_json::json!({"command": "ls"}), None)
+            .await;
+        // Parent process should NOT have the hook's env variable
+        assert!(
+            std::env::var("HOOK_ISOLATION_TEST").is_err(),
+            "Hook env must not leak to parent process"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_env_overrides_parent_env() {
+        // Set a parent env var that the hook should override
+        std::env::set_var("HOOK_OVERRIDE_TEST", "parent_value");
+        let mut env = HashMap::new();
+        env.insert("HOOK_OVERRIDE_TEST".to_string(), "hook_value".to_string());
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: "echo \"{\\\"hookSpecificOutput\\\": {\\\"additionalContext\\\": \\\"$HOOK_OVERRIDE_TEST\\\"}}\""
+                    .to_string(),
+                name: Some("override-test".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+                env,
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.additional_context.as_deref(),
+            Some("hook_value"),
+            "Hook env should override parent env in child process"
+        );
+        // Clean up
+        std::env::remove_var("HOOK_OVERRIDE_TEST");
     }
 }

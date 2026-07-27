@@ -438,4 +438,120 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code(), "extension_sensitive_setting_type_invalid");
     }
+
+    #[test]
+    fn v1_accepts_hook_env_field() {
+        let root = package_root();
+        let parsed = parse_manifest(
+            r#"{
+                "schemaVersion":1,
+                "name":"example.ops",
+                "version":"1.0.0",
+                "compatibility":{"cosh":">=0.12.0"},
+                "hooks":{"PreToolUse":[{"hooks":[{
+                    "type":"command",
+                    "name":"env-hook",
+                    "command":"${extensionPath}/hooks/guard",
+                    "env":{"TOKENLESS_AGENT_ID":"cosh-ng","SESSION_KEY":"abc"}
+                }]}]}
+            }"#,
+            root.path(),
+        )
+        .unwrap();
+        assert!(parsed.diagnostics.is_empty());
+        let flat = crate::extension::config::flatten_hook_groups(&parsed.config.hooks.pre_tool_use);
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].env.len(), 2);
+        assert_eq!(flat[0].env.get("TOKENLESS_AGENT_ID").unwrap(), "cosh-ng");
+        assert_eq!(flat[0].env.get("SESSION_KEY").unwrap(), "abc");
+    }
+
+    #[test]
+    fn v1_hook_without_env_defaults_empty() {
+        let root = package_root();
+        let parsed = parse_manifest(
+            r#"{
+                "schemaVersion":1,
+                "name":"example.ops",
+                "version":"1.0.0",
+                "compatibility":{"cosh":">=0.12.0"},
+                "hooks":{"PreToolUse":[{"hooks":[{
+                    "type":"command",
+                    "name":"plain-hook",
+                    "command":"${extensionPath}/hooks/guard"
+                }]}]}
+            }"#,
+            root.path(),
+        )
+        .unwrap();
+        let flat = crate::extension::config::flatten_hook_groups(&parsed.config.hooks.pre_tool_use);
+        assert_eq!(flat.len(), 1);
+        assert!(flat[0].env.is_empty());
+    }
+
+    #[test]
+    fn v1_rejects_hook_env_name_with_hyphen() {
+        let root = package_root();
+        let error = parse_manifest(
+            r#"{
+                "schemaVersion":1,
+                "name":"example.ops",
+                "version":"1.0.0",
+                "compatibility":{"cosh":">=0.12.0"},
+                "hooks":{"PreToolUse":[{"hooks":[{
+                    "type":"command",
+                    "name":"bad-env",
+                    "command":"${extensionPath}/hooks/guard",
+                    "env":{"INVALID-NAME":"value"}
+                }]}]}
+            }"#,
+            root.path(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "extension_hook_env_name_invalid");
+    }
+
+    #[test]
+    fn v1_rejects_hook_env_empty_name() {
+        let root = package_root();
+        let error = parse_manifest(
+            r#"{
+                "schemaVersion":1,
+                "name":"example.ops",
+                "version":"1.0.0",
+                "compatibility":{"cosh":">=0.12.0"},
+                "hooks":{"PreToolUse":[{"hooks":[{
+                    "type":"command",
+                    "name":"empty-env",
+                    "command":"${extensionPath}/hooks/guard",
+                    "env":{"":"value"}
+                }]}]}
+            }"#,
+            root.path(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "extension_hook_env_name_empty");
+    }
+
+    #[test]
+    fn v1_rejects_hook_env_name_starting_with_digit() {
+        let root = package_root();
+        let error = parse_manifest(
+            r#"{
+                "schemaVersion":1,
+                "name":"example.ops",
+                "version":"1.0.0",
+                "compatibility":{"cosh":">=0.12.0"},
+                "hooks":{"PreToolUse":[{"hooks":[{
+                    "type":"command",
+                    "name":"digit-env",
+                    "command":"${extensionPath}/hooks/guard",
+                    "env":{"1INVALID":"value"}
+                }]}]}
+            }"#,
+            root.path(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "extension_hook_env_name_invalid");
+    }
 }

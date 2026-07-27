@@ -71,7 +71,10 @@ Each extension directory must contain `cosh-extension.json`:
       "name": "hook-name",
       "command": "execution command",
       "description": "description",
-      "timeout": 5000
+      "timeout": 5000,
+      "env": {
+        "TOKENLESS_AGENT_ID": "cosh-ng"
+      }
     }
   ]
 }
@@ -83,6 +86,30 @@ Each extension directory must contain `cosh-extension.json`:
 | `sequential` | Whether hooks in the group execute sequentially |
 | `hooks[].command` | Shell command the hook executes |
 | `hooks[].timeout` | Timeout in milliseconds |
+| `hooks[].env` | Environment variables passed only to the hook child process |
+
+### Hook Environment Variables
+
+The `env` field allows extensions to declare environment variables that are passed exclusively to the hook's child process. These variables:
+
+- Override inherited process environment variables only in the child process
+- Do not modify the parent Cosh-NG process environment
+- Are not exposed in logs or hook notifications (subject to secret redaction)
+- Must use valid POSIX environment variable names (letters, digits, underscores, starting with a letter or underscore)
+
+This is particularly useful for tokenless hooks that need agent/session attribution:
+
+```json
+{
+  "type": "command",
+  "name": "tokenless-hook",
+  "command": "python3 ${extensionPath}/hooks/tokenless.py",
+  "env": {
+    "TOKENLESS_AGENT_ID": "cosh-ng",
+    "TOKENLESS_SESSION_SCOPE": "post-tool"
+  }
+}
+```
 
 ## Variable Substitution
 

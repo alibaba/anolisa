@@ -134,6 +134,10 @@ pub struct HookDefinition {
     pub timeout: Option<u64>,
     #[serde(default)]
     pub sequential: Option<bool>,
+    /// Environment variables passed only to the hook child process.
+    /// Hook-specific values override inherited process environment.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

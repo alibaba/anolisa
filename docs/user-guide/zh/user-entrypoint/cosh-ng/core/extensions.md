@@ -71,7 +71,10 @@ cosh-core 的扩展系统通过 `cosh-extension.json` 配置文件注册技能�
       "name": "hook-name",
       "command": "执行命令",
       "description": "说明",
-      "timeout": 5000
+      "timeout": 5000,
+      "env": {
+        "TOKENLESS_AGENT_ID": "cosh-ng"
+      }
     }
   ]
 }
@@ -83,6 +86,30 @@ cosh-core 的扩展系统通过 `cosh-extension.json` 配置文件注册技能�
 | `sequential` | 组内钩子是否顺序执行 |
 | `hooks[].command` | 钩子执行的 shell 命令 |
 | `hooks[].timeout` | 超时时间（毫秒） |
+| `hooks[].env` | 仅传递给钩子子进程的环境变量 |
+
+### 钩子环境变量
+
+`env` 字段允许扩展声明仅传递给钩子子进程的环境变量。这些变量具有以下特性：
+
+- 仅在子进程中覆盖继承的进程环境变量
+- 不修改父 Cosh-NG 进程的环境
+- 不会在日志或钩子通知中暴露（受秘密信息脱敏保护）
+- 必须使用合法的 POSIX 环境变量名（字母、数字、下划线，以字母或下划线开头）
+
+这对于需要 agent/session 归因的 tokenless 钩子特别有用：
+
+```json
+{
+  "type": "command",
+  "name": "tokenless-hook",
+  "command": "python3 ${extensionPath}/hooks/tokenless.py",
+  "env": {
+    "TOKENLESS_AGENT_ID": "cosh-ng",
+    "TOKENLESS_SESSION_SCOPE": "post-tool"
+  }
+}
+```
 
 ## 变量替换
 

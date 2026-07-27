@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use super::*;
 use crate::provider::mock::MockProvider;
 use crate::tool::{Tool, ToolResult};
@@ -1328,6 +1329,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: HashMap::new(),
         }],
         post_tool_use: vec![config::HookDefinition {
             command: "echo '{\"decision\":\"block\",\"reason\":\"post hook should not run\"}'"
@@ -1336,6 +1338,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: HashMap::new(),
         }],
         ..Default::default()
     };

@@ -341,6 +341,40 @@ pub(super) fn legacy_hook_records(config: &ExtensionConfig) -> Vec<CapabilityRec
     records
 }
 
+/// Validates an environment variable name for hook-level env declarations.
+///
+/// Valid names must be non-empty, start with an ASCII letter or underscore,
+/// contain only ASCII letters, digits, and underscores, and must not exceed
+/// 128 bytes.
+fn validate_hook_env_name(name: &str) -> Result<(), ManifestError> {
+    if name.is_empty() {
+        return Err(ManifestError::new(
+            "extension_hook_env_name_empty",
+            "environment variable name must not be empty",
+        ));
+    }
+    if name.len() > 128 {
+        return Err(ManifestError::new(
+            "extension_hook_env_name_too_long",
+            "environment variable name must not exceed 128 bytes",
+        ));
+    }
+    let bytes = name.as_bytes();
+    if !bytes[0].is_ascii_alphabetic() && bytes[0] != b'_' {
+        return Err(ManifestError::new(
+            "extension_hook_env_name_invalid",
+            "environment variable name must start with a letter or underscore",
+        ));
+    }
+    if !bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+        return Err(ManifestError::new(
+            "extension_hook_env_name_invalid",
+            "environment variable name must contain only letters, digits, and underscores",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_and_convert_hooks(
     extension: &str,
     package_root: &Path,
@@ -409,12 +443,21 @@ fn validate_and_convert_hooks(
                     id: id.canonical(),
                     projection,
                 });
+                for key in hook.env.keys() {
+                    validate_hook_env_name(key).map_err(|error| {
+                        ManifestError::new(
+                            error.code(),
+                            format!("hook {} env: {}", hook.name, error),
+                        )
+                    })?;
+                }
                 runtime_hooks.push(CommandHookConfig {
                     hook_type: Some(hook.hook_type),
                     command: hook.command,
                     name: Some(hook.name),
                     description: hook.description,
                     timeout: hook.timeout,
+                    env: hook.env.into_iter().collect(),
                 });
             }
             converted.push(HookGroup {
@@ -764,6 +807,8 @@ struct CommandHookV1 {
     description: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

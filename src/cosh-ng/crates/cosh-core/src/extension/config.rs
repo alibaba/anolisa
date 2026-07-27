@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::config::HookDefinition;
@@ -83,6 +85,11 @@ pub struct CommandHookConfig {
     pub description: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// Environment variables passed only to the hook child process.
+    /// Hook-specific values override inherited process environment.
+    /// The parent Cosh-NG process environment remains unchanged.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// A hook group containing an optional matcher and an array of hook configs.
@@ -118,6 +125,7 @@ impl HookGroup {
                 matcher: self.matcher.clone(),
                 timeout: h.timeout,
                 sequential: self.sequential,
+                env: h.env.clone(),
             })
             .collect()
     }
@@ -275,6 +283,7 @@ mod tests {
                     name: Some("hook-a".to_string()),
                     description: None,
                     timeout: Some(3000),
+                    env: HashMap::new(),
                 }],
             },
             HookGroup {
@@ -286,6 +295,7 @@ mod tests {
                     name: None,
                     description: None,
                     timeout: None,
+                    env: HashMap::new(),
                 }],
             },
         ];
@@ -361,5 +371,87 @@ mod tests {
         assert_eq!(flat[0].name.as_deref(), Some("skill-ledger"));
         assert!(flat[1].matcher.is_none());
         assert_eq!(flat[1].name.as_deref(), Some("sandbox-guard"));
+    }
+
+    #[test]
+    fn test_parse_hook_with_env() {
+        let json = r#"{
+            "name": "tokenless-ext",
+            "version": "1.0.0",
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "shell",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "name": "tokenless-hook",
+                                "command": "python3 hook.py",
+                                "timeout": 5000,
+                                "env": {
+                                    "TOKENLESS_AGENT_ID": "cosh-ng",
+                                    "SESSION_KEY": "abc123"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        let config: ExtensionConfig = serde_json::from_str(json).unwrap();
+        let hook = &config.hooks.post_tool_use[0].hooks[0];
+        assert_eq!(hook.env.len(), 2);
+        assert_eq!(hook.env.get("TOKENLESS_AGENT_ID").unwrap(), "cosh-ng");
+        assert_eq!(hook.env.get("SESSION_KEY").unwrap(), "abc123");
+    }
+
+    #[test]
+    fn test_hook_without_env_defaults_to_empty() {
+        let json = r#"{
+            "name": "no-env-ext",
+            "version": "1.0.0",
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "name": "plain-hook",
+                                "command": "echo hello"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        let config: ExtensionConfig = serde_json::from_str(json).unwrap();
+        let hook = &config.hooks.pre_tool_use[0].hooks[0];
+        assert!(hook.env.is_empty());
+    }
+
+    #[test]
+    fn test_flatten_propagates_env() {
+        let mut env = HashMap::new();
+        env.insert("MY_VAR".to_string(), "my_value".to_string());
+        env.insert("OTHER_VAR".to_string(), "other_value".to_string());
+
+        let groups = vec![HookGroup {
+            matcher: Some("shell".to_string()),
+            sequential: None,
+            hooks: vec![CommandHookConfig {
+                hook_type: Some("command".to_string()),
+                command: "echo test".to_string(),
+                name: Some("env-hook".to_string()),
+                description: None,
+                timeout: Some(3000),
+                env: env.clone(),
+            }],
+        }];
+
+        let flat = flatten_hook_groups(&groups);
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].env.len(), 2);
+        assert_eq!(flat[0].env.get("MY_VAR").unwrap(), "my_value");
+        assert_eq!(flat[0].env.get("OTHER_VAR").unwrap(), "other_value");
     }
 }
