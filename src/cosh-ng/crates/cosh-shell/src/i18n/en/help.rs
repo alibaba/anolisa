@@ -131,6 +131,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashHooksAgentUnavailable => "(cosh-core backend unavailable)",
         MessageId::SlashExtensionsEmptyBody => "No extensions installed.",
         MessageId::SlashSkillsEmptyBody => "No skills found.",
+        MessageId::HelpSoftNewlineHint => {
+            "Press Alt+Enter or Shift+Enter for a newline in prompt; backslash+Enter also works."
+        }
         _ => return None,
     })
 }

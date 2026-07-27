@@ -116,10 +116,12 @@ fn styled_help_lines(model: &HelpPanelModel<'_>, inner: usize) -> Vec<Line<'stat
             }
         }
     }
-    lines.push(Line::from(Span::styled(
-        model.footer.clone(),
-        summary_style,
-    )));
+    for footer_line in model.footer.split('\n') {
+        lines.push(Line::from(Span::styled(
+            footer_line.to_string(),
+            summary_style,
+        )));
+    }
     lines
 }
 
@@ -166,6 +168,8 @@ fn plain_help_lines(model: &HelpPanelModel<'_>, width: usize) -> Vec<String> {
             ));
         }
     }
-    body.push(model.footer.clone());
+    for footer_line in model.footer.split('\n') {
+        body.push(footer_line.to_string());
+    }
     body
 }

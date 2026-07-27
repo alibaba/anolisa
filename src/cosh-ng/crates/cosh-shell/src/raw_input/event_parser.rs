@@ -5,6 +5,21 @@ use super::{CTRL_C, CTRL_U};
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
+/// Escape sequences that terminals emit for Alt+Enter / Shift+Enter soft-newline
+/// shortcuts.  The relay converts them to a literal `\n` in the candidate
+/// buffer so the user can compose multi-line prompts.
+const SOFT_NEWLINE_SEQUENCES: &[&[u8]] = &[
+    b"\x1b\r",       // Alt+Enter (xterm / most terminals)
+    b"\x1b\n",       // Alt+Enter variant
+    b"\x1b[13;2u",  // Shift+Enter  (xterm modifyOtherKeys / kitty)
+    b"\x1b[13;3u",  // Alt+Enter    (xterm modifyOtherKeys / kitty)
+    b"\x1b[13;4u",  // Shift+Alt+Enter
+    b"\x1b[13;5u",  // Ctrl+Enter
+    b"\x1b[13;6u",  // Shift+Ctrl+Enter
+    b"\x1bO\r",      // SS3 prefix variant
+    b"\x1bO\n",      // SS3 prefix variant
+];
+
 #[derive(Debug, Default)]
 pub(super) struct CandidateLineBuffer {
     pub(super) bytes: Vec<u8>,
@@ -20,6 +35,19 @@ impl CandidateLineBuffer {
 
     pub(super) fn push(&mut self, bytes: &[u8]) {
         let mut idx = 0;
+
+        // Handle split soft-newline: ESC already sits at the tail of the
+        // buffer and the CR/LF (or the rest of a modifyOtherKeys sequence)
+        // arrives in the next read.
+        if !bytes.is_empty()
+            && self.bytes.last() == Some(&0x1b)
+            && consume_soft_newline_split(&bytes[..])
+        {
+            self.bytes.pop();
+            self.bytes.push(b'\n');
+            idx += skip_soft_newline_tail(&bytes[..]);
+        }
+
         while idx < bytes.len() {
             if bytes[idx..].starts_with(BRACKETED_PASTE_START) {
                 idx += BRACKETED_PASTE_START.len();
@@ -29,6 +57,22 @@ impl CandidateLineBuffer {
                 idx += BRACKETED_PASTE_END.len();
                 continue;
             }
+
+            // Soft newline: Alt+Enter / Shift+Enter escape sequences.
+            if let Some(seq_len) = try_consume_soft_newline(&bytes[idx..]) {
+                self.bytes.push(b'\n');
+                idx += seq_len;
+                continue;
+            }
+
+            // Soft newline (direction B): backslash + Enter (\r).
+            if bytes[idx] == b'\r' && self.bytes.last() == Some(&b'\\') {
+                self.bytes.pop();
+                self.bytes.push(b'\n');
+                idx += 1;
+                continue;
+            }
+
             match bytes[idx] {
                 CTRL_U => {
                     self.clear();
@@ -68,10 +112,12 @@ impl CandidateLineBuffer {
     }
 
     pub(super) fn visible_line_bytes(&self) -> &[u8] {
+        // \n is a soft-newline inserted by Alt+Enter / Shift+Enter; only a
+        // bare \r (Enter / accept-line) terminates the visible region.
         let end = self
             .bytes
             .iter()
-            .position(|byte| matches!(byte, b'\n' | b'\r'))
+            .position(|byte| matches!(byte, b'\r'))
             .unwrap_or(self.bytes.len());
         &self.bytes[..end]
     }
@@ -80,7 +126,7 @@ impl CandidateLineBuffer {
         let Some(end) = self
             .bytes
             .iter()
-            .position(|byte| matches!(byte, b'\n' | b'\r'))
+            .position(|byte| matches!(byte, b'\r'))
             .or(Some(self.bytes.len()))
         else {
             return;
@@ -285,7 +331,10 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
         return CandidateLineStatus::Unsafe;
     }
 
-    let Some(newline_idx) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) else {
+    // Only a bare \r (Enter / accept-line) triggers submission.
+    // \n bytes are soft-newlines inserted by Alt+Enter / Shift+Enter and
+    // must remain part of the composed multi-line prompt.
+    let Some(newline_idx) = bytes.iter().position(|byte| matches!(byte, b'\r')) else {
         for (index, byte) in bytes.iter().enumerate() {
             if *byte == 0x1b {
                 return if incomplete_escape_suffix(&bytes[index..]) {
@@ -294,7 +343,8 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
                     CandidateLineStatus::Unsafe
                 };
             }
-            if *byte < 0x20 && !matches!(byte, b'\t') {
+            // \n is a soft-newline (visible, not unsafe); \t is tab.
+            if *byte < 0x20 && !matches!(byte, b'\t' | b'\n') {
                 return CandidateLineStatus::Unsafe;
             }
         }
@@ -305,7 +355,7 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
     let line_bytes = &bytes[..line_len];
     if line_bytes
         .iter()
-        .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))
+        .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\r' | b'\n' | b'\t')))
     {
         return CandidateLineStatus::Unsafe;
     }
@@ -319,11 +369,163 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
     }
 }
 
+/// Returns the length of a soft-newline escape sequence starting at `bytes`,
+/// or `None` if the prefix does not match any known soft-newline sequence.
+fn try_consume_soft_newline(bytes: &[u8]) -> Option<usize> {
+    for &seq in SOFT_NEWLINE_SEQUENCES {
+        if bytes.len() >= seq.len() && bytes[..seq.len()] == *seq {
+            return Some(seq.len());
+        }
+    }
+    None
+}
+
+/// Returns `true` when the buffer starts with the tail of a soft-newline
+/// sequence whose leading ESC already sits in the candidate buffer.
+fn consume_soft_newline_split(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    // ESC + CR/LF (the common Alt+Enter case).
+    if bytes[0] == b'\r' || bytes[0] == b'\n' {
+        return true;
+    }
+    // ESC + `[13;Nu` tail arriving as a second read.
+    let tails: &[&[u8]] = &[
+        b"[13;2u",
+        b"[13;3u",
+        b"[13;4u",
+        b"[13;5u",
+        b"[13;6u",
+        b"O\r",
+        b"O\n",
+    ];
+    for tail in tails {
+        if bytes.len() >= tail.len() && bytes[..tail.len()] == **tail {
+            return true;
+        }
+    }
+    false
+}
+
+/// How many bytes of the *new* read to skip after
+/// `consume_soft_newline_split` matched.
+fn skip_soft_newline_tail(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    if bytes[0] == b'\r' || bytes[0] == b'\n' {
+        return 1;
+    }
+    let tails: &[(&[u8], usize)] = &[
+        (b"[13;2u", 6),
+        (b"[13;3u", 6),
+        (b"[13;4u", 6),
+        (b"[13;5u", 6),
+        (b"[13;6u", 6),
+        (b"O\r", 3),
+        (b"O\n", 3),
+    ];
+    for &(tail, len) in tails {
+        if bytes.len() >= tail.len() && bytes[..tail.len()] == *tail {
+            return len;
+        }
+    }
+    1
+}
+
 fn incomplete_escape_suffix(bytes: &[u8]) -> bool {
     match bytes {
         [0x1b] => true,
         [0x1b, b'[', parameters @ ..] => parameters.iter().all(|byte| matches!(byte, 0x20..=0x3f)),
         [0x1b, b'O'] => true,
         _ => false,
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soft_newline_alt_enter_xterm() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"hello\x1b\rworld");
+        assert_eq!(buf.bytes, b"hello\nworld");
+        assert!(matches!(
+            candidate_line_status(&buf.bytes),
+            CandidateLineStatus::Pending
+        ));
+    }
+
+    #[test]
+    fn soft_newline_shift_enter_modify_other_keys() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"hello\x1b[13;2uworld");
+        assert_eq!(buf.bytes, b"hello\nworld");
+        assert!(matches!(
+            candidate_line_status(&buf.bytes),
+            CandidateLineStatus::Pending
+        ));
+    }
+
+    #[test]
+    fn soft_newline_alt_enter_modify_other_keys() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"hello\x1b[13;3uworld");
+        assert_eq!(buf.bytes, b"hello\nworld");
+    }
+
+    #[test]
+    fn soft_newline_backslash_enter() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"hello\\");
+        buf.push(b"\rworld");
+        assert_eq!(buf.bytes, b"hello\nworld");
+    }
+
+    #[test]
+    fn soft_newline_split_read() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"hello\x1b");
+        assert!(matches!(
+            candidate_line_status(&buf.bytes),
+            CandidateLineStatus::Pending
+        ));
+        buf.push(b"\rworld");
+        assert_eq!(buf.bytes, b"hello\nworld");
+    }
+
+    #[test]
+    fn bare_cr_submits() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"hello\r");
+        assert!(matches!(
+            candidate_line_status(&buf.bytes),
+            CandidateLineStatus::Complete { .. }
+        ));
+    }
+
+    #[test]
+    fn ctrl_j_is_soft_newline() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"hello\nworld");
+        assert!(matches!(
+            candidate_line_status(&buf.bytes),
+            CandidateLineStatus::Pending
+        ));
+        assert_eq!(buf.visible_line_bytes(), b"hello\nworld");
+    }
+
+    #[test]
+    fn multiline_submit_preserves_newlines() {
+        let mut buf = CandidateLineBuffer::default();
+        buf.push(b"line1\nline2\nline3\r");
+        if let CandidateLineStatus::Complete { line, .. } = candidate_line_status(&buf.bytes) {
+            assert_eq!(line, "line1\nline2\nline3");
+        } else {
+            panic!("expected Complete");
+        }
     }
 }

@@ -48,6 +48,7 @@ macro_rules! help_core_ids {
             SlashInfoConfigAnalysisStrategyLine,
             SlashInfoConfigRenderFallbackLine,
             SlashInfoConfigFooter,
+            HelpSoftNewlineHint,
         );
     };
 }

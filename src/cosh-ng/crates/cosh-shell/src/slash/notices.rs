@@ -107,12 +107,16 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
         HelpPanelModel {
             title: i18n.t(MessageId::HelpTitle),
             groups,
-            footer: i18n.format(
-                MessageId::HelpFooter,
-                &[
-                    ("mode", state.approval_mode.label()),
-                    ("strategy", state.analysis_mode.label()),
-                ],
+            footer: format!(
+                "{}\n{}",
+                i18n.format(
+                    MessageId::HelpFooter,
+                    &[
+                        ("mode", state.approval_mode.label()),
+                        ("strategy", state.analysis_mode.label()),
+                    ],
+                ),
+                i18n.t(MessageId::HelpSoftNewlineHint),
             ),
         },
     )

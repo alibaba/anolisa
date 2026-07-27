@@ -1734,7 +1734,7 @@ fn agent_prompt_tab_stays_local_until_enter_and_keeps_suggestion_id() {
         .iter()
         .all(|event| !matches!(event, RawInputEvent::PromptGhostIntercept { .. })));
 
-    relay_passthrough_input(b" safely\n", &mut relay).expect("submit edited agent prompt");
+    relay_passthrough_input(b" safely\r", &mut relay).expect("submit edited agent prompt");
     assert!(rx.try_iter().any(|event| matches!(
         event,
         RawInputEvent::PromptGhostIntercept { input, suggestion_id }
@@ -1985,7 +1985,7 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
         .expect("accept agent ghost");
-    relay_passthrough_input(b"\x15\n", &mut relay).expect("clear and submit");
+    relay_passthrough_input(b"\x15\r", &mut relay).expect("clear and submit");
 
     let events = rx.try_iter().collect::<Vec<_>>();
     assert!(events.contains(&RawInputEvent::PromptGhostDismissed));
@@ -1993,6 +1993,6 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
         .iter()
         .any(|event| matches!(event, RawInputEvent::PromptGhostIntercept { .. })));
     assert!(line_buffer.forced_agent_suggestion_id.is_none());
-    assert_eq!(fs::read(&path).expect("read test output"), b"\n");
+    assert_eq!(fs::read(&path).expect("read test output"), b"\r");
     fs::remove_file(path).ok();
 }

@@ -119,6 +119,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashHooksAgentUnavailable => "(cosh-core 后端不可用)",
         MessageId::SlashExtensionsEmptyBody => "未安装扩展。",
         MessageId::SlashSkillsEmptyBody => "未发现技能。",
+        MessageId::HelpSoftNewlineHint => {
+            "æ Alt+Enter æ Shift+Enter å¨æç¤ºè¯ä¸­æå¥æ¢è¡ï¼åææ +Enter ä¹å¯ä»¥ã"
+        }
         _ => return None,
     })
 }
