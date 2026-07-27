@@ -823,18 +823,12 @@ fn configure_child_environment(
         }
     }
     for (name, value) in configured_env {
-        if !is_valid_env_name(name) {
+        if !crate::config::is_valid_env_name(name) {
             return Err(format!("invalid MCP environment variable name: {name}"));
         }
         command.env(name, expand_env_vars(value));
     }
     Ok(())
-}
-
-fn is_valid_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some('A'..='Z' | 'a'..='z' | '_'))
-        && chars.all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_'))
 }
 
 fn expand_env_vars(value: &str) -> String {

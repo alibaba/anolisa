@@ -2047,7 +2047,7 @@ fn plan_action(steps: &[Step]) -> &'static str {
 fn plan_error_to_cli(err: PlanError, target: &str, command: &str) -> CliError {
     let command = command.to_string();
     match err {
-        PlanError::NotInstalled => CliError::InvalidArgument {
+        PlanError::NotInstalled => CliError::NotInstalled {
             command,
             reason: format!(
                 "component '{target}' is not installed — nothing to repair (run `anolisa status` to see what is installed)"
@@ -2657,7 +2657,7 @@ mod tests {
     // ── R7 / plan refusals ────────────────────────────────────────────
 
     #[test]
-    fn absent_component_is_invalid_argument() {
+    fn absent_component_is_not_installed() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         seed(&ctx, Vec::new());
@@ -2665,7 +2665,7 @@ mod tests {
 
         let err = repair_with_deps("cosh", &ctx, &fake, &fake, false).unwrap_err();
 
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert!(err.reason().contains("not installed"), "got: {err}");
     }
 

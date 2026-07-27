@@ -13,6 +13,7 @@
 //! reaches them fails loudly at the exact step rather than committing a
 //! record that lies.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -874,12 +875,7 @@ pub(crate) fn validate_owned_install(
             command: command.to_string(),
             reason: format!("failed to parse component manifest: {err}"),
         })?;
-    if let Some(reason) = component_conflict(&manifest, store) {
-        return Err(CliError::InvalidArgument {
-            command: command.to_string(),
-            reason,
-        });
-    }
+    validate_component_conflict(&manifest, store, &HashSet::new(), command)?;
     let hooks = resolve_install_hooks(&manifest, layout, &component)?;
     let prepared_files = InstallRunner::new(layout)
         .prepare_files(
@@ -897,6 +893,34 @@ pub(crate) fn validate_owned_install(
         manifest,
         hooks,
     })
+}
+
+/// Reject an incoming component whose manifest conflicts with active state
+/// or an earlier successful member of the same dry-run batch.
+pub(crate) fn validate_component_conflict(
+    manifest: &anolisa_core::ComponentManifest,
+    store: &StateStore,
+    planned_components: &HashSet<String>,
+    command: &str,
+) -> Result<(), CliError> {
+    if let Some(reason) = component_conflict(manifest, store) {
+        return Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason,
+        });
+    }
+    for conflict in &manifest.component.conflicts {
+        if planned_components.contains(conflict) {
+            return Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "component '{}' conflicts with component '{}' planned earlier in this batch — remove one component from the batch, then retry",
+                    manifest.component.name, conflict
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Component-level mutual exclusion (the raw equivalent of RPM's

@@ -993,10 +993,9 @@ jobs:
 
       - name: Run process and PTY integration tests
         env:
-          # Raw CLI PTY tests are wait-bound, not CPU-bound; probe a wider
-          # shared gate on CI runners. Revert this env to fall back to the
-          # in-tree default (8) if timing flakes regress.
-          COSH_RAW_CLI_TEST_PARALLELISM: '16'
+          # Libtest still schedules 16 workers, while the harness gate bounds
+          # live PTY sessions to avoid oversubscribing loaded CI runners.
+          COSH_RAW_CLI_TEST_PARALLELISM: '8'
         run: |
           cd src/cosh-ng
           scripts/run-test-gates.sh integration

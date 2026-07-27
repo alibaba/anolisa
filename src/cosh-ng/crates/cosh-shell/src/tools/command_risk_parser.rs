@@ -97,6 +97,14 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     // `&>` redirects both stdout and stderr; it is not a
                     // `[N]>` form, keep the existing high-risk path.
                     amp_redirect_guard = chars.peek().is_some_and(|next| *next == '>');
+                    // A single `&` is the background list separator, so
+                    // record a segment mark like `;`/newline/`&&`/`||`
+                    // (issue #1785 review). A terminal `&` leaves an
+                    // empty tail that the segment builder drops, so
+                    // `ls &` still yields a single segment.
+                    if !amp_redirect_guard {
+                        segment_marks.push((stages.len(), tokens.len()));
+                    }
                 }
             }
             '>' => {

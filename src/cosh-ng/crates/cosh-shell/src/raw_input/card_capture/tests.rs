@@ -733,9 +733,11 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
 
+    // Ctrl+C and ESC both abandon the capture, but stay distinguishable: a multi-step prompt
+    // lets ESC step back, and only Ctrl+C means "abandon the whole thing".
     assert_eq!(
         state.consume(&capture, &[0x03]),
-        vec![RawInputEvent::QuestionCancel("q-1".to_string())]
+        vec![RawInputEvent::QuestionAbort("q-1".to_string())]
     );
 
     state.apply_capture(&capture);
@@ -743,6 +745,30 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
         state.consume(&capture, b"\x1b"),
         vec![RawInputEvent::QuestionCancel("q-1".to_string())]
     );
+}
+
+/// Abandoning the capture also has to stop the consumer. Whatever follows the interrupt in the
+/// same read belongs to the shell, not to the question that just went away — otherwise the bytes
+/// are swallowed and reported as edits to a prompt that no longer exists.
+#[test]
+fn question_capture_ctrl_c_stops_consuming_and_returns_the_rest() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 2,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, remainder) = state.consume_split(&capture, b"\x03xnext");
+
+    assert_eq!(
+        events,
+        vec![RawInputEvent::QuestionAbort("q-1".to_string())]
+    );
+    assert_eq!(remainder, b"xnext");
 }
 
 #[test]

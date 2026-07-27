@@ -2,10 +2,12 @@
 //!
 //! Plain uninstall runs the planner pipeline: for an absent component the
 //! dry-run reports the same refusal as a real run would (an error envelope,
-//! exit 2), so previews never disagree with reality. `--purge` keeps the
-//! legacy plan view (#1471): a unified `data.dry_run`, plan fields flat
-//! under `data`. These tests drive the compiled binary and assert the full
-//! envelope, which in-crate unit tests cannot cover.
+//! `NOT_INSTALLED`, exit 2), so previews never disagree with reality. The
+//! code marks state absence only — it is not a statement about the name, as
+//! `not_installed_does_not_distinguish_a_known_name_from_an_unknown_one`
+//! pins. `--purge` keeps the legacy plan view: a unified `data.dry_run`,
+//! plan fields flat under `data`. These tests drive the compiled binary and
+//! assert the full envelope, which in-crate unit tests cannot cover.
 
 use std::path::Path;
 use std::process::Output;
@@ -68,11 +70,18 @@ fn absent_uninstall_args<'a>(prefix: &'a str, extra: &[&'a str]) -> Vec<&'a str>
 }
 
 fn seed_local_repo(prefix: &Path) {
+    seed_local_repo_with_index(prefix, "components = []\n");
+}
+
+/// Same layout as [`seed_local_repo`] but with a caller-supplied component
+/// index body, so a test can distinguish a name the index knows from one it
+/// has never heard of.
+fn seed_local_repo_with_index(prefix: &Path, components: &str) {
     let repo_v1 = prefix.join("repo/v1");
     std::fs::create_dir_all(&repo_v1).expect("local repo");
     std::fs::write(
         repo_v1.join("components.toml"),
-        "schema_version = 1\ncomponents = []\n",
+        format!("schema_version = 1\n{components}"),
     )
     .expect("component index");
     let etc = prefix.join("etc/anolisa");
@@ -105,7 +114,8 @@ fn uninstall_dry_run_json_absent_component_reports_not_installed() {
     let error = value.get("error").expect("envelope must carry error");
     assert_eq!(
         error.get("code").and_then(|v| v.as_str()),
-        Some("INVALID_ARGUMENT"),
+        Some("NOT_INSTALLED"),
+        "an absent target is its own code, distinct from a malformed one: {value}",
     );
     assert!(
         error
@@ -113,6 +123,58 @@ fn uninstall_dry_run_json_absent_component_reports_not_installed() {
             .and_then(|v| v.as_str())
             .is_some_and(|reason| reason.contains("not installed")),
         "the reason must say not installed: {value}",
+    );
+}
+
+/// `NOT_INSTALLED` reports state absence and nothing else. Resolution falls
+/// back to the literal input when the component index has no entry for it
+/// (`common::component_alias_from_repo_index`), so a name the index knows and
+/// a name it has never seen reach this code indistinguishably — same `code`,
+/// same exit status, differing only in the name echoed back.
+///
+/// This is pinned deliberately: callers must not read `NOT_INSTALLED` as
+/// "the name was valid, it just isn't installed". Should the CLI ever grow
+/// real identity validation, this test is the one that has to change, and
+/// its failure is the signal to revisit every doc that describes the code.
+#[test]
+fn not_installed_does_not_distinguish_a_known_name_from_an_unknown_one() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    seed_local_repo_with_index(
+        tmp.path(),
+        "components = [\n  { name = \"cosh\", package = \"copilot-shell\" },\n]\n",
+    );
+    let prefix = tmp.path().to_str().expect("utf-8 prefix");
+
+    let mut codes = Vec::new();
+    // "cosh" is in the index but not installed; "coshh" is in no index at all.
+    for component in ["cosh", "coshh"] {
+        let value = run_json(
+            &[
+                "--json",
+                "--dry-run",
+                "--install-mode",
+                "system",
+                "--prefix",
+                prefix,
+                "uninstall",
+                component,
+            ],
+            2,
+        );
+        let error = value.get("error").expect("envelope must carry error");
+        codes.push(
+            error
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+
+    assert_eq!(
+        codes,
+        vec!["NOT_INSTALLED".to_string(), "NOT_INSTALLED".to_string()],
+        "an index-known name and an unknown one must be reported identically",
     );
 }
 

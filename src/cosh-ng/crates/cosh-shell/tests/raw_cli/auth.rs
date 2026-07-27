@@ -401,6 +401,110 @@ fn raw_cli_auth_prepare_failure_falls_back_to_the_existing_menu() {
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
 }
 
+/// #1760: ESC anywhere in the form used to abandon `/auth` outright, so one mistyped field cost
+/// every field before it. It now walks back one prompt at a time and only cancels at the picker.
+#[test]
+fn raw_cli_auth_esc_walks_back_through_the_form_before_cancelling() {
+    let (output, requests) = run_auth_menu_flow(
+        "auth-esc-back",
+        SAVED_NONE,
+        MANUAL_PREPARE,
+        &[
+            ("cosh-osc$", b"/auth\n".as_slice()),
+            ("Authentication Required", b"\x1b[C\n".as_slice()),
+            ("Enter Provider ID", b"qwen-prod\n".as_slice()),
+            ("Enter Base URL", b"https://example.invalid/v1\n".as_slice()),
+            // ESC on API Key returns to Base URL, which still carries the value just submitted.
+            ("Enter API Key", b"\x1b".as_slice()),
+            ("Enter Base URL", b"\x1b".as_slice()),
+            ("Enter Provider ID", b"\x1b".as_slice()),
+            // Back at the picker a further ESC is the one that ends the flow.
+            ("Authentication Required", b"\x1b".as_slice()),
+            ("Auth cancelled", b"".as_slice()),
+        ],
+    );
+
+    let compact = compact_terminal_words(&output);
+    // Each re-rendered prompt offers the value already submitted for it, not an empty field.
+    assert!(
+        compact.contains("> https://example.invalid/v1"),
+        "stepping back lost the submitted Base URL: {output}"
+    );
+    assert!(
+        compact.contains("> qwen-prod"),
+        "stepping back lost the submitted Provider ID: {output}"
+    );
+    // The picker reopens on the template the form belonged to.
+    assert!(compact.contains("> [2] OpenAI Compatible"), "{output}");
+    // Only the last ESC cancels; the three before it are back-navigation.
+    assert_eq!(
+        count_occurrences(&compact, "Auth cancelled"),
+        1,
+        "an intermediate ESC cancelled the flow: {output}"
+    );
+    assert_eq!(action_count(&requests, "configure"), 0, "{requests}");
+}
+
+/// Teaching ESC to step back must not take away the interrupt: Ctrl+C still abandons the form in
+/// one keystroke, from a field the user is several prompts into.
+#[test]
+fn raw_cli_auth_ctrl_c_mid_form_abandons_the_flow() {
+    let (output, requests) = run_auth_menu_flow(
+        "auth-ctrl-c-abort",
+        SAVED_NONE,
+        MANUAL_PREPARE,
+        &[
+            ("cosh-osc$", b"/auth\n".as_slice()),
+            ("Authentication Required", b"\x1b[C\n".as_slice()),
+            ("Enter Provider ID", b"qwen-prod\n".as_slice()),
+            ("Enter Base URL", b"\x03".as_slice()),
+            ("Auth cancelled", b"".as_slice()),
+        ],
+    );
+
+    let compact = compact_terminal_words(&output);
+    assert!(compact.contains("Auth cancelled"), "{output}");
+    // A single Ctrl+C is enough: the form is gone, not one prompt further back.
+    assert!(
+        !compact.contains("Enter API Key"),
+        "Ctrl+C stepped through the form instead of abandoning it: {output}"
+    );
+    assert_eq!(action_count(&requests, "configure"), 0, "{requests}");
+}
+
+/// An edit steps back to the action menu it came from, never onto Provider ID: that field names
+/// the config being edited, so an edit of it could not take effect.
+#[test]
+fn raw_cli_auth_esc_on_an_edit_returns_to_the_provider_action_menu() {
+    let (output, requests) = run_auth_menu_flow(
+        "auth-esc-back-edit",
+        SAVED_DASHSCOPE,
+        MANUAL_PREPARE,
+        &[
+            ("cosh-osc$", b"/auth\n".as_slice()),
+            ("+ Add new provider", b"\n".as_slice()),
+            ("Edit configuration", b"\n".as_slice()),
+            // API Key is the first field an edit may change, so ESC leaves the form entirely.
+            ("Edit API Key", b"\x1b".as_slice()),
+            ("Edit configuration", b"\x1b".as_slice()),
+            ("Auth cancelled", b"".as_slice()),
+        ],
+    );
+
+    let compact = compact_terminal_words(&output);
+    // The action menu is rendered twice: on the way in, and again after ESC.
+    assert_eq!(
+        count_occurrences(&compact, "Edit configuration"),
+        2,
+        "ESC did not return to the provider action menu: {output}"
+    );
+    assert!(
+        !compact.contains("Provider ID"),
+        "an edit stepped back onto the Provider ID field: {output}"
+    );
+    assert_eq!(action_count(&requests, "configure"), 0, "{requests}");
+}
+
 /// Manual Aliyun AK/SK stays available off ECS, with the secret fields still masked.
 #[test]
 fn raw_cli_auth_non_ecs_aliyun_falls_back_to_manual_keys() {

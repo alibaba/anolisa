@@ -11,6 +11,8 @@ use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::common;
+use crate::context::InstallMode;
+use crate::test_support::{TestContextOptions, TestSandbox};
 use tempfile::tempdir;
 
 /// v5 store as the pipeline persisted it for a system-prefix layout.
@@ -99,6 +101,10 @@ fn install_dry_run_does_not_download_the_artifact() {
             .iter()
             .all(|name| !name.ends_with("remote-only-1.0.0-linux-x86_64.tar.gz")),
         "dry-run must not download the install artifact; cache entries: {cached_names:?}"
+    );
+    assert!(
+        cached_names.iter().any(|name| name.ends_with("meta.toml")),
+        "dry-run must fetch the lightweight contract; cache entries: {cached_names:?}"
     );
 }
 
@@ -942,6 +948,8 @@ fn write_local_repo_with_conflicts(
     std::fs::create_dir_all(&v1).expect("create repo dirs");
 
     let manifest = component_manifest_toml_with_conflicts(component, version, modes, conflicts);
+    let manifest_sha = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+    std::fs::write(v1.join("meta.toml"), &manifest).expect("write sidecar manifest");
     let bin_path = format!("bin/{component}");
     let payload = format!("#!/bin/sh\necho {component}\n");
     let artifact = build_tar_gz(&[
@@ -970,6 +978,7 @@ os = "{os}"
 arch = "{arch}"
 install_modes = {modes_str}
 sha256 = "{sha}"
+manifest_digest = "sha256:{manifest_sha}"
 "#,
         os = env.os,
         arch = env.arch,
@@ -978,13 +987,85 @@ sha256 = "{sha}"
     format!("file://{}", v1.display())
 }
 
-#[test]
-fn install_conflict_blocks_when_conflicting_component_is_installed() {
-    let tmp = tempdir().expect("tmpdir");
-    let prefix = tmp.path().join("sys");
-    let layout = FsLayout::system(Some(prefix.clone()));
+fn write_published_batch_conflict_repo(root: &Path) -> String {
+    let v1 = root.join("v1");
+    std::fs::create_dir_all(&v1).expect("create repo dirs");
+    let env = anolisa_env::EnvService::detect();
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
 
-    // Pre-seed state: cosh v2.6.0 is already installed.
+    for (component, conflicts) in [("cosh", &[][..]), ("cosh-ng", &["cosh"][..])] {
+        let version = "1.0.0";
+        let version_dir = v1.join(component).join(version);
+        let artifact_dir = version_dir.join(&env.os).join(&env.arch);
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact dirs");
+
+        let manifest =
+            component_manifest_toml_with_conflicts(component, version, &["user"], conflicts);
+        std::fs::write(version_dir.join("meta.toml"), &manifest).expect("write sidecar manifest");
+        let manifest_sha = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+        let bin_path = format!("bin/{component}");
+        let payload = format!("#!/bin/sh\necho {component}\n");
+        let artifact = build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            (bin_path.as_str(), payload.as_bytes()),
+        ]);
+        let artifact_name = format!(
+            "{component}-{version}-{os}-{arch}.tar.gz",
+            os = env.os,
+            arch = env.arch
+        );
+        std::fs::write(artifact_dir.join(&artifact_name), &artifact).expect("write artifact");
+        let artifact_sha = format!("{:x}", Sha256::digest(&artifact));
+        let url = format!(
+            "{component}/{version}/{os}/{arch}/{artifact_name}",
+            os = env.os,
+            arch = env.arch
+        );
+        index.push_str(&format!(
+            r#"
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{url}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["user"]
+sha256 = "{artifact_sha}"
+manifest_digest = "sha256:{manifest_sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ));
+    }
+    std::fs::write(v1.join("index.toml"), index).expect("write distribution index");
+    std::fs::write(
+        v1.join("components.toml"),
+        r#"schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "raw"
+package = "cosh"
+
+[[components]]
+name = "cosh-ng"
+
+[[components.backends]]
+kind = "raw"
+package = "cosh-ng"
+"#,
+    )
+    .expect("write component index");
+    format!("file://{}", v1.display())
+}
+
+fn seed_installed_component(layout: &FsLayout, component: &str, version: &str) {
     std::fs::create_dir_all(&layout.state_dir).expect("create state dir");
     let mut state = anolisa_core::InstalledState {
         install_mode: StateInstallMode::System,
@@ -993,12 +1074,12 @@ fn install_conflict_blocks_when_conflicting_component_is_installed() {
     };
     state.upsert_object(InstalledObject {
         kind: ObjectKind::Component,
-        name: "cosh".to_string(),
-        version: "2.6.0".to_string(),
+        name: component.to_string(),
+        version: version.to_string(),
         status: ObjectStatus::Installed,
         manifest_digest: None,
-        distribution_source: Some("file:///repo/v1/cosh.tar.gz".to_string()),
-        raw_package: Some("cosh".to_string()),
+        distribution_source: Some(format!("file:///repo/v1/{component}.tar.gz")),
+        raw_package: Some(component.to_string()),
         install_backend: Some("raw".to_string()),
         ownership: None,
         rpm_metadata: None,
@@ -1018,6 +1099,15 @@ fn install_conflict_blocks_when_conflicting_component_is_installed() {
     state
         .save(&layout.state_dir.join("installed.toml"))
         .expect("save state");
+}
+
+#[test]
+fn install_conflict_blocks_when_conflicting_component_is_installed() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+
+    seed_installed_component(&layout, "cosh", "2.6.0");
 
     // Write a repo with cosh-ng that declares conflicts = ["cosh"].
     let repo_url = write_local_repo_with_conflicts(
@@ -1049,6 +1139,157 @@ fn install_conflict_blocks_when_conflicting_component_is_installed() {
         err.reason().contains("uninstall 'cosh' first"),
         "error must provide remediation: {}",
         err.reason()
+    );
+}
+
+#[test]
+fn install_dry_run_reports_conflict_without_downloading_artifact() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+    seed_installed_component(&layout, "cosh", "2.6.0");
+    let repo_url = write_local_repo_with_conflicts(
+        &tmp.path().join("repo"),
+        "cosh-ng",
+        "0.11.0",
+        &["system"],
+        &["cosh"],
+    );
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    let mut ctx = ctx_with_prefix(false, Some(prefix));
+    ctx.dry_run = true;
+    let err = handle_with_fake_rpm(a, &ctx).expect_err("dry-run must report the conflict");
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason()
+            .contains("conflicts with installed component 'cosh'"),
+        "got: {}",
+        err.reason()
+    );
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names.iter().any(|name| name.ends_with("meta.toml")),
+        "dry-run must fetch the lightweight contract; cache entries: {cached_names:?}"
+    );
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("cosh-ng.tar.gz")),
+        "dry-run must not fetch the install artifact; cache entries: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_all_dry_run_rejects_conflicts_between_planned_components() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_published_batch_conflict_repo(sandbox.repo_root());
+    let ctx = sandbox.context_with(
+        InstallMode::User,
+        TestContextOptions {
+            dry_run: true,
+            ..Default::default()
+        },
+    );
+    let layout = common::resolve_layout(&ctx);
+    std::fs::create_dir_all(&layout.etc_dir).expect("create config dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{repo_url}\"\n"
+        ),
+    )
+    .expect("write repo config");
+    let batch_args = InstallArgs {
+        component: None,
+        all: true,
+        fail_fast: false,
+        version: None,
+        backend: Some("raw".to_string()),
+        repo: None,
+        package: None,
+    };
+
+    let err = handle_all(batch_args, &ctx)
+        .expect_err("the second component must conflict with the first planned component");
+
+    assert!(matches!(err, CliError::BatchPartial { .. }), "got: {err}");
+    assert!(
+        !layout.state_dir.join("installed.toml").exists(),
+        "dry-run must not persist simulated batch state"
+    );
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        cached_names
+            .iter()
+            .filter(|name| name.ends_with("meta.toml"))
+            .count(),
+        2,
+        "both batch contracts must be checked; cache entries: {cached_names:?}"
+    );
+    assert!(
+        cached_names.iter().all(|name| !name.ends_with(".tar.gz")),
+        "dry-run must not fetch batch artifacts; cache entries: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_dry_run_rejects_mismatched_sidecar_digest() {
+    let tmp = tempdir().expect("tmpdir");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_with_conflicts(&repo_root, "cosh-ng", "0.11.0", &["system"], &["cosh"]);
+    std::fs::write(
+        repo_root.join("v1/meta.toml"),
+        component_manifest_toml("cosh-ng", "0.11.0", &["system"]),
+    )
+    .expect("replace sidecar manifest");
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let mut ctx = ctx_with_prefix(false, Some(prefix));
+    ctx.dry_run = true;
+    let err = handle_with_fake_rpm(a, &ctx).expect_err("digest mismatch must fail dry-run");
+
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(err.reason().contains("sha256 mismatch"), "got: {err}");
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("cosh-ng.tar.gz")),
+        "digest failure must not fetch the install artifact; cache entries: {cached_names:?}"
     );
 }
 

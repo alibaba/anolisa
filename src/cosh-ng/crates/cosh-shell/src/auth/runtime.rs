@@ -9,12 +9,13 @@ use crate::auth::capture::matches_auth_capture;
 use crate::auth::completion::finish_auth_configuration;
 use crate::auth::delete_confirm::{
     begin_delete_confirmation, focus_delete_confirmation, render_delete_outcome,
-    submit_delete_confirmation,
+    submit_delete_confirmation, DeleteConfirmationOutcome,
 };
 use crate::auth::menu::{
     has_manageable_entries, management_entry, management_entry_count, management_entry_index,
     AuthManagementEntry, EcsRamRolePrepare, PrefetchedAliyunPrepare, SysomMenu,
 };
+use crate::auth::navigation::{step_back, BackOutcome};
 use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
 use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
@@ -207,6 +208,20 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
 
     render_current_auth_panel(state, output)?;
     Ok(())
+}
+
+fn clear_observed_model_after_provider_change(state: &mut InlineState) {
+    state.personalization.foreground_model = None;
+}
+
+fn clear_observed_model_after_provider_delete(
+    state: &mut InlineState,
+    deleted_provider_was_active: bool,
+    outcome: &DeleteConfirmationOutcome,
+) {
+    if deleted_provider_was_active && matches!(outcome, DeleteConfirmationOutcome::Deleted { .. }) {
+        clear_observed_model_after_provider_change(state);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,6 +425,7 @@ fn handle_auth_answer<W: std::io::Write>(
             match action {
                 ProviderAction::Activate => {
                     core_auth_activate(adapter, &existing.name).map_err(std::io::Error::other)?;
+                    clear_observed_model_after_provider_change(state);
                     // Clear and show confirmation
                     state.auth.state.take();
                     clear_active_auth_panel(state, output)?;
@@ -519,8 +535,17 @@ fn handle_auth_answer<W: std::io::Write>(
             Ok(true)
         }
         AuthPhase::ConfirmDelete { provider_idx } => {
+            let deleted_provider_was_active = auth
+                .existing_providers
+                .get(provider_idx)
+                .is_some_and(|provider| provider.is_active);
             let outcome = submit_delete_confirmation(adapter, auth, provider_idx)
                 .map_err(std::io::Error::other)?;
+            clear_observed_model_after_provider_delete(
+                state,
+                deleted_provider_was_active,
+                &outcome,
+            );
             clear_active_auth_panel(state, output)?;
             let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
             render_delete_outcome(&outcome, &renderer, output)?;
@@ -722,8 +747,12 @@ fn send_auth_response<W: std::io::Write>(
     };
 
     if let Some(active_run) = state.agent_run.active.as_ref() {
+        let result = active_run.handle.respond_auth(response);
+        if result.is_ok() {
+            clear_observed_model_after_provider_change(state);
+        }
         return finish_active_submission(
-            active_run.handle.respond_auth(response),
+            result,
             &auth.id,
             &mut state.auth.completed_ids,
             state.language,
@@ -751,6 +780,7 @@ fn send_auth_response<W: std::io::Write>(
                     render_current_auth_panel(state, output)?;
                     return Ok(());
                 }
+                clear_observed_model_after_provider_change(state);
             }
             AuthBackend::ActiveRun => {}
         }
@@ -758,6 +788,38 @@ fn send_auth_response<W: std::io::Write>(
 
     state.auth.completed_ids.insert(auth.id);
     finish_auth_configuration(state, output, &provider_label)
+}
+
+/// Reports whether `event` carries the capture id the auth panel is currently listening on.
+///
+/// The scoped id is what keeps a keystroke left over from an earlier field from acting on
+/// whichever field is live now.
+fn event_targets_pending_auth(state: &InlineState, event: &ShellEvent) -> bool {
+    let Some(target_id) = event.input.as_deref() else {
+        return false;
+    };
+    state
+        .auth
+        .state
+        .as_ref()
+        .is_some_and(|auth| matches_auth_capture(auth, target_id.trim()))
+}
+
+/// Applies ESC to the pending auth panel: one step back, or cancel at the first step.
+fn handle_auth_back<W: std::io::Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let Some(auth) = state.auth.state.as_mut() else {
+        return Ok(());
+    };
+    match step_back(auth) {
+        BackOutcome::Redraw => {
+            clear_active_auth_panel(state, output)?;
+            render_current_auth_panel(state, output)
+        }
+        BackOutcome::Cancel => cancel_auth_panel(state, output),
+    }
 }
 
 fn cancel_auth_panel<W: std::io::Write>(
@@ -847,17 +909,14 @@ pub(crate) fn render_auth_card_actions<W: std::io::Write>(
                     }
                 }
             }
-            Some("cancel") | Some("question_cancel") => {
-                if let Some(cancel_id) = event.input.as_deref() {
-                    let matches_pending = state
-                        .auth
-                        .state
-                        .as_ref()
-                        .is_some_and(|auth| matches_auth_capture(auth, cancel_id.trim()));
-                    if matches_pending {
-                        cancel_auth_panel(state, output)?;
-                    }
-                }
+            // ESC steps back through the form one prompt at a time; Ctrl+C
+            // (`question_abort`) keeps abandoning `/auth` outright, so the multi-step flow
+            // never costs the user their usual interrupt.
+            Some("question_cancel") if event_targets_pending_auth(state, event) => {
+                handle_auth_back(state, output)?;
+            }
+            Some("cancel") | Some("question_abort") if event_targets_pending_auth(state, event) => {
+                cancel_auth_panel(state, output)?;
             }
             _ => {}
         }
