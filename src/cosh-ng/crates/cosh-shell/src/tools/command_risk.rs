@@ -4,7 +4,7 @@ use super::command_risk_build::{
     high_risk_program_assessment, high_shell_syntax, max_output_exposure, max_output_stability,
     min_confidence,
 };
-use super::command_risk_compound::{assess_stripped_compound, stripped_segments};
+use super::command_risk_compound::{assess_compound, compound_segments};
 use super::command_risk_parser::{is_env_assignment, parse_command, ParsedCommand};
 use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
@@ -88,11 +88,11 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             "redirection-write",
         );
     }
-    let mut result = if let Some(segments) = stripped_segments(&parsed) {
-        // Stripped commands are assessed per segment and aggregated so
-        // high-risk tails keep their full stage assessment (PR #1790
-        // review); unstripped commands keep the first-stage path below.
-        assess_stripped_compound(command, parsed.shape, &segments, policy)
+    let mut result = if let Some(segments) = compound_segments(&parsed) {
+        // Compound commands are assessed per segment and aggregated so
+        // high-risk tail segments keep their full stage assessment
+        // (issue #1785, PR #1790 review).
+        assess_compound(command, parsed.shape, &segments, policy)
     } else {
         match parsed.shape {
             CommandShape::Simple | CommandShape::EnvSimple => {

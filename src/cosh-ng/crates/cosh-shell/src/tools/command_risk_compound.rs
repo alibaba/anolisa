@@ -8,20 +8,19 @@ use super::command_risk_build::{
 };
 use super::command_risk_parser::ParsedCommand;
 
-/// Normalizes the input for the stripped-compound path (PR #1790 review):
-/// `&&`/`||`/`;`/newline separated commands use their recorded segments,
-/// while a bare pipeline masked by an input redirection (`cat < in
-/// 2>/dev/null | rm ...`, where `RedirectionRead` outranks `Pipeline` as
-/// dominant shape) has no segment separators, so all of its stages become
-/// a single pipeline segment. Returns `None` for commands that keep the
-/// first-stage path.
-pub(super) fn stripped_segments(parsed: &ParsedCommand) -> Option<Vec<Vec<Vec<String>>>> {
-    if parsed.null_redirections == 0
-        || !matches!(
-            parsed.shape,
-            CommandShape::AndOrList | CommandShape::Sequence | CommandShape::RedirectionRead
-        )
-    {
+/// Returns the per-segment pipeline stages for compound commands
+/// (`&&`/`||`/`;`/newline separated) so each segment is assessed
+/// independently and the results aggregated (issue #1785). A bare
+/// pipeline masked by an input redirection (`cat < in 2>/dev/null |
+/// rm ...`, where `RedirectionRead` outranks `Pipeline` as dominant
+/// shape) has no segment separators, so all of its stages become a
+/// single pipeline segment. Returns `None` for non-compound shapes
+/// and for `Complex` commands that cannot be reliably segmented.
+pub(super) fn compound_segments(parsed: &ParsedCommand) -> Option<Vec<Vec<Vec<String>>>> {
+    if !matches!(
+        parsed.shape,
+        CommandShape::AndOrList | CommandShape::Sequence | CommandShape::RedirectionRead
+    ) {
         return None;
     }
     if !parsed.segments.is_empty() {
@@ -31,17 +30,16 @@ pub(super) fn stripped_segments(parsed: &ParsedCommand) -> Option<Vec<Vec<Vec<St
 }
 
 /// Assesses a compound command (`&&` / `||` / `;` / newline separated)
-/// whose null-suppression redirections were stripped, by re-using the
-/// existing simple/pipeline assessment per segment and aggregating the
-/// results. This replaces the earlier word-scan compensation, which lost
-/// command/argument boundaries (PR #1790 review): it both missed rules
-/// that need full stage assessment (`kubectl delete`, `docker run`,
-/// `awk system()`, `curl | sh`) and escalated benign arguments
-/// (`echo rm>/dev/null && true`).
+/// by re-using the existing simple/pipeline assessment per segment and
+/// aggregating the results (issue #1785, PR #1790 review): each segment
+/// is assessed independently, impact takes the max across segments,
+/// confidence takes the min, and reasons are aggregated and deduped.
+/// This ensures high-risk tail segments are not missed (e.g.
+/// `cd /tmp && rm -rf ~` correctly assesses as High).
 ///
 /// The compound execution boundary is unchanged: always `AskUser`, never
 /// auto-allow.
-pub(super) fn assess_stripped_compound(
+pub(super) fn assess_compound(
     command: &str,
     shape: CommandShape,
     segments: &[Vec<Vec<String>>],

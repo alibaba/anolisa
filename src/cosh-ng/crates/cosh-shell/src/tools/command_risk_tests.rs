@@ -220,9 +220,9 @@ const SEMANTICS_BASELINE: &[(bool, &str, &str)] = &[
     (false, "ps aux | head -5", "AskUser|Medium|Medium|None|None|[None, None]|diagnostic-pipeline-heuristic,pipeline-not-auto-executable"),
     (false, "ps aux | awk '{print $1}'", "AskUser|Medium|Medium|None|None|[None, None]|pipeline-not-auto-executable"),
     (false, "cd /tmp && git status", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,unknown-command"),
-    (false, "sudo id && ls", "AskUser|High|Medium|None|CredentialPromptLikely|[PrivilegeEscalation]|and-or-list-not-auto-executable,privilege-escalation"),
-    (false, "echo hi && rm -rf /tmp/x", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,unknown-command"),
-    (false, "echo hi; ls -la", "AskUser|Medium|Low|None|None|[Unknown]|sequence-not-auto-executable,unknown-command"),
+    (false, "sudo id && ls", "AskUser|High|Medium|None|CredentialPromptLikely|[PrivilegeEscalation, None]|and-or-list-not-auto-executable,bounded-readonly,privilege-escalation"),
+    (false, "echo hi && rm -rf /tmp/x", "AskUser|High|Medium|None|None|[None, FilesystemDelete]|and-or-list-not-auto-executable,bounded-readonly,filesystem-delete"),
+    (false, "echo hi; ls -la", "AskUser|Low|Medium|None|None|[None]|bounded-readonly,sequence-not-auto-executable"),
     (false, "wc -l < notes.txt", "AskUser|Low|Medium|None|None|[None]|read-redirection-not-auto-executable,readonly-pipeline-stage"),
     (false, "for i in 1 2; do echo $i; done", "AskUser|Medium|Low|None|None|[Unknown]|sequence-not-auto-executable,unknown-command"),
     (false, "echo $(whoami)", "AskUser|High|High|None|None|[Unknown]|command-substitution"),
@@ -288,6 +288,35 @@ fn command_risk_primary_reason_keeps_high_risk_explanation_first() {
     let push = ask("git push");
     assert_eq!(push.primary_reason(), "unknown-command");
 }
+
+#[test]
+fn command_risk_compound_assesses_all_segments() {
+    // Issue #1785: high-risk tail segments in compound commands must be
+    // assessed, not just the first segment.
+    
+    // cd /tmp && rm -rf ~ should assess as High due to rm -rf tail
+    let dangerous_tail = ask("cd /tmp && rm -rf ~");
+    assert_eq!(dangerous_tail.impact, RiskImpact::High);
+    assert!(dangerous_tail.reasons.contains(&"filesystem-delete"));
+    assert_eq!(dangerous_tail.execution, ExecutionDecision::AskUser);
+
+    // echo hi && sudo reboot should assess as High due to sudo tail
+    let sudo_tail = ask("echo hi && sudo reboot");
+    assert_eq!(sudo_tail.impact, RiskImpact::High);
+    assert!(sudo_tail.reasons.contains(&"privilege-escalation"));
+
+    // All-readonly compound should stay Low
+    let readonly_seq = ask("echo hi; ls -la");
+    assert_eq!(readonly_seq.impact, RiskImpact::Low);
+    assert!(readonly_seq.reasons.contains(&"bounded-readonly"));
+
+    // execution boundary unchanged: always AskUser for compound commands
+    assert_eq!(dangerous_tail.execution, ExecutionDecision::AskUser);
+    assert_eq!(sudo_tail.execution, ExecutionDecision::AskUser);
+    assert_eq!(readonly_seq.execution, ExecutionDecision::AskUser);
+    assert_eq!(dangerous_tail.auto_allow, None);
+}
+
 #[test]
 fn null_redirection_suppression_is_not_filesystem_write() {
     // V-M1/V-M3/V-M4/V-M5: null-suppression redirections are no longer
