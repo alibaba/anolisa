@@ -108,7 +108,7 @@ pub(crate) enum RawInputEvent {
 #[cfg(test)]
 mod tests {
     use super::event_parser::{
-        candidate_line_status, candidate_inline_hint, native_candidate_should_return_to_shell,
+        candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
         redact_extension_setting_value, starts_native_intercept_candidate, CandidateLineBuffer,
         CandidateLineStatus, NativeLineState,
     };
