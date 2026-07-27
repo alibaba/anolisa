@@ -476,7 +476,6 @@ fn input_redirection_does_not_mask_pipeline_tail_stages() {
     assert_ne!(benign.impact, RiskImpact::High, "{:?}", benign.reasons);
 }
 
-
 #[test]
 fn compound_without_null_redirection_assesses_all_segments() {
     // Issue #1785: compound commands without null-suppression redirections
@@ -487,7 +486,9 @@ fn compound_without_null_redirection_assesses_all_segments() {
     let delete_tail = ask("cd /tmp && rm -rf ~");
     assert_eq!(delete_tail.impact, RiskImpact::High);
     assert_eq!(delete_tail.primary_reason(), "filesystem-delete");
-    assert!(delete_tail.reasons.contains(&"and-or-list-not-auto-executable"));
+    assert!(delete_tail
+        .reasons
+        .contains(&"and-or-list-not-auto-executable"));
     assert_eq!(delete_tail.execution, ExecutionDecision::AskUser);
     assert!(delete_tail.auto_allow.is_none());
 
@@ -522,10 +523,7 @@ fn compound_without_null_redirection_assesses_all_segments() {
             ExecutionDecision::AskUser,
             "{command}: execution must remain AskUser"
         );
-        assert!(
-            a.auto_allow.is_none(),
-            "{command}: auto_allow must be None"
-        );
+        assert!(a.auto_allow.is_none(), "{command}: auto_allow must be None");
     }
 }
 
