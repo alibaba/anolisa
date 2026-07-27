@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 use crate::input::{InputClassifier, InputDecision, InterceptReason};
 
 use super::event_parser::{
-    candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
-    redact_extension_setting_value, starts_intercept_candidate, starts_native_intercept_candidate,
-    CandidateLineBuffer, CandidateLineStatus, NativeLineState,
+    at_file_complete, candidate_inline_hint, candidate_line_status,
+    native_candidate_should_return_to_shell, redact_extension_setting_value,
+    starts_intercept_candidate, starts_native_intercept_candidate, CandidateLineBuffer,
+    CandidateLineStatus, NativeLineState,
 };
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
@@ -95,6 +96,15 @@ fn relay_passthrough_input_with_activity(
         return relay_native_passthrough(bytes, relay, emit_activity);
     }
     if relay.line_buffer.is_active() || starts_intercept_candidate(bytes) {
+        // Handle Tab completion for @-file candidates.
+        if bytes == b"\t" && relay.line_buffer.is_active() {
+            if let Some(completed) = try_at_file_complete(relay.line_buffer) {
+                relay.line_buffer.clear();
+                relay.line_buffer.push(completed.as_bytes());
+                redraw_candidate_line(relay.input_events, relay.line_buffer);
+                return relay_candidate_line(relay, emit_activity);
+            }
+        }
         relay.line_buffer.push(bytes);
         redraw_candidate_line(relay.input_events, relay.line_buffer);
         return relay_candidate_line(relay, emit_activity);
@@ -299,6 +309,15 @@ fn relay_native_passthrough(
     if relay.line_buffer.is_active()
         || starts_native_intercept_candidate(bytes, relay.native_line_state)
     {
+        // Handle Tab completion for @-file candidates in native mode.
+        if bytes == b"\t" && relay.line_buffer.is_active() {
+            if let Some(completed) = try_at_file_complete(relay.line_buffer) {
+                relay.line_buffer.clear();
+                relay.line_buffer.push(completed.as_bytes());
+                redraw_candidate_line(relay.input_events, relay.line_buffer);
+                return relay_candidate_line(relay, emit_activity);
+            }
+        }
         relay.line_buffer.push(bytes);
         if native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer) {
             return flush_candidate_line_to_shell(relay, emit_activity);
@@ -437,6 +456,26 @@ fn flush_candidate_line_to_shell(
         &bytes,
     )?;
     Ok(false)
+}
+
+/// Attempts to complete an `@filename` candidate when Tab is pressed.
+/// Returns the completed string (e.g. `@readme.md`) or None if not applicable.
+fn try_at_file_complete(line_buffer: &CandidateLineBuffer) -> Option<String> {
+    let visible = line_buffer.visible_line_bytes();
+    let line = std::str::from_utf8(visible).ok()?;
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('@') {
+        return None;
+    }
+    let prefix = &trimmed[1..];
+    // Do not complete if the prefix already has whitespace (multi-token input).
+    if prefix.contains(char::is_whitespace) {
+        return None;
+    }
+    let completed = at_file_complete(prefix)?;
+    // Preserve any leading whitespace from the original line.
+    let leading = &line[..line.len() - trimmed.len()];
+    Some(format!("{leading}@{completed}"))
 }
 
 fn redraw_candidate_line(

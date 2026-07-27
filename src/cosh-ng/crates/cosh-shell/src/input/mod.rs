@@ -77,6 +77,13 @@ impl InputClassifier {
             };
         }
 
+        if trimmed.starts_with('@') && trimmed.len() > 1 && !trimmed[1..].starts_with('@') {
+            return InputDecision::Intercept {
+                input: input.to_string(),
+                reason: InterceptReason::AtFile,
+            };
+        }
+
         InputDecision::SendToShell(input.to_string())
     }
 
@@ -105,6 +112,7 @@ pub enum InterceptReason {
     NaturalLanguage,
     AgentMarker,
     PromptGhost,
+    AtFile,
 }
 
 impl InterceptReason {
@@ -114,6 +122,7 @@ impl InterceptReason {
             Self::NaturalLanguage => "natural_language",
             Self::AgentMarker => "agent_marker",
             Self::PromptGhost => "prompt_ghost",
+            Self::AtFile => "at_file",
         }
     }
 }
@@ -522,5 +531,46 @@ mod tests {
             d.classify("echo ok"),
             InputDecision::SendToShell("echo ok".to_string())
         );
+    }
+
+    #[test]
+    fn at_file_is_classified_as_at_file_intercept() {
+        let d = InputClassifier::default();
+        assert_eq!(
+            d.classify("@readme.md"),
+            InputDecision::Intercept {
+                input: "@readme.md".to_string(),
+                reason: InterceptReason::AtFile,
+            }
+        );
+        assert_eq!(
+            d.classify("@src/main.rs"),
+            InputDecision::Intercept {
+                input: "@src/main.rs".to_string(),
+                reason: InterceptReason::AtFile,
+            }
+        );
+    }
+
+    #[test]
+    fn bare_at_is_not_at_file_intercept() {
+        let d = InputClassifier::default();
+        // Single @ alone should not be classified (it's still pending input)
+        assert_eq!(d.classify("@"), InputDecision::SendToShell("@".to_string()));
+    }
+
+    #[test]
+    fn double_at_is_not_at_file_intercept() {
+        let d = InputClassifier::default();
+        // @@ should not be classified as AtFile (could be email, etc.)
+        assert_eq!(
+            d.classify("@@test"),
+            InputDecision::SendToShell("@@test".to_string())
+        );
+    }
+
+    #[test]
+    fn at_file_reason_as_str() {
+        assert_eq!(InterceptReason::AtFile.as_str(), "at_file");
     }
 }
