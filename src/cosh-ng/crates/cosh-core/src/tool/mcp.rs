@@ -105,8 +105,7 @@ pub(crate) async fn handle_mcp_registry(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing 'server' parameter".to_string())?;
             let inspection = inspect_server(server, config, "inspected", false).await?;
-            serde_json::to_value(&inspection)
-                .map_err(|e| format!("serialization error: {e}"))
+            serde_json::to_value(&inspection).map_err(|e| format!("serialization error: {e}"))
         }
         "connect" => {
             let server = params
@@ -115,8 +114,7 @@ pub(crate) async fn handle_mcp_registry(
                 .ok_or_else(|| "missing 'server' parameter".to_string())?;
             let inspection = inspect_server(server, config, "connected", true).await?;
             state::remove_disabled(MCP_SERVERS_STATE, server)?;
-            serde_json::to_value(&inspection)
-                .map_err(|e| format!("serialization error: {e}"))
+            serde_json::to_value(&inspection).map_err(|e| format!("serialization error: {e}"))
         }
         "refresh" => {
             let server = params
@@ -124,8 +122,7 @@ pub(crate) async fn handle_mcp_registry(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing 'server' parameter".to_string())?;
             let inspection = inspect_server(server, config, "refreshed", false).await?;
-            serde_json::to_value(&inspection)
-                .map_err(|e| format!("serialization error: {e}"))
+            serde_json::to_value(&inspection).map_err(|e| format!("serialization error: {e}"))
         }
         "disconnect" => {
             let server = params
