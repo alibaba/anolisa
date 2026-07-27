@@ -1993,6 +1993,6 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
         .iter()
         .any(|event| matches!(event, RawInputEvent::PromptGhostIntercept { .. })));
     assert!(line_buffer.forced_agent_suggestion_id.is_none());
-    assert_eq!(fs::read(&path).expect("read test output"), b"\n");
+    assert_eq!(fs::read(&path).expect("read test output"), b"\r");
     fs::remove_file(path).ok();
 }
