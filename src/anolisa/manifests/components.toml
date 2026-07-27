@@ -157,3 +157,18 @@ kind = "rpm"
 package = "skillfs"
 provides = "anolisa-component(skillfs)"
 legacy_adopt = true
+
+[[components]]
+name = "ktuner"
+display_name = "Kernel Tuner"
+summary = "Deterministic kernel-tuning engine for ANOLISA agents"
+
+[[components.backends]]
+kind = "raw"
+package = "ktuner"
+
+[[components.backends]]
+kind = "rpm"
+package = "ktuner"
+provides = "anolisa-component(ktuner)"
+legacy_adopt = true
