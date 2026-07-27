@@ -855,7 +855,35 @@ pub(crate) fn render_auth_card_actions<W: std::io::Write>(
                         .as_ref()
                         .is_some_and(|auth| matches_auth_capture(auth, cancel_id.trim()));
                     if matches_pending {
-                        cancel_auth_panel(state, output)?;
+                        // Phase-aware ESC handling: step back instead of cancelling
+                        // the entire /auth flow when inside a multi-step form.
+                        let phase = state.auth.state.as_ref().map(|a| a.phase.clone());
+                        let current_field = state.auth.state.as_ref().map(|a| a.current_field);
+                        match (phase, current_field) {
+                            (Some(AuthPhase::FillingField), Some(field)) if field > 0 => {
+                                // Go back to the previous field, preserving collected values
+                                let auth = state.auth.state.as_mut().unwrap();
+                                auth.current_field -= 1;
+                                auth.field_error = None;
+                                auth.load_current_field_input();
+                                clear_active_auth_panel(state, output)?;
+                                render_current_auth_panel(state, output)?;
+                            }
+                            (Some(AuthPhase::FillingField), _) => {
+                                // First field: go back to SelectingProvider
+                                let auth = state.auth.state.as_mut().unwrap();
+                                auth.phase = AuthPhase::SelectingProvider;
+                                auth.collected_values.clear();
+                                auth.field_input.clear();
+                                auth.field_error = None;
+                                clear_active_auth_panel(state, output)?;
+                                render_current_auth_panel(state, output)?;
+                            }
+                            _ => {
+                                // SelectingProvider and other phases: cancel the whole flow
+                                cancel_auth_panel(state, output)?;
+                            }
+                        }
                     }
                 }
             }
