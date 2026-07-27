@@ -76,6 +76,7 @@ where
     let mut buffer = [0_u8; 8192];
     let mut display_start = parser.display.len();
     let mut native_candidate_echoed_len = 0;
+    let mut candidate_prev_lines = 1;
     let mut prompt_replay = PromptReplayTracker::new(input_generation.clone());
     let mut last_pty_output: Option<Instant> = None;
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
@@ -96,6 +97,7 @@ where
             output,
             prompt,
             &mut native_candidate_echoed_len,
+            &mut candidate_prev_lines,
             &mut prompt_replay,
         )?;
         let mut observer_action = merge_pending_prompt_restore(
@@ -300,6 +302,7 @@ where
             output,
             prompt,
             &mut native_candidate_echoed_len,
+            &mut candidate_prev_lines,
             &mut prompt_replay,
         )?;
         observer_action = merge_pending_prompt_restore(
@@ -477,8 +480,12 @@ fn clear_prompt_ghost_line<W: Write>(
     output: &mut W,
     fallback_prompt: &str,
     native_candidate_echoed_len: &mut usize,
+    candidate_prev_lines: &mut usize,
 ) -> io::Result<()> {
-    write!(output, "\r\x1b[2K")?;
+    if *candidate_prev_lines > 1 {
+        write!(output, "\x1b[{}A", *candidate_prev_lines - 1)?;
+    }
+    write!(output, "\r\x1b[J")?;
     let replay = prompt_replay_bytes(parser.last_prompt_display());
     if replay.is_empty() {
         output.write_all(fallback_prompt.as_bytes())?;
@@ -486,6 +493,7 @@ fn clear_prompt_ghost_line<W: Write>(
         output.write_all(replay)?;
     }
     *native_candidate_echoed_len = 0;
+    *candidate_prev_lines = 1;
     output.flush()
 }
 

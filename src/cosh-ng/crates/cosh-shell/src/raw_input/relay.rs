@@ -443,13 +443,17 @@ fn redraw_candidate_line(
     input_events: &Sender<RawInputEvent>,
     line_buffer: &mut CandidateLineBuffer,
 ) {
-    let original = line_buffer.visible_line_bytes();
-    send_shell_input_state(original.is_empty(), input_events);
-    let visible = redact_extension_setting_value(original);
-    let hint = std::str::from_utf8(&visible)
+    let raw_len = line_buffer.visible_line_bytes().len();
+    send_shell_input_state(raw_len == 0, input_events);
+    // Use render bytes: soft-newline sentinels converted to literal \n.
+    let render = line_buffer.visible_line_render_bytes();
+    let visible = redact_extension_setting_value(&render);
+    // Hint calculation uses only the first line (before any soft newline).
+    let first_line_end = visible.iter().position(|&b| b == b'\n').unwrap_or(visible.len());
+    let hint = std::str::from_utf8(&visible[..first_line_end])
         .ok()
         .and_then(candidate_inline_hint);
-    line_buffer.relayed_len = visible.len();
+    line_buffer.relayed_len = raw_len;
     let _ = input_events.send(RawInputEvent::CandidateRedraw {
         input: visible,
         hint,
