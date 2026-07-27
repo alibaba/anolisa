@@ -54,7 +54,7 @@ check_source_floor cosh-types 24
 check_source_floor cosh-platform 279
 check_source_floor cosh-cli 75
 check_source_floor cosh-core 696
-check_source_floor cosh-shell 2571
+check_source_floor cosh-shell 2572
 
 ignored_count="$(rg -n '^[[:space:]]*#\[ignore' crates -g '*.rs' | wc -l | tr -d ' ')"
 echo "ignored tests: $ignored_count"
@@ -63,7 +63,7 @@ if [[ "$ignored_count" -ne 3 ]]; then
 fi
 
 check_overlap_ceiling cosh-core cosh-core 4
-check_overlap_ceiling cosh-shell cosh-shell 634
+check_overlap_ceiling cosh-shell cosh-shell 635
 
 if [[ "$failures" -ne 0 ]]; then
   echo "test inventory audit failed with $failures violation(s)" >&2
