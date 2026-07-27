@@ -96,9 +96,30 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
     } else {
         match parsed.shape {
             CommandShape::Simple | CommandShape::EnvSimple => {
-                assess_simple_command(command, parsed, policy)
+                let effective = if parsed.null_redirections > 0 {
+                    parsed
+                        .stages
+                        .first()
+                        .map(|stage| stage.join(" "))
+                        .unwrap_or_default()
+                } else {
+                    command.to_string()
+                };
+                assess_simple_command(&effective, parsed, policy)
             }
-            CommandShape::Pipeline => assess_pipeline(command, parsed, policy),
+            CommandShape::Pipeline => {
+                let effective = if parsed.null_redirections > 0 {
+                    parsed
+                        .stages
+                        .iter()
+                        .map(|stage| stage.join(" "))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                } else {
+                    command.to_string()
+                };
+                assess_pipeline(&effective, parsed, policy)
+            }
             CommandShape::AndOrList | CommandShape::Sequence | CommandShape::RedirectionRead => {
                 let mut simple = assess_first_stage(command, &parsed, policy);
                 simple.shape = parsed.shape;
@@ -129,6 +150,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
     };
     if null_redirections > 0 {
         apply_null_redirection_policy(&mut result);
+        result.command = command.to_string();
     }
     result
 }
