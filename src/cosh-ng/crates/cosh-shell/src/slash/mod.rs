@@ -22,3 +22,4 @@ pub(super) mod session;
 pub(super) mod skills;
 #[cfg(test)]
 mod skills_tests;
+pub(super) mod status;
