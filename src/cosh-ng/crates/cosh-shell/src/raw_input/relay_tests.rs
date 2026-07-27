@@ -812,6 +812,231 @@ fn prompt_ghost_candidate_cycle_during_read_does_not_drop_input() {
 }
 
 #[test]
+fn tab_read_under_selection_is_not_reinterpreted_by_native_route() {
+    let (path, master) = output_file("ghost-route-cutover-selection-native");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = selection_input_mode();
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"\t".to_vec()).expect("tab input");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("tab bytes obtained");
+    // The prompt ghost is replaced by a native-shell route between the read
+    // obtaining the Tab and the reader publishing it: the route kinds differ,
+    // so the Tab must be discarded instead of writing the new native ghost
+    // text to the PTY.
+    {
+        let mut mode = input_mode.lock().expect("input mode");
+        *mode = RawInputMode::PromptGhost {
+            text: "echo native".to_string(),
+            route: PromptGhostRoute::NativeShell,
+        };
+    }
+    resume_tx.send(()).expect("release read");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptGhostAccepted { .. })),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn tab_read_under_native_route_is_not_reinterpreted_by_agent_intercept() {
+    let (path, master) = output_file("ghost-route-cutover-native-intercept");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
+        text: "echo native".to_string(),
+        route: PromptGhostRoute::NativeShell,
+    }));
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"\t".to_vec()).expect("tab input");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("tab bytes obtained");
+    // The native ghost is replaced by an agent-intercept route while the Tab
+    // read is in flight: the Tab must neither accept the new suggestion nor
+    // write the old native ghost text to the PTY.
+    {
+        let mut mode = input_mode.lock().expect("input mode");
+        *mode = RawInputMode::PromptGhost {
+            text: "inspect memory".to_string(),
+            route: PromptGhostRoute::AgentIntercept {
+                suggestion_id: Some("health-1".to_string()),
+            },
+        };
+    }
+    resume_tx.send(()).expect("release read");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptGhostAccepted { .. })),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn enter_read_under_intercept_is_not_reinterpreted_by_selection() {
+    let (path, master) = output_file("ghost-route-cutover-intercept-selection");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
+        text: "inspect memory".to_string(),
+        route: PromptGhostRoute::AgentIntercept {
+            suggestion_id: Some("health-1".to_string()),
+        },
+    }));
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"\r".to_vec()).expect("enter input");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("enter bytes obtained");
+    // The intercept ghost is replaced by a selection route while the Enter
+    // read is in flight: the Enter must not commit the newly installed
+    // candidate to the agent.
+    {
+        let mut mode = input_mode.lock().expect("input mode");
+        *mode = current_raw_input_mode(&selection_input_mode());
+    }
+    resume_tx.send(()).expect("release read");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::CandidateCommit(_) | RawInputEvent::PromptGhostIntercept { .. }
+        )),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn tab_after_route_cutover_is_relayed_under_the_new_route() {
+    let (path, master) = output_file("ghost-route-cutover-window-bound");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (bytes_ready_tx, bytes_ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = selection_input_mode();
+    let relay = super::super::spawn_raw_input_relay(
+        PausingChannelReader {
+            receiver: input_rx,
+            pause_on_read: 1,
+            read_count: 0,
+            bytes_ready_tx,
+            resume_rx,
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode.clone(),
+        UserPtyInputGeneration::default(),
+    );
+
+    input_tx.send(b"\t".to_vec()).expect("in-flight tab");
+    bytes_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("tab bytes obtained");
+    {
+        let mut mode = input_mode.lock().expect("input mode");
+        *mode = RawInputMode::PromptGhost {
+            text: "echo native".to_string(),
+            route: PromptGhostRoute::NativeShell,
+        };
+    }
+    resume_tx.send(()).expect("release read");
+    // The discard window is bounded to the single in-flight read: a second
+    // Tab pressed after the native route is installed must be relayed under
+    // that route (accepting the native ghost exactly once), not dropped.
+    input_tx.send(b"\t".to_vec()).expect("post-cutover tab");
+    drop(input_tx);
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptGhostAccepted { .. })),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"echo nativeexit\n"
+    );
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn stale_generation_reads_are_discarded_without_affecting_the_next_capture() {
     let (path, mut master) = output_file("capture-overflow-tagged-reads");
     let (event_tx, event_rx) = mpsc::channel();

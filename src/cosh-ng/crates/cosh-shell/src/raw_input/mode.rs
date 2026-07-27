@@ -321,12 +321,26 @@ mod tests {
         let cycled = RawInputMode::PromptGhost {
             text: candidates[1].text.clone(),
             route: PromptGhostRoute::AgentSelection {
-                candidates,
+                candidates: candidates.clone(),
                 active: 1,
             },
         };
         assert_ne!(first, cycled);
         assert_eq!(first.input_ownership(), cycled.input_ownership());
+
+        let native = RawInputMode::PromptGhost {
+            text: candidates[0].text.clone(),
+            route: PromptGhostRoute::NativeShell,
+        };
+        let intercept = RawInputMode::PromptGhost {
+            text: candidates[0].text.clone(),
+            route: PromptGhostRoute::AgentIntercept {
+                suggestion_id: Some(candidates[0].suggestion_id.clone()),
+            },
+        };
+        assert_ne!(first.input_ownership(), native.input_ownership());
+        assert_ne!(first.input_ownership(), intercept.input_ownership());
+        assert_ne!(native.input_ownership(), intercept.input_ownership());
 
         let capture = RawInputCapture::Consultation {
             id: "consult-1".to_string(),
