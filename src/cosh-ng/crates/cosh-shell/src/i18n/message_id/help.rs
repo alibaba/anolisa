@@ -79,9 +79,6 @@ macro_rules! help_registry_ids {
             SlashHooksAgentUnavailable,
             SlashExtensionsEmptyBody,
             SlashSkillsEmptyBody,
-            HelpSummaryMcp,
-            SlashMcpTitle,
-            SlashMcpEmptyBody,
         );
     };
 }
@@ -131,6 +128,21 @@ macro_rules! status_query_ids {
             SlashStatsTelemetryUnavailable,
             SlashStatsUsageLine,
             SlashStatsFooter,
+        );
+    };
+}
+
+// Trailing segment: MCP slash-command message IDs appended after all existing
+// segments so every pre-existing MessageId discriminant stays stable, per the
+// stable-runtime-api trailing-segment contract.
+macro_rules! mcp_slash_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryMcp,
+            SlashMcpTitle,
+            SlashMcpEmptyBody,
         );
     };
 }

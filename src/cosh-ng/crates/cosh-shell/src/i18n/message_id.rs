@@ -29,6 +29,7 @@ mod approval;
 #[macro_use]
 mod session;
 
+
 macro_rules! define_message_id {
     ($($id:ident,)*) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,4 +89,4 @@ collect_message_ids!([
     activity_untracked_ids,
     approval_turn_consent_ids,
     status_query_ids,
-],);
+    mcp_slash_ids,],);
