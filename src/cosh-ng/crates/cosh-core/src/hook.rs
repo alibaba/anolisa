@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{HookDefinition, HooksConfig};
+use crate::provider::ToolDeclaration;
 
 // ─── Hook Event Names ────────────────────────────────────────────────
 
@@ -139,6 +140,11 @@ pub struct PostToolUseFailureResult {
 #[derive(Debug, Clone)]
 pub struct BeforeModelResult {
     pub notifications: Vec<HookNotification>,
+    /// Tool declarations rewritten by a BeforeModel hook, e.g. schema
+    /// compression. Only ever applies to the provider call that fired the hook:
+    /// the ToolRegistry is untouched, so the next turn starts from the original
+    /// declarations again. `None` means "use the originals".
+    pub updated_tools: Option<Vec<ToolDeclaration>>,
 }
 
 #[derive(Debug, Clone)]
@@ -647,10 +653,12 @@ impl HookSystem {
         cwd: &str,
         model: &str,
         messages: &[crate::provider::Message],
+        tools: &[ToolDeclaration],
     ) -> BeforeModelResult {
         if !self.enabled {
             return BeforeModelResult {
                 notifications: vec![],
+                updated_tools: None,
             };
         }
 
@@ -658,11 +666,13 @@ impl HookSystem {
         if defs.is_empty() {
             return BeforeModelResult {
                 notifications: vec![],
+                updated_tools: None,
             };
         }
 
-        // 对齐 copilot-shell hookTranslator.toHookLLMRequest 格式：
-        // llm_request 包含 model 和 messages 数组。
+        // Mirrors copilot-shell's hookTranslator.toHookLLMRequest shape:
+        // llm_request carries the model, the messages array, and the tool
+        // declarations at config.tools.
         let hook_messages: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| {
@@ -677,17 +687,37 @@ impl HookSystem {
             "llm_request": {
                 "model": model,
                 "messages": hook_messages,
+                "config": {
+                    "tools": tools,
+                },
             },
         });
         let input = self.build_input(session_id, cwd, HookEventName::BeforeModel, event_data);
         let outputs = self.run_hooks(&defs, &input).await;
 
         let mut notifications = Vec::new();
+        let mut updated_tools = None;
         for (i, out) in outputs {
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
+            // Last valid full array in configuration order wins; a rejected
+            // array leaves an earlier hook's accepted one in place.
+            if let Some(candidate) = extract_updated_tools(&out.hook_specific_output) {
+                match validate_updated_tools(tools, candidate) {
+                    Ok(validated) => updated_tools = Some(validated),
+                    Err(reason) => {
+                        tracing::warn!(
+                            target: "cosh_hook",
+                            "Hook '{name}' tool declaration update rejected: {reason}"
+                        );
+                    }
+                }
+            }
         }
-        BeforeModelResult { notifications }
+        BeforeModelResult {
+            notifications,
+            updated_tools,
+        }
     }
 
     pub async fn fire_after_model(
@@ -788,7 +818,10 @@ impl HookSystem {
         defs: &[&HookDefinition],
         input: &HookInput,
     ) -> Vec<(usize, HookOutput)> {
-        let input_json = crate::redaction::to_redacted_json(input);
+        let input_json = crate::redaction::to_redacted_json_with_schemas(
+            input,
+            crate::redaction::TOOL_DECLARATION_PATHS,
+        );
 
         if Self::is_sequential(defs) {
             let mut results = Vec::new();
@@ -897,7 +930,10 @@ impl HookSystem {
             .system_message
             .map(|value| crate::redaction::redact_text(&value));
         if let Some(value) = &mut output.hook_specific_output {
-            crate::redaction::redact_value(value);
+            crate::redaction::redact_value_with_schemas(
+                value,
+                crate::redaction::TOOL_DECLARATION_PATHS,
+            );
         }
         output
     }
@@ -1116,6 +1152,80 @@ fn fold_additional_context(current: &mut Option<String>, specific: &Option<Value
             });
         }
     }
+}
+
+/// Read a BeforeModel hook's replacement tool array out of its
+/// `hook_specific_output`. `llm_request.config.tools` is canonical;
+/// `llm_request.tools` is accepted so hooks written against the older position
+/// keep working during migration.
+fn extract_updated_tools(specific: &Option<Value>) -> Option<&Value> {
+    let llm_request = specific.as_ref()?.get("llm_request")?;
+    llm_request
+        .get("config")
+        .and_then(|config| config.get("tools"))
+        .or_else(|| llm_request.get("tools"))
+}
+
+/// Accept a hook's tool array only if it is the *same tool set* as the host
+/// declared — same count, same names, same order. That confines hooks to
+/// rewriting `description` and `parameters` (the schema-compression use case)
+/// and keeps them from silently adding, dropping, or reordering tools, which
+/// would change tool-selection semantics. Tool filtering belongs to a separate
+/// protocol.
+fn validate_updated_tools(
+    original: &[ToolDeclaration],
+    candidate: &Value,
+) -> Result<Vec<ToolDeclaration>, String> {
+    let Some(entries) = candidate.as_array() else {
+        return Err("expected a JSON array of tool declarations".to_string());
+    };
+    if entries.len() != original.len() {
+        return Err(format!(
+            "expected {} tool declarations, got {}",
+            original.len(),
+            entries.len()
+        ));
+    }
+
+    let mut updated = Vec::with_capacity(entries.len());
+    for (entry, expected) in entries.iter().zip(original) {
+        let tool: ToolDeclaration = serde_json::from_value(entry.clone())
+            .map_err(|error| format!("invalid tool declaration: {error}"))?;
+        if tool.name != expected.name {
+            return Err(format!(
+                "tool name changed: expected '{}', got '{}'",
+                expected.name, tool.name
+            ));
+        }
+        if !tool.parameters.is_object() {
+            return Err(format!("tool '{}' parameters must be an object", tool.name));
+        }
+        updated.push(tool);
+    }
+
+    // The turn's compaction prefix estimate is computed from the original
+    // declarations before this hook runs, so a rewrite that grows them would
+    // make the runtime under-account the real request, skip an emergency
+    // compaction it needed, and overflow the provider context. The 1024-token
+    // prefix reserve cannot absorb unbounded growth. Requiring the rewrite to
+    // be no larger keeps the estimate conservative and matches the contract
+    // this protocol already advertises: compression, not expansion.
+    let original_tokens = estimate_declaration_tokens(original);
+    let updated_tokens = estimate_declaration_tokens(&updated);
+    if updated_tokens > original_tokens {
+        return Err(format!(
+            "tool declarations grew from ~{original_tokens} to ~{updated_tokens} tokens; \
+             BeforeModel may only compress declarations"
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// Estimates the declarations the same way the compaction prefix estimate does,
+/// so the two cannot disagree about whether a rewrite fits.
+fn estimate_declaration_tokens(tools: &[ToolDeclaration]) -> u64 {
+    crate::compaction::estimate_text_tokens(&serde_json::to_string(tools).unwrap_or_default())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -1389,6 +1499,241 @@ mod tests {
     fn pick_additional_context_returns_none_when_absent() {
         let v = serde_json::json!({"other": "x"});
         assert_eq!(HookSystem::pick_additional_context(&v), None);
+    }
+
+    // ===== BeforeModel tool declaration rewriting (#1616) =====
+
+    fn shell_declaration() -> ToolDeclaration {
+        ToolDeclaration {
+            name: "shell".to_string(),
+            description: "run a shell command".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            }),
+        }
+    }
+
+    fn updated_tools_output(tools: Value) -> Option<Value> {
+        Some(serde_json::json!({"llm_request": {"config": {"tools": tools}}}))
+    }
+
+    #[test]
+    fn extract_updated_tools_prefers_canonical_config_position() {
+        let specific = Some(serde_json::json!({
+            "llm_request": {
+                "config": {"tools": [{"name": "canonical"}]},
+                "tools": [{"name": "legacy"}],
+            }
+        }));
+        let tools = extract_updated_tools(&specific).unwrap();
+        assert_eq!(tools[0]["name"], "canonical");
+    }
+
+    #[test]
+    fn extract_updated_tools_falls_back_to_legacy_position() {
+        let specific = Some(serde_json::json!({
+            "llm_request": {"tools": [{"name": "legacy"}]}
+        }));
+        let tools = extract_updated_tools(&specific).unwrap();
+        assert_eq!(tools[0]["name"], "legacy");
+    }
+
+    #[test]
+    fn validate_updated_tools_accepts_compressed_description_and_schema() {
+        let original = vec![shell_declaration()];
+        let candidate = serde_json::json!([{
+            "name": "shell",
+            "description": "run",
+            "parameters": {"type": "object"},
+        }]);
+
+        let updated = validate_updated_tools(&original, &candidate).unwrap();
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].description, "run");
+    }
+
+    #[test]
+    fn validate_updated_tools_rejects_malformed_arrays() {
+        let original = vec![shell_declaration()];
+        for candidate in [
+            // not an array
+            serde_json::json!({"tools": []}),
+            // missing required field
+            serde_json::json!([{"name": "shell", "parameters": {"type": "object"}}]),
+            // parameters is not a JSON object
+            serde_json::json!([{"name": "shell", "description": "run", "parameters": "object"}]),
+            // renamed tool
+            serde_json::json!([{"name": "sh", "description": "run", "parameters": {}}]),
+            // added tool
+            serde_json::json!([
+                {"name": "shell", "description": "run", "parameters": {}},
+                {"name": "extra", "description": "x", "parameters": {}},
+            ]),
+            // dropped tool
+            serde_json::json!([]),
+        ] {
+            assert!(
+                validate_updated_tools(&original, &candidate).is_err(),
+                "should reject {candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_updated_tools_rejects_expanded_declarations() {
+        let original = vec![shell_declaration()];
+
+        // Same tool set, but a description and schema far larger than the
+        // original — the compaction prefix estimate was already fixed from the
+        // originals, so accepting this would under-account the real request.
+        let candidate = serde_json::json!([{
+            "name": "shell",
+            "description": "x".repeat(4096),
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "y".repeat(4096)}},
+            },
+        }]);
+
+        let error = validate_updated_tools(&original, &candidate).unwrap_err();
+        assert!(error.contains("may only compress"), "{error}");
+    }
+
+    #[test]
+    fn validate_updated_tools_allows_unchanged_size() {
+        let original = vec![shell_declaration()];
+        let candidate = serde_json::to_value(&original).unwrap();
+
+        assert!(validate_updated_tools(&original, &candidate).is_ok());
+    }
+
+    #[test]
+    fn validate_updated_tools_rejects_reordered_tools() {
+        let original = vec![
+            shell_declaration(),
+            ToolDeclaration {
+                name: "read_file".to_string(),
+                description: "read".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let candidate = serde_json::json!([
+            {"name": "read_file", "description": "read", "parameters": {"type": "object"}},
+            {"name": "shell", "description": "run", "parameters": {"type": "object"}},
+        ]);
+
+        assert!(validate_updated_tools(&original, &candidate).is_err());
+    }
+
+    #[tokio::test]
+    async fn before_model_input_carries_full_tool_declarations() {
+        let config = HooksConfig {
+            enabled: true,
+            before_model: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; t=json.load(sys.stdin)["llm_request"]["config"]["tools"]; print(json.dumps({"systemMessage": t[0]["name"]+"|"+t[0]["description"]+"|"+t[0]["parameters"]["properties"]["command"]["type"]}))'"#.to_string(),
+                name: Some("inspect".to_string()),
+                matcher: None,
+                timeout: Some(10_000),
+                sequential: None,
+            }],
+            ..Default::default()
+        };
+        let sys = HookSystem::from_config(&config);
+
+        let result = sys
+            .fire_before_model("s1", "/tmp", "m", &[], &[shell_declaration()])
+            .await;
+
+        assert_eq!(
+            result.notifications[0].message,
+            "shell|run a shell command|string"
+        );
+        assert!(result.updated_tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn before_model_last_valid_tool_array_wins_over_later_invalid_one() {
+        let config = HooksConfig {
+            enabled: true,
+            before_model: vec![
+                HookDefinition {
+                    command: r#"python3 -c 'print("""{"hookSpecificOutput":{"llm_request":{"config":{"tools":[{"name":"shell","description":"first","parameters":{"type":"object"}}]}}}}""")'"#.to_string(),
+                    name: Some("first".to_string()),
+                    matcher: None,
+                    timeout: Some(10_000),
+                    sequential: None,
+                },
+                HookDefinition {
+                    command: r#"python3 -c 'print("""{"hookSpecificOutput":{"llm_request":{"config":{"tools":[{"name":"renamed","description":"second","parameters":{"type":"object"}}]}}}}""")'"#.to_string(),
+                    name: Some("second".to_string()),
+                    matcher: None,
+                    timeout: Some(10_000),
+                    sequential: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let sys = HookSystem::from_config(&config);
+
+        let result = sys
+            .fire_before_model("s1", "/tmp", "m", &[], &[shell_declaration()])
+            .await;
+
+        let updated = result.updated_tools.expect("first hook's array applies");
+        assert_eq!(updated[0].description, "first");
+    }
+
+    #[test]
+    fn hook_output_tool_schemas_survive_redaction() {
+        let output = HookOutput {
+            decision: None,
+            reason: None,
+            system_message: None,
+            hook_specific_output: updated_tools_output(serde_json::json!([{
+                "name": "shell",
+                "description": "pass --token secret-in-description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string"},
+                        "token": {"type": "string"},
+                    },
+                },
+            }])),
+        };
+
+        let output = HookSystem::redact_hook_output(output);
+        let tools = extract_updated_tools(&output.hook_specific_output).unwrap();
+
+        assert_eq!(
+            tools[0]["parameters"]["properties"]["api_key"]["type"],
+            "string"
+        );
+        assert_eq!(
+            tools[0]["parameters"]["properties"]["token"]["type"],
+            "string"
+        );
+        // String leaves inside the exempt subtree still lose secret shapes.
+        assert_eq!(tools[0]["description"], "pass --token <redacted>");
+    }
+
+    #[test]
+    fn hook_output_outside_tool_schemas_is_still_redacted() {
+        let output = HookOutput {
+            decision: None,
+            reason: None,
+            system_message: None,
+            hook_specific_output: Some(serde_json::json!({
+                "api_key": "leaked-value",
+            })),
+        };
+
+        let output = HookSystem::redact_hook_output(output);
+        let specific = output.hook_specific_output.unwrap();
+
+        assert_eq!(specific["api_key"], "<redacted>");
     }
 
     // ===== Task 3: tool_response 包装 =====

@@ -83,6 +83,43 @@ Hooks return decisions in JSON format:
 | `systemMessage` | Notification message (displayed to user with priority over reason) |
 | `hookSpecificOutput` | Custom JSON data (`additional_context` within it is injected into conversation context) |
 
+### BeforeModel: rewriting tool declarations
+
+`BeforeModel` input carries the full tool declarations for this request at
+`llm_request.config.tools`. A hook may return a rewritten array at the same path,
+for example to compress descriptions and JSON Schemas:
+
+```json
+{
+  "hookSpecificOutput": {
+    "llm_request": {
+      "config": {
+        "tools": [
+          { "name": "shell", "description": "compressed", "parameters": { "type": "object" } }
+        ]
+      }
+    }
+  }
+}
+```
+
+Constraints:
+
+- The rewrite applies to that single LLM request only; the tool registry and the
+  next turn's declarations are untouched
+- Tool count, order, and names must match the input exactly, and `parameters`
+  must be a JSON object; otherwise the whole array is discarded and the original
+  declarations are used (tool filtering is not part of this protocol)
+- The rewrite may only **compress**: an array whose estimated token count exceeds
+  the original is rejected even when it is otherwise structurally valid. The
+  context budget for the turn is computed from the original declarations before
+  the hook runs, so a larger array would make the runtime under-account the
+  request and risk a provider context overflow
+- With multiple hooks the last valid array in configuration order wins; an
+  invalid value never overwrites an earlier valid one
+- The tool declaration subtree is exempt from key-based redaction, so schema
+  properties named `api_key` or `token` are not corrupted
+
 ## Execution Model
 
 1. Multiple hooks can be registered for the same event point, executed sequentially in configuration order

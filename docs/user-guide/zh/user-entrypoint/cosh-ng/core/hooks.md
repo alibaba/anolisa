@@ -83,6 +83,36 @@ Core 以 JSON 格式将事件数据写入钩子进程的 stdin：
 | `systemMessage` | 通知消息（优先于 reason 展示给用户） |
 | `hookSpecificOutput` | 自定义 JSON 数据（其中 `additional_context` 会注入对话上下文） |
 
+### BeforeModel：改写工具声明
+
+`BeforeModel` 输入在 `llm_request.config.tools` 中携带本次请求的完整工具声明，
+钩子可以通过同一路径返回改写后的数组（例如压缩 `description` 与 JSON Schema）：
+
+```json
+{
+  "hookSpecificOutput": {
+    "llm_request": {
+      "config": {
+        "tools": [
+          { "name": "shell", "description": "压缩后的说明", "parameters": { "type": "object" } }
+        ]
+      }
+    }
+  }
+}
+```
+
+约束：
+
+- 改写只作用于当前一次 LLM 请求，工具注册表与下一轮声明不受影响
+- 数组的工具数量、顺序和名称必须与输入完全一致，`parameters` 必须是 JSON object；
+  否则整个数组被丢弃并回退原始声明（工具过滤不属于该协议）
+- 改写只允许**压缩**：估算 token 数超过原声明的数组即使结构合法也会被拒绝。
+  本轮的上下文预算在钩子执行前就按原声明计算完毕，更大的数组会让运行时低估真实
+  请求，可能导致 provider 上下文溢出
+- 多个钩子按配置顺序生效，取最后一个合法数组；非法值不会覆盖此前的合法值
+- 工具声明子树豁免基于键名的脱敏，因此名为 `api_key`、`token` 的 schema 属性不会被破坏
+
 ## 执行模型
 
 1. 同一事件点可注册多个钩子，按配置顺序依次执行
