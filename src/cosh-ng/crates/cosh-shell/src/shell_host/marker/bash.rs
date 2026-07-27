@@ -217,7 +217,7 @@ _cosh_emit_top_level_missing_marker() {
 _cosh_should_intercept_unknown() {
   local command="$1"
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills|/status)
       printf '%s' "slash"
       return 0
       ;;
@@ -235,7 +235,7 @@ _cosh_should_intercept_unknown() {
 _cosh_is_slash_control_candidate() {
   local command="$1"
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills|/status)
       return 0
       ;;
   esac

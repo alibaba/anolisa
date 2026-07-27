@@ -22,6 +22,7 @@ macro_rules! help_core_ids {
             HelpSummaryAudit,
             HelpSummaryHooks,
             HelpSummaryHealth,
+            HelpSummaryStatus,
             HelpSummarySelect,
             HelpSummaryCopy,
             HelpSummaryDebug,

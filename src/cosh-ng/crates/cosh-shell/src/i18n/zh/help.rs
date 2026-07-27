@@ -25,6 +25,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryAudit => "显示审计入口",
         MessageId::HelpSummaryHooks => "显示 Hook 状态",
         MessageId::HelpSummaryHealth => "按需运行健康检查",
+        MessageId::HelpSummaryStatus => "显示版本、后端及供应商信息",
         MessageId::HelpSummarySelect => "展示一条推荐",
         MessageId::HelpSummaryCopy => "复制一条推荐",
         MessageId::HelpSummaryDebug => "显示会话调试详情",

@@ -24,6 +24,7 @@ pub(super) enum SlashCommand<'a> {
     #[allow(dead_code)]
     Info(SlashInfoCommand),
     Health,
+    Status,
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
@@ -84,6 +85,7 @@ impl<'a> SlashCommand<'a> {
             }
             "/debug" => Some(Self::Debug(parts.next())),
             "/health" => Some(Self::Health),
+            "/status" => Some(Self::Status),
             "/extensions" => {
                 let args = input
                     .strip_prefix("/extensions")
@@ -145,6 +147,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/config"
             | "/debug"
             | "/health"
+            | "/status"
             | "/extensions"
             | "/skills"
             | "/session"

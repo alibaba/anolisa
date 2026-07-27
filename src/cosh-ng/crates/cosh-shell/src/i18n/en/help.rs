@@ -25,6 +25,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryAudit => "show audit entry points",
         MessageId::HelpSummaryHooks => "show hook status",
         MessageId::HelpSummaryHealth => "run an on-demand health check",
+        MessageId::HelpSummaryStatus => "display version, backend, and provider info",
         MessageId::HelpSummarySelect => "show a displayed recommendation",
         MessageId::HelpSummaryCopy => "copy a displayed recommendation",
         MessageId::HelpSummaryDebug => "show session debug details",
