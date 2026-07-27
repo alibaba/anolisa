@@ -77,6 +77,13 @@ impl InputClassifier {
             };
         }
 
+        if trimmed.starts_with('@') {
+            return InputDecision::Intercept {
+                input: input.to_string(),
+                reason: InterceptReason::AtMention,
+            };
+        }
+
         InputDecision::SendToShell(input.to_string())
     }
 
@@ -105,6 +112,7 @@ pub enum InterceptReason {
     NaturalLanguage,
     AgentMarker,
     PromptGhost,
+    AtMention,
 }
 
 impl InterceptReason {
@@ -114,6 +122,7 @@ impl InterceptReason {
             Self::NaturalLanguage => "natural_language",
             Self::AgentMarker => "agent_marker",
             Self::PromptGhost => "prompt_ghost",
+            Self::AtMention => "at_mention",
         }
     }
 }

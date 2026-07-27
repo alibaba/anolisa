@@ -228,4 +228,94 @@ mod tests {
 
         assert!(!tracker.saw_explicit_exit());
     }
+
+    #[test]
+    fn at_mention_triggers_intercept_candidate() {
+        use super::event_parser::starts_intercept_candidate;
+        assert!(starts_intercept_candidate(b"@"));
+        assert!(starts_intercept_candidate(b"@file"));
+        assert!(!starts_intercept_candidate(b"a@file"));
+    }
+
+    #[test]
+    fn at_mention_triggers_native_intercept_candidate() {
+        use super::event_parser::starts_native_intercept_candidate;
+        let state = super::event_parser::NativeLineState::default();
+        assert!(starts_native_intercept_candidate(b"@", &state));
+        assert!(starts_native_intercept_candidate(b"@file", &state));
+
+        let mut state_after_text = super::event_parser::NativeLineState::default();
+        state_after_text.observe_shell_bytes(b"echo ");
+        assert!(!starts_native_intercept_candidate(b"@", &state_after_text));
+    }
+
+    #[test]
+    fn at_mention_classifier_intercepts() {
+        let classifier = crate::input::InputClassifier::default();
+        assert_eq!(
+            classifier.classify("@readme.md"),
+            crate::input::InputDecision::Intercept {
+                input: "@readme.md".to_string(),
+                reason: crate::input::InterceptReason::AtMention,
+            }
+        );
+        assert_eq!(
+            classifier.classify("@alpha_file.txt"),
+            crate::input::InputDecision::Intercept {
+                input: "@alpha_file.txt".to_string(),
+                reason: crate::input::InterceptReason::AtMention,
+            }
+        );
+    }
+
+    #[test]
+    fn at_mention_inline_hint_with_matching_files() {
+        use std::fs;
+        use std::path::Path;
+        let dir = std::env::temp_dir().join("cosh_at_test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("alpha_file.txt"), "").unwrap();
+        fs::write(dir.join("beta_file.txt"), "").unwrap();
+        let prev_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+
+        let hint = candidate_inline_hint("@");
+        assert!(hint.is_some(), "hint should be Some when files exist");
+
+        let hint_alp = candidate_inline_hint("@alp");
+        assert!(hint_alp.is_some(), "hint for @alp should match alpha_file.txt");
+        assert!(hint_alp.unwrap().starts_with("ha_file.txt"), "hint should show suffix after @alp");
+
+        let hint_nomatch = candidate_inline_hint("@zzz");
+        assert!(hint_nomatch.is_none(), "hint for @zzz should be None");
+
+        std::env::set_current_dir(prev_dir).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn at_mention_tab_completion() {
+        use super::event_parser::try_at_mention_tab_completion;
+        use std::fs;
+        let dir = std::env::temp_dir().join("cosh_at_tab_test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("alpha_file.txt"), "").unwrap();
+        fs::write(dir.join("beta_file.txt"), "").unwrap();
+        let prev_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+
+        let result = try_at_mention_tab_completion("@alp");
+        assert_eq!(result, Some("@alpha_file.txt".to_string()));
+
+        let result_at = try_at_mention_tab_completion("@");
+        assert!(result_at.is_some(), "Tab after bare @ should complete first file");
+
+        let result_nomatch = try_at_mention_tab_completion("@zzz");
+        assert!(result_nomatch.is_none(), "Tab for non-matching prefix should return None");
+
+        std::env::set_current_dir(prev_dir).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

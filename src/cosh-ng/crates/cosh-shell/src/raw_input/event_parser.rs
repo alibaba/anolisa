@@ -1,3 +1,5 @@
+use std::fs;
+
 use crate::input::InputClassifier;
 
 use super::{CTRL_C, CTRL_U};
@@ -177,8 +179,66 @@ impl NativeLineState {
     }
 }
 
+
+fn at_mention_query(line: &str) -> Option<(usize, &str)> {
+    let bytes = line.as_bytes();
+    let mut at_pos = None;
+    for (i, &byte) in bytes.iter().enumerate() {
+        if byte == b'@' {
+            if i == 0 || bytes[i - 1] != b'\\' {
+                at_pos = Some(i);
+            }
+        }
+    }
+    let at_pos = at_pos?;
+    let query = &line[at_pos + 1..];
+    if query.contains(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    Some((at_pos, query))
+}
+
+fn list_at_completion_candidates(query: &str) -> Vec<String> {
+    let cwd = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => return Vec::new(),
+    };
+    let entries = match fs::read_dir(&cwd) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut matches: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .filter(|name| query.is_empty() || name.starts_with(query))
+        .collect();
+    matches.sort();
+    matches
+}
+
+/// Attempts to complete an `@`-mention file path when Tab is pressed.
+/// Returns the completed line (with the full filename) if completion succeeds.
+pub fn try_at_mention_tab_completion(line: &str) -> Option<String> {
+    let (_at_pos, query) = at_mention_query(line)?;
+    let matches = list_at_completion_candidates(query);
+    let first_match = matches.into_iter().next()?;
+    Some(format!("@{}", first_match))
+}
+
 pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
+    if trimmed.starts_with('@') {
+        let (_, query) = at_mention_query(trimmed)?;
+        let matches = list_at_completion_candidates(query);
+        let first = matches.first()?;
+        let suffix = &first[query.len()..];
+        return if matches.len() > 1 {
+            Some(format!("{} (+{})", suffix, matches.len() - 1))
+        } else {
+            Some(suffix.to_string())
+        };
+    }
     if !trimmed.starts_with('/') || trimmed[1..].contains('/') {
         return None;
     }
@@ -235,7 +295,7 @@ pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
 
 pub(super) fn starts_intercept_candidate(bytes: &[u8]) -> bool {
     let first = first_visible_input_byte(bytes);
-    matches!(first, Some(b'/' | b'?')) || first.is_some_and(|byte| byte >= 0x80)
+    matches!(first, Some(b'/' | b'?' | b'@')) || first.is_some_and(|byte| byte >= 0x80)
 }
 
 pub(super) fn starts_native_intercept_candidate(
@@ -244,6 +304,7 @@ pub(super) fn starts_native_intercept_candidate(
 ) -> bool {
     native_line_state.is_at_line_start()
         && (first_visible_input_byte(bytes) == Some(b'/')
+            || first_visible_input_byte(bytes) == Some(b'@')
             || first_visible_input_bytes(bytes).starts_with(b"??"))
 }
 

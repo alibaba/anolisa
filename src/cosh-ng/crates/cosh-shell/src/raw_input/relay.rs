@@ -8,7 +8,7 @@ use crate::input::{InputClassifier, InputDecision, InterceptReason};
 use super::event_parser::{
     candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
     redact_extension_setting_value, starts_intercept_candidate, starts_native_intercept_candidate,
-    CandidateLineBuffer, CandidateLineStatus, NativeLineState,
+    try_at_mention_tab_completion, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
 };
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
@@ -300,6 +300,18 @@ fn relay_native_passthrough(
         || starts_native_intercept_candidate(bytes, relay.native_line_state)
     {
         relay.line_buffer.push(bytes);
+        // Handle Tab completion for @-mentions: complete the filename instead
+        // of flushing to shell.
+        if bytes.last() == Some(&b'\t') {
+            let visible = relay.line_buffer.visible_line_bytes();
+            if let Ok(line) = std::str::from_utf8(visible) {
+                if let Some(completed) = try_at_mention_tab_completion(line) {
+                    relay.line_buffer.bytes = completed.into_bytes();
+                    redraw_candidate_line(relay.input_events, relay.line_buffer);
+                    return relay_candidate_line(relay, emit_activity);
+                }
+            }
+        }
         if native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer) {
             return flush_candidate_line_to_shell(relay, emit_activity);
         }
