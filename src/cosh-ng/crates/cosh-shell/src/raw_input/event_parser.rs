@@ -5,6 +5,15 @@ use super::{CTRL_C, CTRL_U};
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
+/// Soft-newline escape sequences recognised by the candidate-line
+/// buffer.  Terminals emit these for Alt+Enter / Shift+Enter instead
+/// of a bare carriage-return, so we convert them to a literal `\n`
+/// inside the buffer rather than treating them as submit.
+const SOFT_NEWLINE_ALT_ENTER_CR: &[u8] = b"\x1b\r";
+const SOFT_NEWLINE_ALT_ENTER_LF: &[u8] = b"\x1b\n";
+const SOFT_NEWLINE_SHIFT_ENTER: &[u8] = b"\x1b[27;2u";
+const SOFT_NEWLINE_SHIFT_ENTER_ALT: &[u8] = b"\x1b[13;2u";
+
 #[derive(Debug, Default)]
 pub(super) struct CandidateLineBuffer {
     pub(super) bytes: Vec<u8>,
@@ -27,6 +36,30 @@ impl CandidateLineBuffer {
             }
             if bytes[idx..].starts_with(BRACKETED_PASTE_END) {
                 idx += BRACKETED_PASTE_END.len();
+                continue;
+            }
+            // Soft-newline detection (issue #1721): Alt+Enter and
+            // Shift+Enter escape sequences are converted to a literal
+            // `\n` so the candidate line stays open for multi-line
+            // prompt input.  Only a bare `\r` (Enter) triggers submit.
+            if bytes[idx..].starts_with(SOFT_NEWLINE_ALT_ENTER_CR) {
+                self.bytes.push(b'\n');
+                idx += SOFT_NEWLINE_ALT_ENTER_CR.len();
+                continue;
+            }
+            if bytes[idx..].starts_with(SOFT_NEWLINE_ALT_ENTER_LF) {
+                self.bytes.push(b'\n');
+                idx += SOFT_NEWLINE_ALT_ENTER_LF.len();
+                continue;
+            }
+            if bytes[idx..].starts_with(SOFT_NEWLINE_SHIFT_ENTER) {
+                self.bytes.push(b'\n');
+                idx += SOFT_NEWLINE_SHIFT_ENTER.len();
+                continue;
+            }
+            if bytes[idx..].starts_with(SOFT_NEWLINE_SHIFT_ENTER_ALT) {
+                self.bytes.push(b'\n');
+                idx += SOFT_NEWLINE_SHIFT_ENTER_ALT.len();
                 continue;
             }
             match bytes[idx] {
@@ -71,7 +104,7 @@ impl CandidateLineBuffer {
         let end = self
             .bytes
             .iter()
-            .position(|byte| matches!(byte, b'\n' | b'\r'))
+            .position(|byte| *byte == b'\r')
             .unwrap_or(self.bytes.len());
         &self.bytes[..end]
     }
@@ -285,7 +318,10 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
         return CandidateLineStatus::Unsafe;
     }
 
-    let Some(newline_idx) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) else {
+    // Only a bare `\r` (Enter key in raw mode) triggers submit.
+    // `\n` in the buffer is a soft newline inserted by Alt+Enter /
+    // Shift+Enter handling in `CandidateLineBuffer::push` (issue #1721).
+    let Some(newline_idx) = bytes.iter().position(|byte| *byte == b'\r') else {
         for (index, byte) in bytes.iter().enumerate() {
             if *byte == 0x1b {
                 return if incomplete_escape_suffix(&bytes[index..]) {
@@ -294,7 +330,9 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
                     CandidateLineStatus::Unsafe
                 };
             }
-            if *byte < 0x20 && !matches!(byte, b'\t') {
+            // `\n` is a soft newline (part of prompt content);
+            // other control chars below 0x20 remain unsafe.
+            if *byte < 0x20 && !matches!(byte, b'\t' | b'\n') {
                 return CandidateLineStatus::Unsafe;
             }
         }

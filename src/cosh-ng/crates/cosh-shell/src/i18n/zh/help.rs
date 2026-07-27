@@ -3,7 +3,7 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
-        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
+        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}. 按 Alt+Enter 在 prompt 中换行。",
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",

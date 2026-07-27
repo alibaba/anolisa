@@ -228,4 +228,76 @@ mod tests {
 
         assert!(!tracker.saw_explicit_exit());
     }
+
+    #[test]
+    fn soft_newline_alt_enter_inserts_newline_without_submit() {
+        let mut line = CandidateLineBuffer::default();
+        // Type some text then Alt+Enter (\x1b\r)
+        line.push(b"hello");
+        line.push(b"\x1b\r");
+        line.push(b"world");
+        // Should be pending (not complete) since no bare \r was sent
+        let status = candidate_line_status(&line.bytes);
+        assert_eq!(status, CandidateLineStatus::Pending);
+        // Buffer should contain "hello\nworld"
+        let visible = line.visible_line_bytes();
+        assert_eq!(visible, b"hello\nworld");
+    }
+
+    #[test]
+    fn soft_newline_shift_enter_inserts_newline_without_submit() {
+        let mut line = CandidateLineBuffer::default();
+        line.push(b"line1");
+        line.push(b"\x1b[27;2u");  // Shift+Enter (kitty protocol)
+        line.push(b"line2");
+        let status = candidate_line_status(&line.bytes);
+        assert_eq!(status, CandidateLineStatus::Pending);
+        assert_eq!(line.visible_line_bytes(), b"line1\nline2");
+    }
+
+    #[test]
+    fn soft_newline_shift_enter_alt_encoding() {
+        let mut line = CandidateLineBuffer::default();
+        line.push(b"first");
+        line.push(b"\x1b[13;2u");  // Shift+Enter alternate encoding
+        line.push(b"second");
+        let status = candidate_line_status(&line.bytes);
+        assert_eq!(status, CandidateLineStatus::Pending);
+        assert_eq!(line.visible_line_bytes(), b"first\nsecond");
+    }
+
+    #[test]
+    fn bare_enter_submits_after_soft_newlines() {
+        let mut line = CandidateLineBuffer::default();
+        line.push(b"line1");
+        line.push(b"\x1b\r");  // soft newline
+        line.push(b"line2");
+        line.push(b"\r");  // bare Enter → submit
+        let status = candidate_line_status(&line.bytes);
+        match status {
+            CandidateLineStatus::Complete { line, .. } => {
+                assert_eq!(line, "line1\nline2");
+            }
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn multiline_prompt_preserves_soft_newlines_in_submission() {
+        let mut line = CandidateLineBuffer::default();
+        line.push(b"analyze load");
+        line.push(b"\x1b\r");
+        line.push(b"suggest fixes");
+        line.push(b"\x1b\r");
+        line.push(b"no sudo");
+        line.push(b"\r");  // submit
+        let status = candidate_line_status(&line.bytes);
+        match status {
+            CandidateLineStatus::Complete { line, .. } => {
+                assert_eq!(line, "analyze load\nsuggest fixes\nno sudo");
+            }
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
 }
