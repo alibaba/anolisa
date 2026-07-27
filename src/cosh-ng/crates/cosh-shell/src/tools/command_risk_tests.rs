@@ -336,10 +336,10 @@ fn null_redirection_keeps_remaining_command_risk_and_boundaries() {
     assert!(delete.reasons.contains(&"filesystem-delete"));
     assert!(delete.reasons.contains(&"output-suppressed"));
 
-    // V-M10: the execution boundary is never widened.
+    // V-M10: null redirections to safe sinks preserve auto-allow (#1752).
     let auto_policy = auto("ps aux 2>/dev/null");
-    assert_eq!(auto_policy.execution, ExecutionDecision::AskUser);
-    assert!(auto_policy.auto_allow.is_none());
+    assert_eq!(auto_policy.execution, ExecutionDecision::AutoAllow);
+    assert!(auto_policy.auto_allow.is_some());
 }
 
 #[test]

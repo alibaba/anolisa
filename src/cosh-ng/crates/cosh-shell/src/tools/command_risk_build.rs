@@ -5,16 +5,14 @@ use super::command_risk::{
 };
 
 /// Post-processing for assessments whose command carried stripped
-/// null-suppression redirections (issue #1667): append the informational
-/// reason and keep the execution boundary unchanged. Risk itself is fully
-/// decided by the shape/segment assessment paths.
+/// null-suppression redirections to safe output sinks (issue #1667, #1752):
+/// append the informational reason without changing the execution boundary.
+/// Redirections to `/dev/null` are output-suppression, not filesystem writes,
+/// so the auto-allow decision is preserved. Risk itself is fully decided by
+/// the shape/segment assessment paths.
 pub(super) fn apply_null_redirection_policy(result: &mut CommandAssessment) {
     result.reasons.push("output-suppressed");
     result.reasons = dedupe_reasons(std::mem::take(&mut result.reasons));
-    if result.execution == ExecutionDecision::AutoAllow {
-        result.execution = ExecutionDecision::AskUser;
-    }
-    result.auto_allow = None;
 }
 
 pub(super) fn high_risk_program_assessment(
