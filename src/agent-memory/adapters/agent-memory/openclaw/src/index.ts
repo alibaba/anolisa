@@ -91,40 +91,80 @@ export default definePluginEntry({
           const userMessage = event.prompt;
           if (!userMessage || userMessage.trim().length < 3) return;
 
-          const rawText = await client.callTool("memory_search", {
-            query: userMessage,
-            top_k: 5,
-          // Use BM25 mode for auto-recall: memories are synchronously indexed
-          // immediately after observe (PR #1520), so BM25 finds them without delay.
-          // User prompts typically contain keyword matches with stored memories
-          // (e.g., "I decided" matching "decision" memories), making BM25 sufficient.
-          // Hybrid mode adds complexity without benefit when no embedding provider
-          // is configured.
-            mode: "bm25",
-          });
+          // BM25 keyword search performs poorly on long, natural-language
+          // queries: common stopwords dilute the TF-IDF signal so no
+          // document reaches the relevance threshold, returning [] even
+          // when a matching memory exists (regression on #1462).
+          // Extract salient keywords and try progressively shorter queries.
+          const stopWords = new Set([
+            "a","an","the","is","are","was","were","be","been","being",
+            "have","has","had","do","does","did","will","would","should",
+            "could","may","might","must","shall","can","what","who","whom",
+            "whose","which","that","this","these","those","i","you","he",
+            "she","it","we","they","me","him","her","us","them","my",
+            "your","his","her","its","our","their","to","of","in","on",
+            "at","by","for","with","about","against","between","into",
+            "through","during","before","after","above","below","from",
+            "up","down","out","off","over","under","again","further",
+            "then","once","here","there","when","where","why","how","all",
+            "any","both","each","few","more","most","other","some","such",
+            "no","nor","not","only","own","same","so","than","too","very",
+            "just","also","and","but","or","if","because","as","until",
+            "while","answer","tell","give","say","know","think","want",
+            "need","like","get","got","make","made","go","going",
+          ]);
+          const extractKeywords = (text: string): string => {
+            const words = text
+              .toLowerCase()
+              .replace(/[^a-z0-9\s]/g, " ")
+              .split(/\s+/)
+              .filter((w) => w.length >= 2 && !stopWords.has(w));
+            const seen = new Set<string>();
+            const unique = words.filter((w) => {
+              if (seen.has(w)) return false;
+              seen.add(w);
+              return true;
+            });
+            return unique.slice(0, 6).join(" ").trim();
+          };
 
-          // Parse to verify we have hits; skip injection on empty results.
-          let hits: Array<Record<string, unknown>> = [];
-          try {
-            hits = JSON.parse(rawText);
-          } catch {
-            api.logger.warn?.(
-              `agent-memory: auto-recall memory_search returned non-JSON response (len=${rawText.length})`,
-            );
-            return;
-          }
-          if (!Array.isArray(hits) || hits.length === 0) {
-            api.logger.info?.(
-              `agent-memory: auto-recall found 0 results for prompt (query len=${userMessage.length})`,
-            );
-            return;
+          const keywordQuery = extractKeywords(userMessage);
+          const queryCandidates = [
+            keywordQuery,
+            keywordQuery.split(" ").slice(0, 3).join(" "),
+            userMessage.slice(0, 80),
+          ].filter((q) => q && q.length >= 3);
+
+          let rawText = "[]";
+          let hitCount = 0;
+          for (const query of queryCandidates) {
+            rawText = await client.callTool("memory_search", {
+              query,
+              top_k: 5,
+              // Use BM25 mode for auto-recall: memories are synchronously indexed
+              // immediately after observe (PR #1520), so BM25 finds them without delay.
+              mode: "bm25",
+            });
+            let hits: Array<Record<string, unknown>> = [];
+            try {
+              hits = JSON.parse(rawText);
+            } catch {
+              api.logger.warn?.(
+                `agent-memory: auto-recall memory_search returned non-JSON response (len=${rawText.length})`,
+              );
+              return;
+            }
+            if (Array.isArray(hits) && hits.length > 0) {
+              hitCount = hits.length;
+              break;
+            }
           }
 
           const wrapped = wrapMemoryResultsForPrompt(rawText);
           if (!wrapped) return;
 
           api.logger.info?.(
-            `agent-memory: auto-recall injected ${hits.length} memory result(s) for prompt`,
+            `agent-memory: auto-recall injected ${hitCount} memory result(s) for prompt`,
           );
           // Dynamic content per turn → use prependContext (NOT prependSystemContext).
           return { prependContext: wrapped };
