@@ -9,6 +9,7 @@ pub(super) mod health;
 pub(super) mod hooks;
 #[cfg(test)]
 mod hooks_tests;
+pub(super) mod mcp;
 pub(super) mod notices;
 pub(super) mod panel;
 pub(super) mod parser;
