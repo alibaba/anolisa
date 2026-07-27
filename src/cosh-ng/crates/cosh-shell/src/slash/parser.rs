@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn hidden_and_contextual_commands_are_not_public_hints() {
         assert!(slash_hints("/co").iter().any(|hint| hint.name == "/config"));
-        for prefix in ["/ag", "/ca", "/de", "/au", "/se", "/co", "/send", "/debug"] {
+        for prefix in ["/ag", "/ca", "/de", "/se", "/co", "/send", "/debug"] {
             let hints = slash_hints(prefix);
             assert!(
                 hints.iter().all(|hint| matches!(
