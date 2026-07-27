@@ -1,0 +1,14 @@
+rule_id: shell-persistence
+cwe_id: CWE-506
+desc_en: >-
+  Command injects persistent backdoor into the system via crontab,
+  shell profile, init scripts, or authorized_keys.
+desc_zh: >-
+  命令通过 crontab、Shell 配置文件、init 脚本或 authorized_keys
+  向系统注入持久化后门。
+regex: |-
+  >>?\s*"?(~/\.(bashrc|bash_profile|profile|zshrc)|/etc/(profile|bash\.bashrc|bashrc|cron|init\.d/)|/var/spool/cron|[^;\n&]*authorized_keys\b)
+  |\btee\b[^;\n&]*(~/\.(bashrc|bash_profile|profile|zshrc)|/etc/(profile|bash\.bashrc|bashrc|cron|init\.d/)|/var/spool/cron|authorized_keys\b)
+  |\bsystemctl\b[^;\n&]*\benable\b
+  |\bcrontab\b(?!\s+-[lre]\b)
+severity: warn

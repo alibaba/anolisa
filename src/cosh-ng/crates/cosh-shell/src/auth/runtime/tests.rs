@@ -1,0 +1,583 @@
+//! Unit tests for the `/auth` slash-command state machine.
+
+use super::{
+    apply_aliyun_prepare, begin_sysom_shortcut, clear_ecs_auth_source_for_manual_aliyun_edit,
+    ecs_ram_role_prepare, handle_auth_answer, management_entry, render_auth_card_actions,
+    should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
+    should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
+    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, EcsRamRolePrepare,
+    ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
+};
+use crate::adapter::{AdapterInstance, FakeAgentAdapter};
+use crate::auth::capture::auth_capture_id;
+use std::collections::HashMap;
+
+/// Any registry round-trip through this adapter fails, so reaching the ECS metadata
+/// service a second time turns into a visible error instead of a silent probe.
+fn adapter_without_registry() -> AdapterInstance {
+    AdapterInstance::Fake(FakeAgentAdapter)
+}
+
+fn template(id: &str) -> AuthProviderInfo {
+    AuthProviderInfo {
+        id: id.to_string(),
+        label: id.to_string(),
+        fields: Vec::new(),
+    }
+}
+
+fn ecs_prepare() -> EcsRamRolePrepare {
+    EcsRamRolePrepare {
+        instance_id: "i-test-1".to_string(),
+        console_url: "https://example.invalid/guide/cosh?instance=i-test-1".to_string(),
+        values: HashMap::from([("auth_source".to_string(), "ecs_ram_role".to_string())]),
+    }
+}
+
+fn slash_auth_state(templates: &[&str], sysom: SysomMenu) -> RuntimeAuthState {
+    RuntimeAuthState {
+        id: "auth-slash".to_string(),
+        request_id: "slash".to_string(),
+        phase: AuthPhase::ManagingProviders,
+        providers: templates.iter().copied().map(template).collect(),
+        selected_provider: 0,
+        current_field: 0,
+        collected_values: HashMap::new(),
+        field_input: String::new(),
+        field_error: None,
+        existing_providers: Vec::new(),
+        editing_provider_name: None,
+        error_message: None,
+        backend: AuthBackend::CoreRegistry,
+        sysom,
+    }
+}
+
+#[test]
+fn manual_prepare_mode_is_not_an_ecs_challenge() {
+    assert!(ecs_ram_role_prepare(CoreAuthPrepare {
+        mode: "manual".to_string(),
+        instance_id: None,
+        console_url: None,
+        values: HashMap::new(),
+    })
+    .is_none());
+
+    let prepare = ecs_ram_role_prepare(CoreAuthPrepare {
+        mode: "ecs_ram_role".to_string(),
+        instance_id: Some("i-test-1".to_string()),
+        console_url: Some("https://example.invalid/guide".to_string()),
+        values: HashMap::from([("auth_source".to_string(), "ecs_ram_role".to_string())]),
+    })
+    .expect("ecs mode is a challenge");
+    assert_eq!(prepare.instance_id, "i-test-1");
+    assert_eq!(
+        prepare.values.get("auth_source").map(String::as_str),
+        Some("ecs_ram_role")
+    );
+
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_manual());
+    assert!(
+        !apply_aliyun_prepare(&adapter_without_registry(), &mut auth)
+            .expect("cached manual prepare needs no registry")
+    );
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+}
+
+#[test]
+fn sysom_shortcut_starts_the_aliyun_template_at_provider_id() {
+    let mut auth = slash_auth_state(
+        &["dashscope", "openai_compat", "aliyun"],
+        SysomMenu::on_ecs(ecs_prepare()),
+    );
+
+    assert!(begin_sysom_shortcut(&mut auth));
+
+    // The aliyun template is reused as-is; SysOM is not a provider type of its own.
+    assert_eq!(auth.current_provider().id, "aliyun");
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    // Field 0 is the injected Provider ID, so the shortcut cannot overwrite a config.
+    assert_eq!(auth.current_field, 0);
+    assert!(auth.editing_provider_name.is_none());
+    assert!(auth.collected_values.is_empty());
+}
+
+#[test]
+fn sysom_shortcut_without_an_aliyun_template_reports_failure() {
+    let mut auth = slash_auth_state(&["dashscope"], SysomMenu::on_ecs(ecs_prepare()));
+
+    assert!(!begin_sysom_shortcut(&mut auth));
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+}
+
+#[test]
+fn prefetched_challenge_is_applied_without_probing_ecs_again() {
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_ecs(ecs_prepare()));
+    auth.collected_values
+        .insert("provider_id".to_string(), "sysom-trial".to_string());
+    auth.collected_values
+        .insert("access_key_id".to_string(), "stale-ak".to_string());
+
+    let applied = apply_aliyun_prepare(&adapter_without_registry(), &mut auth)
+        .expect("cached prepare needs no registry");
+
+    assert!(applied);
+    assert_eq!(
+        auth.phase,
+        AuthPhase::AliyunEcsChallenge {
+            instance_id: "i-test-1".to_string(),
+            console_url: "https://example.invalid/guide/cosh?instance=i-test-1".to_string(),
+        }
+    );
+    assert_eq!(
+        auth.collected_values.get("auth_source").map(String::as_str),
+        Some("ecs_ram_role")
+    );
+    assert!(!auth.collected_values.contains_key("access_key_id"));
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("sysom-trial")
+    );
+}
+
+/// Slash-auth state on an ECS host with one saved DashScope provider.
+fn ecs_state_with_saved_dashscope() -> InlineState {
+    let mut auth = slash_auth_state(
+        &["dashscope", "openai_compat", "aliyun"],
+        SysomMenu::on_ecs(ecs_prepare()),
+    );
+    auth.existing_providers = vec![saved_dashscope()];
+    let mut state = InlineState::default();
+    state.auth.state = Some(auth);
+    state
+}
+
+fn saved_dashscope() -> ExistingProvider {
+    ExistingProvider {
+        name: "qwen-prod".to_string(),
+        provider_type: "dashscope".to_string(),
+        label: "DashScope".to_string(),
+        model: "qwen3.7-plus".to_string(),
+        is_active: true,
+        editable: true,
+        source: "user".to_string(),
+        base_url: None,
+        api_key_mask: Some("\u{2022}\u{2022}".to_string()),
+        access_key_id_mask: None,
+        access_key_secret_mask: None,
+        security_token_mask: None,
+        auth_source: None,
+    }
+}
+
+/// Answers the panel with the row currently selected, discarding the rendered output.
+fn answer_selected_row(state: &mut InlineState) {
+    let id = state.auth.state.as_ref().expect("auth state").id.clone();
+    let mut output = Vec::new();
+    assert!(
+        handle_auth_answer(&adapter_without_registry(), state, &id, "", &mut output)
+            .expect("panel answer"),
+        "answer was not routed to the auth panel"
+    );
+}
+
+#[test]
+fn menu_rows_below_the_shortcut_still_open_their_provider_action_menu() {
+    let mut state = ecs_state_with_saved_dashscope();
+    // Row 2 of [SysOM, qwen-prod, + Add new provider].
+    state
+        .auth
+        .state
+        .as_mut()
+        .expect("auth state")
+        .selected_provider = 1;
+
+    answer_selected_row(&mut state);
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(auth.phase, AuthPhase::ProviderAction { provider_idx: 0 });
+}
+
+#[test]
+fn the_last_menu_row_still_adds_a_new_provider() {
+    let mut state = ecs_state_with_saved_dashscope();
+    state
+        .auth
+        .state
+        .as_mut()
+        .expect("auth state")
+        .selected_provider = 2;
+
+    answer_selected_row(&mut state);
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(auth.phase, AuthPhase::SelectingProvider);
+    assert_eq!(auth.selected_provider, 0);
+}
+
+#[test]
+fn the_first_menu_row_starts_the_sysom_shortcut() {
+    let mut state = ecs_state_with_saved_dashscope();
+
+    answer_selected_row(&mut state);
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(auth.phase, AuthPhase::FillingField);
+    assert_eq!(auth.current_provider().id, "aliyun");
+    assert_eq!(auth.current_field, 0);
+}
+
+#[test]
+fn cancelling_a_provider_action_returns_to_the_row_it_came_from() {
+    let mut state = ecs_state_with_saved_dashscope();
+    {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.phase = AuthPhase::ProviderAction { provider_idx: 0 };
+        // An active provider offers Edit, Delete, Cancel.
+        auth.selected_provider = 2;
+    }
+
+    answer_selected_row(&mut state);
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+    // Row 2, not row 1: the SysOM shortcut occupies the first slot.
+    assert_eq!(auth.selected_provider, 1);
+}
+
+#[test]
+fn deleting_the_promoted_provider_restores_the_shortcut_row() {
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_ecs(ecs_prepare()));
+    auth.existing_providers = vec![ExistingProvider {
+        name: "sysom-trial".to_string(),
+        provider_type: "aliyun".to_string(),
+        auth_source: Some("ecs_ram_role".to_string()),
+        ..saved_dashscope()
+    }];
+    auth.sysom.sync(&mut auth.existing_providers);
+    assert!(auth.sysom.promoted());
+
+    // What `submit_delete_confirmation` does after reloading the saved providers.
+    auth.existing_providers = vec![saved_dashscope()];
+    auth.sysom.sync(&mut auth.existing_providers);
+
+    assert!(!auth.sysom.promoted());
+    assert_eq!(
+        management_entry(&auth.sysom, auth.existing_providers.len(), 0),
+        AuthManagementEntry::SysomShortcut
+    );
+}
+
+#[test]
+fn without_a_prefetched_challenge_prepare_still_asks_the_registry() {
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::default());
+
+    let error = apply_aliyun_prepare(&adapter_without_registry(), &mut auth)
+        .expect_err("registry is consulted when nothing was prefetched");
+
+    assert!(error.contains("cosh-core"), "{error}");
+    assert_eq!(auth.phase, AuthPhase::ManagingProviders);
+}
+
+#[test]
+fn core_registry_aliyun_add_waits_for_provider_id_before_prepare() {
+    assert!(!should_apply_aliyun_prepare_on_provider_selection(
+        AuthBackend::CoreRegistry
+    ));
+    assert!(should_apply_aliyun_prepare_after_field(
+        AuthBackend::CoreRegistry,
+        false,
+        "aliyun",
+        Some("provider_id"),
+    ));
+}
+
+#[test]
+fn active_run_aliyun_selection_can_prepare_without_provider_id_field() {
+    assert!(should_apply_aliyun_prepare_on_provider_selection(
+        AuthBackend::ActiveRun
+    ));
+    assert!(!should_apply_aliyun_prepare_after_field(
+        AuthBackend::ActiveRun,
+        false,
+        "aliyun",
+        Some("provider_id"),
+    ));
+}
+
+#[test]
+fn manual_aliyun_edit_does_not_apply_ecs_prepare() {
+    let manual = ExistingProvider {
+        name: "aliyun-manual".to_string(),
+        provider_type: "aliyun".to_string(),
+        label: "Aliyun Authentication".to_string(),
+        model: "qwen3.7-plus".to_string(),
+        is_active: true,
+        editable: true,
+        source: "user".to_string(),
+        base_url: None,
+        api_key_mask: None,
+        access_key_id_mask: Some("••••".to_string()),
+        access_key_secret_mask: Some("••••••".to_string()),
+        security_token_mask: None,
+        auth_source: None,
+    };
+    let ecs = ExistingProvider {
+        auth_source: Some("ecs_ram_role".to_string()),
+        access_key_id_mask: None,
+        access_key_secret_mask: None,
+        ..manual.clone()
+    };
+
+    assert!(!should_apply_aliyun_prepare_for_edit(&manual));
+    assert!(should_apply_aliyun_prepare_for_edit(&ecs));
+}
+
+#[test]
+fn ecs_aliyun_manual_fallback_clears_auth_source() {
+    let ecs = ExistingProvider {
+        name: "aliyun-ecs".to_string(),
+        provider_type: "aliyun".to_string(),
+        label: "Aliyun Authentication".to_string(),
+        model: "qwen3.7-plus".to_string(),
+        is_active: true,
+        editable: true,
+        source: "user".to_string(),
+        base_url: None,
+        api_key_mask: None,
+        access_key_id_mask: None,
+        access_key_secret_mask: None,
+        security_token_mask: None,
+        auth_source: Some("ecs_ram_role".to_string()),
+    };
+    let manual = ExistingProvider {
+        auth_source: None,
+        ..ecs.clone()
+    };
+    let mut ecs_values = HashMap::from([
+        ("auth_source".to_string(), "ecs_ram_role".to_string()),
+        ("access_key_id".to_string(), "manual-ak".to_string()),
+        ("access_key_secret".to_string(), "manual-sk".to_string()),
+        ("security_token".to_string(), "manual-token".to_string()),
+    ]);
+    let mut manual_values = ecs_values.clone();
+
+    clear_ecs_auth_source_for_manual_aliyun_edit(&ecs, &mut ecs_values);
+    clear_ecs_auth_source_for_manual_aliyun_edit(&manual, &mut manual_values);
+
+    assert!(!ecs_values.contains_key("auth_source"));
+    assert_eq!(
+        ecs_values.get("access_key_id").map(String::as_str),
+        Some("manual-ak")
+    );
+    assert_eq!(
+        ecs_values.get("access_key_secret").map(String::as_str),
+        Some("manual-sk")
+    );
+    assert_eq!(
+        ecs_values.get("security_token").map(String::as_str),
+        Some("manual-token")
+    );
+    assert_eq!(
+        manual_values.get("auth_source").map(String::as_str),
+        Some("ecs_ram_role")
+    );
+}
+
+fn field(name: &str, label: &str, secret: bool) -> AuthFieldInfo {
+    AuthFieldInfo {
+        name: name.to_string(),
+        label: label.to_string(),
+        hint: None,
+        secret,
+        required: true,
+        placeholder: None,
+    }
+}
+
+/// An `/auth` edit already sitting on Base URL with the saved value pre-filled — the state a
+/// user sees right before pressing Enter to keep it.
+fn editing_base_url_state() -> InlineState {
+    let mut template = template("openai_compat");
+    template.fields = vec![
+        field("provider_id", "Provider ID", false),
+        field("base_url", "Base URL", false),
+        field("model", "Model", false),
+        field("api_key", "API Key", true),
+    ];
+    let mut auth = slash_auth_state(&[], SysomMenu::default());
+    auth.providers = vec![template];
+    auth.phase = AuthPhase::FillingField;
+    auth.editing_provider_name = Some("qwen-prod".to_string());
+    auth.collected_values = HashMap::from([
+        ("provider_id".to_string(), "qwen-prod".to_string()),
+        (
+            "base_url".to_string(),
+            "https://example.invalid/v1".to_string(),
+        ),
+        ("model".to_string(), "qwen3.7-plus".to_string()),
+        (
+            "api_key".to_string(),
+            "\u{2022}\u{2022}\u{2022}".to_string(),
+        ),
+    ]);
+    auth.current_field = 1;
+    auth.field_input = "https://example.invalid/v1".to_string();
+    let mut state = InlineState::default();
+    state.auth.state = Some(auth);
+    state
+}
+
+/// The event an empty Enter produces on a non-secret capture: the scoped capture id, not the
+/// typed text, rides in `input`.
+fn empty_submission(capture_id: &str) -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("session", capture_id);
+    event.component = Some("card".to_string());
+    event.message = Some("question_submit_empty".to_string());
+    event.input = Some(capture_id.to_string());
+    event
+}
+
+fn relay_card_event(state: &mut InlineState, event: ShellEvent) -> String {
+    let mut output = Vec::new();
+    render_auth_card_actions(&[event], &adapter_without_registry(), state, &mut output, 0)
+        .expect("relay card event");
+    String::from_utf8(output).expect("utf8 panel output")
+}
+
+/// #1833: Enter on a pre-filled non-secret field kept the panel frozen, because the empty
+/// submission never reached the auth dispatcher.
+#[test]
+fn empty_enter_keeps_the_prefilled_value_and_advances_the_field() {
+    let mut state = editing_base_url_state();
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+
+    relay_card_event(&mut state, empty_submission(&capture_id));
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(
+        auth.collected_values.get("base_url").map(String::as_str),
+        Some("https://example.invalid/v1")
+    );
+    assert_eq!(auth.current_field, 2);
+    // The cursor moved to Model, so its saved value becomes the editable projection.
+    assert_eq!(auth.field_input, "qwen3.7-plus");
+}
+
+/// The scoped capture id is the guard: an empty submission left over from the field the user
+/// already passed must not push the live field forward a second time.
+#[test]
+fn a_stale_empty_submission_does_not_advance_the_live_field() {
+    let mut state = editing_base_url_state();
+    let stale_id = {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.current_field = 0;
+        let stale = auth_capture_id(auth);
+        auth.current_field = 1;
+        stale
+    };
+
+    relay_card_event(&mut state, empty_submission(&stale_id));
+
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(auth.current_field, 1);
+    assert_eq!(auth.field_input, "https://example.invalid/v1");
+}
+
+/// Secret fields already worked: an empty Enter there is delivered as an empty `answer`.
+#[test]
+fn empty_enter_on_a_secret_field_still_keeps_the_masked_value() {
+    let mut state = editing_base_url_state();
+    {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.current_field = 3;
+        auth.load_current_field_input();
+        assert_eq!(auth.field_input, "\u{2022}\u{2022}\u{2022}");
+    }
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+    let mut event = empty_submission(&capture_id);
+    event.component = Some("card_secret".to_string());
+    event.message = Some("answer".to_string());
+    event.input = Some(String::new());
+
+    relay_card_event(&mut state, event);
+
+    // All fields collected: the submission is attempted and the fake adapter rejects it, so
+    // the edit is restored instead of completed — with the mask intact for another try.
+    let auth = state.auth.state.as_ref().expect("auth state");
+    assert_eq!(
+        auth.collected_values.get("api_key").map(String::as_str),
+        Some("\u{2022}\u{2022}\u{2022}")
+    );
+}
+
+/// ESC in `FillingField` should return to the previous field rather than cancelling the
+/// entire `/auth` flow — the common multi-step form "step back" pattern.
+fn cancel_event(capture_id: &str) -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("session", capture_id);
+    event.component = Some("card".to_string());
+    event.message = Some("question_cancel".to_string());
+    event.input = Some(capture_id.to_string());
+    event
+}
+
+#[test]
+fn esc_in_filling_field_steps_back_to_previous_field() {
+    let mut state = editing_base_url_state();
+    // The edit is sitting on Base URL (field 1) with collected Provider ID + Base URL.
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+
+    relay_card_event(&mut state, cancel_event(&capture_id));
+
+    // Auth state is still alive — not cancelled.
+    let auth = state.auth.state.as_ref().expect("auth state not cancelled");
+    // Cursor moved back to field 0 (Provider ID).
+    assert_eq!(auth.current_field, 0);
+    // The editable projection now shows the Provider ID value.
+    assert_eq!(auth.field_input, "qwen-prod");
+    // Already-collected values are preserved.
+    assert_eq!(
+        auth.collected_values.get("base_url").map(String::as_str),
+        Some("https://example.invalid/v1")
+    );
+}
+
+#[test]
+fn esc_on_first_field_returns_to_selecting_provider() {
+    let mut state = editing_base_url_state();
+    {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.current_field = 0;
+        auth.load_current_field_input();
+    }
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+
+    relay_card_event(&mut state, cancel_event(&capture_id));
+
+    let auth = state.auth.state.as_ref().expect("auth state not cancelled");
+    // Returned to provider selection, with a clean slate.
+    assert_eq!(auth.phase, AuthPhase::SelectingProvider);
+    assert!(auth.collected_values.is_empty());
+    assert!(auth.field_input.is_empty());
+}
+
+#[test]
+fn esc_in_selecting_provider_cancels_the_flow() {
+    let mut state = editing_base_url_state();
+    {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.phase = AuthPhase::SelectingProvider;
+        auth.collected_values.clear();
+        auth.field_input.clear();
+    }
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+
+    let output = relay_card_event(&mut state, cancel_event(&capture_id));
+
+    // The whole flow is torn down.
+    assert!(state.auth.state.is_none(), "auth state should be cleared");
+    assert!(
+        output.contains("Auth cancelled"),
+        "expected cancel panel: {output}"
+    );
+}

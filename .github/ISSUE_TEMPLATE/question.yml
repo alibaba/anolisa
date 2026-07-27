@@ -1,0 +1,39 @@
+name: Question
+description: Ask a question about the project
+title: "docs: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have a question? Please fill in the details below.
+        For general questions about ANOLISA, you can also check the [documentation](../docs/).
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component does your question relate to?
+      options:
+        - cosh
+        - cosh-ng
+        - sec-core
+        - skill
+        - sight
+        - tokenless
+        - ckpt
+        - memory
+        - anolisa
+        - skillfs
+        - other
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: Please describe your question in detail.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What have you already tried? What documentation have you read?

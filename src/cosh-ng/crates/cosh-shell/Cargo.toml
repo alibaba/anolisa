@@ -1,0 +1,30 @@
+[package]
+name = "cosh-shell"
+version.workspace = true
+edition.workspace = true
+description = "Shell-first interactive Agent shell for cosh-ng"
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+keywords = ["shell", "agent", "terminal", "approval", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "cosh-shell"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true, features = ["clock", "serde"] }
+nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
+ratatui = "0.28"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+uuid.workspace = true
+wait-timeout.workspace = true
+qrcode = { version = "0.14", default-features = false }
+regex.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true

@@ -1,0 +1,20 @@
+{
+  "name": "tokenless",
+  "version": "@VERSION@",
+  "description": "Intelligent tool response compression, environment error detection, and token optimization. Strips noise (debug fields, nulls, empty values), truncates long strings/arrays, applies TOON encoding for JSON responses, and classifies environment errors with actionable fix hints.",
+  "keywords": [
+    "compression",
+    "token",
+    "context",
+    "optimization",
+    "environment",
+    "diagnostics"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Tokenless",
+    "shortDescription": "Compress tool responses and detect environment errors to save tokens",
+    "category": "developer-tools",
+    "capabilities": ["hook"]
+  }
+}

@@ -1,0 +1,435 @@
+// Owner: shell_host (zsh marker script). Emitted protocol must stay
+// byte-identical to the pre-split marker.rs; golden coverage lives in
+// osc_tests.rs and tests/shell_host/marker.rs.
+pub(in crate::shell_host) fn zsh_marker_script() -> &'static str {
+    r#"
+if [[ -n "${COSH_OSC_MARKER_LOADED:-}" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+COSH_OSC_MARKER_LOADED=1
+[[ -o interactive ]] || return 0 2>/dev/null || exit 0
+export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
+export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
+_COSH_INITIAL_COMMAND_NOT_FOUND_HANDLER="${functions[command_not_found_handler]-}"
+if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
+  if [[ -n "${COSH_ZDOTDIR_ORIG:-}" ]]; then
+    _cosh_marker_zdotdir="${ZDOTDIR:-}"
+    if [[ -n "$_cosh_marker_zdotdir" && "${HISTFILE:-}" == "$_cosh_marker_zdotdir/.zsh_history" ]]; then
+      HISTFILE="${COSH_ZDOTDIR_ORIG}/.zsh_history"
+    fi
+    export ZDOTDIR="${COSH_ZDOTDIR_ORIG}"
+    [[ -f "${COSH_ZDOTDIR_ORIG}/.zshenv" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshenv"
+    if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f "${COSH_ZDOTDIR_ORIG}/.zprofile" ]] && source "${COSH_ZDOTDIR_ORIG}/.zprofile"
+      [[ -f "${COSH_ZDOTDIR_ORIG}/.zlogin" ]] && source "${COSH_ZDOTDIR_ORIG}/.zlogin"
+    fi
+    [[ -f "${COSH_ZDOTDIR_ORIG}/.zshrc" ]] && source "${COSH_ZDOTDIR_ORIG}/.zshrc"
+    unset _cosh_marker_zdotdir
+  else
+    [[ -f ~/.zshenv ]] && source ~/.zshenv
+    if [[ "${COSH_LOGIN_SHELL:-}" == "1" ]]; then
+      [[ -f ~/.zprofile ]] && source ~/.zprofile
+      [[ -f ~/.zlogin ]] && source ~/.zlogin
+    fi
+    [[ -f ~/.zshrc ]] && source ~/.zshrc
+  fi
+fi
+_COSH_AI_ENABLED="$_COSH_SESSION_AI_ENABLED"
+readonly _COSH_AI_ENABLED
+_cosh_load_native_zsh_history_if_empty() {
+  if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
+    return 0
+  fi
+  if [[ -z "${HISTFILE:-}" && -n "${COSH_ZDOTDIR_ORIG:-}" && -r "${COSH_ZDOTDIR_ORIG}/.zsh_history" ]]; then
+    HISTFILE="${COSH_ZDOTDIR_ORIG}/.zsh_history"
+  fi
+  if [[ -z "${HISTFILE:-}" || ! -r "$HISTFILE" ]]; then
+    return 0
+  fi
+  if fc -l 1 >/dev/null 2>&1; then
+    return 0
+  fi
+  fc -R "$HISTFILE" 2>/dev/null || true
+}
+if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
+  : # native mode: keep user PS1/PROMPT, HISTFILE, etc.
+else
+  export PS1="$COSH_POC_PS1"
+  export PROMPT="$COSH_POC_PS1"
+  export HISTFILE="${COSH_HISTFILE:-/dev/null}"
+  HISTSIZE="${COSH_HISTSIZE:-1000}"
+  SAVEHIST=0
+fi
+_cosh_load_native_zsh_history_if_empty
+setopt NO_BEEP 2>/dev/null || true
+setopt NO_PROMPT_CR 2>/dev/null || true
+setopt NO_PROMPT_SP 2>/dev/null || true
+unsetopt NOMATCH 2>/dev/null || true
+_COSH_ATTEMPT_GENERATION=0
+_COSH_ATTEMPT_ACTIVE=0
+_COSH_ATTEMPT_INPUT=
+_COSH_ATTEMPT_TOKEN=
+_COSH_ATTEMPT_TOKEN_FINGERPRINT=
+_COSH_ATTEMPT_SENSITIVE=0
+_COSH_ATTEMPT_UNSAFE=0
+_COSH_WRAPPER_ID="${COSH_SESSION_ID}:${COSH_MARKER_TOKEN}"
+_cosh_apply_internal_recovery() {
+  if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
+    return 0
+  fi
+  rm -f -- "$COSH_RECOVERY_REQUEST_FILE" 2>/dev/null || true
+  stty echo icanon isig iexten opost 2>/dev/null || true
+}
+_cosh_json_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+_cosh_now_ms() {
+  date +%s000
+}
+_cosh_emit_marker() {
+  local event="$1"
+  local command="$2"
+  local exit_status="$3"
+  local path_trusted="${4:-false}"
+  local timestamp
+  timestamp="$(_cosh_now_ms)"
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s}\a' \
+    "$(_cosh_json_escape "$event")" \
+    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
+    "$(_cosh_json_escape "$COSH_SESSION_ID")" \
+    "$timestamp" \
+    "$(_cosh_json_escape "$PWD")" \
+    "$(_cosh_json_escape "$command")" \
+    "$exit_status" \
+    "$(_cosh_json_escape "$PATH")" \
+    "$path_trusted" \
+    "${_COSH_ATTEMPT_GENERATION:-0}"
+}
+_cosh_emit_intercept_marker() {
+  local input="$1"
+  local reason="$2"
+  local top_level_missing="${3:-false}"
+  local timestamp
+  timestamp="$(_cosh_now_ms)"
+  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s}\a' \
+    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
+    "$(_cosh_json_escape "$COSH_SESSION_ID")" \
+    "$timestamp" \
+    "$(_cosh_json_escape "$PWD")" \
+    "$(_cosh_json_escape "$input")" \
+    "$(_cosh_json_escape "$reason")" \
+    "${_COSH_ATTEMPT_GENERATION:-0}" \
+    "$top_level_missing"
+}
+_cosh_emit_top_level_missing_marker() {
+  local intent="$1"
+  local sensitive="${2:-false}"
+  local unsafe="${3:-false}"
+  local timestamp
+  timestamp="$(_cosh_now_ms)"
+  printf '\033]1337;COSH;{"event":"top_level_missing","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","generation":%s,"proven":true,"intent":"%s","sensitive":%s,"unsafe":%s}\a' \
+    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
+    "$(_cosh_json_escape "$COSH_SESSION_ID")" \
+    "$timestamp" \
+    "$(_cosh_json_escape "$PWD")" \
+    "${_COSH_ATTEMPT_GENERATION:-0}" \
+    "$(_cosh_json_escape "$intent")" \
+    "$sensitive" \
+    "$unsafe"
+}
+_cosh_should_intercept_unknown() {
+  local command="$1"
+  case "$command" in
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+      printf '%s' "slash"
+      return 0
+      ;;
+  esac
+  if _cosh_is_slash_control_candidate "$command"; then
+    printf '%s' "slash"
+    return 0
+  fi
+  if [[ "$command" == "??" || "$command" == "??"* ]]; then
+    printf '%s' "agent_marker"
+    return 0
+  fi
+  return 1
+}
+_cosh_is_slash_control_candidate() {
+  local command="$1"
+  case "$command" in
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/health|/help|/hooks|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills)
+      return 0
+      ;;
+  esac
+  return 1
+}
+_COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '
+_cosh_is_handoff_wrapper() {
+  case "$1" in
+    "$_COSH_HANDOFF_PREFIX"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+_cosh_unwrap_handoff_command() {
+  local command="$1"
+  printf '%s' "${command#$_COSH_HANDOFF_PREFIX}"
+}
+_cosh_is_pending_handoff_command() {
+  local command="$1"
+  if [[ -z "${COSH_HANDOFF_REQUEST_FILE:-}" || ! -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
+    return 1
+  fi
+  [[ "$(cat -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null)" == "$command" ]]
+}
+_cosh_clear_handoff_request() {
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
+    rm -f -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null || true
+  fi
+}
+_cosh_command_has_secret() {
+  local lower="${(L)1}"
+  case "$lower" in
+    *"-----begin "*"private key-----"*|*"bearer "*|*"://"*":"*"@"*|*ghp_*|*github_pat_*|*glpat-*|*npm_*|*hf_*|*xox?-*|*aiza*)
+      return 0
+      ;;
+    *ltai????????????*)
+      return 0
+      ;;
+    *akia????????????????*|*asia????????????????*)
+      return 0
+      ;;
+    sk-*|sk_live_*|sk_test_*|*" sk-"*|*"=sk-"*|*":sk-"*|*"\"sk-"*|*"'sk-"*|*" sk_live_"*|*" sk_test_"*|*"=sk_live_"*|*"=sk_test_"*)
+      return 0
+      ;;
+  esac
+  local key
+  for key in password passwd passphrase token access_token access-token refresh_token refresh-token id_token id-token secret client_secret client-secret api_key api-key apikey access_key_id access-key-id access_key_secret access-key-secret security_token security-token authorization cookie set-cookie; do
+    case "$lower" in
+      *"$key="*|*"$key:"*|*"--$key "*|*"--$key="*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+_cosh_zshaddhistory_marker() {
+  local command="${1%$'\n'}"
+  if _cosh_is_handoff_wrapper "$command"; then
+    local history_command="$(_cosh_unwrap_handoff_command "$command")"
+    if _cosh_command_has_secret "$history_command"; then
+      history_command="<redacted sensitive command>"
+    fi
+    _COSH_HANDOFF_HISTORY_COMMAND="$history_command"
+    return 1
+  fi
+  if _cosh_command_has_secret "$command"; then
+    return 1
+  fi
+  _cosh_utf8_han_status "$command"
+  (( $? == 2 )) && return 1
+  return 0
+}
+_cosh_add_handoff_history() {
+  if [[ -z "${_COSH_HANDOFF_HISTORY_COMMAND+x}" ]]; then
+    return 0
+  fi
+  print -sr -- "$_COSH_HANDOFF_HISTORY_COMMAND" 2>/dev/null || true
+  unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
+}
+_cosh_begin_attempt() {
+  local input="$1"
+  local top_token="$2"
+  local utf8_status
+  _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+  _COSH_ATTEMPT_ACTIVE=1
+  _COSH_ATTEMPT_WRAPPER_ID="$_COSH_WRAPPER_ID"
+  _COSH_ATTEMPT_SENSITIVE=0
+  _COSH_ATTEMPT_UNSAFE=0
+  _COSH_ATTEMPT_INPUT=
+  _COSH_ATTEMPT_TOKEN=
+  _COSH_ATTEMPT_TOKEN_FINGERPRINT=
+  if _cosh_command_has_secret "$input"; then
+    _COSH_ATTEMPT_SENSITIVE=1
+    _COSH_ATTEMPT_TOKEN_FINGERPRINT="$(_cosh_token_fingerprint "$top_token")" || _COSH_ATTEMPT_ACTIVE=0
+    return 0
+  fi
+  _cosh_utf8_han_status "$input"
+  utf8_status=$?
+  if (( utf8_status == 2 )); then
+    _COSH_ATTEMPT_UNSAFE=1
+    _COSH_ATTEMPT_TOKEN_FINGERPRINT="$(_cosh_token_fingerprint "$top_token")" || _COSH_ATTEMPT_ACTIVE=0
+    return 0
+  fi
+  _COSH_ATTEMPT_INPUT="$input"
+  _COSH_ATTEMPT_TOKEN="$top_token"
+}
+_cosh_token_fingerprint() {
+  local result
+  result="$(printf '%s\n' "$1" | command cksum 2>/dev/null)" || return 1
+  printf '%s' "${result%% *}"
+}
+_cosh_delegate_zsh_command_not_found() {
+  if [[ "${_COSH_IN_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
+    printf 'zsh: command not found: %s\n' "$1" >&2
+    return 127
+  fi
+  if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
+    _COSH_IN_USER_COMMAND_NOT_FOUND=1
+    _cosh_user_command_not_found_handler "$@"
+    local result=$?
+    _COSH_IN_USER_COMMAND_NOT_FOUND=0
+    return "$result"
+  fi
+  printf 'zsh: command not found: %s\n' "$1" >&2
+  return 127
+}
+_cosh_user_handler_definition="${functions[command_not_found_handler]-}"
+if [[ -n "$_cosh_user_handler_definition"
+   && "$_cosh_user_handler_definition" != "$_COSH_INITIAL_COMMAND_NOT_FOUND_HANDLER" ]]; then
+  functions[_cosh_user_command_not_found_handler]="$_cosh_user_handler_definition"
+  _COSH_HAS_USER_COMMAND_NOT_FOUND=1
+else
+  _COSH_HAS_USER_COMMAND_NOT_FOUND=0
+fi
+unset _cosh_user_handler_definition _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLER
+command_not_found_handler() {
+  local command="$1"
+  shift || true
+  local original="${_COSH_ATTEMPT_INPUT:-}"
+  if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]]; then
+    _cosh_delegate_zsh_command_not_found "$command" "$@"
+    return $?
+  fi
+  if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1
+     || "${_COSH_ATTEMPT_WRAPPER_ID:-}" != "$_COSH_WRAPPER_ID" ]]; then
+    _cosh_delegate_zsh_command_not_found "$command" "$@"
+    return $?
+  fi
+  if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
+    local command_fingerprint
+    command_fingerprint="$(_cosh_token_fingerprint "$command")"
+    if [[ -z "$command_fingerprint"
+       || "$command_fingerprint" != "${_COSH_ATTEMPT_TOKEN_FINGERPRINT:-}" ]]; then
+      _cosh_delegate_zsh_command_not_found "$command" "$@"
+      return $?
+    fi
+    _COSH_ATTEMPT_ACTIVE=0
+    local sensitive=false
+    local unsafe=false
+    [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
+    [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]] && unsafe=true
+    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" "$unsafe"
+    _cosh_delegate_zsh_command_not_found "$command" "$@"
+    return $?
+  fi
+  if [[ "${_COSH_ATTEMPT_TOKEN:-}" != "$command" || -z "$original" ]]; then
+    _cosh_delegate_zsh_command_not_found "$command" "$@"
+    return $?
+  fi
+  if _cosh_is_pending_handoff_command "$original"; then
+    _cosh_delegate_zsh_command_not_found "$command" "$@"
+    return $?
+  fi
+  _COSH_ATTEMPT_ACTIVE=0
+  local reason
+  if reason="$(_cosh_should_intercept_unknown "$command" "$original" "$(($# + 1))")"; then
+    _cosh_emit_intercept_marker "$original" "$reason"
+    return 0
+  fi
+  local intent
+  intent="$(_cosh_classify_missing "$original" "$command")"
+  if [[ "$intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
+    if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
+      _cosh_emit_top_level_missing_marker "$intent" false false
+      _cosh_delegate_zsh_command_not_found "$command" "$@"
+      return $?
+    fi
+    _cosh_emit_intercept_marker "$original" "natural_language" true
+    return 0
+  fi
+  _cosh_emit_top_level_missing_marker "$intent" false false
+  _cosh_delegate_zsh_command_not_found "$command" "$@"
+  return $?
+}
+_cosh_preexec_marker() {
+  local command="$1"
+  _COSH_ATTEMPT_ACTIVE=0
+  _COSH_ATTEMPT_SENSITIVE=0
+  _COSH_ATTEMPT_UNSAFE=0
+  local display_command="$command"
+  local path_trusted=false
+  if [[ "${preexec_functions[-1]:-}" == "_cosh_preexec_marker" ]]; then
+    path_trusted=true
+  fi
+  if _cosh_is_handoff_wrapper "$command"; then
+    display_command="$(_cosh_unwrap_handoff_command "$command")"
+    _COSH_HANDOFF_ACTIVE=1
+    if _cosh_command_has_secret "$display_command"; then
+      display_command="<redacted sensitive command>"
+    fi
+    _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
+  elif _cosh_is_pending_handoff_command "$command"; then
+    _COSH_HANDOFF_ACTIVE=1
+  else
+    _cosh_clear_handoff_request
+    unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
+    unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
+    local first_word="$command"
+    local argc=1
+    if [[ "$command" == *[[:space:]]* ]]; then
+      first_word="${command%%[[:space:]]*}"
+      argc=2
+    fi
+    local reason
+    if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+      _cosh_emit_intercept_marker "$command" "$reason"
+      return 1
+    fi
+    _cosh_begin_attempt "$command" "$first_word"
+  fi
+  if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1
+     || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]] \
+     || _cosh_command_has_secret "$display_command"; then
+    display_command="<redacted sensitive command>"
+  fi
+  _cosh_emit_marker "preexec" "$display_command" 0 "$path_trusted"
+}
+_cosh_precmd_marker() {
+  local exit_status=$?
+  setopt NO_PROMPT_CR 2>/dev/null || true
+  setopt NO_PROMPT_SP 2>/dev/null || true
+  _cosh_apply_internal_recovery
+  _cosh_add_handoff_history
+  _cosh_clear_handoff_request
+  unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
+  _COSH_ATTEMPT_ACTIVE=0
+  _cosh_emit_marker "precmd" "" "$exit_status" false
+  # Only claim prompt readiness while this remains the final precmd hook.
+  # Hooks appended later may still emit output or block before zsh paints.
+  if [[ "${precmd_functions[-1]:-}" == "_cosh_precmd_marker" ]]; then
+    _cosh_emit_marker "prompt_ready" "" "$exit_status" false
+  fi
+}
+# ── Hook setup (re-set after user rcfile may have overridden) ──
+# Slash command function stubs — prevent "zsh: no such file or directory" for
+# commands starting with / that zsh would try to exec as an absolute path.
+# The actual interception and marker emission happens in _cosh_preexec_marker.
+for _cosh_sc in agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions health help hooks mode new recommendations select send-to-shell shell skills; do
+  functions[/$_cosh_sc]=':'
+done
+unset _cosh_sc
+autoload -Uz add-zsh-hook
+add-zsh-hook zshaddhistory _cosh_zshaddhistory_marker
+add-zsh-hook preexec _cosh_preexec_marker
+add-zsh-hook precmd _cosh_precmd_marker
+"#
+}

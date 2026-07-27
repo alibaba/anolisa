@@ -1,0 +1,32 @@
+macro_rules! config_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ConfigInvalidLanguageBody,
+            ConfigSupportedLanguagesFooter,
+            ConfigUnknownKeyBody,
+            ConfigHomeMissingBody,
+            ConfigHomeMissingFooter,
+            ConfigUnchangedTitle,
+            ConfigNoFileChangedBody,
+            ConfigSavedTitle,
+            ConfigSavedValueLine,
+            ConfigCurrentSessionLanguageLine,
+            ConfigSavedFooter,
+            ConfigSaveFailedTitle,
+            ConfigSaveFailedBody,
+            ConfigSavePromptTitle,
+            ConfigFileLine,
+            ConfigPendingChangeLine,
+            ConfigSaveButton,
+            ConfigCancelButton,
+            ConfigApplyKeysFooter,
+            ConfigLanguageTitle,
+            ConfigLanguageAutoLine,
+            ConfigLanguageEnLine,
+            ConfigLanguageZhLine,
+            ConfigLanguageKeysFooter,
+        );
+    };
+}

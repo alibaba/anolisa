@@ -1,0 +1,19 @@
+# Generated C header — written on every `cargo build` by build.rs via cbindgen.
+# Consumers regenerate locally; do NOT commit.
+/include/
+
+# Dashboard 前端嵌入产物 — 由 `npm run build:embed` 在 dashboard/ 目录下生成。
+# webpack output.clean=true 每次构建都会覆盖。开发者本地按需重建，不提交。
+/frontend-dist/
+
+# 本地开发运行时产物 — `./dev.sh` 写入的日志与回退用的 SQLite 数据库。
+/.dev/
+
+# 测试与构建产物 —— 由 make test-coverage / e2e / rpm-build.sh 生成，本地按需重建。
+/coverage.xml
+/coverage-html/
+/e2e-report/
+/rpm-sources/
+
+# 运行期错误日志转储
+/error.jsonl

@@ -1,0 +1,71 @@
+//! AgentSight CLI - AI Agent observability tool
+//!
+//! This binary provides commands to:
+//! - `token`: Query token consumption data
+//! - `trace`: Trace agent activity via eBPF
+//! - `audit`: Query audit events
+//! - `discover`: Discover running AI agents
+//! - `interruption`: Query and manage session interruption events
+//! - `dashboard`: Display dashboard URL and ECS console access guide
+use structopt::StructOpt;
+
+mod cli;
+#[cfg(feature = "server")]
+use cli::dashboard::DashboardCommand;
+#[cfg(feature = "server")]
+use cli::serve::ServeCommand;
+use cli::{
+    audit::AuditCommand, discover::DiscoverCommand, interruption::InterruptionCommand,
+    metrics::MetricsCommand, skill_metrics::SkillMetricsCommand, summary::SummaryCommand,
+    token::TokenCommand, trace::TraceCommand,
+};
+
+#[derive(Debug, StructOpt)]
+#[structopt(
+    name = "agentsight",
+    about = "AI Agent observability tool - trace processes, SSL traffic, and LLM API calls via eBPF"
+)]
+pub enum Command {
+    /// Query token consumption data
+    Token(TokenCommand),
+    /// Trace agent activity (default)
+    Trace(TraceCommand),
+    /// Query audit events
+    Audit(AuditCommand),
+    /// Discover running AI agents on the system
+    Discover(DiscoverCommand),
+    /// Print per-agent token usage metrics in Prometheus text format
+    Metrics(MetricsCommand),
+    /// Query and manage session interruption events detected during agent conversations
+    Interruption(InterruptionCommand),
+    /// Compute and display skill usage metrics
+    #[structopt(name = "skill-metrics")]
+    SkillMetrics(SkillMetricsCommand),
+    /// Print a unified summary of sessions, interruptions, and tokenless savings
+    Summary(SummaryCommand),
+    /// Start the API server
+    #[cfg(feature = "server")]
+    Serve(ServeCommand),
+    /// Display dashboard URL and ECS console access guide
+    #[cfg(feature = "server")]
+    Dashboard(DashboardCommand),
+}
+
+fn main() {
+    let cmd = Command::from_args();
+
+    match cmd {
+        Command::Token(token_cmd) => token_cmd.execute(),
+        Command::Trace(trace_cmd) => trace_cmd.execute(),
+        Command::Audit(audit_cmd) => audit_cmd.execute(),
+        Command::Discover(discover_cmd) => discover_cmd.execute(),
+        Command::Metrics(metrics_cmd) => metrics_cmd.execute(),
+        Command::Interruption(interruption_cmd) => interruption_cmd.execute(),
+        Command::SkillMetrics(skill_metrics_cmd) => skill_metrics_cmd.execute(),
+        Command::Summary(summary_cmd) => summary_cmd.execute(),
+        #[cfg(feature = "server")]
+        Command::Serve(serve_cmd) => serve_cmd.execute(),
+        #[cfg(feature = "server")]
+        Command::Dashboard(dashboard_cmd) => dashboard_cmd.execute(),
+    }
+}

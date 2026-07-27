@@ -1,0 +1,185 @@
+diff --git a/src/core/tracking.rs b/src/core/tracking.rs
+index 359e4f6..c543753 100644
+--- a/src/core/tracking.rs
++++ b/src/core/tracking.rs
+@@ -1358,6 +1358,9 @@ impl TimedExecution {
+         let input_tokens = estimate_tokens(input);
+         let output_tokens = estimate_tokens(output);
+ 
++        // Also record to tokenless stats database (fail-silent)
++        record_to_tokenless_stats(original_cmd, rtk_cmd, input, output);
++
+         if let Ok(tracker) = Tracker::new() {
+             let _ = tracker.record(
+                 original_cmd,
+@@ -1419,6 +1422,159 @@ pub fn args_display(args: &[OsString]) -> String {
+         .join(" ")
+ }
+ 
++/// Estimate token count from character count using ~4 chars/token heuristic.
++fn estimate_tokens_from_chars(chars: usize) -> usize {
++    if chars == 0 {
++        return 0;
++    }
++    chars.div_ceil(4)
++}
++
++/// Resolve caller context from environment variables (primary) or
++/// .rewrite-context file (fallback for backwards compatibility).
++fn resolve_tokenless_context() -> (String, Option<String>, Option<String>) {
++    // Primary: environment variables set by the hook
++    let env_agent = std::env::var("TOKENLESS_AGENT_ID").ok();
++    let env_session = std::env::var("TOKENLESS_SESSION_ID").ok();
++    let env_toolcall = std::env::var("TOKENLESS_TOOL_USE_ID").ok();
++
++    if env_agent.is_some() || env_session.is_some() || env_toolcall.is_some() {
++        let agent = env_agent.unwrap_or_else(|| "cli".to_string());
++        let sid = env_session.filter(|s| !s.is_empty());
++        let tuid = env_toolcall.filter(|t| !t.is_empty());
++        return (agent, sid, tuid);
++    }
++
++    // Fallback: .rewrite-context file (legacy compat)
++    let context_file = dirs::home_dir()
++        .map(|d| d.join(".tokenless/.rewrite-context"))
++        .filter(|p| p.exists())
++        .and_then(|p| std::fs::read_to_string(p).ok());
++    if let Some(ctx) = &context_file {
++        let mut lines = ctx.lines();
++        let agent = lines.next().unwrap_or("").trim().to_string();
++        let session = lines.next().unwrap_or("").trim().to_string();
++        let toolcall = lines.next().unwrap_or("").trim().to_string();
++        let agent = if !agent.is_empty() {
++            agent
++        } else {
++            "cli".to_string()
++        };
++        let sid = if session.is_empty() {
++            None
++        } else {
++            Some(session)
++        };
++        let tuid = if toolcall.is_empty() {
++            None
++        } else {
++            Some(toolcall)
++        };
++        return (agent, sid, tuid);
++    }
++
++    ("cli".to_string(), None::<String>, None::<String>)
++}
++
++/// Check if tokenless stats are enabled.
++fn is_tokenless_stats_enabled() -> bool {
++    if let Ok(val) = std::env::var("TOKENLESS_STATS_ENABLED") {
++        return val == "1" || val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("yes");
++    }
++    dirs::home_dir()
++        .map(|d| d.join(".tokenless/config.json"))
++        .and_then(|p| std::fs::read_to_string(p).ok())
++        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
++        .and_then(|v| v.get("stats_enabled").and_then(|b| b.as_bool()))
++        .unwrap_or(true)
++}
++
++/// Record RTK command output compression stats to the tokenless stats database.
++///
++/// Fails silently so RTK output is never blocked by database errors.
++fn record_to_tokenless_stats(
++    original_cmd: &str,
++    rtk_cmd: &str,
++    raw_output: &str,
++    filtered_output: &str,
++) {
++    let _ = (original_cmd, rtk_cmd);
++
++    if !is_tokenless_stats_enabled() {
++        return;
++    }
++
++    let (agent_id, session_id, tool_use_id) = resolve_tokenless_context();
++
++    let db_path = std::env::var("TOKENLESS_STATS_DB").unwrap_or_else(|_| {
++        format!(
++            "{}/.tokenless/stats.db",
++            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
++        )
++    });
++
++    let before_chars = raw_output.len();
++    let after_chars = filtered_output.len();
++
++    let before_tokens = estimate_tokens_from_chars(before_chars);
++    let after_tokens = estimate_tokens_from_chars(after_chars);
++
++    // Skip recording if there was no actual token savings
++    if after_tokens >= before_tokens {
++        return;
++    }
++
++    let _ = (|| -> anyhow::Result<()> {
++        if let Some(parent) = std::path::Path::new(&db_path).parent() {
++            std::fs::create_dir_all(parent)?;
++        }
++        let conn = rusqlite::Connection::open(&db_path)?;
++        conn.execute_batch(
++            "CREATE TABLE IF NOT EXISTS stats (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                timestamp TEXT NOT NULL,
++                operation TEXT NOT NULL,
++                agent_id TEXT NOT NULL,
++                source_pid INTEGER,
++                session_id TEXT,
++                tool_use_id TEXT,
++                before_chars INTEGER NOT NULL,
++                before_tokens INTEGER NOT NULL,
++                after_chars INTEGER NOT NULL,
++                after_tokens INTEGER NOT NULL,
++                before_text TEXT,
++                after_text TEXT
++            );
++            CREATE INDEX IF NOT EXISTS idx_stats_timestamp ON stats(timestamp);
++            CREATE INDEX IF NOT EXISTS idx_stats_operation ON stats(operation);
++            CREATE INDEX IF NOT EXISTS idx_stats_agent_id ON stats(agent_id);
++            CREATE INDEX IF NOT EXISTS idx_stats_session_id ON stats(session_id);",
++        )?;
++        conn.execute(
++            "INSERT INTO stats (
++                timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
++                before_chars, before_tokens, after_chars, after_tokens,
++                before_text, after_text
++            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
++            rusqlite::params![
++                chrono::Utc::now().to_rfc3339(),
++                "rewrite-command",
++                agent_id,
++                Some(std::process::id() as i64),
++                session_id,
++                tool_use_id,
++                before_chars as i64,
++                before_tokens as i64,
++                after_chars as i64,
++                after_tokens as i64,
++                raw_output,
++                filtered_output,
++            ],
++        )?;
++        Ok(())
++    })();
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/src/hooks/hook_check.rs b/src/hooks/hook_check.rs
+index 4dd26d8..3638321 100644
+--- a/src/hooks/hook_check.rs
++++ b/src/hooks/hook_check.rs
+@@ -1,5 +1,6 @@
+ //! Detects whether RTK hooks are installed and warns if they are outdated.
+ 
++#[allow(unused_imports)]
+ use super::constants::{
+     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+     SETTINGS_JSON,

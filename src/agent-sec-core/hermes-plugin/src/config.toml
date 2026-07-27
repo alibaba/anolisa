@@ -1,0 +1,28 @@
+[capabilities.code-scan]
+enabled = true
+timeout = 10
+enable_block = false
+
+[capabilities.observability]
+enabled = true
+timeout = 5
+
+[capabilities.pii-scan-user-input]
+enabled = true
+timeout = 10
+include_low_confidence = false
+warning_ttl_seconds = 300
+
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 15
+warning_ttl_seconds = 300
+
+[capabilities.skill-ledger]
+enabled = true
+timeout = 5
+policy = "ask"
+enable_block = false
+block_statuses = ["none", "drifted", "deny", "tampered"]
+max_warnings_per_turn = 5
+max_warning_contexts = 128

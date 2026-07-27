@@ -1,0 +1,56 @@
+name: Bug Report
+description: Report a bug to help us improve
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please prefix the title with `[component]`, e.g. `[cosh] bug: login fails`.
+
+        **Tip:** Run `anolisa bug` to auto-generate diagnostic info, then paste the output into the "Diagnostic Output" field below.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - anolisa
+        - cosh
+        - cosh-ng
+        - sec-core
+        - skill
+        - sight
+        - tokenless
+        - ckpt
+        - memory
+        - skillfs
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug and how to reproduce it.
+      placeholder: |
+        Bug description:
+
+        Steps to reproduce:
+        1. Run `anolisa ...`
+        2. Observe ...
+
+        Expected behavior:
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic Output
+      description: Paste the output of `anolisa bug` (or `anolisa bug --capability <name>`).
+      render: shell
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Screenshots, config snippets, or anything else that helps.

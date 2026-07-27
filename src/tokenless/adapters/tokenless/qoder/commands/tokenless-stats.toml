@@ -1,0 +1,4 @@
+[command]
+name = "tokenless-stats"
+description = "Show tokenless compression statistics"
+command = "tokenless stats"

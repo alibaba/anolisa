@@ -1,0 +1,1083 @@
+//! raw_e2e tests for the  command.
+
+use super::super::tests::*;
+
+use anolisa_core::ComponentManifest;
+use anolisa_core::domain::{Installation, LifecycleStatus, OwnedArtifact, ProviderBinding};
+use anolisa_core::state::{
+    InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus,
+};
+use anolisa_core::state_store::StateStore;
+use anolisa_platform::fs_layout::FsLayout;
+
+use crate::commands::common;
+use tempfile::tempdir;
+
+/// v5 store as the pipeline persisted it for a system-prefix layout.
+fn load_v5_store(layout: &FsLayout) -> StateStore {
+    StateStore::load(&layout.state_dir.join("installed.toml"), 0).expect("state must load")
+}
+
+/// The owned artifact behind a component's binding; fails the test on a
+/// delegated binding, which also asserts the raw family was recorded.
+fn owned_artifact(installation: &Installation) -> &OwnedArtifact {
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => artifact,
+        other => panic!("expected an owned binding, got {other:?}"),
+    }
+}
+
+#[test]
+fn install_dry_run_resolves_without_writing_files() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    ctx.dry_run = true;
+    handle_with_fake_rpm(a, &ctx).expect("dry-run must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "dry-run must not install the binary"
+    );
+    assert!(
+        !layout.state_dir.join("installed.toml").exists(),
+        "dry-run must not write state"
+    );
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("agentsight.tar.gz")),
+        "dry-run must not download the install artifact; cache entries: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_dry_run_does_not_download_the_artifact() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_published_layout_repo_with_meta(
+        &tmp.path().join("repo"),
+        "remote-only",
+        "1.0.0",
+        &["system"],
+    );
+    let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    ctx.dry_run = true;
+    let layout = FsLayout::system(Some(prefix));
+
+    let mut a = args("remote-only");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx).expect("dry-run must succeed");
+
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("remote-only-1.0.0-linux-x86_64.tar.gz")),
+        "dry-run must not download the install artifact; cache entries: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_rejects_local_binary_before_artifact_fetch() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+
+    let mut a = args("legacy-bin");
+    a.repo = Some(write_binary_repo_component(
+        &tmp.path().join("repo"),
+        "legacy-bin",
+        "1.0.0",
+        &["system"],
+    ));
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect_err("local binary must be rejected");
+
+    assert!(
+        err.reason().contains("cannot resolve package 'legacy-bin'")
+            && err.reason().contains("no distribution entry matches"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(
+        !err.reason().contains("publish it as"),
+        "got: {}",
+        err.reason()
+    );
+    let downloads = FsLayout::system(Some(prefix)).cache_dir.join("downloads");
+    let cached_names: Vec<String> = std::fs::read_dir(downloads)
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("legacy-bin") && !name.ends_with("meta.toml")),
+        "rejected binary must not fetch artifact or sidecar: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_dry_run_rejects_remote_binary_before_artifact_fetch() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_binary_repo_component(&repo_root, "remote-bin", "1.0.0", &["system"]);
+    let index_path = repo_root.join("v1/index.toml");
+    let index = std::fs::read_to_string(&index_path)
+        .expect("read index")
+        .replace(
+            "url = \"remote-bin\"",
+            "url = \"https://example.test/remote-bin\"",
+        );
+    std::fs::write(index_path, index).expect("write remote binary index");
+
+    let mut a = args("remote-bin");
+    a.repo = Some(repo_url);
+    let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    ctx.dry_run = true;
+    let err = handle_with_fake_rpm(a, &ctx).expect_err("remote binary must be rejected");
+
+    assert!(
+        err.reason().contains("cannot resolve package 'remote-bin'")
+            && err.reason().contains("no distribution entry matches"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(
+        !err.reason().contains("publish it as"),
+        "got: {}",
+        err.reason()
+    );
+    let downloads = FsLayout::system(Some(prefix)).cache_dir.join("downloads");
+    let cached_names: Vec<String> = std::fs::read_dir(downloads)
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("remote-bin") && !name.ends_with("meta.toml")),
+        "rejected binary must not fetch artifact or sidecar: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_ignores_binary_entries_when_resolving_tar_gz() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    let index_path = repo_root.join("v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    let env = anolisa_env::EnvService::detect();
+
+    for version in ["0.2.0", "9.0.0"] {
+        index.push_str(&format!(
+            r#"
+
+[[entries]]
+component = "agentsight"
+version = "{version}"
+channel = "stable"
+artifact_type = "binary"
+backend = "raw"
+url = "legacy-agentsight-{version}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+            sha = "0".repeat(64),
+        ));
+    }
+    std::fs::write(index_path, index).expect("write mixed index");
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url.clone());
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("tar_gz entry must remain installable");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(layout.bin_dir.join("agentsight").exists());
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("installed object");
+    assert_eq!(
+        owned_artifact(installation).version,
+        "0.2.0",
+        "the higher binary-only 9.0.0 entry must be ignored by resolution"
+    );
+}
+
+#[test]
+fn install_raw_end_to_end_from_local_repo() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url.clone());
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    let bin = layout.bin_dir.join("agentsight");
+    assert!(bin.exists(), "binary must be installed at {{bindir}}");
+    let manifest_path = common::installed_component_manifest_path(&layout, "agentsight", COMMAND)
+        .expect("manifest path");
+    assert!(
+        manifest_path.exists(),
+        "installed component manifest must be persisted"
+    );
+    let saved_manifest =
+        ComponentManifest::from_file(&manifest_path).expect("saved manifest parses");
+    assert_eq!(saved_manifest.component.name, "agentsight");
+    assert_eq!(saved_manifest.component.version, "0.2.0");
+
+    let store = load_v5_store(&layout);
+    assert_eq!(store.install_mode, StateInstallMode::System);
+    assert_eq!(store.prefix, layout.prefix);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("component object must be recorded");
+    assert_eq!(installation.status, LifecycleStatus::Installed);
+    // `owned_artifact` panics on a delegated binding, so this also asserts
+    // the raw family was recorded as the authority.
+    let artifact = owned_artifact(installation);
+    assert_eq!(artifact.version, "0.2.0");
+    assert_eq!(artifact.files.len(), 2);
+    assert!(
+        artifact.files.iter().any(|file| file.path == manifest_path),
+        "installed manifest must be tracked as an owned file"
+    );
+    assert!(
+        artifact
+            .distribution_source
+            .as_deref()
+            .is_some_and(|u| u.starts_with(&repo_url)),
+        "distribution_source must record the resolved artifact URL"
+    );
+    assert_eq!(
+        artifact.raw_package.as_deref(),
+        Some("agentsight"),
+        "raw_package must record the resolved package so update can reuse it"
+    );
+    assert!(
+        artifact.services.iter().all(|s| !s.enabled),
+        "install must not mark services enabled"
+    );
+    assert_eq!(store.operations.len(), 1);
+    assert!(store.operations[0].id.starts_with("op-install-"));
+}
+
+#[test]
+fn system_raw_install_rechecks_native_absence_under_lock() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .package_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps("agentsight", &a, &ctx, &fake, &NoTxn, true)
+        .expect_err("an external RPM appearing before raw placement must block install");
+
+    assert!(err.reason().contains("appeared"), "got: {}", err.reason());
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "a refused race must not place owned files"
+    );
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn prepare_raw_execution_resolves_declared_capabilities() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_capability(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        &["system"],
+        "{bindir}/agentsight",
+        &["CAP_BPF", "CAP_PERFMON"],
+        true,
+    );
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let env = anolisa_env::EnvService::detect();
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "agentsight".to_string(),
+            package: "agentsight".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            version: None,
+            warnings: Vec::new(),
+        },
+    )
+    .expect("resolve");
+    let prepared = prepare_raw_execution(&ctx, &layout, resolution).expect("prepare");
+
+    assert_eq!(prepared.capabilities.len(), 1);
+    assert_eq!(
+        prepared.capabilities[0].path,
+        layout.bin_dir.join("agentsight")
+    );
+    assert_eq!(
+        prepared.capabilities[0].caps,
+        vec!["CAP_BPF".to_string(), "CAP_PERFMON".to_string()]
+    );
+    assert!(prepared.capabilities[0].optional);
+    // Resolve-only: no setcap, no file laid, no state.
+    assert!(!layout.bin_dir.join("agentsight").exists());
+    assert!(!layout.state_dir.join("installed.toml").exists());
+}
+
+#[test]
+fn install_raw_end_to_end_applies_optional_capability() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_capability(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        &["system"],
+        "{bindir}/agentsight",
+        &["CAP_BPF"],
+        true,
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install with optional capability must succeed even without root");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        layout.bin_dir.join("agentsight").exists(),
+        "binary must be installed even when the optional setcap is skipped"
+    );
+    let store = load_v5_store(&layout);
+    assert!(
+        store.find(ObjectKind::Component, "agentsight").is_some(),
+        "component must be recorded despite optional capability outcome"
+    );
+}
+
+#[test]
+fn prepare_raw_execution_resolves_declared_services() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_service(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        &["system"],
+        "agentsight.service",
+        true,
+        true,
+    );
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let env = anolisa_env::EnvService::detect();
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "agentsight".to_string(),
+            package: "agentsight".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            version: None,
+            warnings: Vec::new(),
+        },
+    )
+    .expect("resolve");
+    let prepared = prepare_raw_execution(&ctx, &layout, resolution).expect("prepare");
+
+    assert_eq!(prepared.services.len(), 1);
+    assert_eq!(prepared.services[0].unit, "agentsight.service");
+    assert!(prepared.services[0].enable && prepared.services[0].start);
+    // Resolve-only: nothing activated or laid.
+    assert!(!layout.bin_dir.join("agentsight").exists());
+    assert!(!layout.state_dir.join("installed.toml").exists());
+}
+
+#[test]
+fn install_raw_end_to_end_records_declared_service() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_service(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        &["system"],
+        "agentsight.service",
+        true,
+        true,
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install with a declared service must succeed (activation is best-effort)");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        layout.bin_dir.join("agentsight").exists(),
+        "binary installed"
+    );
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("component recorded");
+    let artifact = owned_artifact(installation);
+    assert_eq!(artifact.services.len(), 1);
+    assert_eq!(artifact.services[0].name, "agentsight.service");
+}
+
+#[test]
+#[cfg(unix)]
+fn install_raw_runs_post_install_hook() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let sentinel = tmp.path().join("post-install.ran");
+    let body = format!("#!/bin/sh\ntouch {}\n", sentinel.display());
+    let repo_url = write_local_repo_component_with_hook(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        "post_install",
+        false,
+        &body,
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install with a post_install hook must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        layout.bin_dir.join("agentsight").exists(),
+        "binary installed"
+    );
+    assert!(
+        sentinel.exists(),
+        "post_install hook must run after files are laid down"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn install_raw_strict_post_install_failure_rolls_back() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_with_hook(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        "post_install",
+        true,
+        "#!/bin/sh\nexit 1\n",
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect_err("strict post_install failure must abort the install");
+    assert!(matches!(err, CliError::Runtime { .. }));
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "installed files must be rolled back after a strict hook failure"
+    );
+    let snapshot = common::installed_component_manifest_path(&layout, "agentsight", COMMAND)
+        .expect("manifest path");
+    assert!(
+        !snapshot.exists(),
+        "installed manifest snapshot must be rolled back"
+    );
+    let state_path = layout.state_dir.join("installed.toml");
+    if state_path.exists() {
+        let store = load_v5_store(&layout);
+        assert!(
+            store.find(ObjectKind::Component, "agentsight").is_none(),
+            "component must not be recorded after rollback"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn install_raw_pre_install_hook_skipped_as_missing_on_fresh_install() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let sentinel = tmp.path().join("pre-install.ran");
+    let body = format!("#!/bin/sh\ntouch {}\n", sentinel.display());
+    let repo_url = write_local_repo_component_with_hook(
+        &tmp.path().join("repo"),
+        "agentsight",
+        "0.2.0",
+        "pre_install",
+        false,
+        &body,
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install must succeed; pre_install script is not yet laid");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        layout.bin_dir.join("agentsight").exists(),
+        "binary installed"
+    );
+    assert!(
+        !sentinel.exists(),
+        "pre_install must skip when its script is not yet on disk"
+    );
+}
+
+#[test]
+fn install_raw_uses_embedded_manifest_without_local_catalog() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component(
+        &tmp.path().join("repo"),
+        "remote-only",
+        "1.0.0",
+        &["system"],
+    );
+
+    let mut a = args("remote-only");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        layout.bin_dir.join("remote-only").exists(),
+        "component absent from local manifests must install from embedded artifact contract"
+    );
+    let store = load_v5_store(&layout);
+    assert!(
+        store.find(ObjectKind::Component, "remote-only").is_some(),
+        "remote-only component must be recorded"
+    );
+}
+
+#[test]
+fn install_existing_component_with_different_backend_is_invalid_argument() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+    std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+    std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        r#"schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "https://example.com/anolisa"
+
+[backends.npm]
+base_url = "https://registry.npmjs.org"
+scope = "@anolisa"
+"#,
+    )
+    .expect("write repo.toml");
+
+    let mut state = anolisa_core::InstalledState {
+        install_mode: StateInstallMode::System,
+        prefix: layout.prefix.clone(),
+        ..Default::default()
+    };
+    state.upsert_object(InstalledObject {
+        kind: ObjectKind::Component,
+        name: "agentsight".to_string(),
+        version: "0.2.0".to_string(),
+        status: ObjectStatus::Installed,
+        manifest_digest: None,
+        distribution_source: Some("file:///repo/v1/agentsight-bin".to_string()),
+        raw_package: None,
+        install_backend: Some("raw".to_string()),
+        ownership: None,
+        rpm_metadata: None,
+        installed_at: "2026-06-01T10:00:00Z".to_string(),
+        last_operation_id: Some("op-prior".to_string()),
+        managed: true,
+        adopted: false,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: Vec::new(),
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+        provisioned_packages: Vec::new(),
+    });
+    state
+        .save(&layout.state_dir.join("installed.toml"))
+        .expect("save state");
+
+    let mut a = args("agentsight");
+    a.backend = Some("npm".to_string());
+    let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("already installed via backend 'raw'")
+            && err.reason().contains("backend 'npm'"),
+        "reason must explain backend conflict: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_derives_artifact_url_from_convention_when_index_omits_url() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_conventional_repo(&tmp.path().join("repo"));
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url.clone());
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(layout.bin_dir.join("agentsight").exists());
+
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("component object must be recorded");
+    let env = anolisa_env::EnvService::detect();
+    assert_eq!(
+        owned_artifact(installation).distribution_source.as_deref(),
+        Some(
+            format!(
+                "{repo_url}/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}.tar.gz",
+                os = env.os,
+                arch = env.arch
+            )
+            .as_str()
+        ),
+        "distribution_source must record the convention-derived URL"
+    );
+}
+
+#[test]
+fn install_resolves_legacy_template_form_repo_url() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    // write_conventional_repo puts the tree under <root>/v1/; point the
+    // template's static prefix at that same directory.
+    let _ = write_conventional_repo(&repo_root);
+    let template_url = format!(
+        "file://{}/v1/{{component}}/{{version}}/{{os}}/{{arch}}/",
+        repo_root.display()
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(template_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(layout.bin_dir.join("agentsight").exists());
+
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("component object must be recorded");
+    let env = anolisa_env::EnvService::detect();
+    assert_eq!(
+        owned_artifact(installation).distribution_source.as_deref(),
+        Some(
+            format!(
+                "file://{}/v1/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}.tar.gz",
+                repo_root.display(),
+                os = env.os,
+                arch = env.arch
+            )
+            .as_str()
+        ),
+        "distribution_source must record the convention-derived URL"
+    );
+}
+
+#[test]
+fn install_unpublished_version_is_invalid_argument() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    // Two published versions, so the refusal must enumerate the complete
+    // list (highest-first), not just whichever entry resolution saw last.
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("9.9.9".to_string());
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("must fail to resolve");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(err.reason().contains("9.9.9"), "got: {}", err.reason());
+    // The pin refusal must name what the repository actually publishes, so
+    // the caller can correct the request without a second query.
+    assert!(
+        err.reason().contains("not published"),
+        "pin refusal must be a dedicated message: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("installable versions: 0.2.0, 0.1.0"),
+        "pin refusal must list every installable version, highest first: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_pinned_unsupported_artifact_type_is_reported_as_not_installable() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    // Publish 9.0.0 as a binary-only entry: present in the repository, but
+    // outside what the raw backend can install.
+    let index_path = repo_root.join("v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    let env = anolisa_env::EnvService::detect();
+    index.push_str(&format!(
+        r#"
+[[entries]]
+component = "agentsight"
+version = "9.0.0"
+channel = "stable"
+artifact_type = "binary"
+backend = "raw"
+url = "legacy-agentsight-9.0.0"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{sha}"
+"#,
+        os = env.os,
+        arch = env.arch,
+        sha = "0".repeat(64),
+    ));
+    std::fs::write(index_path, index).expect("write mixed index");
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("9.0.0".to_string());
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("must fail to resolve");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    // A published-but-binary-only pin must not be misreported as
+    // unpublished; the refusal names the artifact-type gap instead.
+    assert!(
+        !err.reason().contains("not published"),
+        "published version must not be reported as unpublished: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason()
+            .contains("artifact types the raw backend cannot install"),
+        "refusal must name the artifact-type gap: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("installable versions: 0.2.0"),
+        "refusal must still list installable versions: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_pinned_version_places_exact_published_version() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.1.0".to_string());
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("pinned install must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(layout.bin_dir.join("agentsight").exists());
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("installed object");
+    let artifact = owned_artifact(installation);
+    assert_eq!(
+        artifact.version, "0.1.0",
+        "the pin must beat the higher published 0.2.0"
+    );
+    assert!(
+        artifact
+            .distribution_source
+            .as_deref()
+            .is_some_and(|url| url.ends_with("agentsight-0.1.0.tar.gz")),
+        "distribution_source must record the pinned artifact URL: {:?}",
+        artifact.distribution_source
+    );
+}
+
+#[test]
+fn install_pinned_version_dry_run_previews_without_writing_files() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.1.0".to_string());
+    let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    ctx.dry_run = true;
+    handle_with_fake_rpm(a, &ctx).expect("pinned dry-run must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "dry-run must not install the binary"
+    );
+    assert!(
+        !layout.state_dir.join("installed.toml").exists(),
+        "dry-run must not write state"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Component-level mutual-exclusion (conflicts) tests
+// ---------------------------------------------------------------------------
+
+/// Build a local file:// repo with a single component whose manifest declares
+/// `conflicts = [...]`. Returns the repo URL.
+fn write_local_repo_with_conflicts(
+    root: &std::path::Path,
+    component: &str,
+    version: &str,
+    modes: &[&str],
+    conflicts: &[&str],
+) -> String {
+    let v1 = root.join("v1");
+    std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+    let manifest = component_manifest_toml_with_conflicts(component, version, modes, conflicts);
+    let bin_path = format!("bin/{component}");
+    let payload = format!("#!/bin/sh\necho {component}\n");
+    let artifact = build_tar_gz(&[
+        (".anolisa/component.toml", manifest.as_bytes()),
+        (bin_path.as_str(), payload.as_bytes()),
+    ]);
+    let artifact_name = format!("{component}.tar.gz");
+    std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+    let sha = format!("{:x}", Sha256::digest(&artifact));
+    let modes_str = toml_string_array(modes);
+
+    let env = anolisa_env::EnvService::detect();
+    let index = format!(
+        r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_str}
+sha256 = "{sha}"
+"#,
+        os = env.os,
+        arch = env.arch,
+    );
+    std::fs::write(v1.join("index.toml"), index).expect("write index");
+    format!("file://{}", v1.display())
+}
+
+#[test]
+fn install_conflict_blocks_when_conflicting_component_is_installed() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+
+    // Pre-seed state: cosh v2.6.0 is already installed.
+    std::fs::create_dir_all(&layout.state_dir).expect("create state dir");
+    let mut state = anolisa_core::InstalledState {
+        install_mode: StateInstallMode::System,
+        prefix: layout.prefix.clone(),
+        ..Default::default()
+    };
+    state.upsert_object(InstalledObject {
+        kind: ObjectKind::Component,
+        name: "cosh".to_string(),
+        version: "2.6.0".to_string(),
+        status: ObjectStatus::Installed,
+        manifest_digest: None,
+        distribution_source: Some("file:///repo/v1/cosh.tar.gz".to_string()),
+        raw_package: Some("cosh".to_string()),
+        install_backend: Some("raw".to_string()),
+        ownership: None,
+        rpm_metadata: None,
+        installed_at: "2026-06-01T10:00:00Z".to_string(),
+        last_operation_id: Some("op-prior".to_string()),
+        managed: true,
+        adopted: false,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: Vec::new(),
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+        provisioned_packages: Vec::new(),
+    });
+    state
+        .save(&layout.state_dir.join("installed.toml"))
+        .expect("save state");
+
+    // Write a repo with cosh-ng that declares conflicts = ["cosh"].
+    let repo_url = write_local_repo_with_conflicts(
+        &tmp.path().join("repo"),
+        "cosh-ng",
+        "0.11.0",
+        &["system"],
+        &["cosh"],
+    );
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("install must fail due to conflict");
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason()
+            .contains("conflicts with installed component 'cosh'"),
+        "error must identify the conflicting component: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("v2.6.0"),
+        "error must show the installed version: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("uninstall 'cosh' first"),
+        "error must provide remediation: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_no_conflict_when_conflicting_component_not_installed() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+
+    // Write a repo with cosh-ng that declares conflicts = ["cosh"], but cosh
+    // is NOT installed — install should succeed.
+    let repo_url = write_local_repo_with_conflicts(
+        &tmp.path().join("repo"),
+        "cosh-ng",
+        "0.11.0",
+        &["system"],
+        &["cosh"],
+    );
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install must succeed when no conflict");
+
+    // Verify cosh-ng is recorded in state.
+    let layout = FsLayout::system(Some(prefix));
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "cosh-ng")
+        .expect("cosh-ng must be recorded");
+    assert_eq!(installation.status, LifecycleStatus::Installed);
+    assert_eq!(owned_artifact(installation).version, "0.11.0");
+}

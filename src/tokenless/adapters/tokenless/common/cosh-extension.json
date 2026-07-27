@@ -1,0 +1,64 @@
+{
+  "name": "tokenless",
+  "version": "0.7.0",
+  "contextFileName": "COPILOT.md",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "sequential": true,
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-tool-ready",
+            "description": "Pre-checks tool environment readiness, auto-fixes, and provides skip-retry guidance",
+            "command": "bash ${extensionPath}/hooks/tool_ready_hook.sh",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|run_shell_command|terminal|Shell|exec|process)$",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-rewrite",
+            "description": "Rewrites shell commands via rtk for token savings",
+            "command": "python3 ${extensionPath}/hooks/rewrite_hook.py",
+            "timeout": 5000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-response",
+            "description": "Compresses tool responses and encodes to TOON format",
+            "command": "python3 ${extensionPath}/hooks/compress_response_hook.py",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      }
+    ],
+    "BeforeModel": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "tokenless-compress-schema",
+            "description": "Compresses tool schema definitions for token savings",
+            "command": "python3 ${extensionPath}/hooks/compress_schema_hook.py",
+            "timeout": 10000,
+            "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
+          }
+        ]
+      }
+    ]
+  }
+}

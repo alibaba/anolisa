@@ -1,0 +1,13 @@
+rule_id: shell-disk-wipe
+cwe_id: CWE-78
+desc_en: >-
+  Command performs destructive disk operation such as formatting,
+  zeroing, wiping signatures, or shredding a device.
+desc_zh: >-
+  命令执行破坏性磁盘操作，如格式化、清零、擦除签名或销毁设备数据。
+regex: |-
+  \bmkfs(\.\w+)?\b
+  |\bdd\b[^;\n&]*\b(if|of)=
+  |\bwipefs\b
+  |\bshred\b
+severity: warn
