@@ -4,7 +4,7 @@ use super::command_risk_build::{
     high_risk_program_assessment, high_shell_syntax, max_output_exposure, max_output_stability,
     min_confidence,
 };
-use super::command_risk_compound::{assess_stripped_compound, stripped_segments};
+use super::command_risk_compound::{assess_stripped_compound, compound_segments, finalize_complex};
 use super::command_risk_parser::{is_env_assignment, parse_command, ParsedCommand};
 use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
@@ -88,10 +88,10 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             "redirection-write",
         );
     }
-    let mut result = if let Some(segments) = stripped_segments(&parsed) {
-        // Stripped commands are assessed per segment and aggregated so
-        // high-risk tails keep their full stage assessment (PR #1790
-        // review); unstripped commands keep the first-stage path below.
+    let mut result = if let Some(segments) = compound_segments(&parsed) {
+        // Compound commands are assessed per segment and aggregated so
+        // high-risk tails keep their full stage assessment (issue #1785);
+        // non-compound shapes keep the shape-specific paths below.
         assess_stripped_compound(command, parsed.shape, &segments, policy)
     } else {
         match parsed.shape {
@@ -118,12 +118,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             CommandShape::Complex => {
                 let mut simple = assess_first_stage(command, &parsed, policy);
                 simple.shape = parsed.shape;
-                simple.execution = ExecutionDecision::AskUser;
-                simple.confidence = AssessmentConfidence::Low;
-                if simple.impact < RiskImpact::Medium {
-                    simple.impact = RiskImpact::Medium;
-                }
-                insert_structural_reason(&mut simple.reasons, "complex-shell-not-auto-executable");
+                finalize_complex(&mut simple, &parsed);
                 simple
             }
             CommandShape::Empty
