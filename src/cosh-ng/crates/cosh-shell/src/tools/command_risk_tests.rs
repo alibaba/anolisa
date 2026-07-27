@@ -219,7 +219,7 @@ const SEMANTICS_BASELINE: &[(bool, &str, &str)] = &[
     (false, "kill 1234", "AskUser|High|High|None|None|[ProcessControl]|process-control"),
     (false, "ps aux | head -5", "AskUser|Medium|Medium|None|None|[None, None]|diagnostic-pipeline-heuristic,pipeline-not-auto-executable"),
     (false, "ps aux | awk '{print $1}'", "AskUser|Medium|Medium|None|None|[None, None]|pipeline-not-auto-executable"),
-    (false, "cd /tmp && git status", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,unknown-command"),
+    (false, "cd /tmp && git status", "AskUser|Medium|Low|None|None|[Unknown]|and-or-list-not-auto-executable,bounded-readonly,unknown-command"),
     (false, "sudo id && ls", "AskUser|High|Medium|None|CredentialPromptLikely|[PrivilegeEscalation, None]|and-or-list-not-auto-executable,bounded-readonly,privilege-escalation"),
     (false, "echo hi && rm -rf /tmp/x", "AskUser|High|Medium|None|None|[None, FilesystemDelete]|and-or-list-not-auto-executable,bounded-readonly,filesystem-delete"),
     (false, "echo hi; ls -la", "AskUser|Low|Medium|None|None|[None]|bounded-readonly,sequence-not-auto-executable"),
