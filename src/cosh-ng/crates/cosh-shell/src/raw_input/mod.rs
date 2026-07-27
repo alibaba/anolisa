@@ -228,4 +228,97 @@ mod tests {
 
         assert!(!tracker.saw_explicit_exit());
     }
+
+    #[test]
+    fn at_completion_triggers_intercept_candidate() {
+        use super::event_parser::starts_intercept_candidate;
+        
+        // @ should trigger intercept candidate
+        assert!(starts_intercept_candidate(b"@"));
+        assert!(starts_intercept_candidate(b"@file"));
+        assert!(starts_intercept_candidate(b"@readme.md"));
+        
+        // Regular characters should not trigger
+        assert!(!starts_intercept_candidate(b"a"));
+        assert!(!starts_intercept_candidate(b"r"));
+    }
+
+    #[test]
+    fn at_completion_hint_shows_files() {
+        // Create a temporary directory with test files
+        let temp_dir = std::env::temp_dir().join("cosh_at_test");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::File::create(temp_dir.join("alpha_file.txt")).unwrap();
+        std::fs::File::create(temp_dir.join("beta_file.txt")).unwrap();
+        std::fs::File::create(temp_dir.join("gamma_readme.md")).unwrap();
+        
+        // Change to the test directory
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        
+        // Test bare @ shows files
+        let hint = candidate_inline_hint("@");
+        assert!(hint.is_some());
+        let hint_text = hint.unwrap();
+        assert!(hint_text.contains("alpha_file.txt") || hint_text.contains("beta_file.txt"));
+        
+        // Test @a filters to alpha_file.txt
+        let hint = candidate_inline_hint("@a");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("alpha_file.txt"));
+        
+        // Test @b filters to beta_file.txt
+        let hint = candidate_inline_hint("@b");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("beta_file.txt"));
+        
+        // Test @nonexistent returns None
+        let hint = candidate_inline_hint("@nonexistent");
+        assert!(hint.is_none());
+        
+        // Restore original directory and clean up
+        std::env::set_current_dir(original_dir).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn at_completion_complete_returns_first_match() {
+        use super::event_parser::at_completion_complete;
+        
+        // Create a temporary directory with test files
+        let temp_dir = std::env::temp_dir().join("cosh_at_complete_test");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::File::create(temp_dir.join("alpha_file.txt")).unwrap();
+        std::fs::File::create(temp_dir.join("beta_file.txt")).unwrap();
+        std::fs::File::create(temp_dir.join("gamma_readme.md")).unwrap();
+        
+        // Change to the test directory
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        
+        // Test @a completes to alpha_file.txt
+        let completed = at_completion_complete("@a");
+        assert!(completed.is_some());
+        assert_eq!(completed.unwrap(), "@alpha_file.txt");
+        
+        // Test @b completes to beta_file.txt
+        let completed = at_completion_complete("@b");
+        assert!(completed.is_some());
+        assert_eq!(completed.unwrap(), "@beta_file.txt");
+        
+        // Test @nonexistent returns None
+        let completed = at_completion_complete("@nonexistent");
+        assert!(completed.is_none());
+        
+        // Test with text before @
+        let completed = at_completion_complete("read @a");
+        assert!(completed.is_some());
+        assert_eq!(completed.unwrap(), "read @alpha_file.txt");
+        
+        // Restore original directory and clean up
+        std::env::set_current_dir(original_dir).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

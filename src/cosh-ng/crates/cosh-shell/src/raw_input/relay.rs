@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 use crate::input::{InputClassifier, InputDecision, InterceptReason};
 
 use super::event_parser::{
-    candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
-    redact_extension_setting_value, starts_intercept_candidate, starts_native_intercept_candidate,
-    CandidateLineBuffer, CandidateLineStatus, NativeLineState,
+    at_completion_complete, candidate_inline_hint, candidate_line_status,
+    native_candidate_should_return_to_shell, redact_extension_setting_value,
+    starts_intercept_candidate, starts_native_intercept_candidate, CandidateLineBuffer,
+    CandidateLineStatus, NativeLineState,
 };
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
@@ -331,7 +332,22 @@ fn relay_candidate_line(
     emit_activity: bool,
 ) -> io::Result<bool> {
     match candidate_line_status(&relay.line_buffer.bytes) {
-        CandidateLineStatus::Pending => Ok(true),
+        CandidateLineStatus::Pending => {
+            // Handle Tab completion for @ file references
+            let visible = relay.line_buffer.visible_line_bytes();
+            if visible.contains(&b'\t') && visible.contains(&b'@') {
+                if let Ok(line) = std::str::from_utf8(visible) {
+                    if let Some(completed) = at_completion_complete(line) {
+                        // Replace the line buffer with the completed text
+                        relay.line_buffer.bytes = completed.clone().into_bytes();
+                        relay.line_buffer.relayed_len = 0;
+                        redraw_candidate_line(relay.input_events, relay.line_buffer);
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(true)
+        }
         CandidateLineStatus::Unsafe if relay.line_buffer.force_agent_intercept => {
             relay.line_buffer.clear();
             let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);

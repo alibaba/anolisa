@@ -179,6 +179,15 @@ impl NativeLineState {
 
 pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
+    
+    // Check for @ file completion first
+    if trimmed.contains('@') {
+        if let Some(hint) = at_completion_hint(trimmed) {
+            return Some(hint);
+        }
+    }
+    
+    // Then check for slash command completion
     if !trimmed.starts_with('/') || trimmed[1..].contains('/') {
         return None;
     }
@@ -196,6 +205,137 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
             .find(|spec| spec.name.starts_with(token) && spec.name != token)
             .map(|spec| spec.usage.to_string()),
     }
+}
+
+/// Generate file completion hints when the user types `@`.
+///
+/// This function parses the input line to find `@` followed by an optional
+/// partial filename pattern. It then lists files from the current working
+/// directory that match the pattern.
+///
+/// Examples:
+/// - `@` → shows all files in current directory
+/// - `@re` → shows files starting with "re"
+/// - `read @con` → shows files starting with "con"
+fn at_completion_hint(line: &str) -> Option<String> {
+    // Find the last @ in the line that could be a file reference
+    let at_pos = line.rfind('@')?;
+
+    // Get the pattern after @
+    let after_at = &line[at_pos + 1..];
+
+    // If the pattern contains whitespace, it's probably not a file completion
+    if after_at.contains(|c: char| c.is_whitespace()) {
+        return None;
+    }
+
+    // Get current working directory
+    let cwd = std::env::current_dir().ok()?;
+
+    // List files matching the pattern
+    let pattern = after_at.to_lowercase();
+    let mut matches: Vec<String> = Vec::new();
+    let max_matches = 10;
+
+    if let Ok(entries) = std::fs::read_dir(&cwd) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            // Skip hidden files unless pattern starts with .
+            if name_str.starts_with('.') && !pattern.starts_with('.') {
+                continue;
+            }
+
+            // Check if filename matches the pattern (case-insensitive prefix match)
+            if name_str.to_lowercase().starts_with(&pattern) {
+                let display_name = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    format!("{}/", name_str)
+                } else {
+                    name_str.to_string()
+                };
+                matches.push(display_name);
+                if matches.len() >= max_matches {
+                    break;
+                }
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return None;
+    }
+
+    // Sort matches alphabetically
+    matches.sort();
+
+    // Format the hint
+    let hint = if matches.len() == 1 {
+        matches[0].clone()
+    } else {
+        // Show up to 5 files, with "..." if there are more
+        let display: Vec<_> = matches.iter().take(5).cloned().collect();
+        let mut hint = display.join("  ");
+        if matches.len() > 5 {
+            hint.push_str("  ...");
+        }
+        hint
+    };
+
+    Some(hint)
+}
+
+/// Complete the @ file reference with the first matching file.
+///
+/// Returns the completed line with the @pattern replaced by the first matching filename.
+/// If no match is found, returns None.
+pub(super) fn at_completion_complete(line: &str) -> Option<String> {
+    // Find the last @ in the line
+    let at_pos = line.rfind('@')?;
+    
+    // Get the pattern after @
+    let after_at = &line[at_pos + 1..];
+    
+    // If the pattern contains whitespace, don't complete
+    if after_at.contains(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    
+    // Get current working directory
+    let cwd = std::env::current_dir().ok()?;
+    
+    // Find the first matching file
+    let pattern = after_at.to_lowercase();
+    
+    if let Ok(entries) = std::fs::read_dir(&cwd) {
+        let mut matches: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            
+            // Skip hidden files unless pattern starts with .
+            if name_str.starts_with('.') && !pattern.starts_with('.') {
+                continue;
+            }
+            
+            // Check if filename matches the pattern
+            if name_str.to_lowercase().starts_with(&pattern) {
+                matches.push(name_str.to_string());
+            }
+        }
+        
+        if !matches.is_empty() {
+            // Sort and take the first match
+            matches.sort();
+            let completed = matches[0].clone();
+            
+            // Build the completed line
+            let before_at = &line[..=at_pos];
+            return Some(format!("{}{}", before_at, completed));
+        }
+    }
+    
+    None
 }
 
 pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
@@ -235,7 +375,7 @@ pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
 
 pub(super) fn starts_intercept_candidate(bytes: &[u8]) -> bool {
     let first = first_visible_input_byte(bytes);
-    matches!(first, Some(b'/' | b'?')) || first.is_some_and(|byte| byte >= 0x80)
+    matches!(first, Some(b'/' | b'?' | b'@')) || first.is_some_and(|byte| byte >= 0x80)
 }
 
 pub(super) fn starts_native_intercept_candidate(
