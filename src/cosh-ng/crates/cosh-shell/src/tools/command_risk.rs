@@ -89,9 +89,9 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
         );
     }
     let mut result = if let Some(segments) = stripped_segments(&parsed) {
-        // Stripped commands are assessed per segment and aggregated so
-        // high-risk tails keep their full stage assessment (PR #1790
-        // review); unstripped commands keep the first-stage path below.
+        // Compound commands are assessed per segment and aggregated so
+        // high-risk tails keep their full stage assessment (GH-1785,
+        // PR #1790 review); non-compound commands keep the paths below.
         assess_stripped_compound(command, parsed.shape, &segments, policy)
     } else {
         match parsed.shape {
@@ -100,20 +100,27 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             }
             CommandShape::Pipeline => assess_pipeline(command, parsed, policy),
             CommandShape::AndOrList | CommandShape::Sequence | CommandShape::RedirectionRead => {
-                let mut simple = assess_first_stage(command, &parsed, policy);
-                simple.shape = parsed.shape;
-                simple.execution = ExecutionDecision::AskUser;
-                simple.confidence = min_confidence(simple.confidence, AssessmentConfidence::Medium);
-                insert_structural_reason(
-                    &mut simple.reasons,
-                    match parsed.shape {
-                        CommandShape::AndOrList => "and-or-list-not-auto-executable",
-                        CommandShape::Sequence => "sequence-not-auto-executable",
-                        CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
-                        _ => "complex-shell-not-auto-executable",
-                    },
-                );
-                simple
+                if !parsed.segments.is_empty() {
+                    // Per-segment assessment for all compound commands
+                    // (GH-1785): every segment is assessed individually so
+                    // high-risk tails are never masked by the first segment.
+                    assess_stripped_compound(command, parsed.shape, &parsed.segments, policy)
+                } else {
+                    let mut simple = assess_first_stage(command, &parsed, policy);
+                    simple.shape = parsed.shape;
+                    simple.execution = ExecutionDecision::AskUser;
+                    simple.confidence = min_confidence(simple.confidence, AssessmentConfidence::Medium);
+                    insert_structural_reason(
+                        &mut simple.reasons,
+                        match parsed.shape {
+                            CommandShape::AndOrList => "and-or-list-not-auto-executable",
+                            CommandShape::Sequence => "sequence-not-auto-executable",
+                            CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
+                            _ => "complex-shell-not-auto-executable",
+                        },
+                    );
+                    simple
+                }
             }
             CommandShape::Complex => {
                 let mut simple = assess_first_stage(command, &parsed, policy);
@@ -226,7 +233,19 @@ pub(super) fn assess_simple_command(
     }
 
     let mut stage = stage_assessment(&program, command_tokens);
-    if let Some(readonly) = direct_readonly_evidence(command) {
+    // When the command carries null-suppression redirections (e.g.
+    // `2>/dev/null`), use the parsed tokens for the readonly broker
+    // check instead of the raw command string: the broker's
+    // metacharacter filter rejects `>` in the raw text, masking
+    // commands that are otherwise fully readonly (GH-1752).
+    let stripped_command;
+    let readonly_command = if parsed.null_redirections > 0 {
+        stripped_command = tokens.join(" ");
+        &stripped_command
+    } else {
+        command
+    };
+    if let Some(readonly) = direct_readonly_evidence(readonly_command) {
         stage.impact = RiskImpact::Low;
         stage.confidence = AssessmentConfidence::High;
         stage.reasons.insert(0, readonly.reason_code());
