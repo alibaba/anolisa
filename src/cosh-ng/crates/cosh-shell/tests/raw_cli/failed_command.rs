@@ -71,10 +71,17 @@ fn raw_cli_explain_after_usage_help_failure_invokes_adapter() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "demo-usage --bad\n/explain last error\necho after-explain\nexit\n",
+        &[],
         &[("COSH_SHELL_LANG", "en-US"), ("PATH", path.as_str())],
+        vec![
+            (b"demo-usage --bad\n".to_vec(), Duration::ZERO),
+            (
+                b"/explain last error\necho after-explain\nexit\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+        ],
     );
     let _ = fs::remove_dir_all(&fixture);
 

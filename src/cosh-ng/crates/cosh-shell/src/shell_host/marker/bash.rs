@@ -603,6 +603,12 @@ _cosh_run_user_prompt_command() {
   if [[ -z "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     return "$status"
   fi
+  # Disable extdebug while eval-ing user prompt hooks: extdebug is only
+  # needed for the DEBUG trap return-1 interception semantic.  With extdebug
+  # on, bash ENOEXEC fallback injects --debugger when executing scripts
+  # without shebangs (e.g. Alinux /etc/sysconfig/bash-prompt-history),
+  # causing bashdb load failures on every prompt.
+  shopt -u extdebug 2>/dev/null || true
   if [[ "${_COSH_USER_PROMPT_COMMAND_IS_ARRAY:-0}" == 1 ]]; then
     local _cosh_prompt_command
     for _cosh_prompt_command in "${_COSH_USER_PROMPT_COMMAND[@]}"; do
@@ -611,6 +617,7 @@ _cosh_run_user_prompt_command() {
   elif [[ -n "${_COSH_USER_PROMPT_COMMAND:-}" ]]; then
     eval "$_COSH_USER_PROMPT_COMMAND"
   fi
+  shopt -s extdebug 2>/dev/null || true
   return "$status"
 }
 _cosh_prompt_command() {

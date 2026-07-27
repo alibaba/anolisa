@@ -123,7 +123,7 @@ fn bash_extdebug_does_not_leak_via_exported_bashopts() {
     // in between: the export attribute must be dropped *before* extdebug is
     // enabled, or a trap-spawned child inherits the leak.
     let shopt = script
-        .find("shopt -s extdebug")
+        .find("\nshopt -s extdebug")
         .expect("extdebug setup should exist");
     let unexport = script
         .find("export -n BASHOPTS 2>/dev/null || true")
