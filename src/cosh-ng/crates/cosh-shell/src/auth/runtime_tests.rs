@@ -504,7 +504,6 @@ fn failed_ecs_challenge_edit_retry_drops_the_ecs_auth_source() {
     );
 }
 
-
 // ===== ESC back-step tests for GH-1760 =====
 
 fn multi_field_filling_state() -> InlineState {
@@ -569,8 +568,10 @@ fn esc_back_step_preserves_already_filled_fields() {
     let auth = state.auth.state.as_mut().unwrap();
     // User is on field 2 (api_key), with provider_id and base_url filled
     auth.current_field = 2;
-    auth.collected_values
-        .insert("base_url".to_string(), "https://api.example.com".to_string());
+    auth.collected_values.insert(
+        "base_url".to_string(),
+        "https://api.example.com".to_string(),
+    );
 
     // ESC back-step: go to field 1 (base_url)
     auth.current_field -= 1;

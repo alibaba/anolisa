@@ -817,7 +817,13 @@ impl HookSystem {
     }
 
     async fn run_single_hook(def: &HookDefinition, input_json: &str) -> HookOutput {
-        Self::run_hook_cmd(&def.command, input_json, Self::timeout_for(def), def.env.as_ref()).await
+        Self::run_hook_cmd(
+            &def.command,
+            input_json,
+            Self::timeout_for(def),
+            def.env.as_ref(),
+        )
+        .await
     }
 
     async fn run_hook_cmd(
@@ -1231,7 +1237,7 @@ mod tests {
             matcher: Some("run_shell.*".to_string()),
             timeout: None,
             sequential: None,
-        env: None,
+            env: None,
         };
         assert!(HookSystem::matches_tool(&def, "run_shell_command"));
         assert!(!HookSystem::matches_tool(&def, "read_file"));
@@ -1245,7 +1251,7 @@ mod tests {
             matcher: None,
             timeout: None,
             sequential: None,
-        env: None,
+            env: None,
         };
         assert!(HookSystem::matches_tool(&def, "any_tool"));
     }
@@ -1261,7 +1267,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: Some(5000),
                 sequential: None,
-            env: None,
+                env: None,
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1300,7 +1306,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: None,
                 sequential: None,
-            env: None,
+                env: None,
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1335,7 +1341,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
-            env: None,
+                env: None,
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1361,7 +1367,7 @@ mod tests {
             matcher: Some(matcher.to_string()),
             timeout: None,
             sequential: None,
-        env: None,
+            env: None,
         }
     }
 
@@ -1591,7 +1597,8 @@ mod tests {
         // blocked in the stdin write before the timeout even started.
         let payload = "x".repeat(1 << 20);
         let started = std::time::Instant::now();
-        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300), None).await;
+        let out =
+            HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300), None).await;
         assert!(out.decision.is_none());
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -1839,9 +1846,9 @@ mod tests {
             "{}",
             std::time::Duration::from_secs(5),
             Some(&env),
-        ).await;
+        )
+        .await;
         // Hook should run without crashing despite invalid env var names
         assert!(out.decision.is_none());
     }
-
 }

@@ -413,8 +413,13 @@ fn validate_and_convert_hooks(
                     id: id.canonical(),
                     projection,
                 });
-                let env_map: std::collections::HashMap<String, String> = hook.env.into_iter().collect();
-                let env_opt = if env_map.is_empty() { None } else { Some(env_map) };
+                let env_map: std::collections::HashMap<String, String> =
+                    hook.env.into_iter().collect();
+                let env_opt = if env_map.is_empty() {
+                    None
+                } else {
+                    Some(env_map)
+                };
                 runtime_hooks.push(CommandHookConfig {
                     hook_type: Some(hook.hook_type),
                     command: hook.command,
