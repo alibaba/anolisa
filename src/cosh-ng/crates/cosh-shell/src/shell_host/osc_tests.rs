@@ -122,6 +122,13 @@ fn bash_extdebug_does_not_leak_via_exported_bashopts() {
     // The user rcfile runs before this hook setup, so its DEBUG trap is live
     // in between: the export attribute must be dropped *before* extdebug is
     // enabled, or a trap-spawned child inherits the leak.
+    //
+    // extdebug must stay enabled: _cosh_preexec_marker uses `return 1` to
+    // skip intercepted slash commands, and bash only honours the DEBUG trap
+    // return value when extdebug is on. To block the bashdb re-exec path
+    // that extdebug enables (bash tries $DEBUGGER before
+    // command_not_found_handle), override DEBUGGER with the no-op builtin
+    // `:` so the debugger invocation is silently swallowed (#1848).
     let shopt = script
         .find("shopt -s extdebug")
         .expect("extdebug setup should exist");
@@ -131,6 +138,18 @@ fn bash_extdebug_does_not_leak_via_exported_bashopts() {
     assert!(
         unexport < shopt,
         "export -n BASHOPTS must precede shopt -s extdebug"
+    );
+
+    let debugger_override = script
+        .find("DEBUGGER=:")
+        .expect("DEBUGGER must be overridden to block bashdb re-exec path");
+    assert!(
+        unexport < debugger_override,
+        "export -n BASHOPTS must precede DEBUGGER override"
+    );
+    assert!(
+        debugger_override < shopt,
+        "DEBUGGER override must precede shopt -s extdebug"
     );
 
     // The unexport must land in the same hook-setup block, before the DEBUG

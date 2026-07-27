@@ -636,13 +636,20 @@ _cosh_prompt_command() {
 }
 # If BASHOPTS arrived exported from the login environment it stays exported
 # (readonly keeps the -x attribute). Drop the export attribute *before*
-# disabling extdebug: the user rcfile has already run, so its DEBUG trap is
-# live and fires between these two commands. extdebug must be disabled to
-# block the bashdb re-exec path: when extdebug is on, bash tries to load
-# $DEBUGGER on ENOEXEC before falling back to command_not_found_handle
-# (#1787, #1848). Dropping -x only removes the export attribute.
+# enabling extdebug: the user rcfile has already run, so its DEBUG trap is
+# live and fires between these two commands — a child bash spawned there
+# would otherwise inherit the exported extdebug and fail debugger startup
+# (bashdb). Dropping -x only removes the export attribute; imported options
+# stay effective in this shell and the guard keeps a refusing bash fail-safe.
+# extdebug must stay enabled: _cosh_preexec_marker uses `return 1` to skip
+# intercepted slash commands, and bash only honours the DEBUG trap return
+# value when extdebug is on (#1848). To block the bashdb re-exec path that
+# extdebug enables (bash tries $DEBUGGER before command_not_found_handle),
+# override DEBUGGER with the no-op builtin `:` so the debugger invocation
+# is silently swallowed on systems where BASHOPTS carries extdebug.
 export -n BASHOPTS 2>/dev/null || true
-shopt -u extdebug 2>/dev/null || true
+DEBUGGER=:
+shopt -s extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 _COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
 trap '_cosh_preexec_marker' DEBUG
