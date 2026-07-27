@@ -422,11 +422,29 @@ fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> Cos
         .with_hint("Start daemon with: systemctl start ws-ckpt")
         .recoverable(true),
 
-        _ => CoshError::new(
-            ErrorCode::CheckpointDaemonUnavailable,
-            format!("I/O error while {}: {} ({})", context, e, socket_path),
+        std::io::ErrorKind::UnexpectedEof => CoshError::new(
+            ErrorCode::CheckpointProtocolError,
+            format!(
+                "ws-ckpt daemon returned an incomplete response while {}",
+                context
+            ),
             "checkpoint",
         )
+        .with_hint("ws-ckpt daemon may have crashed mid-response. Retry the operation.")
+        .with_details(serde_json::json!({
+            "io_error": e.to_string(),
+            "socket_path": socket_path,
+        }))
+        .recoverable(true),
+
+        _ => CoshError::new(
+            ErrorCode::CheckpointDaemonUnavailable,
+            format!("I/O error while {}: {}", context, e),
+            "checkpoint",
+        )
+        .with_details(serde_json::json!({
+            "socket_path": socket_path,
+        }))
         .recoverable(true),
     }
 }
@@ -656,6 +674,31 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_unexpected_eof() {
+        let err = classify_io_error(
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"),
+            "/tmp/test.sock",
+            "read response length",
+        );
+        assert_eq!(err.code, ErrorCode::CheckpointProtocolError);
+        assert!(err.message.contains("incomplete response"));
+        assert!(
+            !err.message.contains("/tmp/test.sock"),
+            "socket path must not leak in message: {}",
+            err.message
+        );
+        assert!(err
+            .hint
+            .as_ref()
+            .unwrap()
+            .contains("crashed mid-response"));
+        // socket_path should be in details, not message
+        let details = err.details.as_ref().unwrap();
+        assert_eq!(details["socket_path"], "/tmp/test.sock");
+        assert!(err.recoverable);
+    }
+
+    #[test]
     fn test_classify_other_io_error() {
         let err = classify_io_error(
             std::io::Error::other("something else"),
@@ -663,6 +706,14 @@ mod tests {
             "do thing",
         );
         assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
+        assert!(
+            !err.message.contains("/tmp/test.sock"),
+            "socket path must not leak in message: {}",
+            err.message
+        );
+        // socket_path should be in details
+        let details = err.details.as_ref().unwrap();
+        assert_eq!(details["socket_path"], "/tmp/test.sock");
         assert!(err.recoverable);
     }
 
