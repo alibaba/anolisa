@@ -285,8 +285,14 @@ mod tests {
         assert!(hint.is_some(), "hint should be Some when files exist");
 
         let hint_alp = candidate_inline_hint("@alp");
-        assert!(hint_alp.is_some(), "hint for @alp should match alpha_file.txt");
-        assert!(hint_alp.unwrap().starts_with("ha_file.txt"), "hint should show suffix after @alp");
+        assert!(
+            hint_alp.is_some(),
+            "hint for @alp should match alpha_file.txt"
+        );
+        assert!(
+            hint_alp.unwrap().starts_with("ha_file.txt"),
+            "hint should show suffix after @alp"
+        );
 
         let hint_nomatch = candidate_inline_hint("@zzz");
         assert!(hint_nomatch.is_none(), "hint for @zzz should be None");
@@ -296,15 +302,24 @@ mod tests {
         assert_eq!(result, Some("@alpha_file.txt".to_string()));
 
         let result_at = try_at_mention_tab_completion("@");
-        assert!(result_at.is_some(), "Tab after bare @ should complete first file");
+        assert!(
+            result_at.is_some(),
+            "Tab after bare @ should complete first file"
+        );
 
         let result_nomatch = try_at_mention_tab_completion("@zzz");
-        assert!(result_nomatch.is_none(), "Tab for non-matching prefix should return None");
+        assert!(
+            result_nomatch.is_none(),
+            "Tab for non-matching prefix should return None"
+        );
 
         // Prefix preservation test
         let result_prefix = try_at_mention_tab_completion("  @alp");
-        assert_eq!(result_prefix, Some("  @alpha_file.txt".to_string()),
-            "Tab completion should preserve text before @");
+        assert_eq!(
+            result_prefix,
+            Some("  @alpha_file.txt".to_string()),
+            "Tab completion should preserve text before @"
+        );
 
         std::env::set_current_dir(prev_dir).unwrap();
         let _ = fs::remove_dir_all(&dir);

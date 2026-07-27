@@ -179,7 +179,6 @@ impl NativeLineState {
     }
 }
 
-
 fn at_mention_query(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
     let mut at_pos = None;
