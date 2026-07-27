@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use super::*;
 use crate::provider::mock::MockProvider;
 use crate::tool::{Tool, ToolResult};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,

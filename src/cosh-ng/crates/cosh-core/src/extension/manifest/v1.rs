@@ -366,7 +366,10 @@ fn validate_hook_env_name(name: &str) -> Result<(), ManifestError> {
             "environment variable name must start with a letter or underscore",
         ));
     }
-    if !bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+    if !bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    {
         return Err(ManifestError::new(
             "extension_hook_env_name_invalid",
             "environment variable name must contain only letters, digits, and underscores",

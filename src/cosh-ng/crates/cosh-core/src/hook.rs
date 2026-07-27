@@ -1250,7 +1250,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: Some(5000),
                 sequential: None,
-                    env: HashMap::new(),
+                env: HashMap::new(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1289,7 +1289,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: None,
                 sequential: None,
-                    env: HashMap::new(),
+                env: HashMap::new(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1324,7 +1324,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
-                    env: HashMap::new(),
+                env: HashMap::new(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1474,7 +1474,7 @@ mod tests {
                 matcher: Some("^run_shell_command$".to_string()),
                 timeout: Some(5000),
                 sequential: None,
-                    env: HashMap::new(),
+                env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1516,7 +1516,7 @@ mod tests {
                 matcher: Some("skill".to_string()),
                 timeout: Some(5000),
                 sequential: None,
-                    env: HashMap::new(),
+                env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1558,7 +1558,9 @@ mod tests {
         let pid_file = dir.path().join("pids");
         let script = leak_script(&marker, &pid_file);
 
-        let out = HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300), &HashMap::new()).await;
+        let out =
+            HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300), &HashMap::new())
+                .await;
         assert!(
             out.decision.is_none(),
             "timed-out hook must fall back to the default output"
@@ -1580,7 +1582,13 @@ mod tests {
         // blocked in the stdin write before the timeout even started.
         let payload = "x".repeat(1 << 20);
         let started = std::time::Instant::now();
-        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300), &HashMap::new()).await;
+        let out = HookSystem::run_hook_cmd(
+            "sleep 30",
+            &payload,
+            Duration::from_millis(300),
+            &HashMap::new(),
+        )
+        .await;
         assert!(out.decision.is_none());
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -1660,7 +1668,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
-                    env: HashMap::new(),
+                env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1754,7 +1762,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
-                    env: HashMap::new(),
+                env: HashMap::new(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1827,7 +1835,10 @@ mod tests {
     #[tokio::test]
     async fn hook_env_does_not_leak_to_parent() {
         let mut env = HashMap::new();
-        env.insert("HOOK_ISOLATION_TEST".to_string(), "isolated_value".to_string());
+        env.insert(
+            "HOOK_ISOLATION_TEST".to_string(),
+            "isolated_value".to_string(),
+        );
         let config = HooksConfig {
             enabled: true,
             pre_tool_use: vec![HookDefinition {
@@ -1848,7 +1859,14 @@ mod tests {
         };
         let sys = HookSystem::from_config(&config);
         let _ = sys
-            .fire_pre_tool_use("s1", "/tmp", "call-1", "shell", &serde_json::json!({"command": "ls"}), None)
+            .fire_pre_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                None,
+            )
             .await;
         // Parent process should NOT have the hook's env variable
         assert!(
