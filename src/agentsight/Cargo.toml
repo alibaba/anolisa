@@ -43,6 +43,7 @@ name = "agentsight"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-opt = { path = "crates/agentsight-opt", optional = true }
 agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
 agentsight-trajectory-collector = { path = "crates/agentsight-trajectory-collector" }

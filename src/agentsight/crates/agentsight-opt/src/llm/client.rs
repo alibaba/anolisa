@@ -288,7 +288,6 @@ impl LlmClient {
                     if let Some(ref recorder) = self.recorder {
                         let end_ts = chrono::Utc::now().to_rfc3339();
                         recorder.record(RecordParams {
-                            label: tag,
                             messages: &messages,
                             response: &text,
                             model: &self.model,
@@ -296,6 +295,7 @@ impl LlmClient {
                             output_tokens,
                             start_ts: &start_ts,
                             end_ts: &end_ts,
+                            label,
                         });
                         tracing::debug!(
                             "[{tag}] Recorded LLM call ({} calls total)",

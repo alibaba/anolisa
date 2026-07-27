@@ -1,24 +1,49 @@
-//! Converter from AgentSight SQLite GenAI data to ATIF v1.6 format.
+//! Converter from AgentSight SQLite GenAI data to the shared ATIF schema.
 //!
 //! Reconstructs an incremental step sequence from a series of LLM call records.
 //! Each LLM call maps to an agent step, with system/user steps extracted from
 //! the first call's context. Tool call observations are correlated across
 //! consecutive calls.
+//!
+//! The output model comes from the `agentsight-atif` crate, so eBPF exports and
+//! collector-ingested trajectories share one wire format.
 
 use std::collections::HashMap;
+
+use agentsight_atif::{
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall,
+};
 
 use crate::genai::semantic::{
     GenAISemanticEvent, InputMessage, LLMCall, MessagePart, OutputMessage,
 };
 use crate::storage::sqlite::genai::TraceEventDetail;
 
-use super::schema::*;
+/// Build a plain text step (system prompt or user query) with no agent payload.
+fn text_step(step_id: usize, source: StepSource, timestamp_ns: i64, message: String) -> Step {
+    Step {
+        step_id,
+        source,
+        message,
+        timestamp: Some(ns_to_iso8601(timestamp_ns as u64)),
+        model_name: None,
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: None,
+        observation: None,
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    }
+}
 
 /// Convert a single trace (one user query's call chain) into an ATIF document.
 pub fn convert_trace_to_atif(
     trace_id: &str,
     events: Vec<TraceEventDetail>,
-) -> Result<AtifDocument, Box<dyn std::error::Error>> {
+) -> Result<AtifTrajectory, Box<dyn std::error::Error>> {
     if events.is_empty() {
         return Err("no events found for trace".into());
     }
@@ -26,25 +51,19 @@ pub fn convert_trace_to_atif(
     let parsed = parse_all_events(&events);
     let agent = build_agent_metadata(&events, &parsed);
 
-    let mut step_counter: u32 = 0;
+    let mut step_counter: usize = 0;
     let mut steps = Vec::new();
 
     // 1. System prompt step
     if let Some(system_text) = extract_system_prompt(&events[0], parsed[0].as_ref()) {
         if !system_text.is_empty() {
             step_counter += 1;
-            steps.push(AtifStep {
-                step_id: step_counter,
-                timestamp: Some(ns_to_iso8601(events[0].start_timestamp_ns as u64)),
-                source: "system".to_string(),
-                message: Some(system_text),
-                model_name: None,
-                reasoning_content: None,
-                tool_calls: None,
-                observation: None,
-                metrics: None,
-                extra: None,
-            });
+            steps.push(text_step(
+                step_counter,
+                StepSource::System,
+                events[0].start_timestamp_ns,
+                system_text,
+            ));
         }
     }
 
@@ -52,18 +71,12 @@ pub fn convert_trace_to_atif(
     if let Some(user_text) = extract_user_query(&events[0], parsed[0].as_ref()) {
         if !user_text.is_empty() {
             step_counter += 1;
-            steps.push(AtifStep {
-                step_id: step_counter,
-                timestamp: Some(ns_to_iso8601(events[0].start_timestamp_ns as u64)),
-                source: "user".to_string(),
-                message: Some(user_text),
-                model_name: None,
-                reasoning_content: None,
-                tool_calls: None,
-                observation: None,
-                metrics: None,
-                extra: None,
-            });
+            steps.push(text_step(
+                step_counter,
+                StepSource::User,
+                events[0].start_timestamp_ns,
+                user_text,
+            ));
         }
     }
 
@@ -85,23 +98,16 @@ pub fn convert_trace_to_atif(
     }
 
     // 4. Final metrics
-    let final_metrics = compute_final_metrics(&events, steps.len() as u32);
+    let final_metrics = compute_final_metrics(&events, steps.len());
 
-    Ok(AtifDocument {
-        schema_version: SCHEMA_VERSION.to_string(),
-        session_id: trace_id.to_string(),
-        agent,
-        steps,
-        final_metrics: Some(final_metrics),
-        extra: None,
-    })
+    Ok(trajectory(trace_id, agent, steps, final_metrics))
 }
 
 /// Convert a full session (all traces) into an ATIF document.
 pub fn convert_session_to_atif(
     session_id: &str,
     events: Vec<TraceEventDetail>,
-) -> Result<AtifDocument, Box<dyn std::error::Error>> {
+) -> Result<AtifTrajectory, Box<dyn std::error::Error>> {
     if events.is_empty() {
         return Err("no events found for session".into());
     }
@@ -109,7 +115,7 @@ pub fn convert_session_to_atif(
     let parsed = parse_all_events(&events);
     let agent = build_agent_metadata(&events, &parsed);
 
-    let mut step_counter: u32 = 0;
+    let mut step_counter: usize = 0;
     let mut steps = Vec::new();
     let mut last_system_text: Option<String> = None;
 
@@ -128,18 +134,12 @@ pub fn convert_session_to_atif(
         ) {
             if !system_text.is_empty() && last_system_text.as_deref() != Some(&system_text) {
                 step_counter += 1;
-                steps.push(AtifStep {
-                    step_id: step_counter,
-                    timestamp: Some(ns_to_iso8601(trace_events[0].start_timestamp_ns as u64)),
-                    source: "system".to_string(),
-                    message: Some(system_text.clone()),
-                    model_name: None,
-                    reasoning_content: None,
-                    tool_calls: None,
-                    observation: None,
-                    metrics: None,
-                    extra: None,
-                });
+                steps.push(text_step(
+                    step_counter,
+                    StepSource::System,
+                    trace_events[0].start_timestamp_ns,
+                    system_text.clone(),
+                ));
                 last_system_text = Some(system_text);
             }
         }
@@ -151,18 +151,12 @@ pub fn convert_session_to_atif(
         ) {
             if !user_text.is_empty() {
                 step_counter += 1;
-                steps.push(AtifStep {
-                    step_id: step_counter,
-                    timestamp: Some(ns_to_iso8601(trace_events[0].start_timestamp_ns as u64)),
-                    source: "user".to_string(),
-                    message: Some(user_text),
-                    model_name: None,
-                    reasoning_content: None,
-                    tool_calls: None,
-                    observation: None,
-                    metrics: None,
-                    extra: None,
-                });
+                steps.push(text_step(
+                    step_counter,
+                    StepSource::User,
+                    trace_events[0].start_timestamp_ns,
+                    user_text,
+                ));
             }
         }
 
@@ -187,19 +181,35 @@ pub fn convert_session_to_atif(
         }
     }
 
-    let final_metrics = compute_final_metrics(&events, steps.len() as u32);
+    let final_metrics = compute_final_metrics(&events, steps.len());
 
-    Ok(AtifDocument {
-        schema_version: SCHEMA_VERSION.to_string(),
-        session_id: session_id.to_string(),
-        agent,
-        steps,
-        final_metrics: Some(final_metrics),
-        extra: None,
-    })
+    Ok(trajectory(session_id, agent, steps, final_metrics))
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
+
+/// Assemble the root document. Only the fields AgentSight can populate are set;
+/// the rest of the ATIF surface (trajectory_id, notes, continuation refs) stays
+/// absent rather than empty.
+fn trajectory(
+    session_id: &str,
+    agent: Agent,
+    steps: Vec<Step>,
+    final_metrics: FinalMetrics,
+) -> AtifTrajectory {
+    AtifTrajectory {
+        schema_version: ATIF_SCHEMA_VERSION.to_string(),
+        agent,
+        steps,
+        session_id: Some(session_id.to_string()),
+        trajectory_id: None,
+        notes: None,
+        final_metrics: Some(final_metrics),
+        continued_trajectory_ref: None,
+        subagent_trajectories: None,
+        extra: None,
+    }
+}
 
 /// Parse event_json for all events upfront. Returns a Vec of Option<LLMCall>.
 fn parse_all_events(events: &[TraceEventDetail]) -> Vec<Option<LLMCall>> {
@@ -247,7 +257,7 @@ fn group_by_trace<'a>(
 }
 
 /// Build agent metadata from events.
-fn build_agent_metadata(events: &[TraceEventDetail], parsed: &[Option<LLMCall>]) -> AtifAgent {
+fn build_agent_metadata(events: &[TraceEventDetail], parsed: &[Option<LLMCall>]) -> Agent {
     // Agent name: first non-None agent_name, fallback to process_name
     let name = events
         .iter()
@@ -261,7 +271,7 @@ fn build_agent_metadata(events: &[TraceEventDetail], parsed: &[Option<LLMCall>])
     // Collect tool definitions from parsed calls
     let tool_definitions = collect_tool_definitions(parsed);
 
-    AtifAgent {
+    Agent {
         name,
         version: "1.0.0".to_string(),
         model_name,
@@ -371,14 +381,14 @@ fn extract_user_query(event: &TraceEventDetail, parsed: Option<&LLMCall>) -> Opt
 
 /// Build an agent step from a single LLM call event.
 fn build_agent_step(
-    step_id: u32,
+    step_id: usize,
     event: &TraceEventDetail,
     parsed: Option<&LLMCall>,
     next: Option<(&TraceEventDetail, Option<&LLMCall>)>,
-) -> AtifStep {
+) -> Step {
     let mut message_text = String::new();
     let mut reasoning_text = String::new();
-    let mut tool_calls: Vec<AtifToolCall> = Vec::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     // Extract from parsed response messages
     if let Some(call) = parsed {
@@ -409,12 +419,13 @@ fn build_agent_step(
                         let tc_id = id
                             .clone()
                             .unwrap_or_else(|| format!("auto_{}", tool_calls.len()));
-                        tool_calls.push(AtifToolCall {
+                        tool_calls.push(ToolCall {
                             tool_call_id: tc_id,
                             function_name: name.clone(),
                             arguments: arguments
                                 .clone()
                                 .unwrap_or(serde_json::Value::Object(Default::default())),
+                            extra: None,
                         });
                     }
                     _ => {}
@@ -452,12 +463,13 @@ fn build_agent_step(
                                 let tc_id = id
                                     .clone()
                                     .unwrap_or_else(|| format!("auto_{}", tool_calls.len()));
-                                tool_calls.push(AtifToolCall {
+                                tool_calls.push(ToolCall {
                                     tool_call_id: tc_id,
                                     function_name: name.clone(),
                                     arguments: arguments
                                         .clone()
                                         .unwrap_or(serde_json::Value::Object(Default::default())),
+                                    extra: None,
                                 });
                             }
                             _ => {}
@@ -476,20 +488,24 @@ fn build_agent_step(
     };
 
     // Metrics
-    let metrics = Some(AtifStepMetrics {
+    let metrics = Some(Metrics {
         prompt_tokens: if event.input_tokens > 0 {
-            Some(event.input_tokens as u32)
+            Some(event.input_tokens as u64)
         } else {
             None
         },
         completion_tokens: if event.output_tokens > 0 {
-            Some(event.output_tokens as u32)
+            Some(event.output_tokens as u64)
         } else {
             None
         },
         cached_tokens: event
             .cache_read_tokens
-            .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
+            .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+        cost_usd: None,
+        logprobs: None,
+        completion_token_ids: None,
+        prompt_token_ids: None,
         extra: None,
     });
 
@@ -498,20 +514,18 @@ fn build_agent_step(
 
     // Request start time lets ATIF consumers derive per-step model inference
     // time (end − start) and tool windows (next start − prev end).
-    let extra = Some(serde_json::json!({
-        "start_timestamp": ns_to_iso8601(event.start_timestamp_ns as u64),
-    }));
+    let extra = HashMap::from([(
+        "start_timestamp".to_string(),
+        serde_json::Value::String(ns_to_iso8601(event.start_timestamp_ns as u64)),
+    )]);
 
-    AtifStep {
+    Step {
         step_id,
+        source: StepSource::Agent,
+        message: message_text,
         timestamp: Some(ns_to_iso8601(timestamp_ns as u64)),
-        source: "agent".to_string(),
-        message: if message_text.is_empty() {
-            None
-        } else {
-            Some(message_text)
-        },
         model_name: event.model.clone(),
+        reasoning_effort: None,
         reasoning_content: if reasoning_text.is_empty() {
             None
         } else {
@@ -524,7 +538,9 @@ fn build_agent_step(
         },
         observation,
         metrics,
-        extra,
+        extra: Some(extra),
+        llm_call_count: None,
+        is_copied_context: None,
     }
 }
 
@@ -557,9 +573,9 @@ fn latest_round_messages(messages: &[InputMessage]) -> &[InputMessage] {
 
 /// Build observation by looking for ToolCallResponse in the next event's input.
 fn build_observation(
-    tool_calls: &[AtifToolCall],
+    tool_calls: &[ToolCall],
     next: Option<(&TraceEventDetail, Option<&LLMCall>)>,
-) -> Option<AtifObservation> {
+) -> Option<Observation> {
     let (next_event, next_parsed) = next?;
 
     let tc_ids: HashMap<&str, usize> = tool_calls
@@ -568,7 +584,7 @@ fn build_observation(
         .map(|(i, tc)| (tc.tool_call_id.as_str(), i))
         .collect();
 
-    let mut results: Vec<AtifObservationResult> = Vec::new();
+    let mut results: Vec<ObservationResult> = Vec::new();
     let mut matched_by_id = vec![false; tool_calls.len()];
 
     // Strategy 1: from parsed LLMCall's full request messages (latest round only)
@@ -595,7 +611,7 @@ fn build_observation(
     if results.is_empty() {
         None
     } else {
-        Some(AtifObservation { results })
+        Some(Observation { results })
     }
 }
 
@@ -603,7 +619,7 @@ fn build_observation(
 fn collect_tool_responses(
     messages: &[InputMessage],
     tc_ids: &HashMap<&str, usize>,
-    results: &mut Vec<AtifObservationResult>,
+    results: &mut Vec<ObservationResult>,
     matched: &mut [bool],
 ) {
     let mut positional_idx: usize = 0;
@@ -613,6 +629,9 @@ fn collect_tool_responses(
         }
         for part in &msg.parts {
             if let MessagePart::ToolCallResponse { id, response } = part {
+                // ATIF allows any JSON for observation content, but downstream
+                // consumers (analyzers, dashboard) render it as text — flatten
+                // structured responses to a JSON string rather than nesting.
                 let content_str = match response {
                     serde_json::Value::String(s) => s.clone(),
                     other => serde_json::to_string(other).unwrap_or_default(),
@@ -623,9 +642,11 @@ fn collect_tool_responses(
                     if let Some(&idx) = tc_ids.get(tc_id.as_str()) {
                         if !matched[idx] {
                             matched[idx] = true;
-                            results.push(AtifObservationResult {
+                            results.push(ObservationResult {
                                 source_call_id: Some(tc_id.clone()),
-                                content: Some(content_str),
+                                content: Some(serde_json::Value::String(content_str)),
+                                subagent_trajectory_ref: None,
+                                extra: None,
                             });
                             continue;
                         }
@@ -638,12 +659,14 @@ fn collect_tool_responses(
                 }
                 if positional_idx < matched.len() {
                     matched[positional_idx] = true;
-                    results.push(AtifObservationResult {
+                    results.push(ObservationResult {
                         source_call_id: Some(
                             id.clone()
                                 .unwrap_or_else(|| format!("auto_{positional_idx}")),
                         ),
-                        content: Some(content_str),
+                        content: Some(serde_json::Value::String(content_str)),
+                        subagent_trajectory_ref: None,
+                        extra: None,
                     });
                     positional_idx += 1;
                 }
@@ -653,7 +676,7 @@ fn collect_tool_responses(
 }
 
 /// Compute aggregated final metrics.
-fn compute_final_metrics(events: &[TraceEventDetail], total_steps: u32) -> AtifFinalMetrics {
+fn compute_final_metrics(events: &[TraceEventDetail], total_steps: usize) -> FinalMetrics {
     let mut total_prompt: u64 = 0;
     let mut total_completion: u64 = 0;
     let mut total_cached: u64 = 0;
@@ -666,7 +689,7 @@ fn compute_final_metrics(events: &[TraceEventDetail], total_steps: u32) -> AtifF
         }
     }
 
-    AtifFinalMetrics {
+    FinalMetrics {
         total_prompt_tokens: Some(total_prompt),
         total_completion_tokens: Some(total_completion),
         total_cached_tokens: if total_cached > 0 {
@@ -674,6 +697,7 @@ fn compute_final_metrics(events: &[TraceEventDetail], total_steps: u32) -> AtifF
         } else {
             None
         },
+        total_cost_usd: None,
         total_steps: Some(total_steps),
         extra: None,
     }
@@ -740,9 +764,154 @@ fn ns_to_iso8601(ns: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::genai::semantic::{InputMessage, MessagePart};
+
+    /// Minimal LLM call record: an agent turn that emits one tool call, plus the
+    /// tool response that the *next* call replays back to the model.
+    pub(crate) fn call_event(
+        id: i64,
+        start_ns: i64,
+        output_messages: Option<Vec<OutputMessage>>,
+        input_messages: Option<Vec<InputMessage>>,
+        user_query: Option<&str>,
+    ) -> TraceEventDetail {
+        TraceEventDetail {
+            id,
+            call_id: Some(format!("call-{id}")),
+            start_timestamp_ns: start_ns,
+            end_timestamp_ns: Some(start_ns + 1_000_000_000),
+            model: Some("claude-opus-5".into()),
+            input_tokens: 100,
+            output_tokens: 20,
+            total_tokens: 120,
+            input_messages: input_messages.map(|m| serde_json::to_string(&m).unwrap()),
+            output_messages: output_messages.map(|m| serde_json::to_string(&m).unwrap()),
+            system_instructions: Some(
+                serde_json::to_string(&vec![InputMessage {
+                    role: "system".into(),
+                    parts: vec![MessagePart::Text {
+                        content: "You are helpful.".into(),
+                    }],
+                    name: None,
+                }])
+                .unwrap(),
+            ),
+            agent_name: Some("Claude".into()),
+            process_name: None,
+            pid: Some(42),
+            user_query: user_query.map(str::to_string),
+            event_json: None,
+            trace_id: Some("session-1".into()),
+            conversation_id: Some("conv-1".into()),
+            cache_read_tokens: Some(80),
+            status: Some("complete".into()),
+            interruption_type: None,
+        }
+    }
+
+    /// Two-call chain: system + user + two agent steps, the first correlating a
+    /// tool call with the response replayed in the second call's input.
+    pub(crate) fn two_call_chain() -> Vec<TraceEventDetail> {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![
+                MessagePart::Text {
+                    content: "Checking the file.".into(),
+                },
+                MessagePart::ToolCall {
+                    id: Some("tc-1".into()),
+                    name: "Read".into(),
+                    arguments: Some(serde_json::json!({"file_path": "/tmp/a"})),
+                },
+            ],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let replayed_response = vec![InputMessage {
+            role: "tool".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-1".into()),
+                response: serde_json::json!("file contents"),
+            }],
+            name: None,
+        }];
+        vec![
+            call_event(
+                1,
+                1_000_000_000,
+                Some(agent_turn),
+                None,
+                Some("read /tmp/a"),
+            ),
+            call_event(2, 3_000_000_000, None, Some(replayed_response), None),
+        ]
+    }
+
+    #[test]
+    fn session_export_uses_shared_schema_and_valid_step_ids() {
+        let doc = convert_session_to_atif("session-1", two_call_chain()).unwrap();
+
+        assert_eq!(doc.schema_version, ATIF_SCHEMA_VERSION);
+        assert_eq!(doc.session_id.as_deref(), Some("session-1"));
+        doc.validate_step_ids()
+            .expect("step ids must be contiguous");
+
+        // system + user + one step per LLM call
+        let sources: Vec<StepSource> = doc.steps.iter().map(|s| s.source).collect();
+        assert_eq!(
+            sources,
+            vec![
+                StepSource::System,
+                StepSource::User,
+                StepSource::Agent,
+                StepSource::Agent
+            ]
+        );
+        assert_eq!(doc.steps[1].message, "read /tmp/a");
+
+        let fm = doc.final_metrics.as_ref().unwrap();
+        assert_eq!(fm.total_prompt_tokens, Some(200));
+        assert_eq!(fm.total_completion_tokens, Some(40));
+        assert_eq!(fm.total_cached_tokens, Some(160));
+        assert_eq!(fm.total_steps, Some(4));
+    }
+
+    #[test]
+    fn agent_step_carries_tool_call_observation_and_start_timestamp() {
+        let doc = convert_trace_to_atif("trace-1", two_call_chain()).unwrap();
+        let step = &doc.steps[2];
+
+        assert_eq!(step.message, "Checking the file.");
+        assert_eq!(step.model_name.as_deref(), Some("claude-opus-5"));
+
+        let calls = step.tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].tool_call_id, "tc-1");
+        assert_eq!(calls[0].function_name, "Read");
+
+        // Observation content stays a JSON string so text consumers can render it.
+        let results = &step.observation.as_ref().unwrap().results;
+        assert_eq!(results[0].source_call_id.as_deref(), Some("tc-1"));
+        assert_eq!(
+            results[0].content.as_ref().and_then(|c| c.as_str()),
+            Some("file contents")
+        );
+
+        // extra.start_timestamp is what lets consumers split inference vs tool time.
+        let extra = step.extra.as_ref().unwrap();
+        assert_eq!(
+            extra.get("start_timestamp").and_then(|v| v.as_str()),
+            Some("1970-01-01T00:00:01Z")
+        );
+        assert_eq!(step.metrics.as_ref().unwrap().prompt_tokens, Some(100));
+    }
+
+    #[test]
+    fn empty_events_are_rejected() {
+        assert!(convert_trace_to_atif("t", vec![]).is_err());
+        assert!(convert_session_to_atif("s", vec![]).is_err());
+    }
 
     #[test]
     fn test_ns_to_iso8601() {

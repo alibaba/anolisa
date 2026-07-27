@@ -23,12 +23,12 @@ test_list() {
 
 check_source_floor() {
   local crate="$1"
-  local expected="$2"
+  local floor="$2"
   local actual
   actual="$(source_count "crates/$crate")"
-  echo "$crate source tests: $actual"
-  if [[ "$actual" -ne "$expected" ]]; then
-    fail "$crate source inventory changed from $expected to $actual; update the necessity audit"
+  echo "$crate source tests: $actual (floor $floor)"
+  if [[ "$actual" -lt "$floor" ]]; then
+    fail "$crate source inventory fell below $floor to $actual; audit removals before lowering the floor"
   fi
 }
 
@@ -50,16 +50,18 @@ check_overlap_ceiling() {
   fi
 }
 
+# These are regression floors, not exact snapshots. Feature branches must not
+# update them when adding tests; raise them periodically in a dedicated change.
 check_source_floor cosh-types 24
 check_source_floor cosh-platform 282
 check_source_floor cosh-cli 75
 check_source_floor cosh-core 696
-check_source_floor cosh-shell 2571
+check_source_floor cosh-shell 2573
 
 ignored_count="$(rg -n '^[[:space:]]*#\[ignore' crates -g '*.rs' | wc -l | tr -d ' ')"
-echo "ignored tests: $ignored_count"
-if [[ "$ignored_count" -ne 3 ]]; then
-  fail "ignored inventory changed from 3 to $ignored_count"
+echo "ignored tests: $ignored_count (ceiling 3)"
+if [[ "$ignored_count" -gt 3 ]]; then
+  fail "ignored test inventory increased above 3 to $ignored_count"
 fi
 
 check_overlap_ceiling cosh-core cosh-core 4

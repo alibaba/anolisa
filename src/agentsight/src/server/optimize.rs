@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use agentsight_opt::{AnalyzePipeline, AtifTrajectory, LlmClient, TrajectoryRecorder};
 use agentsight_opt_store::{Dimension, OptimizationStore};
+use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
+
+use uuid::Uuid;
 
 use super::AppState;
 use crate::storage::sqlite::GenAISqliteStore;
@@ -156,7 +159,15 @@ fn optimize_state(data: &AppState) -> Result<&Arc<OptimizeState>, HttpResponse> 
 /// Load a session's captured events and build the ATIF trajectory that the
 /// analyzers consume. The boundary format is standard ATIF JSON: the export
 /// document is serialized and re-parsed into the opt crate's ATIF model.
-fn load_trajectory(db_path: &Path, session_id: &str) -> Result<AtifTrajectory, HttpResponse> {
+///
+/// When the session has no eBPF-captured events, falls back to the
+/// log-collected trajectory store (trajectories.db), whose rows already hold
+/// ready-made ATIF v1.7 JSON.
+fn load_trajectory(
+    db_path: &Path,
+    trajectory_store: Option<&TrajectoryStore>,
+    session_id: &str,
+) -> Result<AtifTrajectory, HttpResponse> {
     let store = GenAISqliteStore::new_with_path(db_path).map_err(|e| {
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;
@@ -164,8 +175,7 @@ fn load_trajectory(db_path: &Path, session_id: &str) -> Result<AtifTrajectory, H
         HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
     })?;
     if events.is_empty() {
-        return Err(HttpResponse::NotFound()
-            .json(serde_json::json!({"error": "session not found or pruned"})));
+        return load_collected_trajectory(trajectory_store, session_id);
     }
     let doc = crate::atif::convert_session_to_atif(session_id, events).map_err(|e| {
         HttpResponse::UnprocessableEntity().json(serde_json::json!({
@@ -182,6 +192,181 @@ fn load_trajectory(db_path: &Path, session_id: &str) -> Result<AtifTrajectory, H
             "message": e.to_string(),
         }))
     })
+}
+
+/// Fallback for sessions absent from the eBPF capture: load the ATIF JSON
+/// persisted by the trajectory collector (log-collected Qoder/QoderWork
+/// sessions).
+fn load_collected_trajectory(
+    trajectory_store: Option<&TrajectoryStore>,
+    session_id: &str,
+) -> Result<AtifTrajectory, HttpResponse> {
+    let Some(tstore) = trajectory_store else {
+        return Err(HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "session not found or pruned"})));
+    };
+    match tstore.get_atif_json(session_id) {
+        Ok(Some(atif_json)) => AtifTrajectory::from_json(&atif_json).map_err(|e| {
+            HttpResponse::UnprocessableEntity().json(serde_json::json!({
+                "error": "atif_parse_failed",
+                "message": e.to_string(),
+            }))
+        }),
+        Ok(None) => Err(HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "session not found or pruned"}))),
+        Err(e) => {
+            Err(HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()})))
+        }
+    }
+}
+
+/// Create or update the per-target optimization run root trajectory
+/// (`opt:<target>`). Each dimension analysis appends one dispatch step with a
+/// `ToolCall(Agent)` + `subagent_trajectory_ref` pointing at the dimension
+/// record (`opt:<target>:subagent:<dim>-<id>`), so the existing subagent
+/// injection and session-list folding group all analyses under one row.
+fn upsert_opt_run_root(
+    store: &TrajectoryStore,
+    target_session_id: &str,
+    dimension_raw: &str,
+    dim_doc: &agentsight_atif::AtifTrajectory,
+) -> anyhow::Result<()> {
+    use agentsight_atif as schema;
+
+    let root_id = format!("opt:{target_session_id}");
+    let mut root: schema::AtifTrajectory = match store.get_atif_json(&root_id)? {
+        Some(json) => serde_json::from_str(&json)?,
+        None => schema::AtifTrajectory {
+            schema_version: schema::ATIF_SCHEMA_VERSION.to_string(),
+            agent: schema::Agent {
+                name: "agentsight-opt".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                model_name: None,
+                tool_definitions: None,
+                extra: None,
+            },
+            steps: Vec::new(),
+            session_id: Some(root_id.clone()),
+            trajectory_id: None,
+            notes: Some(format!("优化分析运行 · 目标会话 {target_session_id}")),
+            final_metrics: None,
+            continued_trajectory_ref: None,
+            subagent_trajectories: None,
+            extra: None,
+        },
+    };
+    if root.agent.model_name.is_none() {
+        root.agent.model_name = dim_doc.agent.model_name.clone();
+    }
+
+    // Append one dispatch step for this dimension run.
+    let sub_traj_id = dim_doc.trajectory_id.clone();
+    let call_id = format!(
+        "dispatch-{}",
+        sub_traj_id.as_deref().unwrap_or(dimension_raw)
+    );
+    let ts = dim_doc
+        .steps
+        .last()
+        .and_then(|s| s.timestamp.clone())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    root.steps.push(schema::Step {
+        step_id: root.steps.len() + 1,
+        source: schema::StepSource::Agent,
+        message: String::new(),
+        timestamp: Some(ts),
+        model_name: dim_doc.agent.model_name.clone(),
+        reasoning_effort: None,
+        reasoning_content: None,
+        tool_calls: Some(vec![schema::ToolCall {
+            tool_call_id: call_id.clone(),
+            function_name: "Agent".to_string(),
+            arguments: serde_json::json!({
+                "subagent_type": dimension_raw,
+                "description": format!("{dimension_raw} 维度优化分析"),
+            }),
+            extra: None,
+        }]),
+        observation: Some(schema::Observation {
+            results: vec![schema::ObservationResult {
+                source_call_id: Some(call_id),
+                content: None,
+                subagent_trajectory_ref: Some(vec![schema::SubagentTrajectoryRef {
+                    trajectory_id: sub_traj_id,
+                    trajectory_path: None,
+                    session_id: dim_doc.session_id.clone(),
+                    extra: None,
+                }]),
+                extra: None,
+            }],
+        }),
+        metrics: None,
+        extra: None,
+        llm_call_count: None,
+        is_copied_context: None,
+    });
+
+    // Accumulate run totals across dimension analyses.
+    let (dim_prompt, dim_completion) = dim_doc
+        .final_metrics
+        .as_ref()
+        .map(|m| {
+            (
+                m.total_prompt_tokens.unwrap_or(0),
+                m.total_completion_tokens.unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0));
+    let prev = root.final_metrics.take();
+    let prev_prompt = prev
+        .as_ref()
+        .and_then(|m| m.total_prompt_tokens)
+        .unwrap_or(0);
+    let prev_completion = prev
+        .as_ref()
+        .and_then(|m| m.total_completion_tokens)
+        .unwrap_or(0);
+    root.final_metrics = Some(schema::FinalMetrics {
+        total_prompt_tokens: Some(prev_prompt + dim_prompt),
+        total_completion_tokens: Some(prev_completion + dim_completion),
+        total_cached_tokens: None,
+        total_cost_usd: None,
+        total_steps: Some(root.steps.len()),
+        extra: None,
+    });
+
+    let atif_json = serde_json::to_string(&root)?;
+    let record = TrajectoryRecord {
+        session_id: root_id,
+        schema_version: root.schema_version.clone(),
+        agent_name: "agentsight-opt".to_string(),
+        model_name: root.agent.model_name.clone(),
+        num_steps: root.steps.len() as i64,
+        total_prompt_tokens: root
+            .final_metrics
+            .as_ref()
+            .and_then(|m| m.total_prompt_tokens)
+            .map(|v| v as i64),
+        total_completion_tokens: root
+            .final_metrics
+            .as_ref()
+            .and_then(|m| m.total_completion_tokens)
+            .map(|v| v as i64),
+        start_time: root.steps.first().and_then(|s| s.timestamp.clone()),
+        end_time: root.steps.last().and_then(|s| s.timestamp.clone()),
+        first_user_message: Some(format!("优化分析运行 · 目标会话 {target_session_id}")),
+        last_user_message: Some(format!("最近维度: {dimension_raw}")),
+        atif_json,
+        project: target_session_id.to_string(),
+        source: "agentsight-opt".to_string(),
+        is_subagent: false,
+        file_path: String::new(),
+        file_size: 0,
+        file_mtime_ns: 0,
+    };
+    store.upsert_trajectory(&record)?;
+    Ok(())
 }
 
 /// Serialize an analysis result, persist it, and build the HTTP response.
@@ -215,6 +400,7 @@ fn parse_dimension(raw: &str) -> Option<Dimension> {
         "cost" => Some(Dimension::Cost),
         "cost-waste" => Some(Dimension::CostWaste),
         "accuracy" => Some(Dimension::Accuracy),
+        "summary" => Some(Dimension::Summary),
         _ => None,
     }
 }
@@ -243,7 +429,11 @@ pub async fn run_optimization(
         }));
     };
 
-    let trajectory = match load_trajectory(&data.storage_path, &session_id) {
+    let trajectory = match load_trajectory(
+        &data.storage_path,
+        data.trajectory_store.as_deref(),
+        &session_id,
+    ) {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -259,7 +449,7 @@ pub async fn run_optimization(
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
         },
-        Dimension::PerfIssues | Dimension::CostWaste | Dimension::Accuracy => {
+        Dimension::PerfIssues | Dimension::CostWaste | Dimension::Accuracy | Dimension::Summary => {
             let mut client = match state.build_client() {
                 Ok(c) => c,
                 Err(resp) => return resp,
@@ -286,6 +476,10 @@ pub async fn run_optimization(
                     .run_accuracy(&trajectory, None)
                     .await
                     .and_then(|r| serde_json::to_string(&r).map_err(|e| anyhow::anyhow!(e))),
+                Dimension::Summary => pipeline
+                    .run_summary(&trajectory)
+                    .await
+                    .and_then(|r| serde_json::to_string(&r).map_err(|e| anyhow::anyhow!(e))),
                 // Pure-compute dimensions handled in the outer match.
                 Dimension::Perf | Dimension::Cost => unreachable!(),
             };
@@ -300,6 +494,60 @@ pub async fn run_optimization(
                     .join(&dimension_raw);
                 if let Err(e) = recorder.save_to_dir(&traj_dir) {
                     log::warn!("Failed to save opt LLM trajectory: {e}");
+                }
+
+                // Persist to trajectories.db for Dashboard query. The record
+                // becomes a subagent of the per-target run root (`opt:<target>`)
+                // so all dimension analyses of one session group under one row.
+                if let Some(ref traj_store) = data.trajectory_store {
+                    let mut doc = recorder.to_atif();
+                    let run_suffix = format!(
+                        "{dimension_raw}-{}",
+                        &Uuid::new_v4().simple().to_string()[..8]
+                    );
+                    let record_session_id = format!("opt:{session_id}:subagent:{run_suffix}");
+                    doc.session_id = Some(record_session_id.clone());
+                    doc.trajectory_id = Some(run_suffix.clone());
+                    let atif_json = serde_json::to_string(&doc).unwrap_or_default();
+                    let (first_user_message, last_user_message) =
+                        agentsight_trajectory_collector::store::extract_user_message_previews(
+                            &atif_json,
+                        );
+                    let record = TrajectoryRecord {
+                        session_id: record_session_id,
+                        schema_version: doc.schema_version.clone(),
+                        agent_name: "agentsight-opt".to_string(),
+                        model_name: doc.agent.model_name.clone(),
+                        num_steps: doc.steps.len() as i64,
+                        total_prompt_tokens: doc
+                            .final_metrics
+                            .as_ref()
+                            .and_then(|m| m.total_prompt_tokens)
+                            .map(|v| v as i64),
+                        total_completion_tokens: doc
+                            .final_metrics
+                            .as_ref()
+                            .and_then(|m| m.total_completion_tokens)
+                            .map(|v| v as i64),
+                        start_time: doc.steps.first().and_then(|s| s.timestamp.clone()),
+                        end_time: doc.steps.last().and_then(|s| s.timestamp.clone()),
+                        first_user_message,
+                        last_user_message,
+                        atif_json,
+                        project: session_id.clone(),
+                        source: "agentsight-opt".to_string(),
+                        is_subagent: true,
+                        file_path: String::new(),
+                        file_size: 0,
+                        file_mtime_ns: 0,
+                    };
+                    if let Err(e) = traj_store.upsert_trajectory(&record) {
+                        log::warn!("Failed to persist opt trajectory to SQLite: {e}");
+                    } else if let Err(e) =
+                        upsert_opt_run_root(traj_store.as_ref(), &session_id, &dimension_raw, &doc)
+                    {
+                        log::warn!("Failed to update opt run root trajectory: {e}");
+                    }
                 }
             }
 
@@ -356,6 +604,7 @@ pub async fn get_optimization_results(
                 "cost": parse(&record.cost),
                 "cost_waste": parse(&record.cost_waste),
                 "accuracy": parse(&record.accuracy),
+                "summary": parse(&record.summary),
                 "created_at_ns": record.created_at_ns,
                 "updated_at_ns": record.updated_at_ns,
             }))
@@ -363,8 +612,89 @@ pub async fn get_optimization_results(
         Ok(None) => HttpResponse::Ok().json(serde_json::json!({
             "session_id": session_id,
             "perf": null, "perf_issues": null, "cost": null,
-            "cost_waste": null, "accuracy": null,
+            "cost_waste": null, "accuracy": null, "summary": null,
         })),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Query parameters for the analysis-history listing.
+#[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+/// Current UNIX time in nanoseconds; 0 if the clock is before the epoch.
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+/// Max rows a single history listing may return.
+const HISTORY_MAX_LIMIT: usize = 200;
+/// Default listing window when the caller passes no range: 30 days.
+const HISTORY_DEFAULT_WINDOW_NS: i64 = 30 * 86_400_000_000_000;
+
+/// GET /api/optimize/results?start_ns=&end_ns=&limit=
+///
+/// Lists previously analyzed sessions, newest first. Only per-dimension
+/// presence flags are returned — never the payloads, which are megabytes of
+/// JSON and are fetched per session via `/optimize/sessions/{id}/results`.
+#[get("/optimize/results")]
+pub async fn list_optimization_history(
+    data: web::Data<AppState>,
+    query: web::Query<HistoryQuery>,
+) -> impl Responder {
+    let state = match optimize_state(&data) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    // Store unavailable → empty list rather than an error: the history table is
+    // a secondary view and should degrade like the trajectory endpoints do.
+    let Some(ref store) = state.store else {
+        return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
+    };
+
+    let end_ns = query.end_ns.unwrap_or_else(now_ns);
+    let start_ns = query
+        .start_ns
+        .unwrap_or_else(|| end_ns.saturating_sub(HISTORY_DEFAULT_WINDOW_NS));
+    let limit = query.limit.unwrap_or(100).clamp(1, HISTORY_MAX_LIMIT);
+
+    match store.list(start_ns, end_ns, limit) {
+        Ok(records) => {
+            let items: Vec<serde_json::Value> = records
+                .iter()
+                .map(|r| {
+                    let mut dimensions = Vec::new();
+                    for (name, value) in [
+                        ("perf", &r.perf),
+                        ("perf_issues", &r.perf_issues),
+                        ("cost", &r.cost),
+                        ("cost_waste", &r.cost_waste),
+                        ("accuracy", &r.accuracy),
+                        ("summary", &r.summary),
+                    ] {
+                        if value.is_some() {
+                            dimensions.push(name);
+                        }
+                    }
+                    serde_json::json!({
+                        "session_id": r.session_id,
+                        "dimensions": dimensions,
+                        "created_at_ns": r.created_at_ns,
+                        "updated_at_ns": r.updated_at_ns,
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(items)
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -450,6 +780,34 @@ pub async fn update_optimize_config(
 mod tests {
     use super::*;
 
+    /// The eBPF export feeds the optimizer through JSON, so the shared-schema
+    /// document must survive the analyzer's parser with tokens and per-step
+    /// timing intact — the same contract the collected v1.7 trajectories rely on.
+    #[test]
+    fn converted_export_parses_into_analyzer_trajectory() {
+        let events = crate::atif::converter::tests::two_call_chain();
+        let doc = crate::atif::convert_session_to_atif("session-1", events).unwrap();
+        let json = serde_json::to_string(&doc).unwrap();
+
+        let traj = AtifTrajectory::from_json(&json).expect("analyzer must accept the export");
+        assert_eq!(traj.session_id, "session-1");
+        assert_eq!(traj.model_name(), "claude-opus-5");
+
+        let agent_steps: Vec<_> = traj.steps.iter().filter(|s| s.is_agent()).collect();
+        assert_eq!(agent_steps.len(), 2);
+        // start_ts comes from extra.start_timestamp, end_ts from timestamp;
+        // losing either one silently zeroes out the perf dimension.
+        assert!(agent_steps[0].start_ts().is_some());
+        assert!(agent_steps[0].end_ts() > agent_steps[0].start_ts());
+        assert_eq!(agent_steps[0].results().len(), 1);
+        assert_eq!(
+            traj.final_metrics
+                .as_ref()
+                .and_then(|m| m.total_prompt_tokens),
+            Some(200)
+        );
+    }
+
     #[test]
     fn config_prefers_explicit_values_and_masks_key() {
         let config = OptLlmConfig {
@@ -487,5 +845,173 @@ mod tests {
         assert_eq!(parse_dimension("cost-waste"), Some(Dimension::CostWaste));
         assert_eq!(parse_dimension("accuracy"), Some(Dimension::Accuracy));
         assert_eq!(parse_dimension("unknown"), None);
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("opt-traj-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn collected_record(session_id: &str, atif_json: &str) -> TrajectoryRecord {
+        TrajectoryRecord {
+            session_id: session_id.to_string(),
+            schema_version: "ATIF-v1.7".to_string(),
+            agent_name: "qoder".to_string(),
+            model_name: None,
+            num_steps: 0,
+            total_prompt_tokens: None,
+            total_completion_tokens: None,
+            start_time: None,
+            end_time: None,
+            first_user_message: None,
+            last_user_message: None,
+            atif_json: atif_json.to_string(),
+            project: "proj".to_string(),
+            source: "qoder".to_string(),
+            is_subagent: false,
+            file_path: String::new(),
+            file_size: 0,
+            file_mtime_ns: 0,
+        }
+    }
+
+    #[test]
+    fn load_trajectory_falls_back_to_collected_store() {
+        let dir = tmp_dir("fallback");
+        let db_path = dir.join("genai.db");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+        let atif = r#"{"schema_version":"ATIF-v1.7","session_id":"log-1","steps":[]}"#;
+        tstore
+            .upsert_trajectory(&collected_record("log-1", atif))
+            .unwrap();
+
+        let trajectory = load_trajectory(&db_path, Some(&tstore), "log-1").unwrap();
+        assert_eq!(trajectory.session_id, "log-1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_trajectory_returns_not_found_when_both_sources_miss() {
+        let dir = tmp_dir("miss");
+        let db_path = dir.join("genai.db");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+
+        // Store present but session absent → 404.
+        let resp = load_trajectory(&db_path, Some(&tstore), "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        // No store at all → 404 as well.
+        let resp = load_trajectory(&db_path, None, "nope").unwrap_err();
+        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_trajectory_rejects_corrupt_collected_atif() {
+        let dir = tmp_dir("corrupt");
+        let db_path = dir.join("genai.db");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+        tstore
+            .upsert_trajectory(&collected_record("bad-1", "not json"))
+            .unwrap();
+
+        let resp = load_trajectory(&db_path, Some(&tstore), "bad-1").unwrap_err();
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn dimension_doc(
+        traj_id: &str,
+        session_id: &str,
+        prompt: u64,
+    ) -> agentsight_atif::AtifTrajectory {
+        agentsight_atif::AtifTrajectory {
+            schema_version: agentsight_atif::ATIF_SCHEMA_VERSION.to_string(),
+            agent: agentsight_atif::Agent {
+                name: "agentsight-opt".into(),
+                version: "test".into(),
+                model_name: Some("gpt-4o".into()),
+                tool_definitions: None,
+                extra: None,
+            },
+            steps: vec![],
+            session_id: Some(session_id.to_string()),
+            trajectory_id: Some(traj_id.to_string()),
+            notes: None,
+            final_metrics: Some(agentsight_atif::FinalMetrics {
+                total_prompt_tokens: Some(prompt),
+                total_completion_tokens: Some(10),
+                total_cached_tokens: None,
+                total_cost_usd: None,
+                total_steps: None,
+                extra: None,
+            }),
+            continued_trajectory_ref: None,
+            subagent_trajectories: None,
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn opt_run_root_accumulates_dimension_dispatches() {
+        let dir = tmp_dir("runroot");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+
+        upsert_opt_run_root(
+            &tstore,
+            "target-1",
+            "perf-issues",
+            &dimension_doc(
+                "perf-issues-abc",
+                "opt:target-1:subagent:perf-issues-abc",
+                100,
+            ),
+        )
+        .unwrap();
+        upsert_opt_run_root(
+            &tstore,
+            "target-1",
+            "cost-waste",
+            &dimension_doc(
+                "cost-waste-def",
+                "opt:target-1:subagent:cost-waste-def",
+                200,
+            ),
+        )
+        .unwrap();
+
+        let json = tstore.get_atif_json("opt:target-1").unwrap().unwrap();
+        let root: agentsight_atif::AtifTrajectory = serde_json::from_str(&json).unwrap();
+
+        // One dispatch step per dimension run; token totals accumulate.
+        assert_eq!(root.steps.len(), 2);
+        assert_eq!(root.session_id.as_deref(), Some("opt:target-1"));
+        let metrics = root.final_metrics.unwrap();
+        assert_eq!(metrics.total_prompt_tokens, Some(300));
+        assert_eq!(metrics.total_completion_tokens, Some(20));
+
+        // Dispatch step carries ToolCall(Agent) + subagent ref.
+        let tc = &root.steps[1].tool_calls.as_ref().unwrap()[0];
+        assert_eq!(tc.function_name, "Agent");
+        assert_eq!(tc.arguments["subagent_type"], "cost-waste");
+        let refs = root.steps[1].observation.as_ref().unwrap().results[0]
+            .subagent_trajectory_ref
+            .as_ref()
+            .unwrap();
+        assert_eq!(refs[0].trajectory_id.as_deref(), Some("cost-waste-def"));
+        assert_eq!(
+            refs[0].session_id.as_deref(),
+            Some("opt:target-1:subagent:cost-waste-def")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

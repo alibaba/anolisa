@@ -25,6 +25,7 @@ pub(super) enum SlashCommand<'a> {
     Info(SlashInfoCommand),
     Health,
     Status,
+    Stats(&'a str),
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
@@ -85,7 +86,10 @@ impl<'a> SlashCommand<'a> {
             }
             "/debug" => Some(Self::Debug(parts.next())),
             "/health" => Some(Self::Health),
-            "/status" => Some(Self::Status),
+            "/status" | "/about" => Some(Self::Status),
+            "/stats" => Some(Self::Stats(
+                input.strip_prefix("/stats").unwrap_or_default().trim(),
+            )),
             "/extensions" => {
                 let args = input
                     .strip_prefix("/extensions")
@@ -148,6 +152,8 @@ fn parser_owned_command(token: &str) -> bool {
             | "/debug"
             | "/health"
             | "/status"
+            | "/about"
+            | "/stats"
             | "/extensions"
             | "/skills"
             | "/session"
@@ -240,12 +246,27 @@ mod tests {
     }
 
     #[test]
+    fn status_about_and_stats_parse_as_read_only_commands() {
+        for command in ["/status", "/about"] {
+            assert!(
+                matches!(SlashCommand::parse(command), Ok(Some(SlashCommand::Status))),
+                "{command}"
+            );
+        }
+        match SlashCommand::parse("/stats tools") {
+            Ok(Some(SlashCommand::Stats(arguments))) => assert_eq!(arguments, "tools"),
+            _ => panic!("/stats tools did not parse as stats"),
+        }
+    }
+
+    #[test]
     fn quoted_arguments_are_rejected_for_parser_owned_commands() {
         for command in [
             "/mode approval \"trust confirm\"",
             "/mode approval 'trust confirm'",
             "/config language \"en US\"",
             "/health \"quick\"",
+            "/stats \"model\"",
             "/recommendations \"on\"",
         ] {
             assert!(

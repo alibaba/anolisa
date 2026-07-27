@@ -1,12 +1,12 @@
 import React, { Fragment, useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
-  fetchSessions,
+  fetchOptimizeHistory,
   fetchOptimizeResults,
   runOptimizeDimension,
   ApiRequestError,
 } from '../utils/apiClient';
-import type { SessionSummary } from '../utils/apiClient';
+import type { OptimizeHistoryEntry } from '../utils/apiClient';
 import type {
   AccIssue,
   AccuracyResult,
@@ -15,15 +15,16 @@ import type {
   Failure,
   PerfReport,
   PerfStats,
+  TrajectorySummary,
   WasteReport,
 } from '../types/optimization';
 import TokenFlameChart from '../components/TokenFlameChart';
-import { OptimizationSettings } from '../components/OptimizationSettings';
 
 // ── 通用状态类型 ──────────────────────────────────────────────────────────────
 
 type DimState = 'idle' | 'loading' | 'done' | 'error';
 type AnalysisProgress = {
+  summary: DimState;
   perf: DimState;
   perfIssues: DimState;
   cost: DimState;
@@ -65,10 +66,6 @@ function formatSecs(s: number): string {
     return `${m}m ${sec}s`;
   }
   return `${s.toFixed(1)}s`;
-}
-
-function fmtTokens(n: number): string {
-  return n.toLocaleString();
 }
 
 function shortId(id: string, len = 20): string {
@@ -147,6 +144,65 @@ function IdleBlock({ label }: { label: string }) {
         该维度尚未分析 —— 点击右上角「开始分析」运行。
       </div>
     </section>
+  );
+}
+
+// ── 轨迹摘要（LLM 叙事）──────────────────────────────────────────────────────
+
+/**
+ * 会话叙事摘要卡片：目标 / 过程 / 结果。
+ *
+ * 摘要完全依赖 LLM，所以 LLM 未配置、调用失败或返回空内容时整块不渲染
+ * （不做非 LLM 兜底），避免在页面顶部留一块空壳。
+ */
+function SummaryCard({ state, summary }: { state: DimState; summary?: TrajectorySummary | null }) {
+  if (state === 'loading') {
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 mt-4 px-6 py-5 flex items-center gap-3">
+        <Spinner size={18} />
+        <span className="text-gray-500 font-mono text-[13px]">正在生成轨迹摘要…</span>
+      </div>
+    );
+  }
+
+  const hasContent =
+    !!summary && (!!summary.goal?.trim() || summary.process?.length > 0 || !!summary.outcome?.trim());
+  if (state !== 'done' || !hasContent) return null;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 mt-4 px-6 py-5">
+      <div className="flex items-center gap-2 mb-3">
+        <h2 className="text-sm font-semibold text-gray-700">轨迹摘要</h2>
+        <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">
+          LLM 生成
+        </span>
+      </div>
+
+      {summary.goal?.trim() && (
+        <div className="flex gap-3 text-sm">
+          <span className="text-gray-400 flex-shrink-0 w-8">目标</span>
+          <span className="text-gray-900">{summary.goal}</span>
+        </div>
+      )}
+
+      {summary.process?.length > 0 && (
+        <div className="flex gap-3 text-sm mt-2">
+          <span className="text-gray-400 flex-shrink-0 w-8">过程</span>
+          <ol className="list-decimal list-inside space-y-1 text-gray-700 m-0">
+            {summary.process.map((step, i) => (
+              <li key={i}>{step}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {summary.outcome?.trim() && (
+        <div className="flex gap-3 text-sm mt-2">
+          <span className="text-gray-400 flex-shrink-0 w-8">结果</span>
+          <span className="text-gray-900">{summary.outcome}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -548,7 +604,7 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
           <table className="w-full table-fixed text-sm">
             <thead>
               <tr className="border-b border-gray-200">
-                <th className="w-[90px] text-left pb-2 pr-3 text-xs font-semibold text-gray-600">工具</th>
+                <th className="w-[110px] text-left pb-2 pr-3 text-xs font-semibold text-gray-600">工具</th>
                 <th className="w-[70px] text-left pb-2 pr-3 text-xs font-semibold text-gray-600">耗时</th>
                 <th className="text-left pb-2 text-xs font-semibold text-gray-600">命令</th>
               </tr>
@@ -563,7 +619,7 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
               ) : (
                 perf.top_slow.slice(0, 5).map((call, i) => (
                   <tr key={i}>
-                    <td className="py-2 pr-3 whitespace-nowrap text-gray-800">{call.name}</td>
+                    <td title={call.name} className="py-2 pr-3 whitespace-nowrap overflow-hidden text-ellipsis text-gray-800">{call.name}</td>
                     <td className={`py-2 pr-3 whitespace-nowrap ${call.err ? 'text-red-500' : 'text-gray-600'}`}>
                       {formatSecs(call.dur)}{call.err ? ' ✗' : ''}
                     </td>
@@ -759,9 +815,11 @@ const EMPTY_REPORT: AnalysisReport = {
   perf_issues: null,
   cost: null,
   cost_waste: null,
+  summary: null,
 };
 
 const IDLE_PROGRESS: AnalysisProgress = {
+  summary: 'idle',
   perf: 'idle',
   perfIssues: 'idle',
   cost: 'idle',
@@ -769,7 +827,7 @@ const IDLE_PROGRESS: AnalysisProgress = {
   accuracy: 'idle',
 };
 
-function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string; onOpenSettings: () => void }) {
+function SessionAnalysisView({ sessionId }: { sessionId: string }) {
   const navigate = useNavigate();
   const [report, setReport] = useState<AnalysisReport>(EMPTY_REPORT);
   const [progress, setProgress] = useState<AnalysisProgress>(IDLE_PROGRESS);
@@ -797,8 +855,10 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
           perf_issues: data.perf_issues,
           cost: data.cost,
           cost_waste: data.cost_waste,
+          summary: data.summary,
         });
         setProgress({
+          summary: data.summary ? 'done' : 'idle',
           perf: data.perf ? 'done' : 'idle',
           perfIssues: data.perf_issues ? 'done' : 'idle',
           cost: data.cost ? 'done' : 'idle',
@@ -824,9 +884,17 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
   // 渐进式分析：并行触发 5 个维度，每个维度独立更新 loading/done/error
   const runAnalysis = useCallback(() => {
     setReport(EMPTY_REPORT);
-    setProgress({ perf: 'loading', perfIssues: 'loading', cost: 'loading', costWaste: 'loading', accuracy: 'loading' });
+    setProgress({ summary: 'loading', perf: 'loading', perfIssues: 'loading', cost: 'loading', costWaste: 'loading', accuracy: 'loading' });
     setAnalyzeError(null);
     setLlmNotConfigured(false);
+
+    // summary — 叙事摘要，单次 LLM 调用，数秒
+    runOptimizeDimension<TrajectorySummary>(sessionId, 'summary')
+      .then((data) => {
+        setReport((prev) => ({ ...prev, summary: data }));
+        setProgress((prev) => ({ ...prev, summary: 'done' }));
+      })
+      .catch((e) => { handleDimError(e); setProgress((prev) => ({ ...prev, summary: 'error' })); });
 
     // perf — 纯计算，毫秒级
     runOptimizeDimension<PerfStats>(sessionId, 'perf')
@@ -906,12 +974,6 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
         </div>
         <div className="ml-auto flex items-center gap-2">
           <button
-            onClick={onOpenSettings}
-            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-sm transition-colors"
-          >
-            ⚙️ LLM 设置
-          </button>
-          <button
             onClick={runAnalysis}
             disabled={running || loadingResults}
             className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
@@ -921,12 +983,18 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
         </div>
       </div>
 
+      {/* ── 轨迹摘要（LLM 未配置 / 失败 / 空内容时整块不渲染）── */}
+      {!llmNotConfigured && <SummaryCard state={progress.summary} summary={report.summary} />}
+
       {/* ── LLM 未配置提示 ── */}
       {llmNotConfigured && (
         <div className="mt-4 bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded-lg text-sm flex items-center gap-2 flex-wrap">
-          <span>LLM 尚未配置 —— 性能策略 / 成本浪费 / 准确性维度需要调用 LLM。</span>
-          <button onClick={onOpenSettings} className="underline font-medium hover:text-yellow-900">
-            前往 LLM 设置
+          <span>LLM 尚未配置 —— 摘要 / 性能策略 / 成本浪费 / 准确性维度需要调用 LLM。</span>
+          <button
+            onClick={() => navigate('/settings')}
+            className="underline font-medium hover:text-yellow-900"
+          >
+            前往设置
           </button>
         </div>
       )}
@@ -947,17 +1015,6 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
         {report.cost ? ` · ${report.cost.total_events} 事件` : ''}
       </div>
 
-      {/* ── 提取结果 ── */}
-      {progress.accuracy === 'done' && report.extraction.final_answer && (
-        <div className="mb-4 bg-white rounded-lg shadow border border-green-200 p-4">
-          <p className="font-mono text-xs text-gray-600 m-0">
-            <b>提取结果：</b>
-            {report.extraction.final_answer.length > 200
-              ? [...report.extraction.final_answer].slice(0, 200).join('') + '...'
-              : report.extraction.final_answer}
-          </p>
-        </div>
-      )}
 
       {/* ── 内容 ── */}
       {loadingResults ? (
@@ -978,130 +1035,150 @@ function SessionAnalysisView({ sessionId, onOpenSettings }: { sessionId: string;
   );
 }
 
-// ── 会话选择列表 ──────────────────────────────────────────────────────────────
+// ── 会话入口（ID 直达）─────────────────────────────────────────────────────────
+// 会话发现统一由「🗂️ 会话列表」页负责（它同时覆盖 eBPF 捕获的会话和 collector
+// 采集的轨迹）。这里只保留 ID 直达输入框，避免两处列表口径不一致：优化分析后端
+// 支持 genai_events.db 与 trajectories.db 两个来源，而 /api/sessions 只有前者。
 
-const RANGE_OPTIONS = [
-  { label: '最近 24 小时', hours: 24 },
-  { label: '最近 7 天', hours: 24 * 7 },
-  { label: '最近 30 天', hours: 24 * 30 },
-];
+/** 维度键 → 中文标签（与分析页各 section 的叫法保持一致）*/
+const DIM_LABELS: Record<string, string> = {
+  summary: '摘要',
+  perf: '性能',
+  perf_issues: '性能策略',
+  cost: '成本',
+  cost_waste: '成本浪费',
+  accuracy: '准确性',
+};
 
-function SessionListView({ onOpenSettings }: { onOpenSettings: () => void }) {
+/** 维度标签配色：复用 SEC_TAG_CLS 的三色语义（准确性绿 / 性能蓝 / 成本橙），摘要用中性灰 */
+const DIM_TAG_CLS: Record<string, string> = {
+  summary: 'bg-gray-100 text-gray-600',
+  perf: SEC_TAG_CLS.perf,
+  perf_issues: SEC_TAG_CLS.perf,
+  cost: SEC_TAG_CLS.cost,
+  cost_waste: SEC_TAG_CLS.cost,
+  accuracy: SEC_TAG_CLS.acc,
+};
+
+function SessionEntryView() {
   const navigate = useNavigate();
-  const [rangeHours, setRangeHours] = useState(24 * 7);
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [input, setInput] = useState('');
+  const [history, setHistory] = useState<OptimizeHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const trimmed = input.trim();
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    const now = Date.now();
-    const startNs = (now - rangeHours * 3600 * 1000) * 1_000_000;
-    const endNs = now * 1_000_000;
-    fetchSessions(startNs, endNs)
-      .then((data) => {
-        if (cancelled) return;
-        // 最近活跃在前
-        setSessions([...data].sort((a, b) => b.last_seen_ns - a.last_seen_ns));
-      })
+    fetchOptimizeHistory()
+      .then((data) => { if (!cancelled) setHistory(data); })
       .catch((e) => { if (!cancelled) setError(userFacingError(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [rangeHours]);
+  }, []);
+
+  const go = () => {
+    if (!trimmed) return;
+    navigate(`/optimization/${encodeURIComponent(trimmed)}`);
+  };
 
   return (
     <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-4">
-      {/* ── Toolbar ── */}
+      {/* ── Toolbar：沿用原会话列表页的工具栏结构（标题在左，操作在右）── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-center gap-3">
         <div>
           <h1 className="text-lg font-semibold text-gray-900">优化分析</h1>
-          <p className="text-xs text-gray-400 mt-0.5">选择一个会话，运行准确性 / 性能 / 成本三维度剖析</p>
+          <p className="text-xs text-gray-400 mt-0.5">输入会话 ID，运行准确性 / 性能 / 成本三维度剖析</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <select
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-            value={rangeHours}
-            onChange={(e) => setRangeHours(Number(e.target.value))}
-          >
-            {RANGE_OPTIONS.map((o) => (
-              <option key={o.hours} value={o.hours}>{o.label}</option>
-            ))}
-          </select>
+          <input
+            type="text"
+            aria-label="会话 ID"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') go(); }}
+            placeholder="粘贴会话 ID，回车开始分析"
+            className="w-[320px] border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
           <button
-            onClick={onOpenSettings}
-            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-sm transition-colors"
+            onClick={go}
+            disabled={!trimmed}
+            className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 whitespace-nowrap"
           >
-            ⚙️ LLM 设置
+            开始分析
           </button>
         </div>
       </div>
 
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-          加载会话失败: {error}
-        </div>
-      )}
-
-      {/* ── Session table ── */}
+      {/* ── 历史分析记录 ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        {loading ? (
+        <div className="px-4 lg:px-6 py-3 border-b border-gray-200 bg-gray-50 flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-gray-700">历史分析记录</h2>
+          {!loading && !error && history.length > 0 && (
+            <span className="text-xs text-gray-400">共 {history.length} 条</span>
+          )}
+        </div>
+
+        {error ? (
+          <div className="px-4 lg:px-6 py-4 text-sm text-red-700 bg-red-50 border-b border-red-200">
+            加载历史记录失败: {error}
+          </div>
+        ) : loading ? (
           <div className="flex items-center gap-3 py-16 justify-center text-gray-400">
             <Spinner size={20} />
-            <span className="text-sm">加载会话列表...</span>
+            <span className="text-sm">加载历史分析记录...</span>
           </div>
-        ) : sessions.length === 0 ? (
+        ) : history.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-gray-400">
             <div className="text-4xl mb-3">📭</div>
-            <p className="text-sm">所选时间范围内没有会话</p>
+            <p className="text-sm">还没有分析记录</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[800px]">
+            <table className="w-full min-w-[720px]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">会话 ID</th>
-                  <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">Agent</th>
-                  <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">模型</th>
-                  <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">对话数</th>
-                  <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">Tokens</th>
-                  <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">最后活跃</th>
+                  <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">已分析维度</th>
+                  <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">首次分析</th>
+                  <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">最近更新</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {sessions.map((s) => (
+                {history.map((h) => (
                   <tr
-                    key={s.session_id}
+                    key={h.session_id}
                     className="hover:bg-blue-50 transition-colors cursor-pointer"
-                    onClick={() => navigate(`/optimization/${encodeURIComponent(s.session_id)}`)}
+                    onClick={() => navigate(`/optimization/${encodeURIComponent(h.session_id)}`)}
                   >
                     <td className="px-4 lg:px-6 py-3.5">
-                      <span className="font-mono text-sm text-gray-800" title={s.session_id}>
-                        {shortId(s.session_id)}
+                      <span className="font-mono text-sm text-gray-800" title={h.session_id}>
+                        {shortId(h.session_id)}
                       </span>
                     </td>
-                    <td className="px-4 lg:px-6 py-3.5 text-sm text-gray-700">
-                      <span className="truncate block max-w-[160px]" title={s.agent_name ?? ''}>
-                        {s.agent_name ?? '-'}
-                      </span>
-                    </td>
-                    <td className="px-4 lg:px-6 py-3.5 text-sm text-gray-500">
-                      <span className="truncate block max-w-[180px] font-mono text-xs" title={s.model ?? ''}>
-                        {s.model ?? '-'}
-                      </span>
-                    </td>
-                    <td className="px-4 lg:px-6 py-3.5 text-sm text-gray-900 text-right">
-                      {s.conversation_count}
-                    </td>
-                    <td className="px-4 lg:px-6 py-3.5 text-sm text-right">
-                      <span className="text-gray-900">{fmtTokens(s.total_input_tokens + s.total_output_tokens)}</span>
-                      <span className="text-xs text-gray-400 ml-1.5">
-                        (in {fmtTokens(s.total_input_tokens)} / out {fmtTokens(s.total_output_tokens)})
-                      </span>
+                    <td className="px-4 lg:px-6 py-3.5">
+                      <div className="flex flex-wrap gap-1">
+                        {h.dimensions.length === 0 ? (
+                          <span className="text-xs text-gray-400">-</span>
+                        ) : (
+                          h.dimensions.map((d) => (
+                            <span
+                              key={d}
+                              className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                DIM_TAG_CLS[d] ?? 'bg-gray-100 text-gray-600'
+                              }`}
+                            >
+                              {DIM_LABELS[d] ?? d}
+                            </span>
+                          ))
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 lg:px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">
-                      {fmtNs(s.last_seen_ns)}
+                      {fmtNs(h.created_at_ns)}
+                    </td>
+                    <td className="px-4 lg:px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">
+                      {fmtNs(h.updated_at_ns)}
                     </td>
                   </tr>
                 ))}
@@ -1118,16 +1195,6 @@ function SessionListView({ onOpenSettings }: { onOpenSettings: () => void }) {
 
 export const OptimizationPage: React.FC = () => {
   const { sessionId } = useParams<{ sessionId: string }>();
-  const [showSettings, setShowSettings] = useState(false);
 
-  return (
-    <>
-      {sessionId ? (
-        <SessionAnalysisView sessionId={sessionId} onOpenSettings={() => setShowSettings(true)} />
-      ) : (
-        <SessionListView onOpenSettings={() => setShowSettings(true)} />
-      )}
-      {showSettings && <OptimizationSettings onClose={() => setShowSettings(false)} />}
-    </>
-  );
+  return sessionId ? <SessionAnalysisView sessionId={sessionId} /> : <SessionEntryView />;
 };

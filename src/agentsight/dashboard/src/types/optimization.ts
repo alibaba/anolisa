@@ -207,6 +207,15 @@ export interface WasteReport {
   model: string;
 }
 
+// ── Trajectory summary（LLM 叙事摘要）─────────────────────────────────────
+
+/** 一次 LLM 调用产出的会话叙事摘要：目标 / 过程 / 结果 */
+export interface TrajectorySummary {
+  goal: string;
+  process: string[];
+  outcome: string;
+}
+
 // ── Aggregated report ───────────────────────────────────────────────────
 
 export interface AnalysisReport {
@@ -217,6 +226,7 @@ export interface AnalysisReport {
   perf_issues?: PerfReport | null;
   cost: CostStats | null;
   cost_waste?: WasteReport | null;
+  summary?: TrajectorySummary | null;
 }
 
 /** Response of GET /api/optimize/sessions/{id}/results */
@@ -227,6 +237,7 @@ export interface OptimizeSessionResults {
   cost: CostStats | null;
   cost_waste: WasteReport | null;
   accuracy: AccuracyResult | null;
+  summary: TrajectorySummary | null;
   created_at_ns?: number;
   updated_at_ns?: number;
 }
