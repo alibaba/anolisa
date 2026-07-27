@@ -152,6 +152,41 @@ fn bash_extdebug_does_not_leak_via_exported_bashopts() {
 }
 
 #[test]
+fn bash_extdebug_disabled_before_profile_sourcing() {
+    let script = bash_marker_script();
+
+    // GH-1848: when BASHOPTS is readonly without export (Alinux3 security
+    // hardening: `declare -r BASHOPTS=...extdebug...`), bash imports extdebug
+    // at startup but `export -n BASHOPTS` is a no-op (nothing to unexport).
+    // With extdebug active, bash re-executes every ENOEXEC script through
+    // $DEBUGGER (default: /usr/share/bashdb/bashdb-main.inc), which on hosts
+    // without bashdb emits two error lines at every prompt.  The marker must
+    // explicitly disable extdebug *before* sourcing any profile file so the
+    // bashdb re-exec path is blocked during rc file evaluation.
+    let early_disable = script
+        .find("shopt -u extdebug 2>/dev/null || true")
+        .expect("early shopt -u extdebug should exist before profile sourcing");
+    let profile_source = script
+        .find("source /etc/profile")
+        .expect("profile sourcing should exist");
+    let shopt_enable = script
+        .find("shopt -s extdebug")
+        .expect("shopt -s extdebug should exist");
+
+    assert!(
+        early_disable < profile_source,
+        "shopt -u extdebug must precede profile sourcing to block bashdb ENOEXEC path"
+    );
+    assert!(
+        early_disable < shopt_enable,
+        "shopt -u extdebug must precede shopt -s extdebug (the hook-setup re-enable)"
+    );
+
+    // zsh has no BASHOPTS/extdebug mechanism; its marker must not reference it.
+    assert!(!zsh_marker_script().contains("shopt -u extdebug"));
+}
+
+#[test]
 fn bash_preexec_marker_skips_completion_with_comp_type_guard() {
     let script = bash_marker_script();
 

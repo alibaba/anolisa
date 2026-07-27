@@ -10,6 +10,17 @@ COSH_OSC_MARKER_LOADED=1
 if [[ $- != *i* ]]; then
   return 0 2>/dev/null || exit 0
 fi
+# Disable extdebug inherited from BASHOPTS as early as possible.  When BASHOPTS
+# contains extdebug (e.g. Alinux3 security audit with `declare -r BASHOPTS`),
+# bash enables it on startup.  With extdebug on, bash re-executes every ENOEXEC
+# script through $DEBUGGER (default: /usr/share/bashdb/bashdb-main.inc); on
+# hosts without bashdb this emits two error lines at every prompt.  Blocking
+# this path before profile sourcing ensures sourced rc files (e.g.
+# /etc/sysconfig/bash-prompt-history) do not trigger the bashdb fallback.  The
+# marker re-enables extdebug in the hook-setup block below for DEBUG-trap
+# return-value suppression; that re-enable happens after the BASHOPTS export
+# attribute is dropped and no profile file is sourced there.
+shopt -u extdebug 2>/dev/null || true
 export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
 export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
 _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE="$(declare -f command_not_found_handle 2>/dev/null || true)"
