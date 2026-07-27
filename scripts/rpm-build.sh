@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, anolisa, cosh-ng
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, ktuner, anolisa, cosh-ng
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -27,6 +27,7 @@ SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
 MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
+KTUNER_DIR="${ROOT_DIR}/src/ktuner"
 COSH_DIR="${ROOT_DIR}/src/cosh-ng"
 SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
 
@@ -778,6 +779,85 @@ EOF
 }
 
 # =============================================================================
+# ktuner
+# =============================================================================
+build_ktuner() {
+    log "=========================================="
+    log "Building RPM: ktuner"
+    log "=========================================="
+
+    local spec_in="${KTUNER_DIR}/ktuner.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version = ' "${KTUNER_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        err "Cannot determine ktuner version. Set VERSION env or ensure Cargo.toml/spec exists."
+        return 1
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+    local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    log "Step 1/3: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "$pkg_dir"
+
+    tar -cf - -C "$KTUNER_DIR" \
+        --exclude='target' \
+        --exclude='vendor' \
+        --exclude='.cargo' \
+        . | tar -xf - -C "$pkg_dir"
+
+    if [ -L "${pkg_dir}/LICENSE" ] && [ -f "${ROOT_DIR}/LICENSE" ]; then
+        rm -f "${pkg_dir}/LICENSE"
+        cp -p "${ROOT_DIR}/LICENSE" "${pkg_dir}/LICENSE"
+    fi
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    log "Step 2/3: Creating vendor tarball ${vendor_tarball_name}..."
+    local vendor_tmp
+    vendor_tmp=$(mktemp -d)
+    mkdir -p "${vendor_tmp}/.cargo"
+    (
+        cd "$KTUNER_DIR"
+        cargo vendor --locked "${vendor_tmp}/vendor" >/dev/null
+    )
+    cat > "${vendor_tmp}/.cargo/config.toml" <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+EOF
+    tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" vendor .cargo
+    rm -rf "$vendor_tmp"
+
+    log "Step 3/3: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "ktuner RPM built successfully"
+}
+
+# =============================================================================
 # cosh-ng
 # =============================================================================
 build_cosh_ng() {
@@ -1144,6 +1224,7 @@ usage() {
     echo "  tokenless                 Build tokenless RPM"
     echo "  agent-memory              Build agent-memory RPM"
     echo "  skillfs                   Build skillfs RPM"
+    echo "  ktuner                    Build ktuner RPM"
     echo "  anolisa                   Build anolisa RPM"
     echo "  cosh-ng                   Build cosh-ng RPM"
     echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
@@ -1202,6 +1283,9 @@ case "$TARGET" in
     skillfs)
         build_skillfs
         ;;
+    ktuner)
+        build_ktuner
+        ;;
     anolisa)
         build_anolisa
         ;;
@@ -1234,6 +1318,7 @@ case "$TARGET" in
         build_tokenless
         build_agent_memory
         build_skillfs
+        build_ktuner
         build_anolisa
         build_cosh_ng
         ;;

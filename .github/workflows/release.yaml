@@ -12,6 +12,7 @@ on:
       - 'ckpt/v*'
       - 'memory/v*'
       - 'skillfs/v*'
+      - 'ktuner/v*'
       - 'anolisa/v*'
 
 permissions:
@@ -60,6 +61,7 @@ jobs:
             ckpt)     COMPONENT="ws-ckpt" ;;
             memory)   COMPONENT="agent-memory" ;;
             skillfs)  COMPONENT="skillfs" ;;
+            ktuner)   COMPONENT="ktuner" ;;
             anolisa)  COMPONENT="anolisa" ;;
             *)
               echo "Unknown scope: $SCOPE"
@@ -306,6 +308,7 @@ jobs:
             ws-ckpt)        PREFIX="ckpt/v" ;;
             agent-memory)   PREFIX="memory/v" ;;
             skillfs)        PREFIX="skillfs/v" ;;
+            ktuner)         PREFIX="ktuner/v" ;;
             anolisa)        PREFIX="anolisa/v" ;;
           esac
 
