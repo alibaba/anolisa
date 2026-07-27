@@ -79,6 +79,9 @@ macro_rules! help_registry_ids {
             SlashHooksAgentUnavailable,
             SlashExtensionsEmptyBody,
             SlashSkillsEmptyBody,
+            HelpSummaryMcp,
+            SlashMcpTitle,
+            SlashMcpEmptyBody,
         );
     };
 }

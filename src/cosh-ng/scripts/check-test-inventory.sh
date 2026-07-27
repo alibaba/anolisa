@@ -53,7 +53,7 @@ check_overlap_ceiling() {
 # These are regression floors, not exact snapshots. Feature branches must not
 # update them when adding tests; raise them periodically in a dedicated change.
 check_source_floor cosh-types 24
-check_source_floor cosh-platform 279
+check_source_floor cosh-platform 280
 check_source_floor cosh-cli 75
 check_source_floor cosh-core 696
 check_source_floor cosh-shell 2573
