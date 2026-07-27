@@ -131,6 +131,32 @@ Core 以 JSON 格式将事件数据写入钩子进程的 stdin：
 
 Shell 端负责渲染通知卡片。
 
+## 环境变量
+
+钩子定义可声明 `env`，只注入该钩子的子进程：
+
+```json
+{
+  "type": "command",
+  "name": "tokenless-compress-schema",
+  "command": "python3 ${extensionPath}/hooks/compress_schema.py",
+  "env": { "TOKENLESS_AGENT_ID": "cosh-ng" }
+}
+```
+
+- 子进程默认继承宿主环境，`env` 中的同名变量覆盖继承值
+- 宿主进程自身永不被修改（不调用 `setenv`）
+- 变量名须符合 POSIX 规则 `[A-Za-z_][A-Za-z0-9_]*`。严格 `schemaVersion: 1`
+  扩展 manifest 会以 `extension_hook_env_name_invalid` 直接拒绝，问题在安装期暴露；
+  配置文件与 legacy manifest 的钩子在启动子进程时再校验一次作为兜底：丢弃该条目、
+  钩子照常执行，且只记录变量名（绝不记录取值）
+- `${extensionPath}` / `${workspacePath}` 只在取值中替换，变量名按字面量处理
+- 宿主在声明的 env map 之后注入 `COSH_RUNTIME=cosh-ng` 与 `COSH_NG_VERSION`，
+  因此其优先级高于同名 `env` 条目，钩子可据此识别运行时（用于统计归因等）。
+  这是协作式信号，**不是**安全边界——同一个 manifest 也控制 `command`，
+  可以在自己的 shell 里重新赋值或 unset 这些变量，因此任何安全相关逻辑都不得依赖它们
+- `env` 属于可执行能力，会计入扩展的 capability 指纹：新增或修改 `env` 会触发重新确认
+
 ## 扩展钩子
 
 通过 `cosh-extension.json` 注册的钩子与配置文件中的钩子合并，使用相同的执行协议。参见 [extensions.md](extensions.md)。

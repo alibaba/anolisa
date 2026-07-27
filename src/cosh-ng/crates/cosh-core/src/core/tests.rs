@@ -252,6 +252,7 @@ fn compress_schema_hook(command: &str) -> crate::config::HookDefinition {
         matcher: None,
         timeout: Some(10_000),
         sequential: None,
+        env: Default::default(),
     }
 }
 
@@ -1442,6 +1443,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: Default::default(),
         }],
         post_tool_use: vec![config::HookDefinition {
             command: "echo '{\"decision\":\"block\",\"reason\":\"post hook should not run\"}'"
@@ -1450,6 +1452,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: Default::default(),
         }],
         ..Default::default()
     };

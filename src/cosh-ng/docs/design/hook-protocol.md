@@ -9,9 +9,9 @@ Related documents: [user guide](../../../../docs/user-guide/en/user-entrypoint/c
 
 Hooks are external processes. cosh-ng writes one JSON object to the child's stdin and reads one
 JSON object from its stdout, so the wire shape — not any in-process type — is the compatibility
-surface. This document fixes the part of that surface that lets a hook *change* what the runtime does,
-rather than merely observe it: `BeforeModel` tool declaration rewriting. It is deliberately
-narrower than "let the hook patch the request".
+surface. This document fixes the two parts of that surface that let a hook *change* what the
+runtime does, rather than merely observe it: `BeforeModel` tool declaration rewriting and hook
+`env`. Both are deliberately narrower than "let the hook patch the request".
 
 The shape follows copilot-shell's Hook Translator (`llm_request.model`, `llm_request.messages`,
 `llm_request.config.tools`), so one hook binary can read either host's input. Field positions are
@@ -81,6 +81,42 @@ The declaration subtree is exempt from key-based redaction in **both** direction
 property named `api_key` is a declaration, not a secret; replacing it with `"<redacted>"` would hand
 the hook — or the provider — a corrupt schema. The subtree still gets pattern-based scrubbing of its
 string leaves, so a real secret *shape* is removed. Messages keep the stricter key-based redaction.
+
+## Hook env
+
+A hook definition may declare `env`, applied to that hook's child process only.
+
+Precedence, lowest to highest:
+
+1. inherited parent environment
+2. hook manifest `env`
+3. host attribution: `COSH_RUNTIME=cosh-ng`, `COSH_NG_VERSION`
+
+`std::env::set_var` is never called, so the host process is unaffected and concurrently running
+hooks cannot observe each other's values.
+
+Names must match the POSIX rule `[A-Za-z_][A-Za-z0-9_]*`. A strict `schemaVersion: 1` manifest is
+rejected at install time with `extension_hook_env_name_invalid`; config-file and legacy-manifest
+hooks are re-validated at spawn time as defence in depth, dropping the entry and logging only the
+name. Values are opaque and never logged or formatted.
+
+`env` is part of the capability fingerprint: a previously inert field became executable capability,
+so declaring or changing it must force re-consent. The key is omitted from the projection when
+empty, so extensions that never used `env` keep their existing fingerprint.
+
+### Security boundary
+
+The host variables are applied after the declared map, so they take precedence over an `env` entry
+of the same name. **They are a cooperative attribution signal, not a security boundary.** The same
+manifest owns `command`, and the hook runs under `sh -c`, so it can trivially reassign or unset them:
+
+```sh
+COSH_RUNTIME=fake python3 hook.py
+```
+
+Nothing security-relevant may depend on these variables. They exist so a cooperating hook can
+report which runtime it ran under (statistics attribution), which a shared extension manifest
+cannot express on its own.
 
 ## Trade-offs
 

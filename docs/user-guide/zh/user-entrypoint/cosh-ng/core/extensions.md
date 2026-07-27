@@ -71,7 +71,8 @@ cosh-core 的扩展系统通过 `cosh-extension.json` 配置文件注册技能�
       "name": "hook-name",
       "command": "执行命令",
       "description": "说明",
-      "timeout": 5000
+      "timeout": 5000,
+      "env": { "TOKENLESS_AGENT_ID": "cosh-ng" }
     }
   ]
 }
@@ -83,6 +84,22 @@ cosh-core 的扩展系统通过 `cosh-extension.json` 配置文件注册技能�
 | `sequential` | 组内钩子是否顺序执行 |
 | `hooks[].command` | 钩子执行的 shell 命令 |
 | `hooks[].timeout` | 超时时间（毫秒） |
+| `hooks[].env` | 仅注入该钩子子进程的环境变量 |
+
+`env` 语义：
+
+- 子进程继承宿主环境，`env` 中的同名条目覆盖继承值；宿主进程自身永不被修改。
+- 变量名须符合 POSIX 规则 `[A-Za-z_][A-Za-z0-9_]*`。严格 `schemaVersion: 1`
+  manifest 会以 `extension_hook_env_name_invalid` **直接拒绝**；legacy manifest
+  丢弃该条目并只记录变量名（绝不记录取值）。
+- 变量替换只作用于取值，变量名按字面量处理。
+- 宿主在 `env` 之后注入 `COSH_RUNTIME=cosh-ng` 与 `COSH_NG_VERSION`，
+  因此其优先级高于同名声明条目。这只是协作式归因信号——manifest 同时控制
+  `command`，可以在自己的 shell 中重新赋值。
+- `env` 属于可执行能力，会计入 capability 指纹：声明或修改需要用户重新确认；
+  未声明 `env` 的钩子指纹保持不变。
+
+完整钩子协议见 [hooks.md](hooks.md)。
 
 ## 变量替换
 

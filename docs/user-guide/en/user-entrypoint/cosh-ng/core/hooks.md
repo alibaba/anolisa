@@ -138,6 +138,39 @@ Notifications generated after hook execution are delivered to Shell via JSONL ou
 
 Shell is responsible for rendering notification cards.
 
+## Environment Variables
+
+A hook definition may declare `env`, injected into that hook's child process only:
+
+```json
+{
+  "type": "command",
+  "name": "tokenless-compress-schema",
+  "command": "python3 ${extensionPath}/hooks/compress_schema.py",
+  "env": { "TOKENLESS_AGENT_ID": "cosh-ng" }
+}
+```
+
+- The child inherits the host environment by default; an entry in `env`
+  overrides an inherited value of the same name
+- The host process itself is never modified (no `setenv` call)
+- Names must follow the POSIX rule `[A-Za-z_][A-Za-z0-9_]*`. A strict
+  `schemaVersion: 1` extension manifest is rejected outright with
+  `extension_hook_env_name_invalid`, so the problem surfaces at install time.
+  Config-file and legacy-manifest hooks are validated again at spawn time as a
+  defence in depth: the offending entry is dropped, the hook still runs, and
+  only the name is logged (values are never logged)
+- `${extensionPath}` / `${workspacePath}` are substituted in values only; names
+  are treated literally
+- The host injects `COSH_RUNTIME=cosh-ng` and `COSH_NG_VERSION` after the
+  declared map, so they take precedence over an `env` entry of the same name and
+  hooks can identify the runtime (e.g. for statistics attribution). This is a
+  cooperative signal, **not** a security boundary — the same manifest also owns
+  `command` and can reassign or unset these variables inside its own shell, so
+  nothing security-relevant may depend on them
+- `env` is executable capability and is part of the extension capability
+  fingerprint: adding or changing it triggers re-consent
+
 ## Extension Hooks
 
 Hooks registered via `cosh-extension.json` are merged with configuration file hooks and use the same execution protocol. See [extensions.md](extensions.md).

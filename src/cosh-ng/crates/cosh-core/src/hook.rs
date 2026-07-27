@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use regex::Regex;
@@ -837,9 +837,10 @@ impl HookSystem {
                 .map(|(i, def)| {
                     let json = input_json.clone();
                     let cmd = def.command.clone();
+                    let env = def.env.clone();
                     let timeout = Self::timeout_for(def);
                     async move {
-                        let output = Self::run_hook_cmd(&cmd, &json, timeout).await;
+                        let output = Self::run_hook_cmd(&cmd, &env, &json, timeout).await;
                         (i, output)
                     }
                 })
@@ -849,10 +850,15 @@ impl HookSystem {
     }
 
     async fn run_single_hook(def: &HookDefinition, input_json: &str) -> HookOutput {
-        Self::run_hook_cmd(&def.command, input_json, Self::timeout_for(def)).await
+        Self::run_hook_cmd(&def.command, &def.env, input_json, Self::timeout_for(def)).await
     }
 
-    async fn run_hook_cmd(command: &str, input_json: &str, timeout: Duration) -> HookOutput {
+    async fn run_hook_cmd(
+        command: &str,
+        env: &BTreeMap<String, String>,
+        input_json: &str,
+        timeout: Duration,
+    ) -> HookOutput {
         use tokio::process::Command;
 
         use crate::process::{output_with_timeout, OutputError};
@@ -860,6 +866,31 @@ impl HookSystem {
         let safe_command = crate::redaction::redact_text(command);
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
+
+        // `Command` inherits the parent environment by default, so declared
+        // entries override inherited values of the same name for this child
+        // only. Invalid names are dropped with the name (never the value) in
+        // the log.
+        let (valid, invalid): (Vec<_>, Vec<_>) = env
+            .iter()
+            .partition(|(name, _)| crate::config::is_valid_env_name(name));
+        if !invalid.is_empty() {
+            let names: Vec<&str> = invalid.iter().map(|(name, _)| name.as_str()).collect();
+            tracing::warn!(
+                target: "cosh_hook",
+                "Hook '{safe_command}' declares invalid env names, skipped: {}",
+                names.join(", ")
+            );
+        }
+        cmd.envs(valid);
+
+        // Host attribution, applied after the declared map so it takes
+        // precedence over an `env` entry of the same name. This is a
+        // cooperative signal, not a security boundary: the same manifest also
+        // owns `command`, so it can reassign or unset these inside the shell it
+        // asked for. Nothing security-relevant may depend on them.
+        cmd.env("COSH_RUNTIME", "cosh-ng");
+        cmd.env("COSH_NG_VERSION", env!("CARGO_PKG_VERSION"));
 
         // The deadline covers the stdin write as well: a hook that never
         // reads stdin must not stall the session, and on timeout the whole
@@ -1318,6 +1349,7 @@ mod tests {
             matcher: Some("run_shell.*".to_string()),
             timeout: None,
             sequential: None,
+            env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "run_shell_command"));
         assert!(!HookSystem::matches_tool(&def, "read_file"));
@@ -1331,6 +1363,7 @@ mod tests {
             matcher: None,
             timeout: None,
             sequential: None,
+            env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "any_tool"));
     }
@@ -1346,6 +1379,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1384,6 +1418,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: None,
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1418,6 +1453,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1443,6 +1479,7 @@ mod tests {
             matcher: Some(matcher.to_string()),
             timeout: None,
             sequential: None,
+            env: Default::default(),
         }
     }
 
@@ -1637,6 +1674,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(10_000),
                 sequential: None,
+                env: Default::default(),
             }],
             ..Default::default()
         };
@@ -1664,6 +1702,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(10_000),
                     sequential: None,
+                    env: Default::default(),
                 },
                 HookDefinition {
                     command: r#"python3 -c 'print("""{"hookSpecificOutput":{"llm_request":{"config":{"tools":[{"name":"renamed","description":"second","parameters":{"type":"object"}}]}}}}""")'"#.to_string(),
@@ -1671,6 +1710,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(10_000),
                     sequential: None,
+                    env: Default::default(),
                 },
             ],
             ..Default::default()
@@ -1801,6 +1841,7 @@ mod tests {
                 matcher: Some("^run_shell_command$".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1842,6 +1883,7 @@ mod tests {
                 matcher: Some("skill".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1883,7 +1925,9 @@ mod tests {
         let pid_file = dir.path().join("pids");
         let script = leak_script(&marker, &pid_file);
 
-        let out = HookSystem::run_hook_cmd(&script, "{}", Duration::from_millis(300)).await;
+        let out =
+            HookSystem::run_hook_cmd(&script, &BTreeMap::new(), "{}", Duration::from_millis(300))
+                .await;
         assert!(
             out.decision.is_none(),
             "timed-out hook must fall back to the default output"
@@ -1905,12 +1949,116 @@ mod tests {
         // blocked in the stdin write before the timeout even started.
         let payload = "x".repeat(1 << 20);
         let started = std::time::Instant::now();
-        let out = HookSystem::run_hook_cmd("sleep 30", &payload, Duration::from_millis(300)).await;
+        let out = HookSystem::run_hook_cmd(
+            "sleep 30",
+            &BTreeMap::new(),
+            &payload,
+            Duration::from_millis(300),
+        )
+        .await;
         assert!(out.decision.is_none());
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "stdin write must be bounded by the hook deadline"
         );
+    }
+
+    // ─── #1617: hook env tests ───────────────────────────────────────
+
+    // Runs a hook that reports `$probe`, `$COSH_RUNTIME` and
+    // `$COSH_NG_VERSION` as seen by the child, joined with `|`.
+    async fn probe_env(probe: &str, env: BTreeMap<String, String>) -> Vec<String> {
+        let config = HooksConfig {
+            enabled: true,
+            session_start: vec![HookDefinition {
+                command: format!(
+                    r#"python3 -c 'import json,os; print(json.dumps({{"systemMessage": "|".join(os.environ.get(name,"<unset>") for name in ["{probe}","COSH_RUNTIME","COSH_NG_VERSION"])}}))'"#
+                ),
+                name: Some("probe".to_string()),
+                timeout: Some(10_000),
+                env,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys.fire_session_start("s1", "/tmp").await;
+        result
+            .notifications
+            .first()
+            .expect("hook system message")
+            .message
+            .split('|')
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn hook_env_overrides_inherited_value_without_touching_the_parent() {
+        // HOME is inherited from the parent; the hook shadows it for its own
+        // child process only.
+        let inherited = std::env::var("HOME").expect("HOME is set in the test environment");
+        assert_ne!(inherited, "from-hook");
+
+        let baseline = probe_env("HOME", BTreeMap::new()).await;
+        assert_eq!(baseline[0], inherited, "child must inherit the parent env");
+
+        let fields = probe_env(
+            "HOME",
+            BTreeMap::from([("HOME".to_string(), "from-hook".to_string())]),
+        )
+        .await;
+
+        assert_eq!(fields[0], "from-hook");
+        // Host-owned attribution reaches the child.
+        assert_eq!(fields[1], "cosh-ng");
+        assert_eq!(fields[2], env!("CARGO_PKG_VERSION"));
+        // The host process itself is never mutated — no std::env::set_var.
+        assert_eq!(std::env::var("HOME").unwrap(), inherited);
+    }
+
+    // Covers precedence only. The host values are a cooperative signal, not a
+    // security boundary — the manifest also owns `command` and can reassign
+    // them inside its own shell — so this proves nothing stronger than that a
+    // declared `env` entry loses to the host's.
+    #[tokio::test]
+    async fn host_attribution_overrides_declared_hook_env() {
+        let fields = probe_env(
+            "COSH_RUNTIME",
+            BTreeMap::from([
+                ("COSH_RUNTIME".to_string(), "copilot-shell".to_string()),
+                ("COSH_NG_VERSION".to_string(), "99.99.99".to_string()),
+            ]),
+        )
+        .await;
+
+        assert_eq!(fields[1], "cosh-ng");
+        assert_eq!(fields[2], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn hook_env_with_invalid_name_is_dropped_and_hook_still_runs() {
+        let fields = probe_env(
+            "HOME",
+            BTreeMap::from([
+                ("HOME".to_string(), "kept".to_string()),
+                ("1INVALID".to_string(), "dropped".to_string()),
+                ("WITH-DASH".to_string(), "dropped".to_string()),
+            ]),
+        )
+        .await;
+
+        assert_eq!(fields[0], "kept");
+    }
+
+    #[test]
+    fn env_name_validation_follows_posix_rules() {
+        for name in ["PATH", "_UNDERSCORE", "A1", "_"] {
+            assert!(crate::config::is_valid_env_name(name), "{name}");
+        }
+        for name in ["", "1LEADING", "WITH-DASH", "WITH SPACE", "a=b", "ä"] {
+            assert!(!crate::config::is_valid_env_name(name), "{name}");
+        }
     }
 
     // ─── #1614: updated_tool_response tests ──────────────────────────
@@ -1985,6 +2133,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -2030,6 +2179,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                    env: Default::default(),
                 },
                 HookDefinition {
                     command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "second"}}))'"#.to_string(),
@@ -2037,6 +2187,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                    env: Default::default(),
                 },
             ],
             post_tool_use_failure: vec![],
@@ -2076,6 +2227,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
