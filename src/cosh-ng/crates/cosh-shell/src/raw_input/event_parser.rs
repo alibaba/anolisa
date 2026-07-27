@@ -266,7 +266,11 @@ fn at_mention_file_hint(line: &str) -> Option<String> {
 
     // Limit display to fit in terminal width
     let max_display = 8;
-    let display: Vec<&str> = candidates.iter().take(max_display).map(|s| s.as_str()).collect();
+    let display: Vec<&str> = candidates
+        .iter()
+        .take(max_display)
+        .map(|s| s.as_str())
+        .collect();
     let mut hint = display.join("  ");
     if candidates.len() > max_display {
         hint.push_str(&format!("  (+{} more)", candidates.len() - max_display));

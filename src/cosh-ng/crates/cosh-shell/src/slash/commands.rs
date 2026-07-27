@@ -4,9 +4,9 @@ use crate::slash::audit::render_audit_command;
 use crate::slash::config::render_config_command;
 use crate::slash::debug::render_debug_command;
 use crate::slash::extensions::render_extensions_command;
-use crate::slash::mcp::render_mcp_command;
 use crate::slash::health::render_health_command;
 use crate::slash::hooks::render_hooks_command;
+use crate::slash::mcp::render_mcp_command;
 use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
 };

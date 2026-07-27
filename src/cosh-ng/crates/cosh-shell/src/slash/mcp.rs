@@ -79,7 +79,11 @@ pub(super) fn render_mcp_command<W: Write>(
                     let body = if text.trim().is_empty() {
                         vec![format!(
                             "  {} \"{name}\".",
-                            tr(&i18n, &format!("{action} completed"), &format!("{action} 完成"))
+                            tr(
+                                &i18n,
+                                &format!("{action} completed"),
+                                &format!("{action} 完成")
+                            )
                         )]
                     } else {
                         vec![format!("  {text}")]
@@ -94,12 +98,7 @@ pub(super) fn render_mcp_command<W: Write>(
                 ),
             }
         }
-        _ => render_notice_panel(
-            output,
-            i18n.t(MessageId::SlashMcpTitle),
-            help(&i18n),
-            None,
-        ),
+        _ => render_notice_panel(output, i18n.t(MessageId::SlashMcpTitle), help(&i18n), None),
     }
 }
 
@@ -109,7 +108,9 @@ fn run_cosh_core_mcp(program: &str, args: &[&str]) -> Result<String, String> {
     for arg in args {
         cmd.arg(arg);
     }
-    let result = cmd.output().map_err(|e| format!("failed to run cosh-core: {e}"))?;
+    let result = cmd
+        .output()
+        .map_err(|e| format!("failed to run cosh-core: {e}"))?;
     if result.status.success() {
         Ok(String::from_utf8_lossy(&result.stdout).to_string())
     } else {
@@ -141,8 +142,14 @@ fn format_mcp_list(json_str: &str, i18n: &I18n) -> Vec<String> {
         .iter()
         .map(|server| {
             let name = server.get("server").and_then(|v| v.as_str()).unwrap_or("?");
-            let transport = server.get("transport").and_then(|v| v.as_str()).unwrap_or("?");
-            let enabled = server.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let transport = server
+                .get("transport")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let enabled = server
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let has_creds = server
                 .get("has_credentials")
                 .and_then(|v| v.as_bool())
@@ -164,20 +171,13 @@ fn format_mcp_inspection(json_str: &str, action: &str, i18n: &I18n) -> Vec<Strin
     };
     let mut lines = Vec::new();
     if let Some(server) = data.get("server").and_then(|v| v.as_str()) {
-        lines.push(format!(
-            "  {}: {server}",
-            tr(i18n, "Server", "服务器")
-        ));
+        lines.push(format!("  {}: {server}", tr(i18n, "Server", "服务器")));
     }
     if let Some(transport) = data.get("transport").and_then(|v| v.as_str()) {
         lines.push(format!("  {}: {transport}", tr(i18n, "Transport", "传输")));
     }
     if let Some(tools) = data.get("tools").and_then(|v| v.as_array()) {
-        lines.push(format!(
-            "  {}: {}",
-            tr(i18n, "Tools", "工具"),
-            tools.len()
-        ));
+        lines.push(format!("  {}: {}", tr(i18n, "Tools", "工具"), tools.len()));
         for tool in tools {
             let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let desc = tool
