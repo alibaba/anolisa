@@ -636,13 +636,13 @@ _cosh_prompt_command() {
 }
 # If BASHOPTS arrived exported from the login environment it stays exported
 # (readonly keeps the -x attribute). Drop the export attribute *before*
-# enabling extdebug: the user rcfile has already run, so its DEBUG trap is
-# live and fires between these two commands — a child bash spawned there
-# would otherwise inherit the exported extdebug and fail debugger startup
-# (bashdb). Dropping -x only removes the export attribute; imported options
-# stay effective in this shell and the guard keeps a refusing bash fail-safe.
+# disabling extdebug: the user rcfile has already run, so its DEBUG trap is
+# live and fires between these two commands. extdebug must be disabled to
+# block the bashdb re-exec path: when extdebug is on, bash tries to load
+# $DEBUGGER on ENOEXEC before falling back to command_not_found_handle
+# (#1787, #1848). Dropping -x only removes the export attribute.
 export -n BASHOPTS 2>/dev/null || true
-shopt -s extdebug 2>/dev/null || true
+shopt -u extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 _COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
 trap '_cosh_preexec_marker' DEBUG
