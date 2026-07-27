@@ -108,9 +108,9 @@ pub(crate) enum RawInputEvent {
 #[cfg(test)]
 mod tests {
     use super::event_parser::{
-        candidate_inline_hint, native_candidate_should_return_to_shell,
+        candidate_line_status, candidate_inline_hint, native_candidate_should_return_to_shell,
         redact_extension_setting_value, starts_native_intercept_candidate, CandidateLineBuffer,
-        NativeLineState,
+        CandidateLineStatus, NativeLineState,
     };
     use super::relay::ExplicitExitTracker;
     use crate::input::InputClassifier;
