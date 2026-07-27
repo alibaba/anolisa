@@ -32,6 +32,12 @@ pub(super) struct InputRelayContext<'a> {
     pub(super) native_line_state: &'a mut NativeLineState,
     pub(super) exit_tracker: &'a mut ExplicitExitTracker,
     pub(super) main_prompt_gate: &'a MainPromptGate,
+    /// Routes exact slash-control submissions through bash so they enter
+    /// native history (issue #1718); admission additionally requires the
+    /// main prompt gate, so any submission (slash or shell) lowers the gate
+    /// until the next prompt_ready marker and later bytes fall back to the
+    /// Rust intercept path instead of leaking into a foreground process.
+    pub(super) slash_route_enabled: bool,
 }
 
 /// Writes real user bytes to the PTY, bumping the shared input generation
@@ -488,6 +494,24 @@ fn relay_candidate_line(
             }
             match relay.input_classifier.classify(&line) {
                 InputDecision::Intercept { input, reason } => {
+                    if reason == InterceptReason::Slash
+                        && relay.slash_route_enabled
+                        && relay.main_prompt_gate.is_at_prompt()
+                        && relay.input_classifier.is_exact_slash_control_command(
+                            line.split_whitespace().next().unwrap_or_default(),
+                        )
+                    {
+                        // Submit the exact slash line through bash so
+                        // readline records it in native history (issue
+                        // #1718). The shell marker's DEBUG trap intercepts
+                        // it at the prompt boundary (#1724) and emits the
+                        // same UserInputIntercepted event as the Rust path
+                        // below. write_user_bytes_to_pty lowers the prompt
+                        // gate for this and every other line submission, so
+                        // follow-up slash bytes can never route into a
+                        // foreground process before the next prompt_ready.
+                        return submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity);
+                    }
                     let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
                         redact_extension_setting_value(line.as_bytes()),
                     ));
@@ -518,28 +542,7 @@ fn relay_candidate_line(
                         wrapped.extend_from_slice(b"\x1b[201~");
                         bytes = wrapped;
                     }
-                    let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-                    send_raw_input_events(&bytes, relay.input_events);
-                    relay.native_line_state.observe_shell_bytes(&bytes);
-                    if emit_activity && !bytes.is_empty() {
-                        send_shell_input_state(
-                            relay.native_line_state.is_empty(),
-                            relay.input_events,
-                        );
-                    }
-                    relay.exit_tracker.observe_shell_bytes(&bytes);
-                    write_user_bytes_to_pty(
-                        relay.master,
-                        relay.input_generation,
-                        relay.line_submits,
-                        relay.input_events,
-                        relay.main_prompt_gate,
-                        &bytes,
-                    )?;
-                    if !remainder.is_empty() {
-                        relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-                    }
-                    Ok(false)
+                    submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity)
                 }
                 InputDecision::Consume => {
                     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
@@ -570,6 +573,18 @@ fn flush_candidate_line_to_shell(
         wrapped.extend_from_slice(b"\x1b[201~");
         bytes = wrapped;
     }
+    submit_line_bytes_to_shell(relay, bytes, Vec::new(), emit_activity)
+}
+
+/// Clears the cosh-echoed candidate line and writes the taken bytes to the
+/// PTY, then relays any remainder. Shared by SendToShell submissions, unsafe
+/// candidate flushes, and shell-routed slash submissions (issue #1718).
+fn submit_line_bytes_to_shell(
+    relay: &mut InputRelayContext<'_>,
+    bytes: Vec<u8>,
+    remainder: Vec<u8>,
+    emit_activity: bool,
+) -> io::Result<bool> {
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
     send_raw_input_events(&bytes, relay.input_events);
     relay.native_line_state.observe_shell_bytes(&bytes);
@@ -585,6 +600,9 @@ fn flush_candidate_line_to_shell(
         relay.main_prompt_gate,
         &bytes,
     )?;
+    if !remainder.is_empty() {
+        relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
+    }
     Ok(false)
 }
 

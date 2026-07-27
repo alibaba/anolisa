@@ -69,7 +69,8 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation, gate| {
+        config.slash_via_shell,
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -78,6 +79,7 @@ where
                 input_mode,
                 input_generation,
                 gate,
+                routed,
             )
         },
     )
@@ -101,7 +103,8 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation, gate| {
+        false,
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -110,6 +113,7 @@ where
                 input_mode,
                 input_generation,
                 gate,
+                routed,
             )
         },
     )
@@ -141,7 +145,15 @@ where
         |_, _| Ok(RawObserverAction::Continue),
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
+        false,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -150,6 +162,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -176,7 +190,15 @@ where
         },
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
+        config.slash_via_shell,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -185,6 +207,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -207,7 +231,15 @@ where
         event_observer,
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
+        config.slash_via_shell,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -216,6 +248,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -228,6 +262,7 @@ fn run_raw_relay_with_driver<W, F, D>(
     mut event_observer: F,
     input_classifier: InputClassifier,
     action_watchdog: Option<Duration>,
+    slash_via_shell: bool,
     spawn_driver: D,
 ) -> io::Result<ShellHostOutput>
 where
@@ -241,6 +276,7 @@ where
         Arc<Mutex<RawInputMode>>,
         UserPtyInputGeneration,
         MainPromptGate,
+        bool,
     ) -> JoinHandle<io::Result<()>>,
 {
     let mut session = start_session(config)?;
@@ -270,6 +306,10 @@ where
     session
         .parser
         .set_main_prompt_gate(main_prompt_gate.clone());
+    // Slash-via-shell routing (issue #1718) needs a markered native session
+    // so the prompt gate can prove bash is at its prompt; everything else
+    // keeps the Rust intercept path.
+    let slash_route_enabled = slash_via_shell && config.native_mode;
     let driver_thread = spawn_driver(
         input_master,
         session.child.id(),
@@ -278,6 +318,7 @@ where
         Arc::clone(&input_mode),
         input_generation.clone(),
         main_prompt_gate,
+        slash_route_enabled,
     );
     let watchdog = action_watchdog.map(|grace| {
         let driver_done = Arc::new(Mutex::new(None));

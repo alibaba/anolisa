@@ -76,6 +76,7 @@ pub(crate) fn spawn_raw_input_relay<R>(
     input_mode: Arc<Mutex<RawInputMode>>,
     input_generation: UserPtyInputGeneration,
     main_prompt_gate: MainPromptGate,
+    slash_route_enabled: bool,
 ) -> JoinHandle<io::Result<()>>
 where
     R: Read + Send + 'static,
@@ -86,8 +87,11 @@ where
         let reader_input_mode = input_mode.clone();
         thread::spawn(move || read_input_chunks(input, read_tx, reader_input_mode));
 
-        let mut state =
-            RawInputRelayState::with_generation_and_gate(input_generation, main_prompt_gate);
+        let mut state = RawInputRelayState::with_generation_and_gate(
+            input_generation,
+            main_prompt_gate,
+            slash_route_enabled,
+        );
         loop {
             sync_pending_draft_escape(&mut state);
             let input = match receive_input(&read_rx, &mut state) {
@@ -595,6 +599,7 @@ fn relay_input_for_mode(
         input_generation,
         line_submits,
         main_prompt_gate,
+        slash_route_enabled,
         ..
     } = state;
     let mut relay = InputRelayContext {
@@ -608,6 +613,7 @@ fn relay_input_for_mode(
         native_line_state,
         exit_tracker,
         main_prompt_gate,
+        slash_route_enabled: *slash_route_enabled,
     };
     relay_input_chunk(
         bytes,

@@ -53,6 +53,14 @@ impl InputClassifier {
         self.is_slash_control_input(token)
     }
 
+    /// Exact registry hits only, excluding hint prefixes such as `/sk`. The
+    /// shell marker's case lists carry the same exact tokens, so only these
+    /// submissions can be routed through the shell for history recording
+    /// (issue #1718) with a guaranteed shell-side intercept.
+    pub(crate) fn is_exact_slash_control_command(&self, token: &str) -> bool {
+        self.slash_commands.iter().any(|command| token == command)
+    }
+
     pub fn classify(&self, input: &str) -> InputDecision {
         let trimmed = input.trim();
         if trimmed.is_empty() {

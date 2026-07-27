@@ -211,6 +211,229 @@ fn raw_relay_bash_intercepts_fragmented_slash_while_typing() {
 }
 
 #[test]
+fn raw_relay_bash_up_recalls_intercepted_slash_command() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-1718-recall-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+    std::fs::write(home.join(".bash_history"), "echo prior-shell-cmd\n").expect("history");
+
+    let mut config = ShellHostConfig::new("bash-1718-recall", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/skills detail xlsx"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("1718 recall relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    let intercept_count = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("/skills detail xlsx")
+                && event.component.as_deref() == Some("slash")
+        })
+        .count();
+    let recalled_prior_shell_cmd = output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event.command.as_deref() == Some("echo prior-shell-cmd")
+    });
+    // Issue #1718: Up right after a slash intercept recalls the slash
+    // command (intercepted again through the shell marker), not the older
+    // shell command from bash history.
+    assert_eq!(intercept_count, 2, "{rendered_text}");
+    assert!(!recalled_prior_shell_cmd, "{rendered_text}");
+    // The routed line must never execute as a shell command.
+    assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_routed_slash_enters_native_history_file() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-1718-histfile-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-1718-histfile", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/skills detail xlsx"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("1718 histfile relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    let intercepted = output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/skills detail xlsx")
+            && event.component.as_deref() == Some("slash")
+    });
+    assert!(intercepted, "{rendered_text}");
+    // bash owns persistence: the routed slash reaches HISTFILE through the
+    // user's native histappend semantics, with no cosh-side writes.
+    let history = std::fs::read_to_string(home.join(".bash_history")).expect("histfile");
+    assert!(history.contains("/skills detail xlsx"), "{history}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-1718-switch-off-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+    std::fs::write(home.join(".bash_history"), "echo prior-shell-cmd\n").expect("history");
+
+    let mut config = ShellHostConfig::new("bash-1718-switch-off", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = false;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/skills detail xlsx"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("1718 switch-off relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    let intercept_count = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("/skills detail xlsx")
+                && event.component.as_deref() == Some("slash")
+        })
+        .count();
+    let recalled_prior_shell_cmd = output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event.command.as_deref() == Some("echo prior-shell-cmd")
+    });
+    // COSH_SLASH_VIA_SHELL=0 restores the pre-#1718 chain end to end: the
+    // slash is intercepted in the Rust relay, never enters history, and Up
+    // recalls the older shell command.
+    assert_eq!(intercept_count, 1, "{rendered_text}");
+    assert!(recalled_prior_shell_cmd, "{rendered_text}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_routed_slash_with_secret_never_persists_in_history() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-1718-secret-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-1718-secret", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/config set api_key=sk-test-secret"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("1718 secret relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    let intercepted = output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("slash")
+    });
+    assert!(intercepted, "{rendered_text}");
+    // The intercept branch scrubs credential-bearing entries before its
+    // return 1, so the routed line must never reach the history file.
+    let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
+    assert!(!history.contains("api_key"), "{history}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-recalled-slash-test-{}-{}",

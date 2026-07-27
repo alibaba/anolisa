@@ -284,6 +284,7 @@ pub(in super::super) fn relay_late_capture_input(
         input_generation,
         line_submits,
         main_prompt_gate,
+        slash_route_enabled,
         ..
     } = state;
     let mut relay = InputRelayContext {
@@ -297,6 +298,7 @@ pub(in super::super) fn relay_late_capture_input(
         native_line_state,
         exit_tracker,
         main_prompt_gate,
+        slash_route_enabled: *slash_route_enabled,
     };
     relay_late_capture_bytes(bytes, generation, capture_owned_input, &mut relay)
 }
@@ -463,6 +465,7 @@ pub(in super::super) fn finish_input_relay(
             native_line_state,
             exit_tracker,
             main_prompt_gate,
+            slash_route_enabled: false,
         };
         drain_abandoned_capture(capture_owned_input, &mut relay)?;
     }
@@ -561,6 +564,7 @@ mod tests {
             native_line_state: &mut native_line_state,
             exit_tracker: &mut exit_tracker,
             main_prompt_gate: &main_prompt_gate,
+            slash_route_enabled: false,
         };
 
         relay_input_chunk(
@@ -613,6 +617,7 @@ mod tests {
             native_line_state: &mut native_line_state,
             exit_tracker: &mut exit_tracker,
             main_prompt_gate: &main_prompt_gate,
+            slash_route_enabled: false,
         };
         relay_input_chunk(
             b"later",

@@ -30,6 +30,10 @@ pub(in super::super) struct RawInputRelayState {
     pub(super) input_generation: UserPtyInputGeneration,
     pub(super) line_submits: LineSubmitCounter,
     pub(super) main_prompt_gate: MainPromptGate,
+    /// Routes exact slash submissions through bash for native history
+    /// recall (issue #1718); gated further by `main_prompt_gate` at
+    /// submission time.
+    pub(super) slash_route_enabled: bool,
     pub(super) pending_prompt_ghost_escape: Option<PendingPromptGhostEscape>,
     pub(super) pending_delay_escape: Option<PendingDelayEscape>,
     pub(super) pending_replaced_prompt_ghost_suffix: Option<PendingReplacedPromptGhostSuffix>,
@@ -41,20 +45,15 @@ pub(in super::super) struct RawInputRelayState {
 }
 
 impl RawInputRelayState {
-    pub(super) fn with_generation(input_generation: UserPtyInputGeneration) -> Self {
-        Self {
-            input_generation,
-            ..Self::default()
-        }
-    }
-
     pub(super) fn with_generation_and_gate(
         input_generation: UserPtyInputGeneration,
         main_prompt_gate: MainPromptGate,
+        slash_route_enabled: bool,
     ) -> Self {
         Self {
             input_generation,
             main_prompt_gate,
+            slash_route_enabled,
             ..Self::default()
         }
     }
@@ -77,6 +76,7 @@ pub(super) fn input_relay_context<'a>(
         native_line_state: &mut state.native_line_state,
         exit_tracker: &mut state.exit_tracker,
         main_prompt_gate: &state.main_prompt_gate,
+        slash_route_enabled: state.slash_route_enabled,
     }
 }
 
@@ -143,6 +143,7 @@ pub(super) fn flush_pending_draft_escape(
                 input_generation,
                 line_submits,
                 main_prompt_gate,
+                slash_route_enabled,
                 ..
             } = state;
             let mut relay = InputRelayContext {
@@ -156,6 +157,7 @@ pub(super) fn flush_pending_draft_escape(
                 native_line_state,
                 exit_tracker,
                 main_prompt_gate,
+                slash_route_enabled: *slash_route_enabled,
             };
             relay.line_buffer.clear();
             relay.native_line_state.clear();

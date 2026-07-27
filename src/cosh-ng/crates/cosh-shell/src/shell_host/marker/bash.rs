@@ -583,6 +583,13 @@ _cosh_preexec_marker() {
         fi
         local reason
         if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+          # Intercepted lines return 1 before the secret redaction below
+          # ever runs, so scrub credential-bearing entries here or the raw
+          # text would persist in native history (routed slash submissions
+          # enter history via readline before the trap fires).
+          if _cosh_command_has_secret "$command"; then
+            builtin history -d "$history_no" 2>/dev/null || true
+          fi
           _cosh_emit_intercept_marker "$command" "$reason"
           _COSH_AT_PROMPT=0
           eval "$active_debug_trap" 2>/dev/null || true

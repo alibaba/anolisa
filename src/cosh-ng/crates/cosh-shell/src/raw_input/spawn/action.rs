@@ -13,7 +13,7 @@ use crate::input::InputClassifier;
 use super::super::generation::UserPtyInputGeneration;
 use super::super::mode::RawInputMode;
 use super::super::pty::{set_pty_winsize, signal_process_group};
-use super::super::{RawInputEvent, RawRelayAction};
+use super::super::{MainPromptGate, RawInputEvent, RawRelayAction};
 use super::{
     finish_input_relay, flush_pending_prompt_ghost_escape,
     flush_pending_replaced_prompt_ghost_suffix, next_pending_deadline, relay_input_bytes,
@@ -177,6 +177,7 @@ fn wait_for_raw_action(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_raw_action_relay(
     actions: Vec<RawRelayAction>,
     mut master: File,
@@ -185,9 +186,15 @@ pub(crate) fn spawn_raw_action_relay(
     input_classifier: InputClassifier,
     input_mode: Arc<Mutex<RawInputMode>>,
     input_generation: UserPtyInputGeneration,
+    main_prompt_gate: MainPromptGate,
+    slash_route_enabled: bool,
 ) -> JoinHandle<io::Result<()>> {
     thread::spawn(move || {
-        let mut state = RawInputRelayState::with_generation(input_generation);
+        let mut state = RawInputRelayState::with_generation_and_gate(
+            input_generation,
+            main_prompt_gate,
+            slash_route_enabled,
+        );
         for action in actions {
             flush_pending_prompt_ghost_escape(
                 false,

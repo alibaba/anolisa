@@ -65,6 +65,12 @@ pub struct ShellHostConfig {
     pub input_classifier: InputClassifier,
     pub native_mode: bool,
     pub login_shell: bool,
+    /// Routes exact slash-control submissions through bash so they enter
+    /// native history (issue #1718). Defaults from `COSH_SLASH_VIA_SHELL`
+    /// (on unless "0"); disabling restores the pre-#1718 Rust intercept
+    /// path end to end. Only bash runners consult it; zsh has no extdebug
+    /// return-suppression equivalent and always keeps the Rust path.
+    pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
     pub raw_action_watchdog: Duration,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
@@ -84,6 +90,7 @@ impl ShellHostConfig {
             input_classifier: InputClassifier::default(),
             native_mode: true,
             login_shell: false,
+            slash_via_shell: slash_via_shell_default(),
             env_overrides: Vec::new(),
             raw_action_watchdog: Duration::from_secs(120),
             shell_environment_observer: None,
@@ -122,6 +129,14 @@ impl ShellHostConfig {
     pub(crate) fn clear_shell_history_file_observer(&mut self) {
         self.shell_history_file_observer = None;
     }
+}
+
+/// `COSH_SLASH_VIA_SHELL` gates the shell routing of exact slash
+/// submissions; any value other than "0" (including unset) keeps it on.
+fn slash_via_shell_default() -> bool {
+    std::env::var("COSH_SLASH_VIA_SHELL")
+        .map(|value| value != "0")
+        .unwrap_or(true)
 }
 
 fn default_winsize() -> Winsize {
