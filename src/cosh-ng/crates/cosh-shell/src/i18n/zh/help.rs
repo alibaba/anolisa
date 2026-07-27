@@ -63,7 +63,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "渲染降级: 启动 cosh-shell 前设置 COSH_SHELL_RENDER=plain。"
         }
         MessageId::SlashInfoConfigFooter => {
-            "使用 /config language [auto|en-US|zh-CN]。保存的语言会在下次启动时生效。"
+            "使用 /config language [auto|en-US|zh-CN]。设置立即生效；Agent 回复跟随你的提问语言。"
         }
         MessageId::HelpGroupSessions => "会话",
         MessageId::HelpSummarySession => "查找、恢复和清理智能体会话",

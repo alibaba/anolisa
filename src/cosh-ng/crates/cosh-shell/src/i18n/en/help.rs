@@ -69,7 +69,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "render fallback: set COSH_SHELL_RENDER=plain before starting cosh-shell."
         }
         MessageId::SlashInfoConfigFooter => {
-            "Use /config language [auto|en-US|zh-CN]. Saved language takes effect next startup."
+            "Use /config language [auto|en-US|zh-CN]. Takes effect immediately; agent replies follow your message language."
         }
         MessageId::HelpGroupSessions => "Sessions",
         MessageId::HelpSummarySession => "discover, resume, and clear Agent sessions",
