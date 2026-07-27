@@ -681,7 +681,10 @@ mod tests {
     #[test]
     fn test_classify_unexpected_eof() {
         let err = classify_io_error(
-            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"),
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ),
             "/tmp/test.sock",
             "read response length",
         );

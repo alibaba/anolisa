@@ -20,6 +20,6 @@ pub(crate) mod registry;
 pub(super) mod runtime;
 pub(super) mod session;
 pub(super) mod skills;
-pub(super) mod status;
 #[cfg(test)]
 mod skills_tests;
+pub(super) mod status;
