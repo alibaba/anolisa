@@ -134,7 +134,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDeclaration {
     pub name: String,
     pub description: String,
@@ -186,6 +186,29 @@ pub enum GenerateEvent {
     MessageEnd,
     Cancelled,
     Error(String),
+}
+
+/// Highest tool-call index a provider may report within one message.
+///
+/// Consumers size per-call state by index (`Vec` slots keyed by position), so an
+/// unbounded index turns one malformed frame into a multi-billion-entry
+/// allocation. No real turn issues more than a few dozen parallel calls, so
+/// anything past this limit is a protocol violation rather than a large message.
+pub const MAX_TOOL_CALL_INDEX: u32 = 127;
+
+impl GenerateEvent {
+    /// The tool-call index this event addresses, if it addresses one.
+    ///
+    /// Lets a consumer bound-check every index-bearing event in one place
+    /// instead of repeating the guard in each match arm.
+    pub fn tool_call_index(&self) -> Option<u32> {
+        match self {
+            Self::ToolCallStart { index, .. }
+            | Self::ToolCallDelta { index, .. }
+            | Self::ToolCallEnd { index } => Some(*index),
+            _ => None,
+        }
+    }
 }
 
 pub type GenerateStream = Pin<Box<dyn Stream<Item = GenerateEvent> + Send>>;

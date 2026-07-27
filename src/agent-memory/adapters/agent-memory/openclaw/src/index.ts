@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { McpStdioClient } from "./mcp-client.js";
 import { resolveConfig, type AgentMemoryConfig } from "./config.js";
 import { looksLikePromptInjection, wrapMemoryResultsForPrompt } from "./safety.js";
+import { buildRecallQueries, MAX_RESULTS, RRF_K } from "./keyword-extract.js";
 
 // Module-scoped singleton client. OpenClaw may call register() again
 // during a plugin hot-reload without firing gateway_stop for the old
@@ -91,80 +92,106 @@ export default definePluginEntry({
           const userMessage = event.prompt;
           if (!userMessage || userMessage.trim().length < 3) return;
 
-          // BM25 keyword search performs poorly on long, natural-language
-          // queries: common stopwords dilute the TF-IDF signal so no
-          // document reaches the relevance threshold, returning [] even
-          // when a matching memory exists (regression on #1462).
-          // Extract salient keywords and try progressively shorter queries.
-          const stopWords = new Set([
-            "a","an","the","is","are","was","were","be","been","being",
-            "have","has","had","do","does","did","will","would","should",
-            "could","may","might","must","shall","can","what","who","whom",
-            "whose","which","that","this","these","those","i","you","he",
-            "she","it","we","they","me","him","her","us","them","my",
-            "your","his","her","its","our","their","to","of","in","on",
-            "at","by","for","with","about","against","between","into",
-            "through","during","before","after","above","below","from",
-            "up","down","out","off","over","under","again","further",
-            "then","once","here","there","when","where","why","how","all",
-            "any","both","each","few","more","most","other","some","such",
-            "no","nor","not","only","own","same","so","than","too","very",
-            "just","also","and","but","or","if","because","as","until",
-            "while","answer","tell","give","say","know","think","want",
-            "need","like","get","got","make","made","go","going",
-          ]);
-          const extractKeywords = (text: string): string => {
-            const words = text
-              .toLowerCase()
-              .replace(/[^a-z0-9\s]/g, " ")
-              .split(/\s+/)
-              .filter((w) => w.length >= 2 && !stopWords.has(w));
-            const seen = new Set<string>();
-            const unique = words.filter((w) => {
-              if (seen.has(w)) return false;
-              seen.add(w);
-              return true;
-            });
-            return unique.slice(0, 6).join(" ").trim();
-          };
+          // BM25 keyword search performs poorly on long natural-language
+          // prompts: stopwords dilute TF-IDF signal so no document reaches
+          // the relevance threshold (regression of #1462). Build
+          // progressively shorter query candidates, execute every
+          // candidate, and merge the results so that no topic is
+          // silently dropped by an early-break optimisation.  See
+          // keyword-extract.ts for the extraction logic.
+          const queryCandidates = buildRecallQueries(userMessage);
 
-          const keywordQuery = extractKeywords(userMessage);
-          const queryCandidates = [
-            keywordQuery,
-            keywordQuery.split(" ").slice(0, 3).join(" "),
-            userMessage.slice(0, 80),
-          ].filter((q) => q && q.length >= 3);
+          // Reciprocal-rank fusion (RRF) across all candidates.
+          //
+          // Raw BM25 scores from different queries are NOT comparable
+          // (different IDF, term counts, corpus coverage).  Instead we
+          // assign each hit an RRF score: sum of 1/(RRF_K + rank) where
+          // rank is the hit's 1-based position within its own candidate
+          // result set.  This makes scores comparable across candidates.
+          //
+          // Deduplication is by memory path (stable identity).  A single
+          // failing candidate (e.g. query > 1024 bytes) does NOT discard
+          // previously merged results.  Final result count is capped at
+          // MAX_RESULTS (5).
+          interface RrfEntry {
+            hit: Record<string, unknown>;
+            rrfScore: number;
+            bestContribution: number;
+          }
+          const pathToEntry = new Map<string, RrfEntry>();
 
-          let rawText = "[]";
-          let hitCount = 0;
           for (const query of queryCandidates) {
-            rawText = await client.callTool("memory_search", {
-              query,
-              top_k: 5,
-              // Use BM25 mode for auto-recall: memories are synchronously indexed
-              // immediately after observe (PR #1520), so BM25 finds them without delay.
-              mode: "bm25",
-            });
-            let hits: Array<Record<string, unknown>> = [];
+            let rawText: string;
             try {
-              hits = JSON.parse(rawText);
+              rawText = await client.callTool("memory_search", {
+                query,
+                top_k: 5,
+                mode: "bm25",
+              });
+            } catch (candidateErr) {
+              // Per-candidate error (e.g. query too long).  Log and
+              // continue — do NOT discard previously merged hits.
+              api.logger.warn?.(
+                `agent-memory: auto-recall candidate failed (query len=${query.length}, err=${candidateErr instanceof Error ? candidateErr.message : String(candidateErr)})`,
+              );
+              continue;
+            }
+            let batch: unknown;
+            try {
+              batch = JSON.parse(rawText);
             } catch {
               api.logger.warn?.(
                 `agent-memory: auto-recall memory_search returned non-JSON response (len=${rawText.length})`,
               );
-              return;
+              continue;
             }
-            if (Array.isArray(hits) && hits.length > 0) {
-              hitCount = hits.length;
-              break;
+            if (!Array.isArray(batch)) continue;
+            // Within this candidate, hits are already sorted by BM25
+            // score.  Assign RRF score based on rank (0-based index,
+            // so rank 0 → contribution 1/(k+1), rank 1 → 1/(k+2), etc).
+            for (let rank = 0; rank < batch.length; rank++) {
+              const hit = batch[rank] as Record<string, unknown>;
+              const rrfContribution = 1 / (RRF_K + rank + 1);
+              const hitPath = String(hit.path ?? "");
+              const key = hitPath || JSON.stringify(hit);
+              const existing = pathToEntry.get(key);
+              if (existing) {
+                existing.rrfScore += rrfContribution;
+                // Keep the hit from the candidate where it ranked
+                // highest (largest contribution = lowest rank).
+                if (rrfContribution > existing.bestContribution) {
+                  existing.hit = hit;
+                  existing.bestContribution = rrfContribution;
+                }
+              } else {
+                pathToEntry.set(key, {
+                  hit,
+                  rrfScore: rrfContribution,
+                  bestContribution: rrfContribution,
+                });
+              }
             }
           }
 
-          const wrapped = wrapMemoryResultsForPrompt(rawText);
+          // Sort by RRF score descending and limit to MAX_RESULTS.
+          const finalHits = Array.from(pathToEntry.values())
+            .sort((a, b) => b.rrfScore - a.rrfScore)
+            .slice(0, MAX_RESULTS)
+            .map((entry) => entry.hit);
+
+          if (finalHits.length === 0) {
+            api.logger.info?.(
+              `agent-memory: auto-recall found 0 results for prompt (query len=${userMessage.length})`,
+            );
+            return;
+          }
+
+          const finalRawText = JSON.stringify(finalHits);
+          const wrapped = wrapMemoryResultsForPrompt(finalRawText);
           if (!wrapped) return;
 
           api.logger.info?.(
-            `agent-memory: auto-recall injected ${hitCount} memory result(s) for prompt`,
+            `agent-memory: auto-recall injected ${finalHits.length} memory result(s) for prompt`,
           );
           // Dynamic content per turn → use prependContext (NOT prependSystemContext).
           return { prependContext: wrapped };

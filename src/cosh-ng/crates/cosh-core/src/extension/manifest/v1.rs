@@ -324,16 +324,20 @@ pub(super) fn legacy_hook_records(config: &ExtensionConfig) -> Vec<CapabilityRec
                 let Ok(id) = CapabilityId::new(extension, CapabilityKind::Hook, local) else {
                     continue;
                 };
+                let mut projection = json!({
+                    "command": hook.command,
+                    "event": event,
+                    "id": id.canonical(),
+                    "kind": "hook",
+                    "matcher": group.matcher,
+                    "type": hook.hook_type.as_deref().unwrap_or("command")
+                });
+                if !hook.env.is_empty() {
+                    projection["env"] = json!(hook.env);
+                }
                 records.push(CapabilityRecord {
                     id: id.canonical(),
-                    projection: json!({
-                        "command": hook.command,
-                        "event": event,
-                        "id": id.canonical(),
-                        "kind": "hook",
-                        "matcher": group.matcher,
-                        "type": hook.hook_type.as_deref().unwrap_or("command")
-                    }),
+                    projection,
                 });
             }
         }
@@ -391,6 +395,14 @@ fn validate_and_convert_hooks(
                 }
                 validate_hook_command(package_root, &hook.command)?;
                 record_host_executable(&hook.command, host_executables);
+                for name in hook.env.keys() {
+                    if !crate::config::is_valid_env_name(name) {
+                        return Err(ManifestError::new(
+                            "extension_hook_env_name_invalid",
+                            format!("hook {} declares invalid env name: {name}", hook.name),
+                        ));
+                    }
+                }
                 let mut projection = json!({
                     "command": normalize_extension_command(&hook.command),
                     "event": event,
@@ -399,6 +411,13 @@ fn validate_and_convert_hooks(
                     "matcher": group.matcher,
                     "type": "command"
                 });
+                // `env` is executable capability, so declaring or changing it
+                // must move the fingerprint and force the user to re-consent.
+                // Omitted when empty so extensions that never used env keep
+                // their existing fingerprint across this upgrade.
+                if !hook.env.is_empty() {
+                    projection["env"] = json!(hook.env);
+                }
                 if group.sequential {
                     projection["sequential"] = Value::Bool(true);
                 }
@@ -415,6 +434,7 @@ fn validate_and_convert_hooks(
                     name: Some(hook.name),
                     description: hook.description,
                     timeout: hook.timeout,
+                    env: hook.env,
                 });
             }
             converted.push(HookGroup {
@@ -764,6 +784,8 @@ struct CommandHookV1 {
     description: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

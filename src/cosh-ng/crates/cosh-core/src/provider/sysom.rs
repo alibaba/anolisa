@@ -3,10 +3,8 @@
 //! Uses ACS3-HMAC-SHA256 signing and parses the cumulative SSE stream format
 //! into incremental `GenerateEvent`s compatible with `ContentGenerator` trait.
 
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -19,9 +17,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{
-    ContentGenerator, GenerateConfig, GenerateEvent, GenerateStream, Message, ToolDeclaration,
-};
+use super::{ContentGenerator, GenerateConfig, GenerateStream, Message, ToolDeclaration};
+
+use self::stream::sysom_event_stream;
+
+mod stream;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -326,10 +326,14 @@ impl SysomProvider {
             return Err(format!("SysOM API error {status}: {text}"));
         }
 
-        Ok(sysom_event_stream(
-            response.bytes_stream(),
-            Arc::clone(&self.cancelled),
-        ))
+        let cancelled = Arc::clone(&self.cancelled);
+        // Normalizing to owned bytes keeps the SSE state machine testable with a
+        // plain in-memory stream instead of a live HTTP response.
+        let byte_stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|e| e.to_string()));
+
+        Ok(sysom_event_stream(Box::pin(byte_stream), cancelled))
     }
 
     /// Check if an error indicates STS credential expiration.
@@ -382,249 +386,6 @@ fn is_sts_error(error: &str) -> bool {
     error.contains("InvalidSecurityToken")
         || error.contains("SecurityTokenExpired")
         || error.contains("InvalidAccessKeyId")
-}
-
-// ---------------------------------------------------------------------------
-// SSE parsing helpers
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct SseParseState {
-    last_content_len: usize,
-    last_tool_use_count: usize,
-    /// Track accumulated arguments length per tool index
-    last_tool_args_len: Vec<usize>,
-    message_ended: bool,
-    /// Latest usage info (updated every frame, emitted at stream end)
-    latest_usage: Option<(u32, u32, u32)>,
-}
-
-/// Byte-stream → `GenerateEvent` conversion state.
-struct SysomStreamState<S> {
-    source: Pin<Box<S>>,
-    /// Bytes received but not yet split into a complete SSE frame.
-    buf: String,
-    parse: SseParseState,
-    /// Events already decoded and waiting to be yielded, in emission order.
-    pending: VecDeque<GenerateEvent>,
-    /// Set once `source` reported EOF (or a transport error): a `Stream` gives
-    /// no guarantee about being polled again after it terminates.
-    source_done: bool,
-    cancelled: Arc<AtomicBool>,
-}
-
-/// Convert a raw SSE byte stream into incremental `GenerateEvent`s.
-///
-/// Terminal-event contract: the stream always ends with `MessageEnd`, preceded
-/// by `Usage` when the API reported token counts — `cosh-core` treats a stream
-/// without `MessageEnd` as `unexpected_eof` and aborts the turn before running
-/// any tool call the model requested. Both events are therefore queued together
-/// the moment the byte stream reaches EOF, and drained from `pending` without
-/// touching the exhausted source again.
-fn sysom_event_stream<S, B, E>(byte_stream: S, cancelled: Arc<AtomicBool>) -> GenerateStream
-where
-    S: futures::Stream<Item = Result<B, E>> + Send + 'static,
-    B: AsRef<[u8]> + Send + 'static,
-    E: std::fmt::Display + Send + 'static,
-{
-    let state = SysomStreamState {
-        source: Box::pin(byte_stream),
-        buf: String::new(),
-        parse: SseParseState::default(),
-        pending: VecDeque::new(),
-        source_done: false,
-        cancelled,
-    };
-
-    Box::pin(futures::stream::unfold(state, |mut state| async move {
-        loop {
-            if state.cancelled.load(Ordering::SeqCst) {
-                return Some((GenerateEvent::Cancelled, state));
-            }
-            if let Some(event) = state.pending.pop_front() {
-                return Some((event, state));
-            }
-            if state.source_done {
-                return None;
-            }
-
-            // Decode one complete SSE frame (frames are separated by "\n\n").
-            if let Some(pos) = state.buf.find("\n\n") {
-                let frame = state.buf[..pos].to_string();
-                state.buf = state.buf[pos + 2..].to_string();
-                if !frame.trim().is_empty() {
-                    drain_sse_frame(&frame, &mut state.parse, &mut state.pending);
-                }
-                continue;
-            }
-
-            match state.source.next().await {
-                Some(Ok(bytes)) => {
-                    state.buf.push_str(&String::from_utf8_lossy(bytes.as_ref()));
-                }
-                Some(Err(e)) => {
-                    // A transport error kills the underlying body; the core
-                    // aborts the turn on Error, so no terminal event follows.
-                    state.source_done = true;
-                    return Some((GenerateEvent::Error(format!("stream error: {e}")), state));
-                }
-                None => {
-                    state.source_done = true;
-                    // A final frame may arrive without its "\n\n" terminator.
-                    let tail = state.buf.trim().to_string();
-                    state.buf.clear();
-                    if !tail.is_empty() {
-                        drain_sse_frame(&tail, &mut state.parse, &mut state.pending);
-                    }
-                    if let Some((prompt, completion, total)) = state.parse.latest_usage.take() {
-                        state.pending.push_back(GenerateEvent::Usage {
-                            prompt_tokens: prompt,
-                            completion_tokens: completion,
-                            total_tokens: total,
-                        });
-                    }
-                    state.pending.push_back(GenerateEvent::MessageEnd);
-                }
-            }
-        }
-    }))
-}
-
-/// Queue every incremental event a single cumulative SSE frame contributes.
-///
-/// `parse_sysom_sse_event` reports at most one event per call, so a frame that
-/// advances both the text and a tool's arguments needs repeated calls. Each
-/// call returning an event advances a monotonically growing parse cursor
-/// (content length, tool count, argument length), so the loop terminates.
-fn drain_sse_frame(frame: &str, parse: &mut SseParseState, pending: &mut VecDeque<GenerateEvent>) {
-    while let Some(event) = parse_sysom_sse_event(frame, parse) {
-        pending.push_back(event);
-    }
-}
-
-/// Parse a single SSE event block (lines between \n\n).
-/// Returns a GenerateEvent if the block contains useful data.
-fn parse_sysom_sse_event(block: &str, state: &mut SseParseState) -> Option<GenerateEvent> {
-    if state.message_ended {
-        return None;
-    }
-
-    let mut event_type = String::new();
-    let mut data_str = String::new();
-
-    for line in block.lines() {
-        if let Some(val) = line.strip_prefix("event:") {
-            event_type = val.trim().to_string();
-        } else if let Some(val) = line.strip_prefix("data:") {
-            data_str = val.trim().to_string();
-        }
-        // id: line is ignored
-    }
-
-    if event_type == "Failed" {
-        state.message_ended = true;
-        return Some(GenerateEvent::Error(format!(
-            "SysOM stream failed: {}",
-            data_str
-        )));
-    }
-
-    if event_type != "OK" || data_str.is_empty() {
-        return None;
-    }
-
-    let data: Value = serde_json::from_str(&data_str).ok()?;
-
-    let choices = data.get("choices").and_then(|c| c.as_array());
-
-    // --- Text delta (cumulative → incremental) ---
-    if let Some(choices_arr) = choices {
-        if let Some(message) = choices_arr.first().and_then(|c| c.get("message")) {
-            let content = message
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            if content.len() > state.last_content_len {
-                let delta = &content[state.last_content_len..];
-                state.last_content_len = content.len();
-                return Some(GenerateEvent::TextDelta(delta.to_string()));
-            }
-
-            // --- Tool use (cumulative tool_use array) ---
-            if let Some(tool_use) = message.get("tool_use").and_then(|t| t.as_array()) {
-                if !tool_use.is_empty() {
-                    // New tool call appeared
-                    if tool_use.len() > state.last_tool_use_count {
-                        let new_tc = &tool_use[state.last_tool_use_count];
-                        state.last_tool_use_count = tool_use.len();
-                        state.last_tool_args_len.push(0);
-
-                        let id = new_tc
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = new_tc
-                            .get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let index =
-                            new_tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
-
-                        return Some(GenerateEvent::ToolCallStart { index, id, name });
-                    }
-
-                    // Check for arguments growth on last tool call
-                    let last_idx = tool_use.len() - 1;
-                    if let Some(tc) = tool_use.get(last_idx) {
-                        let args = tc
-                            .get("function")
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("");
-                        let prev_len = state.last_tool_args_len.get(last_idx).copied().unwrap_or(0);
-                        if args.len() > prev_len {
-                            let delta = &args[prev_len..];
-                            if let Some(slot) = state.last_tool_args_len.get_mut(last_idx) {
-                                *slot = args.len();
-                            }
-                            return Some(GenerateEvent::ToolCallDelta {
-                                index: last_idx as u32,
-                                arguments_delta: delta.to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // If no content/tool delta, check if this is the final frame
-    // (no new content growth + has usage = stream is done)
-    if let Some(usage) = data.get("usage").and_then(|u| u.as_object()) {
-        // SysOM returns usage on every frame, but we only emit Usage event
-        // when content has stopped growing (i.e., this parse produced no text delta above)
-        let prompt = usage
-            .get("prompt_tokens")
-            .or_else(|| usage.get("input_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        let completion = usage
-            .get("completion_tokens")
-            .or_else(|| usage.get("output_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        let total = usage
-            .get("total_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        // Store latest usage but don't emit yet — only emit when stream ends
-        state.latest_usage = Some((prompt, completion, total));
-    }
-
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -761,190 +522,5 @@ fn hex_hmac_sha256(key: &[u8], data: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::task::{Context, Poll};
-
-    /// Render one `event: OK` SSE frame, terminator included.
-    fn frame(payload: Value) -> String {
-        format!("event: OK\ndata: {payload}\n\n")
-    }
-
-    async fn collect_events(chunks: Vec<String>) -> Vec<GenerateEvent> {
-        let source = futures::stream::iter(chunks.into_iter().map(Ok::<String, String>));
-        let mut stream = sysom_event_stream(source, Arc::new(AtomicBool::new(false)));
-        let mut events = Vec::new();
-        while let Some(event) = stream.next().await {
-            events.push(event);
-        }
-        events
-    }
-
-    #[tokio::test]
-    async fn usage_only_final_frame_still_terminates_with_message_end() {
-        let events = collect_events(vec![
-            frame(serde_json::json!({
-                "choices": [{"message": {"content": "hello"}}]
-            })),
-            frame(serde_json::json!({
-                "choices": [{"message": {"content": "hello"}}],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
-            })),
-        ])
-        .await;
-
-        assert!(
-            matches!(
-                &events[..],
-                [
-                    GenerateEvent::TextDelta(text),
-                    GenerateEvent::Usage {
-                        prompt_tokens: 11,
-                        completion_tokens: 7,
-                        total_tokens: 18,
-                    },
-                    GenerateEvent::MessageEnd,
-                ] if text == "hello"
-            ),
-            "unexpected events: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_without_usage_terminates_with_message_end() {
-        let events = collect_events(vec![frame(serde_json::json!({
-            "choices": [{"message": {"content": "hi"}}]
-        }))])
-        .await;
-
-        assert!(
-            matches!(
-                &events[..],
-                [GenerateEvent::TextDelta(text), GenerateEvent::MessageEnd] if text == "hi"
-            ),
-            "unexpected events: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn unterminated_final_frame_is_flushed_before_message_end() {
-        let last = frame(serde_json::json!({
-            "choices": [{"message": {"content": "done"}}],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
-        }));
-        let events = collect_events(vec![last.trim_end().to_string()]).await;
-
-        assert!(
-            matches!(
-                &events[..],
-                [
-                    GenerateEvent::TextDelta(text),
-                    GenerateEvent::Usage { total_tokens: 4, .. },
-                    GenerateEvent::MessageEnd,
-                ] if text == "done"
-            ),
-            "unexpected events: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_with_final_usage_reaches_message_end() {
-        let events = collect_events(vec![
-            frame(serde_json::json!({
-                "choices": [{"message": {"tool_use": [{
-                    "id": "call_1",
-                    "index": 0,
-                    "function": {"name": "read_file", "arguments": ""}
-                }]}}]
-            })),
-            frame(serde_json::json!({
-                "choices": [{"message": {"tool_use": [{
-                    "id": "call_1",
-                    "index": 0,
-                    "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a\"}"}
-                }]}}],
-                "usage": {"prompt_tokens": 20, "completion_tokens": 9, "total_tokens": 29}
-            })),
-        ])
-        .await;
-
-        assert!(
-            matches!(
-                &events[..],
-                [
-                    GenerateEvent::ToolCallStart { index: 0, id, name },
-                    GenerateEvent::ToolCallDelta { index: 0, arguments_delta },
-                    GenerateEvent::Usage { total_tokens: 29, .. },
-                    GenerateEvent::MessageEnd,
-                ] if id == "call_1" && name == "read_file"
-                    && arguments_delta == "{\"path\":\"/tmp/a\"}"
-            ),
-            "unexpected events: {events:?}"
-        );
-    }
-
-    /// Byte stream that panics if polled again after reporting EOF.
-    struct PanicOnRepoll {
-        chunks: std::vec::IntoIter<String>,
-        exhausted: bool,
-    }
-
-    impl futures::Stream for PanicOnRepoll {
-        type Item = Result<String, String>;
-
-        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            assert!(!self.exhausted, "byte stream polled after EOF");
-            match self.chunks.next() {
-                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
-                None => {
-                    self.exhausted = true;
-                    Poll::Ready(None)
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn byte_stream_is_not_polled_after_eof() {
-        let source = PanicOnRepoll {
-            chunks: vec![frame(serde_json::json!({
-                "choices": [{"message": {"content": "x"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-            }))]
-            .into_iter(),
-            exhausted: false,
-        };
-
-        let mut stream = sysom_event_stream(source, Arc::new(AtomicBool::new(false)));
-        let mut events = Vec::new();
-        while let Some(event) = stream.next().await {
-            events.push(event);
-        }
-
-        assert!(
-            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
-            "unexpected events: {events:?}"
-        );
-    }
-
-    #[test]
-    fn region_id_strips_single_zone_suffix() {
-        assert_eq!(
-            region_id_from_zone_id("cn-hangzhou-j").as_deref(),
-            Some("cn-hangzhou")
-        );
-        assert_eq!(
-            region_id_from_zone_id("cn-beijing").as_deref(),
-            Some("cn-beijing")
-        );
-        assert_eq!(region_id_from_zone_id(""), None);
-    }
-
-    #[test]
-    fn generate_console_url_uses_region_and_instance_id() {
-        assert_eq!(
-            generate_console_url("i-test123", "cn-hangzhou"),
-            "https://alinux.console.aliyun.com/cn-hangzhou/guide/cosh?instance=i-test123"
-        );
-    }
-}
+#[path = "sysom/tests.rs"]
+mod tests;

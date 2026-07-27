@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -123,7 +123,7 @@ pub struct HooksConfig {
     pub after_model: Vec<HookDefinition>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct HookDefinition {
     pub command: String,
     #[serde(default)]
@@ -134,6 +134,24 @@ pub struct HookDefinition {
     pub timeout: Option<u64>,
     #[serde(default)]
     pub sequential: Option<bool>,
+    /// Environment variables injected into this hook's child process only.
+    /// The child inherits the parent environment first, so an entry here
+    /// overrides an inherited value of the same name. The host never calls
+    /// `std::env::set_var`, so the cosh-ng process itself is unaffected.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Validates an environment variable name against POSIX rules
+/// (`[A-Za-z_][A-Za-z0-9_]*`). Only names are checked — values are opaque and
+/// must never be logged.
+pub fn is_valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

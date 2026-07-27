@@ -2,11 +2,12 @@
 
 use super::{
     apply_aliyun_prepare, begin_sysom_shortcut, clear_ecs_auth_source_for_manual_aliyun_edit,
+    clear_observed_model_after_provider_change, clear_observed_model_after_provider_delete,
     ecs_ram_role_prepare, handle_auth_answer, management_entry, render_auth_card_actions,
     should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
     should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
-    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, EcsRamRolePrepare,
-    ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
+    AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, DeleteConfirmationOutcome,
+    EcsRamRolePrepare, ExistingProvider, InlineState, RuntimeAuthState, ShellEvent, SysomMenu,
 };
 use crate::adapter::{AdapterInstance, FakeAgentAdapter};
 use crate::auth::capture::auth_capture_id;
@@ -306,6 +307,73 @@ fn active_run_aliyun_selection_can_prepare_without_provider_id_field() {
 }
 
 #[test]
+fn provider_change_discards_the_previous_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("previous-provider-model".to_string());
+
+    clear_observed_model_after_provider_change(&mut state);
+
+    assert_eq!(state.personalization.foreground_model, None);
+}
+
+#[test]
+fn deleting_the_active_provider_with_a_fallback_discards_the_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("deleted-provider-model".to_string());
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".to_string(),
+        needs_reselection: false,
+    };
+
+    clear_observed_model_after_provider_delete(&mut state, true, &outcome);
+
+    assert_eq!(state.personalization.foreground_model, None);
+}
+
+#[test]
+fn deleting_the_active_provider_without_a_fallback_discards_the_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("deleted-provider-model".to_string());
+    let outcome = DeleteConfirmationOutcome::Deleted {
+        provider_name: "deleted-provider".to_string(),
+        needs_reselection: true,
+    };
+
+    clear_observed_model_after_provider_delete(&mut state, true, &outcome);
+
+    assert_eq!(state.personalization.foreground_model, None);
+}
+
+#[test]
+fn cancelling_or_deleting_an_inactive_provider_keeps_the_observed_model() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("active-provider-model".to_string());
+
+    clear_observed_model_after_provider_delete(
+        &mut state,
+        true,
+        &DeleteConfirmationOutcome::Cancelled,
+    );
+    assert_eq!(
+        state.personalization.foreground_model.as_deref(),
+        Some("active-provider-model")
+    );
+
+    clear_observed_model_after_provider_delete(
+        &mut state,
+        false,
+        &DeleteConfirmationOutcome::Deleted {
+            provider_name: "inactive-provider".to_string(),
+            needs_reselection: false,
+        },
+    );
+    assert_eq!(
+        state.personalization.foreground_model.as_deref(),
+        Some("active-provider-model")
+    );
+}
+
+#[test]
 fn manual_aliyun_edit_does_not_apply_ecs_prepare() {
     let manual = ExistingProvider {
         name: "aliyun-manual".to_string(),
@@ -482,6 +550,146 @@ fn a_stale_empty_submission_does_not_advance_the_live_field() {
     let auth = state.auth.state.as_ref().expect("auth state");
     assert_eq!(auth.current_field, 1);
     assert_eq!(auth.field_input, "https://example.invalid/v1");
+}
+
+/// The event ESC produces on a question capture: the scoped capture id rides in `input`.
+fn cancel_event(capture_id: &str) -> ShellEvent {
+    let mut event = ShellEvent::user_input_intercepted("session", capture_id);
+    event.component = Some("card".to_string());
+    event.message = Some("question_cancel".to_string());
+    event.input = Some(capture_id.to_string());
+    event
+}
+
+/// A brand-new `openai_compat` provider mid-form: Provider ID and Base URL are confirmed and the
+/// cursor sits on Model.
+fn new_provider_on_model_state() -> InlineState {
+    let mut template = template("openai_compat");
+    template.fields = vec![
+        field("provider_id", "Provider ID", false),
+        field("base_url", "Base URL", false),
+        field("model", "Model", false),
+    ];
+    let mut auth = slash_auth_state(&[], SysomMenu::default());
+    auth.providers = vec![template];
+    auth.phase = AuthPhase::FillingField;
+    auth.collected_values = HashMap::from([
+        ("provider_id".to_string(), "qwen-prod".to_string()),
+        (
+            "base_url".to_string(),
+            "https://example.invalid/v1".to_string(),
+        ),
+    ]);
+    auth.current_field = 2;
+    auth.load_current_field_input();
+    let mut state = InlineState::default();
+    state.auth.state = Some(auth);
+    state
+}
+
+fn press_esc(state: &mut InlineState) -> String {
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+    relay_card_event(state, cancel_event(&capture_id))
+}
+
+fn press_ctrl_c(state: &mut InlineState) -> String {
+    let capture_id = auth_capture_id(state.auth.state.as_ref().expect("auth state"));
+    let mut event = cancel_event(&capture_id);
+    event.message = Some("question_abort".to_string());
+    relay_card_event(state, event)
+}
+
+/// Making ESC step back must not cost the user their interrupt: Ctrl+C arrives as a separate
+/// `question_abort` and still abandons the whole form from any field.
+#[test]
+fn ctrl_c_mid_form_abandons_the_whole_flow() {
+    let mut state = new_provider_on_model_state();
+    let auth_id = state.auth.state.as_ref().expect("auth state").id.clone();
+
+    let rendered = press_ctrl_c(&mut state);
+
+    assert!(
+        state.auth.state.is_none(),
+        "Ctrl+C stepped back instead of abandoning the form"
+    );
+    assert!(rendered.contains("Auth cancelled"), "{rendered}");
+    assert!(state.auth.completed_ids.contains(&auth_id));
+}
+
+/// #1760: ESC in the middle of the form abandoned every collected field. It now redraws the
+/// previous prompt, and the flow stays pending.
+#[test]
+fn esc_on_a_middle_field_redraws_the_earlier_field_instead_of_cancelling() {
+    let mut state = new_provider_on_model_state();
+
+    let rendered = press_esc(&mut state);
+
+    let auth = state.auth.state.as_ref().expect("auth flow still pending");
+    assert_eq!(auth.current_field, 1);
+    assert_eq!(auth.field_input, "https://example.invalid/v1");
+    assert!(rendered.contains("Base URL"), "{rendered}");
+    assert!(!rendered.contains("Auth cancelled"), "{rendered}");
+    assert!(
+        state.auth.completed_ids.is_empty(),
+        "a step back must not mark the request answered"
+    );
+}
+
+/// The first field steps out to the template picker, which is still a live panel — so the flow
+/// is not finished and the id must stay open for the answer that follows.
+#[test]
+fn esc_on_the_first_field_returns_to_the_picker_without_cancelling() {
+    let mut state = new_provider_on_model_state();
+    {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.current_field = 0;
+        auth.load_current_field_input();
+    }
+
+    let rendered = press_esc(&mut state);
+
+    let auth = state.auth.state.as_ref().expect("auth flow still pending");
+    assert_eq!(auth.phase, AuthPhase::SelectingProvider);
+    assert!(!rendered.contains("Auth cancelled"), "{rendered}");
+    assert!(state.auth.completed_ids.is_empty());
+}
+
+/// Only the ESC that finds no earlier step ends the flow, and that one still reports the
+/// cancellation and closes the request out.
+#[test]
+fn a_second_esc_at_the_picker_ends_the_flow() {
+    let mut state = new_provider_on_model_state();
+    let auth_id = {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.phase = AuthPhase::SelectingProvider;
+        auth.id.clone()
+    };
+
+    let rendered = press_esc(&mut state);
+
+    assert!(state.auth.state.is_none(), "flow should be over");
+    assert!(rendered.contains("Auth cancelled"), "{rendered}");
+    assert!(state.auth.completed_ids.contains(&auth_id));
+}
+
+/// The scoped capture id guards the step back exactly as it guards a submission: an ESC left
+/// over from a field the user already passed must not walk the live field backwards.
+#[test]
+fn a_stale_field_esc_does_not_move_the_live_field() {
+    let mut state = new_provider_on_model_state();
+    let stale_id = {
+        let auth = state.auth.state.as_mut().expect("auth state");
+        auth.current_field = 0;
+        let stale = auth_capture_id(auth);
+        auth.current_field = 2;
+        stale
+    };
+
+    relay_card_event(&mut state, cancel_event(&stale_id));
+
+    let auth = state.auth.state.as_ref().expect("auth flow still pending");
+    assert_eq!(auth.current_field, 2);
+    assert!(state.auth.completed_ids.is_empty());
 }
 
 /// Secret fields already worked: an empty Enter there is delivered as an empty `answer`.

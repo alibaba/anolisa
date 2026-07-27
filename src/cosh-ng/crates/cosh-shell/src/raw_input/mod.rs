@@ -85,6 +85,12 @@ pub(crate) enum RawInputEvent {
     QuestionSubmitAttempt(String),
     CardSecretAnswer(String),
     QuestionCancel(String),
+    /// Ctrl+C on a question capture: abandon the whole prompt.
+    ///
+    /// Distinct from [`RawInputEvent::QuestionCancel`] (ESC) only so a multi-step prompt can let
+    /// ESC step back while Ctrl+C keeps its usual meaning. Panels with a single step treat both
+    /// identically.
+    QuestionAbort(String),
     EvidenceSend(String),
     EvidenceIgnore(String),
     EvidenceCancel(String),

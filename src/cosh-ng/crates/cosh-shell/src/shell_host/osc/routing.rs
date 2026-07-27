@@ -29,6 +29,13 @@ impl OscParser {
             self.intervention_cuts.push(self.clean.len());
             self.intervention_display_cuts
                 .push((self.display.len(), DisplayCutKind::Intercept));
+            // Record the display position at intercept time so that
+            // `last_prompt_display()` returns only post-intercept bytes
+            // (the new PS1 prompt), not the user-echoed command text that
+            // bash already wrote to the terminal before the DEBUG trap fired.
+            // Without this, RestorePrompt would re-emit the echoed command
+            // below the panel, duplicating it on screen (#1811).
+            self.last_prompt_display_start = Some(self.display.len());
             self.push_intercept_event_with_routing(
                 &session_id,
                 input,

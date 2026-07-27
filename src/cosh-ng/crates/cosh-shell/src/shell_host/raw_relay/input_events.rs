@@ -153,6 +153,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 parser.push_secret_card_event("answer", &answer)
             }
             RawInputEvent::QuestionCancel(id) => parser.push_card_event("question_cancel", &id),
+            RawInputEvent::QuestionAbort(id) => parser.push_card_event("question_abort", &id),
             RawInputEvent::EvidenceSend(id) => parser.push_card_event("evidence_send", &id),
             RawInputEvent::EvidenceIgnore(id) => parser.push_card_event("evidence_ignore", &id),
             RawInputEvent::EvidenceCancel(id) => parser.push_card_event("evidence_cancel", &id),

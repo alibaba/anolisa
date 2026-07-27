@@ -51,6 +51,7 @@ pub(crate) struct LoadedInstallContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallContractSource {
     EmbeddedArtifact,
+    SidecarMeta,
 }
 
 /// What `handle_one` did, so `--all` can distinguish outcomes in its batch

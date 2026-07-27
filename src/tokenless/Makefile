@@ -196,6 +196,7 @@ test-hooks:
 test-integration:
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
+	python3 tests/test_compress_schema_hook.py
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
