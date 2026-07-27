@@ -109,7 +109,8 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
                     let mut simple = assess_first_stage(command, &parsed, policy);
                     simple.shape = parsed.shape;
                     simple.execution = ExecutionDecision::AskUser;
-                    simple.confidence = min_confidence(simple.confidence, AssessmentConfidence::Medium);
+                    simple.confidence =
+                        min_confidence(simple.confidence, AssessmentConfidence::Medium);
                     insert_structural_reason(
                         &mut simple.reasons,
                         match parsed.shape {
@@ -238,6 +239,12 @@ pub(super) fn assess_simple_command(
     // check instead of the raw command string: the broker's
     // metacharacter filter rejects `>` in the raw text, masking
     // commands that are otherwise fully readonly (GH-1752).
+    //
+    // Design note: this is *not* a blanket downgrade for all null-redirected
+    // commands. Only commands that the readonly broker independently validates
+    // as readonly receive Low impact + `bounded-readonly`/`output-suppressed`;
+    // high-risk programs (e.g. `rm -rf ... 2>/dev/null`) still match the
+    // high_risk_program_assessment guard above and remain High.
     let stripped_command;
     let readonly_command = if parsed.null_redirections > 0 {
         stripped_command = tokens.join(" ");
