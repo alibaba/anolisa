@@ -29,7 +29,6 @@ mod approval;
 #[macro_use]
 mod session;
 
-
 macro_rules! define_message_id {
     ($($id:ident,)*) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
