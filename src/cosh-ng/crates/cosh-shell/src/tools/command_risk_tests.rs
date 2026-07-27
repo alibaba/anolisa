@@ -293,7 +293,7 @@ fn command_risk_primary_reason_keeps_high_risk_explanation_first() {
 fn command_risk_compound_assesses_all_segments() {
     // Issue #1785: high-risk tail segments in compound commands must be
     // assessed, not just the first segment.
-    
+
     // cd /tmp && rm -rf ~ should assess as High due to rm -rf tail
     let dangerous_tail = ask("cd /tmp && rm -rf ~");
     assert_eq!(dangerous_tail.impact, RiskImpact::High);
