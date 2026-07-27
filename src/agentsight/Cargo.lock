@@ -212,6 +212,7 @@ version = "0.8.1"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "agentsight-atif",
  "agentsight-opt",
  "agentsight-opt-store",
  "agentsight-trajectory-collector",
@@ -289,6 +290,7 @@ dependencies = [
 name = "agentsight-opt"
 version = "0.1.0"
 dependencies = [
+ "agentsight-atif",
  "anyhow",
  "async-trait",
  "chrono",

@@ -552,3 +552,49 @@ fn raw_cli_zsh_empty_enter_after_slash_panel_repaints_prompt() {
         "{output}"
     );
 }
+
+/// Regression for issue #1811: after a bash slash command is intercepted, the
+/// echoed command text must not be replayed again below the panel.
+///
+/// bash echoes user input before the DEBUG trap fires, so the display buffer
+/// contains `prompt$ /skills detail\r\n` when the intercept marker arrives.
+/// Without advancing `last_prompt_display_start` past that echo, RestorePrompt
+/// would re-emit the command text on the line below the panel.
+#[test]
+fn raw_cli_bash_slash_intercept_does_not_replay_user_command_echo() {
+    let home = TempReplayHome::new("intercept-echo", "set enable-bracketed-paste on\n");
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", home.home.as_str()),
+            ("INPUTRC", home.inputrc.as_str()),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+        vec![
+            // Type and submit a slash command that renders a usage panel.
+            (b"/skills detail\r".to_vec(), Duration::from_millis(600)),
+            // Wait for the panel and any synthesized prompt replay to settle,
+            // then run a sentinel command.
+            (
+                b"echo replay-sentinel-1811\n".to_vec(),
+                Duration::from_millis(800),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    // The only prompt line that should carry the slash text is the original
+    // user input; RestorePrompt must not duplicate it below the panel.
+    let normalized = strip_ansi_escape(&output);
+    let echoed_lines = normalized
+        .lines()
+        .filter(|line| line.starts_with(PROMPT.trim_end()) && line.contains("/skills detail"))
+        .count();
+    assert_eq!(
+        echoed_lines, 1,
+        "expected exactly one prompt line containing /skills detail (the user input); \
+         RestorePrompt duplicated the echoed command\n{output:?}"
+    );
+    assert!(output.contains("replay-sentinel-1811"), "{output}");
+}

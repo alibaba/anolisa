@@ -25,6 +25,10 @@ pub struct TrajectoryRecord {
     pub total_completion_tokens: Option<i64>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
+    /// First user-authored message preview (≤ 200 chars), from ATIF steps.
+    pub first_user_message: Option<String>,
+    /// Last user-authored message preview (≤ 200 chars), from ATIF steps.
+    pub last_user_message: Option<String>,
     pub atif_json: String,
     // Collection bookkeeping columns
     pub project: String,
@@ -49,6 +53,8 @@ pub struct TrajectorySummary {
     pub total_completion_tokens: Option<i64>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
+    pub first_user_message: Option<String>,
+    pub last_user_message: Option<String>,
     pub project: String,
     /// Which product wrote the file: "qoder" or "qoderwork".
     pub source: String,
@@ -98,7 +104,9 @@ impl TrajectoryStore {
                 file_path TEXT NOT NULL,
                 file_size INTEGER NOT NULL,
                 file_mtime_ns INTEGER NOT NULL,
-                collected_at_ns INTEGER NOT NULL
+                collected_at_ns INTEGER NOT NULL,
+                first_user_message TEXT,
+                last_user_message TEXT
             )",
             [],
         )?;
@@ -112,6 +120,7 @@ impl TrajectoryStore {
             )",
             [],
         )?;
+        migrate_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -183,14 +192,15 @@ impl TrajectoryStore {
                 session_id, schema_version, agent_name, model_name, num_steps,
                 total_prompt_tokens, total_completion_tokens, start_time, end_time,
                 atif_json, project, source, is_subagent, file_path, file_size,
-                file_mtime_ns, collected_at_ns
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                file_mtime_ns, collected_at_ns, first_user_message, last_user_message
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
              ON CONFLICT(session_id) DO UPDATE SET
                 schema_version = ?2, agent_name = ?3, model_name = ?4, num_steps = ?5,
                 total_prompt_tokens = ?6, total_completion_tokens = ?7,
                 start_time = ?8, end_time = ?9, atif_json = ?10, project = ?11,
                 source = ?12, is_subagent = ?13, file_path = ?14, file_size = ?15,
-                file_mtime_ns = ?16, collected_at_ns = ?17",
+                file_mtime_ns = ?16, collected_at_ns = ?17,
+                first_user_message = ?18, last_user_message = ?19",
             params![
                 record.session_id,
                 record.schema_version,
@@ -209,6 +219,8 @@ impl TrajectoryStore {
                 record.file_size,
                 record.file_mtime_ns,
                 now_ns,
+                record.first_user_message,
+                record.last_user_message,
             ],
         )?;
         Ok(())
@@ -225,7 +237,7 @@ impl TrajectoryStore {
                 "SELECT session_id, schema_version, agent_name, model_name, num_steps,
                         total_prompt_tokens, total_completion_tokens, start_time, end_time,
                         atif_json, project, source, is_subagent, file_path, file_size,
-                        file_mtime_ns
+                        file_mtime_ns, first_user_message, last_user_message
                  FROM collected_trajectories WHERE session_id = ?1",
                 params![session_id],
                 |row| {
@@ -246,6 +258,8 @@ impl TrajectoryStore {
                         file_path: row.get(13)?,
                         file_size: row.get(14)?,
                         file_mtime_ns: row.get(15)?,
+                        first_user_message: row.get(16)?,
+                        last_user_message: row.get(17)?,
                     })
                 },
             )
@@ -282,7 +296,8 @@ impl TrajectoryStore {
         let mut sql = String::from(
             "SELECT session_id, schema_version, agent_name, model_name, num_steps,
                     total_prompt_tokens, total_completion_tokens, start_time, end_time,
-                    project, source, is_subagent, collected_at_ns
+                    project, source, is_subagent, collected_at_ns,
+                    first_user_message, last_user_message
              FROM collected_trajectories",
         );
         let mut clauses: Vec<String> = Vec::new();
@@ -327,6 +342,8 @@ impl TrajectoryStore {
                 source: row.get(10)?,
                 is_subagent: row.get::<_, i64>(11)? != 0,
                 collected_at_ns: row.get(12)?,
+                first_user_message: row.get(13)?,
+                last_user_message: row.get(14)?,
             })
         })?;
         let mut out = Vec::new();
@@ -350,6 +367,24 @@ impl TrajectoryStore {
             )
             .optional()?;
         Ok(json)
+    }
+
+    /// Returns the ATIF JSON strings of all subagent trajectories belonging to
+    /// the given parent session (matching `<parent>:subagent:%`).
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn get_subagent_atif_jsons(&self, parent_session_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock_conn()?;
+        let pattern = format!("{parent_session_id}:subagent:%");
+        let mut stmt =
+            conn.prepare("SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1")?;
+        let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// Returns distinct project / source / agent_name values for UI filters.
@@ -377,6 +412,126 @@ fn now_ns() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// Current schema version recorded in `PRAGMA user_version`.
+/// v1: preview columns added; v2: previews recomputed with system-context
+/// stripping (see [`extract_user_message_previews`]).
+const SCHEMA_USER_VERSION: i32 = 2;
+
+/// Max characters kept per user-message preview column.
+const MESSAGE_PREVIEW_CHARS: usize = 200;
+
+/// XML-style tag pairs injected into user turns by IDEs/CLIs (Qoder slash
+/// commands, Claude Code local-command transcripts, system reminders). Their
+/// content is not genuine user text and must not surface in previews.
+const SYSTEM_TAG_PAIRS: &[(&str, &str)] = &[
+    ("<system-reminder>", "</system-reminder>"),
+    ("<current_notes_content>", "</current_notes_content>"),
+    ("<command-message>", "</command-message>"),
+    ("<command-name>", "</command-name>"),
+    ("<command-args>", "</command-args>"),
+    ("<local-command-caveat>", "</local-command-caveat>"),
+    ("<local-command-stdout>", "</local-command-stdout>"),
+    ("<local-command-stderr>", "</local-command-stderr>"),
+];
+
+/// Remove system-injected tag blocks from a user message. An unterminated
+/// opening tag swallows the rest of the text (matches AgentOpt semantics).
+fn strip_system_context(text: &str) -> String {
+    let mut result = text.to_string();
+    for &(open, close) in SYSTEM_TAG_PAIRS {
+        while let Some(start) = result.find(open) {
+            if let Some(end_rel) = result[start..].find(close) {
+                let end = start + end_rel + close.len();
+                result.replace_range(start..end, "");
+            } else {
+                result.truncate(start);
+                break;
+            }
+        }
+    }
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+    result.trim().to_string()
+}
+
+/// One-shot schema migration for databases created before the user-message
+/// preview columns existed: adds the columns (no-op on fresh databases where
+/// `CREATE TABLE` already includes them) and (re)computes them from the
+/// stored ATIF JSON. v1→v2 recomputes every row because v2 added
+/// system-context stripping to the extractor.
+fn migrate_schema(conn: &Connection) -> Result<()> {
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version >= SCHEMA_USER_VERSION {
+        return Ok(());
+    }
+    for col in ["first_user_message", "last_user_message"] {
+        let sql = format!("ALTER TABLE collected_trajectories ADD COLUMN {col} TEXT");
+        if let Err(e) = conn.execute(&sql, []) {
+            // Fresh databases already have the column via CREATE TABLE.
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e.into());
+            }
+        }
+    }
+    backfill_message_previews(conn)?;
+    conn.pragma_update(None, "user_version", SCHEMA_USER_VERSION)?;
+    Ok(())
+}
+
+/// Recomputes the preview columns for every row from its `atif_json`.
+fn backfill_message_previews(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT session_id, atif_json FROM collected_trajectories")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(stmt);
+    for (session_id, atif_json) in rows {
+        let (first, last) = extract_user_message_previews(&atif_json);
+        conn.execute(
+            "UPDATE collected_trajectories
+             SET first_user_message = ?2, last_user_message = ?3
+             WHERE session_id = ?1",
+            params![session_id, first, last],
+        )?;
+    }
+    Ok(())
+}
+
+/// Extracts first/last user-authored message previews (≤ 200 chars) from an
+/// ATIF JSON document. System-injected tag blocks are stripped first; user
+/// steps left empty after stripping are skipped. Parses generically
+/// (tolerant of schema drift) and returns `(None, None)` on malformed input
+/// or when no user step carries genuine text.
+pub fn extract_user_message_previews(atif_json: &str) -> (Option<String>, Option<String>) {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(atif_json) else {
+        return (None, None);
+    };
+    let Some(steps) = doc.get("steps").and_then(|s| s.as_array()) else {
+        return (None, None);
+    };
+    let mut first = None;
+    let mut last = None;
+    for step in steps {
+        if step.get("source").and_then(|s| s.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(msg) = step.get("message").and_then(|m| m.as_str()) else {
+            continue;
+        };
+        let cleaned = strip_system_context(msg);
+        if cleaned.is_empty() {
+            continue;
+        }
+        let preview: String = cleaned.chars().take(MESSAGE_PREVIEW_CHARS).collect();
+        if first.is_none() {
+            first = Some(preview.clone());
+        }
+        last = Some(preview);
+    }
+    (first, last)
 }
 
 /// SELECT DISTINCT on a fixed column name (hard-coded, never user input).
@@ -415,6 +570,8 @@ mod tests {
             total_completion_tokens: Some(30),
             start_time: Some("2026-07-25T10:00:00Z".into()),
             end_time: Some("2026-07-25T10:00:05Z".into()),
+            first_user_message: Some("修复登录 bug".into()),
+            last_user_message: Some("再跑一遍测试".into()),
             atif_json: "{\"schema_version\":\"ATIF-v1.7\"}".into(),
             project: "myapp".into(),
             source: "qoder".into(),
@@ -509,6 +666,86 @@ mod tests {
             Some("{\"schema_version\":\"ATIF-v1.7\"}")
         );
         assert!(store.get_atif_json("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_extract_user_message_previews() {
+        let atif = r#"{"steps":[
+            {"step_id":1,"source":"system","message":"sys prompt"},
+            {"step_id":2,"source":"user","message":"  第一条用户消息  "},
+            {"step_id":3,"source":"agent","message":"好的"},
+            {"step_id":4,"source":"user","message":"最后一条"}
+        ]}"#;
+        let (first, last) = extract_user_message_previews(atif);
+        assert_eq!(first.as_deref(), Some("第一条用户消息"));
+        assert_eq!(last.as_deref(), Some("最后一条"));
+
+        // Malformed / empty inputs degrade to (None, None).
+        assert_eq!(extract_user_message_previews("not json"), (None, None));
+        assert_eq!(extract_user_message_previews("{}"), (None, None));
+        let no_user = r#"{"steps":[{"step_id":1,"source":"agent","message":"x"}]}"#;
+        assert_eq!(extract_user_message_previews(no_user), (None, None));
+
+        // Long messages are truncated to 200 chars.
+        let long_msg = "啦".repeat(300);
+        let atif_long =
+            format!(r#"{{"steps":[{{"step_id":1,"source":"user","message":"{long_msg}"}}]}}"#);
+        let (first, _) = extract_user_message_previews(&atif_long);
+        assert_eq!(first.map(|s| s.chars().count()), Some(200));
+    }
+
+    #[test]
+    fn test_extract_strips_system_injected_tags() {
+        // Slash-command turns and local-command caveats are not user text;
+        // the preview must fall through to the first genuine message.
+        let atif = r#"{"steps":[
+            {"step_id":1,"source":"user","message":"<command-message>clear</command-message> <command-name>/clear</command-name>"},
+            {"step_id":2,"source":"user","message":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>\n那你看看当前能做到么"},
+            {"step_id":3,"source":"user","message":"<system-reminder>injected memo</system-reminder>再跑一遍测试"}
+        ]}"#;
+        let (first, last) = extract_user_message_previews(atif);
+        assert_eq!(first.as_deref(), Some("那你看看当前能做到么"));
+        assert_eq!(last.as_deref(), Some("再跑一遍测试"));
+
+        // Unterminated tag swallows the rest of the block.
+        let atif2 = r#"{"steps":[{"step_id":1,"source":"user","message":"<local-command-caveat>Caveat: truncated"}]}"#;
+        assert_eq!(extract_user_message_previews(atif2), (None, None));
+    }
+
+    #[test]
+    fn test_migration_backfills_legacy_rows() {
+        let db = tmp_db("migrate");
+        // Seed a row with stale previews (as written by schema v1, without
+        // system-context stripping), then reset user_version to simulate a
+        // legacy database.
+        {
+            let store = TrajectoryStore::new_with_path(&db).unwrap();
+            let mut rec = sample_record();
+            rec.first_user_message = Some("<command-message>clear</command-message>".into());
+            rec.last_user_message = None;
+            rec.atif_json = r#"{"steps":[
+                {"step_id":1,"source":"user","message":"<command-message>clear</command-message>"},
+                {"step_id":2,"source":"user","message":"首条"},
+                {"step_id":3,"source":"user","message":"末条"}
+            ]}"#
+            .into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.pragma_update(None, "user_version", 0).unwrap();
+        }
+
+        // Reopen → migration recomputes previews from atif_json, replacing
+        // the stale tag-polluted value.
+        let store = TrajectoryStore::new_with_path(&db).unwrap();
+        let got = store.get("s-1").unwrap().unwrap();
+        assert_eq!(got.first_user_message.as_deref(), Some("首条"));
+        assert_eq!(got.last_user_message.as_deref(), Some("末条"));
+
+        let rows = store.list_summaries(None, None, None, 10).unwrap();
+        assert_eq!(rows[0].first_user_message.as_deref(), Some("首条"));
+        assert_eq!(rows[0].last_user_message.as_deref(), Some("末条"));
     }
 
     #[test]

@@ -100,8 +100,8 @@ const inputCls =
 
 // ── Component ─────────────────────────────────────────────────────────────
 
-/** LLM configuration modal for the optimization analysis feature. */
-export const OptimizationSettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+/** LLM configuration form for the optimization analysis feature (rendered in the settings page). */
+export const LlmConfigForm: React.FC = () => {
   const [config, setConfig] = useState<OptimizeLlmConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -199,174 +199,152 @@ export const OptimizationSettings: React.FC<{ onClose: () => void }> = ({ onClos
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-200 flex items-start justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">LLM 配置</h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              选择云服务厂商和模型，修改后立即生效，无需重启。
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 text-xl leading-none px-1"
-            title="关闭"
-          >
-            ×
-          </button>
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
+      {/* Header */}
+      <div className="px-6 py-4 border-b border-gray-200">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">LLM 配置</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            选择云服务厂商和模型，修改后立即生效，无需重启。用于优化分析（性能策略 / 成本浪费 / 准确性维度）。
+          </p>
         </div>
+      </div>
 
-        {loading ? (
-          <div className="flex items-center gap-3 px-6 py-10 text-gray-500 text-sm">
-            <span className="inline-block w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-            加载配置中...
+      {loading ? (
+        <div className="flex items-center gap-3 px-6 py-10 text-gray-500 text-sm">
+          <span className="inline-block w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          加载配置中...
+        </div>
+      ) : (
+        <form onSubmit={handleSave} className="px-6 py-5 space-y-4">
+          {/* Provider */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">云服务商</label>
+            <select
+              className={inputCls}
+              value={provider}
+              onChange={(e) => handleProviderChange(e.target.value)}
+            >
+              {PROVIDERS.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.icon} {p.name}
+                </option>
+              ))}
+            </select>
           </div>
-        ) : (
-          <form onSubmit={handleSave} className="px-6 py-5 space-y-4">
-            {/* Provider */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">云服务商</label>
-              <select
+
+          {/* Base URL */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Base URL</label>
+            {provider === 'custom' ? (
+              <input
+                type="text"
                 className={inputCls}
-                value={provider}
-                onChange={(e) => handleProviderChange(e.target.value)}
-              >
-                {PROVIDERS.map(p => (
-                  <option key={p.id} value={p.id}>
-                    {p.icon} {p.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Base URL */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Base URL</label>
-              {provider === 'custom' ? (
-                <input
-                  type="text"
-                  className={inputCls}
-                  value={baseUrl}
-                  onChange={(e) => setBaseUrl(e.target.value)}
-                  placeholder="https://your-api-endpoint/v1"
-                  spellCheck={false}
-                />
-              ) : (
-                <div className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-500 font-mono truncate">
-                  {baseUrl}
-                </div>
-              )}
-            </div>
-
-            {/* API Key */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
-              <div className="flex items-center gap-2">
-                <input
-                  type={showKey ? 'text' : 'password'}
-                  className={inputCls}
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder={config?.api_key ?? '输入 API Key'}
-                  spellCheck={false}
-                  autoComplete="off"
-                />
-                <button
-                  type="button"
-                  className="flex-shrink-0 px-2.5 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm transition-colors"
-                  onClick={() => setShowKey(!showKey)}
-                  title={showKey ? '隐藏' : '显示'}
-                >
-                  {showKey ? '🙈' : '👁'}
-                </button>
-              </div>
-              <p className="text-xs text-gray-400 mt-1">
-                {config?.api_key ? '留空则保持当前配置不变' : '在对应厂商控制台获取 API Key'}
-              </p>
-            </div>
-
-            {/* Model */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">模型</label>
-              {provider !== 'custom' && availableModels.length > 0 ? (
-                <>
-                  <select
-                    className={inputCls}
-                    value={isKnownModel ? model : '__custom__'}
-                    onChange={(e) => {
-                      if (e.target.value === '__custom__') {
-                        setIsKnownModel(false);
-                      } else {
-                        setIsKnownModel(true);
-                        setModel(e.target.value);
-                      }
-                    }}
-                  >
-                    {availableModels.map(m => (
-                      <option key={m.id} value={m.id}>{m.name} ({m.id})</option>
-                    ))}
-                    <option value="__custom__">✏️ 自定义模型名...</option>
-                  </select>
-                  {!isKnownModel && (
-                    <input
-                      type="text"
-                      className={`${inputCls} mt-1.5`}
-                      value={customModel}
-                      onChange={(e) => setCustomModel(e.target.value)}
-                      placeholder="输入模型 ID"
-                      spellCheck={false}
-                    />
-                  )}
-                </>
-              ) : (
-                <input
-                  type="text"
-                  className={inputCls}
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder="输入模型 ID，如 gpt-4o"
-                  spellCheck={false}
-                />
-              )}
-            </div>
-
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">
-                {error}
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://your-api-endpoint/v1"
+                spellCheck={false}
+              />
+            ) : (
+              <div className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-500 font-mono truncate">
+                {baseUrl}
               </div>
             )}
+          </div>
 
-            {/* Actions */}
-            <div className="flex items-center gap-3 pt-1">
-              <button
-                type="submit"
-                disabled={saving}
-                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
-              >
-                {saving ? '保存中...' : '保存配置'}
-              </button>
-              {saved && (
-                <span className="text-sm text-green-600">✓ 配置已保存并生效</span>
-              )}
+          {/* API Key */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+            <div className="flex items-center gap-2">
+              <input
+                type={showKey ? 'text' : 'password'}
+                className={inputCls}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={config?.api_key ?? '输入 API Key'}
+                spellCheck={false}
+                autoComplete="off"
+              />
               <button
                 type="button"
-                onClick={onClose}
-                className="ml-auto px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-sm transition-colors"
+                className="flex-shrink-0 px-2.5 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm transition-colors"
+                onClick={() => setShowKey(!showKey)}
+                title={showKey ? '隐藏' : '显示'}
               >
-                关闭
+                {showKey ? '🙈' : '👁'}
               </button>
             </div>
-          </form>
-        )}
-      </div>
+            <p className="text-xs text-gray-400 mt-1">
+              {config?.api_key ? '留空则保持当前配置不变' : '在对应厂商控制台获取 API Key'}
+            </p>
+          </div>
+
+          {/* Model */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">模型</label>
+            {provider !== 'custom' && availableModels.length > 0 ? (
+              <>
+                <select
+                  className={inputCls}
+                  value={isKnownModel ? model : '__custom__'}
+                  onChange={(e) => {
+                    if (e.target.value === '__custom__') {
+                      setIsKnownModel(false);
+                    } else {
+                      setIsKnownModel(true);
+                      setModel(e.target.value);
+                    }
+                  }}
+                >
+                  {availableModels.map(m => (
+                    <option key={m.id} value={m.id}>{m.name} ({m.id})</option>
+                  ))}
+                  <option value="__custom__">✏️ 自定义模型名...</option>
+                </select>
+                {!isKnownModel && (
+                  <input
+                    type="text"
+                    className={`${inputCls} mt-1.5`}
+                    value={customModel}
+                    onChange={(e) => setCustomModel(e.target.value)}
+                    placeholder="输入模型 ID"
+                    spellCheck={false}
+                  />
+                )}
+              </>
+            ) : (
+              <input
+                type="text"
+                className={inputCls}
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="输入模型 ID，如 gpt-4o"
+                spellCheck={false}
+              />
+            )}
+          </div>
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg text-sm">
+              {error}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-3 pt-1">
+            <button
+              type="submit"
+              disabled={saving}
+              className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+            >
+              {saving ? '保存中...' : '保存配置'}
+            </button>
+            {saved && (
+              <span className="text-sm text-green-600">✓ 配置已保存并生效</span>
+            )}
+          </div>
+        </form>
+      )}
     </div>
   );
 };

@@ -91,14 +91,14 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Discovery** | `src/discovery/` | Agent 进程发现 | `AgentScanner`, `AgentMatcher`, `known_agents` |
 | **Health** | `src/health/` | Agent 健康检查 | `HealthChecker`, `HealthStore` |
 | **Tokenizer** | `src/tokenizer/` | LLM Token 计数 | `LlmTokenizer`, `MultiModelTokenizer` |
-| **ATIF** | `src/atif/` | 轨迹格式导出 | `AtifDocument`, `convert_trace_to_atif` |
+| **ATIF** | `src/atif/` | 轨迹格式导出（转换逻辑；数据模型来自 `agentsight-atif`） | `convert_trace_to_atif`, `convert_session_to_atif` |
 | **Server** | `src/server/` | HTTP API + 嵌入式前端 | `AppState`, `run_server` |
 | **Container** | `src/container.rs` | 容器 ID 提取（/proc/pid/cgroup） | `extract_container_id`, `parse_container_id_from_cgroup` |
 | **Config** | `src/config.rs` | 统一配置 | `AgentsightConfig` |
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
 | **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
-| **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate（采集链路使用；主 crate `src/atif` 仍为 v1.6 导出链路） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
+| **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate，唯一的 ATIF 数据模型（采集链路 + 主 crate 导出链路共用） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
 | **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
 ## 5. Critical Code Paths
@@ -229,8 +229,9 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/auth/login` | POST | Dashboard 登录（Body: `{"token":"..."}` ），成功设置 httpOnly cookie |
 | `/api/auth/status` | GET | 返回 `{"auth_enabled": bool}`（免认证，供前端判断是否需登录）|
 | `/api/auth/verify` | GET | 校验当前 session cookie/token 是否有效，返回 `{"authenticated": bool}` |
-| `/api/optimize/sessions/{id}/{dim}` | POST | 运行单维度优化分析，`dim` ∈ `perf` / `perf-issues` / `cost` / `cost-waste` / `accuracy`（后三者需 LLM 配置，10–60s） |
+| `/api/optimize/sessions/{id}/{dim}` | POST | 运行单维度优化分析，`dim` ∈ `perf` / `perf-issues` / `cost` / `cost-waste` / `accuracy` / `summary`（后四者需 LLM 配置，10–60s；`summary` 为单次调用叙事摘要） |
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
+| `/api/optimize/results` | GET | 分析历史列表（`start_ns`, `end_ns`, `limit` ≤ 200；默认最近 30 天，仅返回各维度存在标记，不含 payload） |
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
 | `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |

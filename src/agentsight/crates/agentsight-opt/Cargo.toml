@@ -8,6 +8,7 @@ name = "analyze"
 path = "src/bin/analyze.rs"
 
 [dependencies]
+agentsight-atif = { path = "../agentsight-atif" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
