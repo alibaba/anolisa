@@ -178,6 +178,10 @@ impl NativeLineState {
 }
 
 pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
+    if let Some(hint) = at_mention_file_hint(line) {
+        return Some(hint);
+    }
+
     let trimmed = line.trim_start();
     if !trimmed.starts_with('/') || trimmed[1..].contains('/') {
         return None;
@@ -196,6 +200,78 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
             .find(|spec| spec.name.starts_with(token) && spec.name != token)
             .map(|spec| spec.usage.to_string()),
     }
+}
+
+/// When the line contains an `@` character, suggest file names from the
+/// current working directory that match the partial path after `@`.
+fn at_mention_file_hint(line: &str) -> Option<String> {
+    let at_pos = line.rfind('@')?;
+    let partial = &line[at_pos + 1..];
+
+    // Don't trigger if @ is in the middle of a word (e.g., email addresses)
+    if at_pos > 0 {
+        let prev_char = line.as_bytes()[at_pos - 1];
+        if !prev_char.is_ascii_whitespace() {
+            return None;
+        }
+    }
+
+    let cwd = std::env::current_dir().ok()?;
+
+    // Determine the search directory and filter prefix
+    let (search_dir, filter_prefix) = if partial.contains('/') {
+        let last_slash = partial.rfind('/').unwrap();
+        let dir_part = &partial[..last_slash];
+        let file_part = &partial[last_slash + 1..];
+        let resolved = if dir_part.is_empty() || dir_part == "." {
+            cwd.clone()
+        } else {
+            cwd.join(dir_part)
+        };
+        (resolved, file_part.to_string())
+    } else {
+        (cwd.clone(), partial.to_string())
+    };
+
+    let Ok(entries) = std::fs::read_dir(&search_dir) else {
+        return None;
+    };
+
+    let mut candidates: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip hidden files unless the filter starts with '.'
+            if !filter_prefix.starts_with('.') && name.starts_with('.') {
+                return None;
+            }
+            if filter_prefix.is_empty() || name.starts_with(&filter_prefix) {
+                let suffix = if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    "/"
+                } else {
+                    ""
+                };
+                Some(format!("{name}{suffix}"))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    candidates.sort();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Limit display to fit in terminal width
+    let max_display = 8;
+    let display: Vec<&str> = candidates.iter().take(max_display).map(|s| s.as_str()).collect();
+    let mut hint = display.join("  ");
+    if candidates.len() > max_display {
+        hint.push_str(&format!("  (+{} more)", candidates.len() - max_display));
+    }
+    Some(hint)
 }
 
 pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
