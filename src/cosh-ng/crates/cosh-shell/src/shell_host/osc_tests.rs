@@ -859,6 +859,80 @@ fn parser_session_cap_preserves_command_facts_without_output_ref() {
     );
 }
 
+/// Regression for issue #1811: after a bash intercept, `last_prompt_display()`
+/// must not include the user-echoed command text.  bash echoes user input
+/// *before* the DEBUG trap fires, so those bytes are in the display buffer
+/// ahead of the intercept marker.  The intercept handler must advance
+/// `last_prompt_display_start` past the echo so that RestorePrompt only
+/// re-emits the new PS1 paint, not the duplicated command.
+#[test]
+fn intercept_advances_last_prompt_display_start_past_user_echo() {
+    let mut parser = parser_for_test("intercept-echo-dedup");
+    let sid = "intercept-echo-dedup";
+
+    // 1. Shell ready: precmd sets initial `last_prompt_display_start`.
+    parser
+        .feed(
+            format!(
+                "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"{TEST_MARKER_TOKEN}\",\"session_id\":\"{sid}\",\"cwd\":\"/tmp\",\"status\":0}}\x07"
+            )
+            .as_bytes(),
+        )
+        .expect("feed precmd");
+    let prompt = b"cosh-replay$ ";
+    parser.feed(prompt).expect("feed PS1 paint");
+
+    let prompt_start = parser.last_prompt_display();
+    assert!(
+        !prompt_start.is_empty(),
+        "precmd must set last_prompt_display_start"
+    );
+    assert_eq!(
+        prompt_start, prompt,
+        "after precmd, last_prompt_display() returns the PS1 paint"
+    );
+
+    // 2. User types `/skills detail\r\n` — bash echoes it before any trap.
+    let user_echo = b"/skills detail\r\n";
+    parser.feed(user_echo).expect("feed user echo");
+
+    // 3. DEBUG trap fires → intercept marker (bash skips command via extdebug).
+    parser
+        .feed(
+            format!(
+                "\x1b]1337;COSH;{{\"event\":\"intercept\",\"token\":\"{TEST_MARKER_TOKEN}\",\"session_id\":\"{sid}\",\"command\":\"/skills detail\",\"reason\":\"slash\",\"cwd\":\"/tmp\"}}\x07"
+            )
+            .as_bytes(),
+        )
+        .expect("feed intercept");
+
+    // After intercept, `last_prompt_display_start` must be past the user echo
+    // so that `last_prompt_display()` does NOT include the echoed command text.
+    let echo_text = std::str::from_utf8(parser.last_prompt_display()).unwrap_or("");
+    assert!(
+        !echo_text.contains("/skills detail"),
+        "last_prompt_display() must not contain the user-echoed command after intercept; got: {echo_text:?}"
+    );
+
+    // 4. precmd fires → bash repaints PS1.
+    parser
+        .feed(
+            format!(
+                "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"{TEST_MARKER_TOKEN}\",\"session_id\":\"{sid}\",\"cwd\":\"/tmp\",\"status\":0}}\x07"
+            )
+            .as_bytes(),
+        )
+        .expect("feed post-intercept precmd");
+    parser.feed(prompt).expect("feed new PS1 paint");
+
+    // `last_prompt_display()` must return only the new PS1, not the echo.
+    let final_display = std::str::from_utf8(parser.last_prompt_display()).unwrap_or("");
+    assert_eq!(
+        final_display, "cosh-replay$ ",
+        "after precmd, last_prompt_display() returns only the new PS1 paint"
+    );
+}
+
 fn parser_for_test(name: &str) -> OscParser {
     let dir =
         std::env::temp_dir().join(format!("cosh-shell-osc-test-{name}-{}", std::process::id()));
