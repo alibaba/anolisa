@@ -9,6 +9,7 @@ macro_rules! help_core_ids {
             HelpGroupHealth,
             HelpGroupModes,
             HelpGroupHooks,
+            HelpGroupAudit,
             HelpSummaryHelp,
             HelpSummaryAuth,
             HelpSummaryConfig,

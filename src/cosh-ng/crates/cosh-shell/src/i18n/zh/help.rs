@@ -3,11 +3,12 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
-        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
+        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}. 按 Alt+Enter 在提示符中换行.",
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
         MessageId::HelpGroupHooks => "Hooks",
+        MessageId::HelpGroupAudit => "审计",
         MessageId::HelpSummaryHelp => "显示命令参考",
         MessageId::HelpSummaryAuth => "配置 AI 服务商凭证",
         MessageId::HelpSummaryConfig => "配置界面语言",

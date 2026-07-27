@@ -5,6 +5,11 @@ use super::{CTRL_C, CTRL_U};
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
+/// Soft newline marker inserted when user presses Alt+Enter or Shift+Enter.
+/// Using VT (vertical tab, 0x0b) which is a control char that won't appear
+/// in normal text input and won't trigger candidate_line_status Complete.
+const SOFT_NEWLINE: u8 = 0x0b;
+
 #[derive(Debug, Default)]
 pub(super) struct CandidateLineBuffer {
     pub(super) bytes: Vec<u8>,
@@ -45,6 +50,19 @@ impl CandidateLineBuffer {
                     self.pop_visible_char();
                     idx += 4;
                 }
+                // Alt+Enter: ESC + CR or ESC + LF → soft newline
+                0x1b if bytes.get(idx + 1) == Some(&b'\r')
+                    || bytes.get(idx + 1) == Some(&b'\n') =>
+                {
+                    self.bytes.push(SOFT_NEWLINE);
+                    idx += 2;
+                }
+                // Shift+Enter (kitty keyboard protocol): ESC [ 1 3 ; 2 u
+                // or ESC [ 2 7 ; 2 u
+                0x1b if is_shift_enter_csi(&bytes[idx..]) => {
+                    self.bytes.push(SOFT_NEWLINE);
+                    idx += shift_enter_csi_len(&bytes[idx..]);
+                }
                 byte => {
                     self.bytes.push(byte);
                     idx += 1;
@@ -64,7 +82,14 @@ impl CandidateLineBuffer {
         self.relayed_len = 0;
         self.force_agent_intercept = false;
         self.forced_agent_suggestion_id = None;
-        std::mem::take(&mut self.bytes)
+        let mut bytes = std::mem::take(&mut self.bytes);
+        // Convert soft newlines back to real newlines for downstream processing
+        for byte in &mut bytes {
+            if *byte == SOFT_NEWLINE {
+                *byte = b'\n';
+            }
+        }
+        bytes
     }
 
     pub(super) fn visible_line_bytes(&self) -> &[u8] {
@@ -280,6 +305,25 @@ pub(super) fn native_candidate_should_return_to_shell(
     token.starts_with('/') && !input_classifier.is_slash_control_candidate(token)
 }
 
+/// Check if bytes start with a Shift+Enter CSI sequence.
+/// Recognizes: \x1b[13;2u (Shift+Enter) and \x1b[27;2u (Shift+Enter alt code).
+fn is_shift_enter_csi(bytes: &[u8]) -> bool {
+    matches!(
+        bytes,
+        [0x1b, b'[', b'1', b'3', b';', b'2', b'u', ..]
+            | [0x1b, b'[', b'2', b'7', b';', b'2', b'u', ..]
+    )
+}
+
+/// Return the length of a Shift+Enter CSI sequence at the start of bytes.
+fn shift_enter_csi_len(bytes: &[u8]) -> usize {
+    if bytes.starts_with(b"\x1b[13;2u") || bytes.starts_with(b"\x1b[27;2u") {
+        7
+    } else {
+        1
+    }
+}
+
 pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
     if bytes.len() > 4096 {
         return CandidateLineStatus::Unsafe;
@@ -294,7 +338,7 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
                     CandidateLineStatus::Unsafe
                 };
             }
-            if *byte < 0x20 && !matches!(byte, b'\t') {
+            if *byte < 0x20 && !matches!(byte, b'\t' | SOFT_NEWLINE) {
                 return CandidateLineStatus::Unsafe;
             }
         }
@@ -305,7 +349,7 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
     let line_bytes = &bytes[..line_len];
     if line_bytes
         .iter()
-        .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))
+        .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t' | SOFT_NEWLINE)))
     {
         return CandidateLineStatus::Unsafe;
     }

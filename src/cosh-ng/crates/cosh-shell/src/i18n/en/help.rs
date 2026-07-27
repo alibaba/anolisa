@@ -3,11 +3,12 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash commands",
-        MessageId::HelpFooter => "Mode: {mode}. Strategy: {strategy}.",
+        MessageId::HelpFooter => "Mode: {mode}. Strategy: {strategy}. Press Alt+Enter for newline in prompt.",
         MessageId::HelpGroupConfig => "Config",
         MessageId::HelpGroupHealth => "Health",
         MessageId::HelpGroupModes => "Modes",
         MessageId::HelpGroupHooks => "Hooks",
+        MessageId::HelpGroupAudit => "Audit",
         MessageId::HelpSummaryHelp => "show command reference",
         MessageId::HelpSummaryAuth => "configure AI provider credentials",
         MessageId::HelpSummaryConfig => "configure UI language",
