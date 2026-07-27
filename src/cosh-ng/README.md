@@ -129,7 +129,10 @@ only in the operating-system secret store and are always displayed as
 `[redacted]`; workspace settings require an already trusted project. Extension
 context is bounded and injected after project context. Local stdio MCP tools
 use the full `<extension>/mcp/<server>/<tool>` namespace and follow normal tool
-approval. Agent definitions are validated and listed, but currently report
+approval. A hook may declare `env`, injected into that hook's own child process
+only — the host process is never modified — and because that is executable
+capability it is part of the extension capability fingerprint, so declaring or
+changing it requires fresh consent. Agent definitions are validated and listed, but currently report
 `executable=false` until the unified subagent executor is available. Registry
 mutations build a candidate generation. The shell keeps one long-lived core
 process: `/extensions reload` switches a healthy candidate immediately while

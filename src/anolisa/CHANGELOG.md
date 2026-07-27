@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-07-27
+
+### Changed
+
+- Commands that act on an installed component now report an absent target as
+  `NOT_INSTALLED` instead of `INVALID_ARGUMENT`, so a caller can tell "there was
+  nothing to act on" from "the invocation was wrong" without parsing the error
+  message. The code reports state absence only, and does not indicate whether
+  the name was valid. Affects `uninstall`, `update`, `repair`, `forget`,
+  `restart`, and `adapter`; the exit code stays 2
+  ([#1915](https://github.com/alibaba/anolisa/pull/1915)).
+
+### Fixed
+
+- Adapter status now ignores empty or incomplete stale source directories and
+  reports missing bundles as degraded; raw uninstalls prune empty directories
+  so another installation scope cannot be shadowed
+  ([#1850](https://github.com/alibaba/anolisa/pull/1850)).
+- Raw install dry-runs now validate component conflicts before execution,
+  keeping preview results aligned with real installs. Repositories without
+  lightweight sidecar metadata warn that conflict validation was skipped
+  ([#1898](https://github.com/alibaba/anolisa/pull/1898)).
+
 ## [0.2.11] - 2026-07-24
 
 ### Added
@@ -662,6 +685,25 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.12] - 2026-07-27
+
+### 变更
+
+- 对已安装组件执行操作的命令在目标缺失时现报告 `NOT_INSTALLED`，不再报告
+  `INVALID_ARGUMENT`，调用方无需解析错误消息即可区分“没有可操作的目标”和“调用方式错误”。
+  该错误码仅表示状态缺失，不表示组件名称是否有效；影响 `uninstall`、`update`、`repair`、
+  `forget`、`restart` 和 `adapter`，退出码仍为 2
+  ([#1915](https://github.com/alibaba/anolisa/pull/1915))。
+
+### 修复
+
+- adapter 状态检查现忽略空的或不完整的过期源目录，并将缺失 bundle 报告为 degraded；
+  raw 卸载会清理空目录，避免遮蔽其他安装 scope
+  ([#1850](https://github.com/alibaba/anolisa/pull/1850))。
+- raw 安装 dry-run 现会在执行前校验组件冲突，使预览结果与实际安装保持一致。仓库缺少
+  轻量 sidecar 元数据时会提示已跳过冲突校验
+  ([#1898](https://github.com/alibaba/anolisa/pull/1898))。
 
 ## [0.2.11] - 2026-07-24
 

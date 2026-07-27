@@ -24,6 +24,8 @@ pub(super) enum SlashCommand<'a> {
     #[allow(dead_code)]
     Info(SlashInfoCommand),
     Health,
+    Status,
+    Stats(&'a str),
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
@@ -84,6 +86,10 @@ impl<'a> SlashCommand<'a> {
             }
             "/debug" => Some(Self::Debug(parts.next())),
             "/health" => Some(Self::Health),
+            "/status" | "/about" => Some(Self::Status),
+            "/stats" => Some(Self::Stats(
+                input.strip_prefix("/stats").unwrap_or_default().trim(),
+            )),
             "/extensions" => {
                 let args = input
                     .strip_prefix("/extensions")
@@ -145,6 +151,9 @@ fn parser_owned_command(token: &str) -> bool {
             | "/config"
             | "/debug"
             | "/health"
+            | "/status"
+            | "/about"
+            | "/stats"
             | "/extensions"
             | "/skills"
             | "/session"
@@ -237,12 +246,27 @@ mod tests {
     }
 
     #[test]
+    fn status_about_and_stats_parse_as_read_only_commands() {
+        for command in ["/status", "/about"] {
+            assert!(
+                matches!(SlashCommand::parse(command), Ok(Some(SlashCommand::Status))),
+                "{command}"
+            );
+        }
+        match SlashCommand::parse("/stats tools") {
+            Ok(Some(SlashCommand::Stats(arguments))) => assert_eq!(arguments, "tools"),
+            _ => panic!("/stats tools did not parse as stats"),
+        }
+    }
+
+    #[test]
     fn quoted_arguments_are_rejected_for_parser_owned_commands() {
         for command in [
             "/mode approval \"trust confirm\"",
             "/mode approval 'trust confirm'",
             "/config language \"en US\"",
             "/health \"quick\"",
+            "/stats \"model\"",
             "/recommendations \"on\"",
         ] {
             assert!(
@@ -289,12 +313,21 @@ mod tests {
             assert!(
                 hints.iter().all(|hint| matches!(
                     hint.name,
-                    "/config" | "/session" | "/mode" | "/hooks" | "/extensions" | "/skills"
+                    "/config"
+                        | "/session"
+                        | "/mode"
+                        | "/hooks"
+                        | "/extensions"
+                        | "/skills"
+                        | "/auth"
                 )),
                 "{prefix} returned non-public hints: {:?}",
                 hints.iter().map(|hint| hint.name).collect::<Vec<_>>()
             );
         }
+        // /au matches the public /auth but must never surface the contextual /audit
+        assert!(slash_hints("/au").iter().any(|hint| hint.name == "/auth"));
+        assert!(slash_hints("/au").iter().all(|hint| hint.name != "/audit"));
         // /ex and /skill now match public commands
         assert!(slash_hints("/ex")
             .iter()

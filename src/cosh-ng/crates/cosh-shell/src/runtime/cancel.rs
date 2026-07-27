@@ -223,9 +223,14 @@ fn is_approval_card_cancel_event(event: &ShellEvent) -> bool {
         && event.message.as_deref() == Some("cancel")
 }
 
+/// Both ways of abandoning a question prompt release the run's cancel ownership: ESC
+/// (`question_cancel`) and Ctrl+C (`question_abort`).
 fn is_question_card_cancel_event(event: &ShellEvent) -> bool {
     event.component.as_deref() == Some("card")
-        && event.message.as_deref() == Some("question_cancel")
+        && matches!(
+            event.message.as_deref(),
+            Some("question_cancel") | Some("question_abort")
+        )
 }
 
 fn is_evidence_card_cancel_event(event: &ShellEvent) -> bool {

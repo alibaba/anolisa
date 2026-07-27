@@ -669,3 +669,227 @@ fn plain_markdown_text_preserves_markdown_list_markers() {
     assert!(!text.contains("• Check memory"), "{text}");
     assert_rendered_width(&text, 38);
 }
+
+#[test]
+fn probe_issue_1751_code_block_content_is_syntax_highlighted() {
+    let model = MarkdownRenderModel::parse(
+        "```python\ndef greet(name):\n    if name:\n        return name\n```",
+        60,
+    );
+
+    let styled = model.styled_lines();
+    let def_line = styled
+        .iter()
+        .find(|line| line.spans.iter().any(|span| span.content.contains("def")))
+        .expect("code block line with def");
+    assert!(
+        def_line.spans.iter().any(|span| span.style.fg.is_some()),
+        "code block content should carry syntax-highlight colors: {def_line:?}"
+    );
+}
+
+#[test]
+fn markdown_styled_code_block_colors_keywords_strings_and_calls() {
+    let model =
+        MarkdownRenderModel::parse("```python\ndef greet(name):\n    return f(\"hi\")\n```", 60);
+
+    let styled = model.styled_lines();
+    let all_spans = styled
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .collect::<Vec<_>>();
+
+    let keyword = all_spans
+        .iter()
+        .find(|span| span.content.as_ref() == "def")
+        .expect("keyword span");
+    assert_eq!(keyword.style.fg, Some(Color::Cyan));
+    assert!(keyword.style.add_modifier.contains(Modifier::BOLD));
+
+    let string_lit = all_spans
+        .iter()
+        .find(|span| span.content.as_ref() == "\"hi\"")
+        .expect("string span");
+    assert_eq!(string_lit.style.fg, Some(Color::Green));
+
+    let call = all_spans
+        .iter()
+        .find(|span| span.content.as_ref() == "f")
+        .expect("call span");
+    assert_eq!(call.style.fg, Some(Color::Yellow));
+}
+
+#[test]
+fn markdown_styled_code_block_colors_bash_comments() {
+    let model = MarkdownRenderModel::parse("```bash\necho ok # note\n```", 60);
+
+    let styled = model.styled_lines();
+    let comment = styled
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("# note"))
+        .expect("comment span");
+    assert_eq!(comment.style.fg, Some(Color::DarkGray));
+}
+
+#[test]
+fn markdown_styled_code_block_leaves_unknown_language_unstyled() {
+    let model = MarkdownRenderModel::parse("```brainfuck\n+++ if def\n```", 60);
+
+    let styled = model.styled_lines();
+    let content = styled
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("+++ if def"))
+        .expect("content span");
+    assert_eq!(content.style.fg, None, "{content:?}");
+}
+
+#[test]
+fn markdown_styled_code_block_keeps_border_geometry_aligned() {
+    let model = MarkdownRenderModel::parse(
+        "```python\ndef greet(name):\n    if name:\n        return name\n```",
+        60,
+    );
+
+    let text = model
+        .styled_lines()
+        .iter()
+        .map(crate::ui::agent_render::line_to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_box_lines_aligned(&text, 60);
+    assert!(text.contains("┌ code: python "), "{text}");
+    assert!(
+        text.lines().last().is_some_and(|l| l.starts_with('└')),
+        "{text}"
+    );
+}
+
+#[test]
+fn markdown_agent_response_emits_ansi_colors_inside_code_block() {
+    let renderer = RatatuiInlineRenderer {
+        width: 80,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let mut output = Vec::new();
+
+    renderer
+        .write_agent_response(
+            &mut output,
+            "```python\ndef greet(name):\n    return name\n```",
+            None,
+        )
+        .expect("render styled code block");
+
+    let text = String::from_utf8(output).expect("utf8 output");
+    let clean = strip_ansi_escape(&text);
+    assert!(clean.contains("def greet(name):"), "{clean}");
+    assert!(text.contains("\x1b[0;1;36mdef"), "{text:?}");
+}
+
+#[test]
+fn markdown_plain_code_block_stays_free_of_ansi_styles() {
+    let plain = RatatuiInlineRenderer::plain_with_width(60)
+        .markdown_text_lines("```python\ndef greet(name):\n    return name\n```")
+        .join("\n");
+
+    assert!(!plain.contains('\x1b'), "{plain:?}");
+    assert!(plain.contains("def greet(name):"), "{plain}");
+}
+
+#[test]
+fn markdown_styled_code_block_keeps_cpp_only_keywords_plain_in_c() {
+    // C++-only identifiers must not color inside a `c` fence; the same
+    // tokens do color inside a `cpp` fence.
+    let c_model = MarkdownRenderModel::parse("```c\nclass namespace int x;\n```", 60);
+    let c_spans = c_model
+        .styled_lines()
+        .iter()
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|s| (s.content.to_string(), s.style.fg))
+        })
+        .collect::<Vec<_>>();
+    assert!(c_spans
+        .iter()
+        .any(|(text, fg)| text == "int" && *fg == Some(Color::Cyan)));
+    assert!(!c_spans
+        .iter()
+        .any(|(text, fg)| text == "class" && fg.is_some()));
+
+    let cpp_model = MarkdownRenderModel::parse("```cpp\nclass Foo {};\n```", 60);
+    let cpp_styled = cpp_model.styled_lines();
+    let cpp_keyword = cpp_styled
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "class")
+        .expect("cpp class keyword span");
+    assert_eq!(cpp_keyword.style.fg, Some(Color::Cyan));
+}
+
+#[test]
+fn markdown_styled_code_block_tokenizes_line_by_line_only() {
+    // The highlighter is intentionally line-based: a python triple-quoted
+    // string colors the quote lines but continuation lines fall back to
+    // plain text instead of leaking string color.
+    let model =
+        MarkdownRenderModel::parse("```python\ndoc = \"\"\"start\nmiddle line\n\"\"\"\n```", 60);
+
+    let styled = model.styled_lines();
+    let middle = styled
+        .iter()
+        .find(|line| crate::ui::agent_render::line_to_string(line).contains("middle line"))
+        .expect("continuation line");
+    assert!(
+        middle
+            .spans
+            .iter()
+            .filter(|span| !span.content.contains('\u{2502}'))
+            .all(|span| span.style.fg.is_none()),
+        "{middle:?}"
+    );
+}
+
+#[test]
+fn markdown_styled_code_block_truncates_over_long_language_label() {
+    // An info string longer than the panel must not produce an over-wide
+    // styled Line: the outer Paragraph would re-wrap it and break the
+    // inner borders.
+    let renderer = RatatuiInlineRenderer {
+        width: 40,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let mut output = Vec::new();
+
+    renderer
+        .write_agent_response(
+            &mut output,
+            "```this-language-label-is-longer-than-the-panel\nx\n```",
+            None,
+        )
+        .expect("render styled code block");
+
+    let text = String::from_utf8(output).expect("utf8 output");
+    let clean = strip_ansi_escape(&text);
+    assert_rendered_width(&clean, 40);
+    assert!(clean.contains("┌ code: this-language"), "{clean}");
+    assert!(clean.contains("…"), "{clean}");
+    // Border rows stay intact: title row ends with the corner, and the
+    // code row keeps both inner border glyphs on one line.
+    assert!(
+        clean.lines().any(|l| l.contains('┌') && l.contains('┐')),
+        "{clean}"
+    );
+    assert!(
+        clean
+            .lines()
+            .any(|l| l.contains("│ x") && l.matches('│').count() >= 2),
+        "{clean}"
+    );
+}

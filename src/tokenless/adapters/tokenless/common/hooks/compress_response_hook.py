@@ -57,6 +57,7 @@ from hook_utils import (
     get_thresholds,
     is_skill_file,
     parse_version,
+    resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
     secure_write_text,
@@ -85,14 +86,6 @@ _CLAUDE_VERSION_CACHE = os.path.join(
 
 
 # -- helpers -------------------------------------------------------------------
-
-
-def _resolve_agent_id(cosh_ng_detected: bool) -> str:
-    """Resolve the agent ID, using cosh-ng when detected under that runtime."""
-    env_id = os.environ.get("TOKENLESS_AGENT_ID", "")
-    if cosh_ng_detected:
-        return env_id or "cosh-ng"
-    return env_id or "tokenless"
 
 
 def _build_additional_context(
@@ -223,7 +216,7 @@ def main() -> None:
         skip()
 
     # 2. Resolve agent ID based on runtime
-    agent_id = _resolve_agent_id(cosh_ng_detected)
+    agent_id = resolve_agent_id()
 
     # 3. Resolve binaries
     tokenless_bin = resolve_binary(

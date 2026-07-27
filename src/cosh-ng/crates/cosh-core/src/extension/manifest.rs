@@ -291,6 +291,95 @@ mod tests {
         assert_eq!(parsed.capabilities, ["example.ops/hook/guard"]);
     }
 
+    fn v1_hook_manifest(env: &str) -> String {
+        format!(
+            r#"{{
+                "schemaVersion":1,
+                "name":"example.ops",
+                "version":"1.0.0",
+                "compatibility":{{"cosh":">=0.12.0"}},
+                "hooks":{{"PreToolUse":[{{"matcher":"shell","hooks":[{{
+                    "type":"command",
+                    "name":"guard",
+                    "command":"${{extensionPath}}/hooks/guard"
+                    {env}
+                }}]}}]}}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn v1_hook_env_is_preserved_and_changes_the_capability_fingerprint() {
+        let root = package_root();
+        fs::create_dir_all(root.path().join("hooks")).unwrap();
+
+        let without_env = parse_manifest(&v1_hook_manifest(""), root.path()).unwrap();
+        let with_env = parse_manifest(
+            &v1_hook_manifest(r#","env":{"TOKENLESS_AGENT_ID":"cosh-ng"}"#),
+            root.path(),
+        )
+        .unwrap();
+
+        let hook = &with_env.config.hooks.pre_tool_use[0].hooks[0];
+        assert_eq!(
+            hook.env.get("TOKENLESS_AGENT_ID").map(String::as_str),
+            Some("cosh-ng")
+        );
+        // env is executable capability, so declaring it must force re-consent.
+        assert_ne!(
+            with_env.capability_fingerprint,
+            without_env.capability_fingerprint
+        );
+        // Extensions that never declared env keep their existing fingerprint.
+        assert_eq!(
+            without_env.capability_fingerprint,
+            "f678fe77434f8ed6a87de660a42db17c06aa29411280150fd92f2c29f8012b13"
+        );
+    }
+
+    #[test]
+    fn v1_rejects_invalid_hook_env_names() {
+        let root = package_root();
+        fs::create_dir_all(root.path().join("hooks")).unwrap();
+        for name in ["1BAD", "WITH-DASH", "WITH SPACE", "", "a=b"] {
+            let env = format!(r#","env":{{"{name}":"value"}}"#);
+            let error = parse_manifest(&v1_hook_manifest(&env), root.path()).unwrap_err();
+            assert_eq!(
+                error.code(),
+                "extension_hook_env_name_invalid",
+                "name={name}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_manifest_hook_env_changes_the_capability_fingerprint() {
+        let root = package_root();
+        let manifest = |env: &str| {
+            format!(
+                r#"{{"name":"legacy-ext","version":"1.0.0","hooks":{{"PreToolUse":[{{"hooks":[{{
+                    "type":"command","name":"guard","command":"echo guard"{env}
+                }}]}}]}}}}"#
+            )
+        };
+
+        let without_env = parse_manifest(&manifest(""), root.path()).unwrap();
+        let with_env =
+            parse_manifest(&manifest(r#","env":{"AGENT":"cosh-ng"}"#), root.path()).unwrap();
+
+        assert_eq!(
+            with_env.config.hooks.pre_tool_use[0].hooks[0]
+                .env
+                .get("AGENT")
+                .map(String::as_str),
+            Some("cosh-ng")
+        );
+        assert_ne!(
+            with_env.capability_fingerprint,
+            without_env.capability_fingerprint
+        );
+    }
+
     #[test]
     fn v1_rejects_path_escape() {
         let root = package_root();

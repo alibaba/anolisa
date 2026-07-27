@@ -134,7 +134,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDeclaration {
     pub name: String,
     pub description: String,

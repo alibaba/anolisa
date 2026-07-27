@@ -7,6 +7,8 @@ use ratatui::{
 mod blocks;
 #[path = "markdown/code.rs"]
 mod code;
+#[path = "markdown/highlight.rs"]
+mod highlight;
 #[path = "markdown/inline.rs"]
 mod inline;
 #[path = "markdown/list.rs"]
@@ -18,7 +20,7 @@ use super::wrap::{compact_rendered_lines, line_is_empty, ordered_list_item, wrap
 use blocks::{
     render_plain_heading, render_plain_quote, render_ratatui_heading, render_ratatui_quote,
 };
-use code::{render_plain_code_block, render_ratatui_code_block};
+use code::{render_plain_code_block, render_ratatui_code_block, styled_code_block_lines};
 use inline::{clean_inline_markdown, inline_text, styled_inline_spans, InlineText};
 use list::{render_plain_list_item, render_ratatui_list_item};
 use table::{render_plain_markdown_table, render_ratatui_markdown_table};
@@ -378,10 +380,7 @@ fn styled_lines_from_markdown_line(
             text,
         } => vec![styled_list_line(&indent, &marker, &text)],
         MarkdownLine::Code { language, lines } => {
-            render_ratatui_code_block(i18n, &language, &lines, width)
-                .into_iter()
-                .map(Line::from)
-                .collect()
+            styled_code_block_lines(i18n, &language, &lines, width)
         }
         MarkdownLine::Table(rows) => render_ratatui_markdown_table(i18n, &rows, width)
             .into_iter()
