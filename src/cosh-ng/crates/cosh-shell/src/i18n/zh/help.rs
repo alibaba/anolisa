@@ -119,6 +119,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashHooksAgentUnavailable => "(cosh-core 后端不可用)",
         MessageId::SlashExtensionsEmptyBody => "未安装扩展。",
         MessageId::SlashSkillsEmptyBody => "未发现技能。",
+        MessageId::HelpSummaryMcp => "列出/管理 MCP 服务器",
+        MessageId::SlashMcpTitle => "MCP",
+        MessageId::SlashMcpEmptyBody => "未配置 MCP 服务器。",
         _ => return None,
     })
 }
