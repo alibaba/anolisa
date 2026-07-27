@@ -288,7 +288,7 @@ fn raw_cli_stdin_passthrough_preserves_exit_status() {
     {
         let mut stdin = child.stdin.take().expect("child stdin");
         stdin
-            .write_all(b"exit 44\n")
+            .write_all(b"exit 44\r")
             .expect("write stdin passthrough command");
     }
 
@@ -466,7 +466,7 @@ fn raw_cli_login_argv0_stdin_passthrough_preserves_exit_status_without_agent_ui(
     {
         let mut stdin = child.stdin.take().expect("child stdin");
         stdin
-            .write_all(b"echo argv0-stdin-ok\nexit 47\n")
+            .write_all(b"echo argv0-stdin-ok\rexit 47\r")
             .expect("write login argv0 stdin passthrough commands");
     }
 

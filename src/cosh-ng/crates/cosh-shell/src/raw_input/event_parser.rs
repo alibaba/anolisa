@@ -9,15 +9,15 @@ const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 /// shortcuts.  The relay converts them to a literal `\n` in the candidate
 /// buffer so the user can compose multi-line prompts.
 const SOFT_NEWLINE_SEQUENCES: &[&[u8]] = &[
-    b"\x1b\r",       // Alt+Enter (xterm / most terminals)
-    b"\x1b\n",       // Alt+Enter variant
-    b"\x1b[13;2u",  // Shift+Enter  (xterm modifyOtherKeys / kitty)
-    b"\x1b[13;3u",  // Alt+Enter    (xterm modifyOtherKeys / kitty)
-    b"\x1b[13;4u",  // Shift+Alt+Enter
-    b"\x1b[13;5u",  // Ctrl+Enter
-    b"\x1b[13;6u",  // Shift+Ctrl+Enter
-    b"\x1bO\r",      // SS3 prefix variant
-    b"\x1bO\n",      // SS3 prefix variant
+    b"\x1b\r",     // Alt+Enter (xterm / most terminals)
+    b"\x1b\n",     // Alt+Enter variant
+    b"\x1b[13;2u", // Shift+Enter  (xterm modifyOtherKeys / kitty)
+    b"\x1b[13;3u", // Alt+Enter    (xterm modifyOtherKeys / kitty)
+    b"\x1b[13;4u", // Shift+Alt+Enter
+    b"\x1b[13;5u", // Ctrl+Enter
+    b"\x1b[13;6u", // Shift+Ctrl+Enter
+    b"\x1bO\r",    // SS3 prefix variant
+    b"\x1bO\n",    // SS3 prefix variant
 ];
 
 #[derive(Debug, Default)]
@@ -392,13 +392,7 @@ fn consume_soft_newline_split(bytes: &[u8]) -> bool {
     }
     // ESC + `[13;Nu` tail arriving as a second read.
     let tails: &[&[u8]] = &[
-        b"[13;2u",
-        b"[13;3u",
-        b"[13;4u",
-        b"[13;5u",
-        b"[13;6u",
-        b"O\r",
-        b"O\n",
+        b"[13;2u", b"[13;3u", b"[13;4u", b"[13;5u", b"[13;6u", b"O\r", b"O\n",
     ];
     for tail in tails {
         if bytes.len() >= tail.len() && bytes[..tail.len()] == **tail {
@@ -442,7 +436,6 @@ fn incomplete_escape_suffix(bytes: &[u8]) -> bool {
         _ => false,
     }
 }
-
 
 #[cfg(test)]
 mod tests {

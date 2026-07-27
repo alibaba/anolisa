@@ -33,6 +33,17 @@ fn raw_cli_shared_parallelism() -> usize {
 static RAW_CLI_GIT_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
 static RAW_CLI_RUN_GATE: OnceLock<RawCliRunGate> = OnceLock::new();
 
+/// Translate LF (0x0a) to CR (0x0d) in scripted test input.
+/// In raw terminal mode the Enter key sends CR, not LF; the integration
+/// tests write to a pipe (no terminal driver), so we convert here to
+/// match real terminal behavior.
+fn translate_enter_for_pipe(input: &[u8]) -> Vec<u8> {
+    input
+        .iter()
+        .map(|&b| if b == b'\n' { b'\r' } else { b })
+        .collect()
+}
+
 pub(crate) fn raw_cli_command(binary: &str) -> Command {
     let mut command = Command::new(binary);
     configure_raw_cli_command(&mut command);
@@ -84,7 +95,7 @@ pub(crate) fn run_raw_cli_with_args_and_env(
     {
         let mut stdin = child.stdin.take().expect("child stdin");
         stdin
-            .write_all(input.as_bytes())
+            .write_all(&translate_enter_for_pipe(input.as_bytes()))
             .expect("write scripted shell input");
     }
 
@@ -205,7 +216,7 @@ pub(crate) fn run_raw_cli_with_analyzer_start_barrier(
     for _ in 0..4 {
         let response_start = observed.len();
         stdin
-            .write_all(b"/recommendations on\n")
+            .write_all(b"/recommendations on\r")
             .expect("enable recommendations");
         stdin.flush().expect("flush recommendation setup");
         let ready = wait_for_raw_cli_marker_or_retry(
@@ -231,14 +242,14 @@ pub(crate) fn run_raw_cli_with_analyzer_start_barrier(
         "recommendation storage did not become ready: {}",
         String::from_utf8_lossy(&observed)
     );
-    stdin.write_all(initial_input).expect("write initial input");
+    stdin.write_all(&translate_enter_for_pipe(initial_input)).expect("write initial input");
     stdin.flush().expect("flush initial input");
     if let Err(error) = wait_for_path(analyzer_started_marker) {
         abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
     }
 
     stdin
-        .write_all(foreground_input)
+        .write_all(&translate_enter_for_pipe(foreground_input))
         .expect("write foreground input");
     stdin.flush().expect("flush foreground input");
     if let Err(error) = wait_for_raw_cli_marker(&output_receiver, &mut observed, foreground_marker)
@@ -247,7 +258,7 @@ pub(crate) fn run_raw_cli_with_analyzer_start_barrier(
     }
 
     fs::write(analyzer_continue_marker, b"1\n").expect("release Analyzer start barrier");
-    stdin.write_all(b"exit\n").expect("write exit");
+    stdin.write_all(b"exit\r").expect("write exit");
     drop(stdin);
 
     let status = match child.wait_timeout(RAW_CLI_TIMEOUT).expect("wait raw cli") {
@@ -548,7 +559,7 @@ fn run_raw_cli_marker_input_inner(
                 abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error)
             }
         }
-        stdin.write_all(input).expect("write marker-gated input");
+        stdin.write_all(&translate_enter_for_pipe(input)).expect("write marker-gated input");
         stdin.flush().expect("flush marker-gated input");
     }
     drop(stdin);
@@ -618,7 +629,7 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         let mut stdin = child.stdin.take().expect("child stdin");
         for (bytes, delay) in chunks {
             thread::sleep(delay);
-            stdin.write_all(&bytes).expect("write delayed input");
+            stdin.write_all(&translate_enter_for_pipe(&bytes)).expect("write delayed input");
             stdin.flush().expect("flush delayed input");
         }
     }
@@ -660,7 +671,7 @@ pub(crate) fn run_raw_cli_default_with_args_env_and_delayed_input(
         let mut stdin = child.stdin.take().expect("child stdin");
         for (bytes, delay) in chunks {
             thread::sleep(delay);
-            stdin.write_all(&bytes).expect("write delayed input");
+            stdin.write_all(&translate_enter_for_pipe(&bytes)).expect("write delayed input");
             stdin.flush().expect("flush delayed input");
         }
     }

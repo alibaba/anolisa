@@ -160,7 +160,7 @@ sleep 60
     let writer_pid_file = pid_file.clone();
     let writer = thread::spawn(move || {
         stdin
-            .write_all(b"?? cosh-core-process-cleanup\n")
+            .write_all(b"?? cosh-core-process-cleanup\r")
             .expect("write prompt");
         stdin.flush().expect("flush prompt");
         for _ in 0..100 {
@@ -169,10 +169,10 @@ sleep 60
             }
             thread::sleep(Duration::from_millis(50));
         }
-        stdin.write_all(b"/cancel\n").expect("write cancel");
+        stdin.write_all(b"/cancel\r").expect("write cancel");
         stdin.flush().expect("flush cancel");
         thread::sleep(Duration::from_millis(1_000));
-        stdin.write_all(b"exit\n").expect("write exit");
+        stdin.write_all(b"exit\r").expect("write exit");
         stdin.flush().expect("flush exit");
     });
 
