@@ -71,17 +71,17 @@ macro_rules! help_registry_ids {
             HelpGroupRegistry,
             HelpSummaryExtensions,
             HelpSummarySkills,
-            HelpSummaryMcp,
             SlashExtensionsTitle,
             SlashSkillsTitle,
-            SlashMcpTitle,
-            SlashMcpEmptyBody,
             SlashRegistryUnavailable,
             SlashHooksShellSection,
             SlashHooksAgentSection,
             SlashHooksAgentUnavailable,
             SlashExtensionsEmptyBody,
             SlashSkillsEmptyBody,
+            HelpSummaryMcp,
+            SlashMcpTitle,
+            SlashMcpEmptyBody,
         );
     };
 }
