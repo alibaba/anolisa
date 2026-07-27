@@ -484,8 +484,10 @@ fn clear_prompt_ghost_line<W: Write>(
 ) -> io::Result<()> {
     if *candidate_prev_lines > 1 {
         write!(output, "\x1b[{}A", *candidate_prev_lines - 1)?;
+        write!(output, "\r\x1b[J")?;
+    } else {
+        write!(output, "\r\x1b[2K")?;
     }
-    write!(output, "\r\x1b[J")?;
     let replay = prompt_replay_bytes(parser.last_prompt_display());
     if replay.is_empty() {
         output.write_all(fallback_prompt.as_bytes())?;

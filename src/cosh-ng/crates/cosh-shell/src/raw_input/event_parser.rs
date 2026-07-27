@@ -16,8 +16,8 @@ const SOFT_NEWLINE_BYTE: u8 = 0x1e;
 const SOFT_NEWLINE_SEQUENCES: &[&[u8]] = &[
     b"\x1b\r",     // Alt+Enter (most terminals)
     b"\x1b\n",     // Alt+Enter (some terminals)
-    b"\x1b[27;2u",  // Shift+Enter (xterm modifyOtherKeys, keyCode 27=Esc with shift)
-    b"\x1b[13;2u",  // Shift+Enter (xterm modifyOtherKeys, keyCode 13=CR with shift)
+    b"\x1b[27;2u", // Shift+Enter (xterm modifyOtherKeys, keyCode 27=Esc with shift)
+    b"\x1b[13;2u", // Shift+Enter (xterm modifyOtherKeys, keyCode 13=CR with shift)
 ];
 
 #[derive(Debug, Default)]
@@ -355,10 +355,7 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
 
     // Find the first bare \n or \r (submission trigger).
     // Soft-newline sentinel bytes (SOFT_NEWLINE_BYTE) are NOT submission triggers.
-    let Some(newline_idx) = bytes
-        .iter()
-        .position(|byte| matches!(byte, b'\n' | b'\r'))
-    else {
+    let Some(newline_idx) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) else {
         for (index, byte) in bytes.iter().enumerate() {
             if *byte == SOFT_NEWLINE_BYTE {
                 continue;
@@ -381,8 +378,7 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
     let line_bytes = &bytes[..line_len];
     if line_bytes.iter().any(|byte| {
         *byte != SOFT_NEWLINE_BYTE
-            && (*byte == 0x1b
-                || (*byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))
+            && (*byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))
     }) {
         return CandidateLineStatus::Unsafe;
     }
@@ -520,7 +516,7 @@ mod tests {
     fn pop_visible_char_handles_soft_newline() {
         let mut buf = CandidateLineBuffer::default();
         buf.push(b"hello\x1b\r"); // "hello" + soft newline
-        // Pop should remove the soft newline sentinel
+                                  // Pop should remove the soft newline sentinel
         buf.pop_visible_char();
         assert_eq!(buf.visible_line_render_bytes(), b"hello");
         // Pop the 'o'

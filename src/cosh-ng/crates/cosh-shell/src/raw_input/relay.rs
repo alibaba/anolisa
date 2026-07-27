@@ -449,7 +449,10 @@ fn redraw_candidate_line(
     let render = line_buffer.visible_line_render_bytes();
     let visible = redact_extension_setting_value(&render);
     // Hint calculation uses only the first line (before any soft newline).
-    let first_line_end = visible.iter().position(|&b| b == b'\n').unwrap_or(visible.len());
+    let first_line_end = visible
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(visible.len());
     let hint = std::str::from_utf8(&visible[..first_line_end])
         .ok()
         .and_then(candidate_inline_hint);

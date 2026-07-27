@@ -41,11 +41,13 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     *native_candidate_echoed_len = input.len();
                 } else {
                     // Move cursor up to the first line of the previous
-                    // multiline candidate, then clear to end of screen.
+                    // multiline candidate, then clear the multiline area.
                     if *candidate_prev_lines > 1 {
                         write!(output, "\x1b[{}A", *candidate_prev_lines - 1)?;
+                        write!(output, "\r\x1b[J{prompt}")?;
+                    } else {
+                        write!(output, "\r\x1b[2K{prompt}")?;
                     }
-                    write!(output, "\r\x1b[J{prompt}")?;
                     output.write_all(&input)?;
                     let new_lines = input.iter().filter(|&&b| b == b'\n').count() + 1;
                     *candidate_prev_lines = new_lines;
@@ -64,8 +66,10 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 } else {
                     if *candidate_prev_lines > 1 {
                         write!(output, "\x1b[{}A", *candidate_prev_lines - 1)?;
+                        write!(output, "\r\x1b[J{prompt}")?;
+                    } else {
+                        write!(output, "\r\x1b[2K{prompt}")?;
                     }
-                    write!(output, "\r\x1b[J{prompt}")?;
                     output.write_all(&input)?;
                     *candidate_prev_lines = 1;
                 }
@@ -73,13 +77,25 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 output.flush()?;
             }
             RawInputEvent::PromptGhostClear => {
-                clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len, candidate_prev_lines)?;
+                clear_prompt_ghost_line(
+                    parser,
+                    output,
+                    prompt,
+                    native_candidate_echoed_len,
+                    candidate_prev_lines,
+                )?;
             }
             RawInputEvent::PromptGhostAccepted { suggestion_id } => {
                 parser.push_prompt_ghost_event("accepted", suggestion_id.as_deref());
             }
             RawInputEvent::PromptGhostCycle { text } => {
-                clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len, candidate_prev_lines)?;
+                clear_prompt_ghost_line(
+                    parser,
+                    output,
+                    prompt,
+                    native_candidate_echoed_len,
+                    candidate_prev_lines,
+                )?;
                 super::write_prompt_ghost(output, &text, true)?;
                 output.flush()?;
             }
@@ -105,8 +121,10 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 } else {
                     if *candidate_prev_lines > 1 {
                         write!(output, "\x1b[{}A", *candidate_prev_lines - 1)?;
+                        write!(output, "\r\x1b[J{prompt}")?;
+                    } else {
+                        write!(output, "\r\x1b[2K{prompt}")?;
                     }
-                    write!(output, "\r\x1b[J{prompt}")?;
                     *candidate_prev_lines = 1;
                 }
                 output.flush()?;
