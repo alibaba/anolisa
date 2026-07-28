@@ -73,7 +73,15 @@ echo "[${COMPONENT}] Installing ${AGENT} plugin v${VERSION}..."
 echo "[${COMPONENT}] Registering plugin with qodercli..."
 TEMP_DIR="$(mktemp -d -t tokenless-qoder-install.XXXXXX)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
-ln -sfn "$PLUGIN_DIR" "$TEMP_DIR/tokenless"
+# Copy the plugin bundle (not a symlink) so we can expand the
+# ${QODER_TOKENLESS_HOOKS} placeholder before qodercli caches it
+# verbatim. Qoder IDE loads hooks.json from the cache directly
+# without variable expansion, so the placeholder must be resolved
+# at install time.
+cp -a "$PLUGIN_DIR" "$TEMP_DIR/tokenless"
+# Expand ${QODER_TOKENLESS_HOOKS} to the absolute hooks directory
+# in the staged copy so qodercli's plugin cache gets resolved paths.
+sed -i "s|\${QODER_TOKENLESS_HOOKS}|${HOOKS_DIR}|g" "$TEMP_DIR/tokenless/hooks.json"
 # Use `if !` so the failure branch survives `set -e`: a bare
 # `OUT=$(...)` assignment would otherwise abort the script before $?
 # is captured, and qodercli's stderr (now redirected into the var)
