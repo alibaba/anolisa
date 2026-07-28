@@ -113,7 +113,9 @@ mod tests {
         let mut animation = AgentStatusAnimation::new(true);
         let mut output = Vec::new();
 
-        animation.render(&mut output, "Thinking").expect("first render");
+        animation
+            .render(&mut output, "Thinking")
+            .expect("first render");
         let text = String::from_utf8(output).unwrap();
 
         // The first render must emit a newline before the spinner so it
@@ -133,7 +135,9 @@ mod tests {
         let mut animation = AgentStatusAnimation::new(true);
         let mut output = Vec::new();
 
-        animation.render(&mut output, "Thinking").expect("first render");
+        animation
+            .render(&mut output, "Thinking")
+            .expect("first render");
         animation.last_render_at = Some(Instant::now() - Duration::from_millis(300));
         let first_len = output.len();
 
@@ -168,7 +172,9 @@ mod tests {
         let mut animation = AgentStatusAnimation::new(true);
         let mut output = Vec::new();
 
-        animation.render(&mut output, "Thinking").expect("first render");
+        animation
+            .render(&mut output, "Thinking")
+            .expect("first render");
         animation.clear(&mut output).expect("clear");
         let pre_rerender = output.len();
 
