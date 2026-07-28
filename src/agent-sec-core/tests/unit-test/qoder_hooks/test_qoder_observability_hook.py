@@ -1,7 +1,6 @@
 """Unit tests for the Qoder observability command hook."""
 
 import builtins
-import importlib.util
 import io
 import json
 import subprocess
@@ -11,27 +10,14 @@ from types import SimpleNamespace
 
 import pytest
 from agent_sec_cli.observability.schema import validate_observability_record
+from standalone_hook_test_loader import load_standalone_hook
 
 _ROOT = Path(__file__).resolve().parents[3]
 _PLUGIN_DIR = _ROOT / "qoder-plugin"
 _HOOKS_DIR = _PLUGIN_DIR / "hooks"
 _HOOK_PATH = _HOOKS_DIR / "observability_hook.py"
-sys.path.insert(0, str(_HOOKS_DIR))
 
-
-def _load_observability_hook():
-    spec = importlib.util.spec_from_file_location(
-        "qoder_observability_hook", _HOOK_PATH
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-observability_hook = _load_observability_hook()
+observability_hook = load_standalone_hook("qoder_observability_hook", _HOOK_PATH)
 
 _TS = "2026-07-20T08:00:00Z"
 _ZERO_RUN_ID = "00000000-0000-0000-0000-000000000000"

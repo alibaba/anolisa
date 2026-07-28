@@ -23,10 +23,12 @@ fn raw_relay_host_runs_fullscreen_programs_and_keeps_shell_usable() {
     let mut actions = Vec::new();
 
     if has_less {
-        actions.push(RawRelayAction::line("seq 1 200 | less"));
-        actions.push(RawRelayAction::wait(Duration::from_millis(300)));
+        actions.push(RawRelayAction::line("seq 1 200 | TERM=xterm-256color less"));
+        actions.push(RawRelayAction::wait(Duration::from_millis(500)));
         actions.push(RawRelayAction::write(b"q".to_vec()));
+        actions.push(RawRelayAction::wait(Duration::from_millis(500)));
         actions.push(RawRelayAction::line("echo after-less"));
+        actions.push(RawRelayAction::wait(Duration::from_millis(500)));
     }
 
     if has_vim {
@@ -36,8 +38,9 @@ fn raw_relay_host_runs_fullscreen_programs_and_keeps_shell_usable() {
         )));
         actions.push(RawRelayAction::wait(Duration::from_millis(500)));
         actions.push(RawRelayAction::write(b"\x1b:q!\n".to_vec()));
-        actions.push(RawRelayAction::wait(Duration::from_millis(100)));
+        actions.push(RawRelayAction::wait(Duration::from_millis(500)));
         actions.push(RawRelayAction::line("echo after-vim"));
+        actions.push(RawRelayAction::wait(Duration::from_millis(500)));
     }
 
     if actions.is_empty() {
@@ -60,10 +63,10 @@ fn raw_relay_host_runs_fullscreen_programs_and_keeps_shell_usable() {
 
     let ledger = ledger_from_output(&output);
     if has_less {
-        assert!(ledger
-            .blocks
-            .iter()
-            .any(|block| block.command.contains("seq 1 200 | less") && block.exit_code == 0));
+        assert!(ledger.blocks.iter().any(|block| block
+            .command
+            .contains("seq 1 200 | TERM=xterm-256color less")
+            && block.exit_code == 0));
     }
     if has_vim {
         assert!(ledger

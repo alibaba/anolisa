@@ -35,6 +35,13 @@ from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from pydantic import ValidationError
 
 
+def _public_manifest_error(error: ValueError) -> str:
+    """Avoid returning manifest-controlled values from Pydantic diagnostics."""
+    if isinstance(error, ValidationError):
+        return "schema validation failed"
+    return str(error)
+
+
 @canonical_skill_operation
 def audit(
     skill_dir: SkillRootInput,
@@ -71,7 +78,10 @@ def audit(
             errors.append(
                 {
                     "versionId": vid,
-                    "error": f"Version manifest {vid}.json is corrupted: {exc}",
+                    "error": (
+                        f"Version manifest {vid}.json is corrupted: "
+                        f"{_public_manifest_error(exc)}"
+                    ),
                 }
             )
             prev_signature = None
@@ -184,7 +194,7 @@ def audit(
         errors.append(
             {
                 "versionId": "latest.json",
-                "error": f"latest.json is corrupted: {exc}",
+                "error": f"latest.json is corrupted: {_public_manifest_error(exc)}",
             }
         )
         latest = None
@@ -201,10 +211,11 @@ def audit(
                 }
             )
 
-    return {
+    result = {
         "canonicalSkillDir": str(root.canonical_dir),
         "skillName": root.skill_name,
         "valid": len(errors) == 0,
         "versions_checked": len(version_ids),
         "errors": errors,
     }
+    return root.canonicalize_payload(result)

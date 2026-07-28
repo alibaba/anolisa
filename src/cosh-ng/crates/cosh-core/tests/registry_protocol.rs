@@ -170,6 +170,554 @@ fn registry_extensions_list_returns_success() {
 }
 
 #[test]
+fn registry_extensions_report_desired_effective_and_health() {
+    let home = tempfile::tempdir().expect("temp home");
+    let extension = home.path().join(".copilot-shell/extensions/example.ops");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.ops",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"}
+        }"#,
+    )
+    .unwrap();
+
+    let listed =
+        run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
+    let extension = &listed["data"][0];
+    assert_eq!(extension["name"], "example.ops");
+    assert_eq!(extension["desired_state"], "enabled");
+    assert_eq!(extension["effective_state"], "not_loaded");
+    assert_eq!(extension["activation"], "next_session");
+    assert_eq!(extension["health"], "healthy");
+    assert_eq!(extension["schema_version"], "v1");
+
+    let disabled = run_registry_request_with_context(
+        "extensions",
+        "disable",
+        serde_json::json!({"name":"example.ops"}),
+        home.path(),
+        None,
+    );
+    assert_eq!(disabled["success"], true);
+    assert_eq!(disabled["data"]["desired_state"], "disabled");
+    assert_eq!(disabled["data"]["activation"], "next_session");
+
+    let relisted =
+        run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
+    assert_eq!(relisted["data"][0]["desired_state"], "disabled");
+    assert_eq!(relisted["data"][0]["effective_state"], "not_loaded");
+}
+
+#[test]
+fn registry_enable_rolls_back_when_required_runtime_health_fails() {
+    let home = tempfile::tempdir().expect("temp home");
+    let extension = home
+        .path()
+        .join(".copilot-shell/extensions/example.required");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.required",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"},
+            "settings":[{
+                "key":"endpoint",
+                "type":"string",
+                "description":"required endpoint",
+                "required":true
+            }]
+        }"#,
+    )
+    .unwrap();
+    let disabled = run_registry_request_with_context(
+        "extensions",
+        "disable",
+        serde_json::json!({"name":"example.required"}),
+        home.path(),
+        None,
+    );
+    assert_eq!(disabled["success"], true, "{disabled}");
+
+    let enabled = run_registry_request_with_context(
+        "extensions",
+        "enable",
+        serde_json::json!({"name":"example.required"}),
+        home.path(),
+        None,
+    );
+
+    assert_eq!(enabled["success"], false, "{enabled}");
+    assert!(enabled["error"]
+        .as_str()
+        .unwrap()
+        .contains("extension_candidate_validation_failed"));
+    let listed =
+        run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
+    assert_eq!(listed["data"][0]["desired_state"], "disabled");
+}
+
+#[test]
+fn registry_extensions_path_copy_requires_preflight_commit() {
+    let home = tempfile::tempdir().expect("temp home");
+    let source_root = tempfile::tempdir().expect("temp source");
+    std::fs::write(
+        source_root.path().join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.managed",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"}
+        }"#,
+    )
+    .unwrap();
+
+    let preflight = run_registry_request_with_context(
+        "extensions",
+        "install-preflight",
+        serde_json::json!({"source": source_root.path()}),
+        home.path(),
+        None,
+    );
+    assert_eq!(preflight["success"], true, "{preflight}");
+    assert_eq!(preflight["data"]["name"], "example.managed");
+    assert!(!home
+        .path()
+        .join(".copilot-shell/extensions/.managed/example.managed")
+        .exists());
+
+    let committed = run_registry_request_with_context(
+        "extensions",
+        "commit",
+        serde_json::json!({
+            "operation_id": preflight["data"]["operation_id"],
+            "fingerprint": preflight["data"]["capability_fingerprint"],
+        }),
+        home.path(),
+        None,
+    );
+    assert_eq!(committed["success"], true, "{committed}");
+    assert_eq!(committed["data"]["activation"], "next_session");
+
+    let listed =
+        run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
+    assert_eq!(listed["data"][0]["name"], "example.managed");
+    assert_eq!(listed["data"][0]["source"], "path-copy");
+    assert_eq!(listed["data"][0]["update_status"], "not_updatable");
+
+    let update = run_registry_request_with_context(
+        "extensions",
+        "update-preflight",
+        serde_json::json!({"name": "example.managed"}),
+        home.path(),
+        None,
+    );
+    assert_eq!(update["success"], false, "{update}");
+    assert!(update["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("extension_source_not_updatable:"));
+
+    let update_all = run_registry_request_with_context(
+        "extensions",
+        "update-all-preflight",
+        Value::Null,
+        home.path(),
+        None,
+    );
+    assert_eq!(update_all["success"], true, "{update_all}");
+    assert_eq!(update_all["data"]["status"], "prepared");
+    let batch_id = update_all["data"]["operation_id"].as_str().unwrap();
+    let update_all = run_registry_request_with_context(
+        "extensions",
+        "update-all-commit",
+        serde_json::json!({"operation_id": batch_id}),
+        home.path(),
+        None,
+    );
+    assert_eq!(update_all["success"], true, "{update_all}");
+    assert_eq!(update_all["data"]["status"], "completed");
+    assert_eq!(update_all["data"]["summary"]["skipped"], 1);
+    assert_eq!(update_all["data"]["items"][0]["outcome"], "skipped");
+    let batch_result = run_registry_request_with_context(
+        "extensions",
+        "result",
+        serde_json::json!({"operation_id": batch_id}),
+        home.path(),
+        None,
+    );
+    assert_eq!(batch_result["data"], update_all["data"]);
+
+    let reload =
+        run_registry_request_with_context("extensions", "reload", Value::Null, home.path(), None);
+    assert_eq!(reload["success"], true, "{reload}");
+    assert_eq!(reload["data"]["activation"], "next_session");
+    assert!(reload["data"]["generation"].is_number());
+
+    let removed = run_registry_request_with_context(
+        "extensions",
+        "uninstall",
+        serde_json::json!({"name": "example.managed"}),
+        home.path(),
+        None,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+    let relisted =
+        run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
+    assert_eq!(relisted["data"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn registry_commit_rolls_back_when_required_runtime_health_fails() {
+    let home = tempfile::tempdir().expect("temp home");
+    let source_root = tempfile::tempdir().expect("temp source");
+    std::fs::write(
+        source_root.path().join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.unhealthy",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"},
+            "settings":[{
+                "key":"endpoint",
+                "type":"string",
+                "description":"required endpoint",
+                "required":true
+            }]
+        }"#,
+    )
+    .unwrap();
+    let preflight = run_registry_request_with_context(
+        "extensions",
+        "install-preflight",
+        serde_json::json!({"source": source_root.path()}),
+        home.path(),
+        None,
+    );
+    assert_eq!(preflight["success"], true, "{preflight}");
+
+    let committed = run_registry_request_with_context(
+        "extensions",
+        "commit",
+        serde_json::json!({
+            "operation_id": preflight["data"]["operation_id"],
+            "fingerprint": preflight["data"]["capability_fingerprint"],
+        }),
+        home.path(),
+        None,
+    );
+
+    assert_eq!(committed["success"], false, "{committed}");
+    assert!(committed["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("extension_candidate_validation_failed:"));
+    assert!(!home
+        .path()
+        .join(".copilot-shell/extensions/.managed/example.unhealthy")
+        .exists());
+    let listed =
+        run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
+    assert!(listed["data"].as_array().unwrap().is_empty(), "{listed}");
+}
+
+#[test]
+fn registry_extensions_new_creates_valid_scaffold_without_installing_it() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let parent = project.path().join("parent with spaces");
+    std::fs::create_dir(&parent).unwrap();
+    let target = parent.join("sample-extension");
+    let response = run_registry_request_with_context(
+        "extensions",
+        "new",
+        serde_json::json!({"path": target, "template": "mcp"}),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["name"], "sample-extension");
+    assert_eq!(response["data"]["template"], "mcp");
+    assert!(target.join("cosh-extension.json").is_file());
+    assert!(target.join("mcp/README.md").is_file());
+
+    let listed =
+        run_registry_request_with_context("extensions", "list", Value::Null, home.path(), None);
+    assert_eq!(listed["success"], true, "{listed}");
+    assert!(listed["data"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn registry_extensions_git_install_rejects_non_https_source() {
+    let response = run_registry_request(
+        "extensions",
+        "install-preflight",
+        serde_json::json!({
+            "source_kind": "git-https",
+            "source": "ssh://example.com/repository.git"
+        }),
+    );
+    assert_eq!(response["success"], false, "{response}");
+    assert!(response["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("extension_git_protocol_unsupported:"));
+}
+
+#[test]
+fn registry_extension_settings_parse_persist_and_fallback() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let extension = home.path().join(".copilot-shell/extensions/example.ops");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.ops",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"},
+            "settings":[
+                {"key":"region","type":"string","description":"region","default":"default-region"},
+                {"key":"retries","type":"integer","description":"retries"}
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    let set = run_registry_request_with_context(
+        "extensions",
+        "settings-set",
+        serde_json::json!({
+            "name":"example.ops",
+            "key":"region",
+            "value":"cn-hangzhou",
+            "scope":"user"
+        }),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(set["success"], true, "{set}");
+    assert_eq!(set["data"]["setting"]["value"], "cn-hangzhou");
+    assert_eq!(set["data"]["activation"], "pending_safe_reload");
+    assert!(set["data"]["candidate_generation"].is_number());
+
+    let get = run_registry_request_with_context(
+        "extensions",
+        "settings-get",
+        serde_json::json!({"name":"example.ops","key":"region"}),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(get["success"], true, "{get}");
+    assert_eq!(get["data"]["scope"], "user");
+    assert_eq!(get["data"]["value"], "cn-hangzhou");
+
+    let invalid = run_registry_request_with_context(
+        "extensions",
+        "settings-set",
+        serde_json::json!({
+            "name":"example.ops",
+            "key":"retries",
+            "value":"many",
+            "scope":"user"
+        }),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(invalid["success"], false, "{invalid}");
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("extension_setting_type_invalid:"));
+
+    let unset = run_registry_request_with_context(
+        "extensions",
+        "settings-unset",
+        serde_json::json!({"name":"example.ops","key":"region","scope":"user"}),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(unset["success"], true, "{unset}");
+    assert_eq!(unset["data"]["setting"]["value"], "default-region");
+    assert_eq!(unset["data"]["setting"]["scope"], Value::Null);
+}
+
+#[test]
+fn registry_required_setting_unset_rolls_back_unhealthy_candidate() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let extension = home
+        .path()
+        .join(".copilot-shell/extensions/example.required");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.required",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"},
+            "settings":[{
+                "key":"endpoint",
+                "type":"string",
+                "description":"required endpoint",
+                "required":true
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    let set = run_registry_request_with_context(
+        "extensions",
+        "settings-set",
+        serde_json::json!({
+            "name":"example.required",
+            "key":"endpoint",
+            "value":"https://service.example",
+            "scope":"user"
+        }),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(set["success"], true, "{set}");
+
+    let unset = run_registry_request_with_context(
+        "extensions",
+        "settings-unset",
+        serde_json::json!({
+            "name":"example.required",
+            "key":"endpoint",
+            "scope":"user"
+        }),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(unset["success"], false, "{unset}");
+    assert!(unset["error"]
+        .as_str()
+        .unwrap()
+        .contains("extension_candidate_validation_failed"));
+
+    let get = run_registry_request_with_context(
+        "extensions",
+        "settings-get",
+        serde_json::json!({"name":"example.required","key":"endpoint"}),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(get["success"], true, "{get}");
+    assert_eq!(get["data"]["value"], "https://service.example");
+}
+
+#[test]
+fn registry_workspace_settings_require_existing_project_trust() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let extension = home.path().join(".copilot-shell/extensions/example.ops");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.ops",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"},
+            "settings":[{"key":"region","type":"string","description":"region"}]
+        }"#,
+    )
+    .unwrap();
+    let params = serde_json::json!({
+        "name":"example.ops",
+        "key":"region",
+        "value":"workspace-region",
+        "scope":"workspace"
+    });
+    let denied = run_registry_request_with_context(
+        "extensions",
+        "settings-set",
+        params.clone(),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(denied["success"], false, "{denied}");
+    assert!(denied["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("extension_workspace_untrusted:"));
+
+    let trust_store = home
+        .path()
+        .join(".copilot-shell/cosh/trusted-project-hooks");
+    std::fs::create_dir_all(trust_store.parent().unwrap()).unwrap();
+    std::fs::write(
+        trust_store,
+        format!("{}\n", project.path().canonicalize().unwrap().display()),
+    )
+    .unwrap();
+    let allowed = run_registry_request_with_context(
+        "extensions",
+        "settings-set",
+        params,
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(allowed["success"], true, "{allowed}");
+    assert_eq!(allowed["data"]["setting"]["scope"], "workspace");
+    assert!(project
+        .path()
+        .join(".copilot-shell/extension-settings.json")
+        .is_file());
+}
+
+#[test]
+fn registry_extension_info_reports_declared_agents_as_non_executable() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let extension = home.path().join(".copilot-shell/extensions/example.ops");
+    std::fs::create_dir_all(extension.join("agents")).unwrap();
+    std::fs::write(
+        extension.join("agents/reviewer.md"),
+        "---\nname: reviewer\ndescription: Review incidents\ntools:\n  - read_file\n---\n\nReview safely.",
+    )
+    .unwrap();
+    std::fs::write(
+        extension.join("cosh-extension.json"),
+        r#"{
+            "schemaVersion":1,
+            "name":"example.ops",
+            "version":"1.0.0",
+            "compatibility":{"cosh":">=0.12.0"},
+            "agents":["agents"]
+        }"#,
+    )
+    .unwrap();
+    let response = run_registry_request_with_context(
+        "extensions",
+        "info",
+        serde_json::json!({"name":"example.ops"}),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(
+        response["data"]["agents"][0]["id"],
+        "example.ops/agent/reviewer"
+    );
+    assert_eq!(response["data"]["agents"][0]["executable"], false);
+    assert_eq!(
+        response["data"]["agents"][0]["effective_tools"][0],
+        "read_file"
+    );
+    assert!(response["data"]["agents"][0].get("prompt").is_none());
+}
+
+#[test]
 fn registry_skills_list_returns_success() {
     let resp = run_registry_request("skills", "list", Value::Null);
     assert_eq!(resp["type"], "registry_response");
@@ -287,6 +835,80 @@ api_key = "sk-project"
     assert!(!home_config.contains("project-provider"));
     assert!(project_config.contains("project-model"));
     assert!(project_config.contains("sk-project"));
+}
+
+#[test]
+fn registry_auth_configure_rejects_invalid_base_url_without_writing_config() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_path = home.path().join(".copilot-shell/config.toml");
+
+    let response = run_registry_request_with_context(
+        "auth",
+        "configure",
+        serde_json::json!({
+            "provider_id": "bad-url",
+            "provider_type": "openai_compat",
+            "values": {
+                "base_url": "error-testhttps://api.example.com/v1",
+                "api_key": "sk-test",
+                "model": "qwen-test"
+            }
+        }),
+        home.path(),
+        None,
+    );
+
+    assert_eq!(response["success"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("invalid base_url")),
+        "{response}"
+    );
+    assert!(!config_path.exists());
+}
+
+#[test]
+fn registry_auth_delete_removes_user_provider_and_credentials() {
+    let home = tempfile::tempdir().expect("temp home");
+    let home_config_dir = home.path().join(".copilot-shell");
+    std::fs::create_dir_all(&home_config_dir).unwrap();
+    let config_path = home_config_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[ai]
+active_provider = "remove-me"
+
+[ai.providers.keep-me]
+type = "dashscope"
+api_key = "sk-keep"
+
+[ai.providers.remove-me]
+type = "openai"
+api_key = "sk-remove"
+model = "remove-model"
+"#,
+    )
+    .unwrap();
+
+    let response = run_registry_request_with_context(
+        "auth",
+        "delete",
+        serde_json::json!({ "provider_id": "remove-me" }),
+        home.path(),
+        None,
+    );
+
+    assert_eq!(response["success"], true);
+    assert_eq!(response["data"]["deleted_provider"], "remove-me");
+    assert!(response["data"]["active_provider"].is_null());
+
+    let persisted = std::fs::read_to_string(&config_path).unwrap();
+    assert!(!persisted.contains("[ai.providers.remove-me]"));
+    assert!(!persisted.contains("sk-remove"));
+    assert!(persisted.contains("[ai.providers.keep-me]"));
+    assert!(persisted.contains("sk-keep"));
 }
 
 #[test]

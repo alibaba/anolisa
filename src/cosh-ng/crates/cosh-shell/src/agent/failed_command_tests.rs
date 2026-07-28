@@ -4,6 +4,7 @@ use std::time::Instant;
 use super::*;
 use crate::agent::run::ActiveAgentRun;
 use crate::command::{FailureAutoEligibility, FailureSemantics};
+use crate::types::ShellRoutingMetadata;
 
 fn failed_block(exit_code: i32, command: &str) -> CommandBlock {
     CommandBlock {
@@ -23,6 +24,7 @@ fn failed_block(exit_code: i32, command: &str) -> CommandBlock {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 
@@ -104,6 +106,40 @@ fn failed_event(block: &CommandBlock) -> ShellEvent {
         message: None,
         command_origin: Some(block.origin),
         shell_environment_generation: block.shell_environment_generation,
+        audit_identity: None,
+        routing: None,
+        capture: None,
+    }
+}
+
+fn proven_missing_event(block: &CommandBlock, intent: &str) -> ShellEvent {
+    ShellEvent {
+        kind: ShellEventKind::CommandRoutingObserved,
+        session_id: block.session_id.clone(),
+        command_id: Some(block.id.clone()),
+        command: None,
+        cwd: Some(block.cwd.clone()),
+        end_cwd: None,
+        exit_code: None,
+        started_at_ms: Some(block.started_at_ms),
+        ended_at_ms: None,
+        duration_ms: None,
+        terminal_output_ref: None,
+        terminal_output_bytes: None,
+        input: None,
+        component: Some(intent.to_string()),
+        message: None,
+        command_origin: None,
+        shell_environment_generation: None,
+        audit_identity: None,
+        routing: Some(ShellRoutingMetadata {
+            generation: 1,
+            top_level_missing: true,
+            proven: true,
+            sensitive: false,
+            unsafe_input: false,
+        }),
+        capture: None,
     }
 }
 
@@ -944,6 +980,164 @@ fn command_not_found_without_ready_catalog_expires_in_first_batch() {
     assert!(state.pending_command_insight.is_none());
     collect_failed_command_insights(&events, &[block], &mut state, &mut Vec::new(), 0)
         .expect("do not retry expired command");
+    assert!(state.pending_command_insight.is_none());
+}
+
+#[test]
+fn proven_missing_without_rewrite_produces_generic_agent_prompt() {
+    let mut block = failed_block(127, "terraform plan");
+    block.id = "target".to_string();
+    block.origin = CommandOrigin::UserInteractive;
+    let path = write_output(b"zsh: command not found: terraform");
+    block.output.terminal_output_ref = Some(path.clone());
+    block.output.terminal_output_bytes = 33;
+    let events = [
+        proven_missing_event(&block, "ambiguous"),
+        failed_event(&block),
+    ];
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+
+    collect_failed_command_insights(&events, &[block], &mut state, &mut Vec::new(), 0)
+        .expect("collect command-not-found fallback");
+
+    std::fs::remove_file(path).expect("remove output");
+    assert!(matches!(
+        state
+            .pending_command_insight
+            .and_then(|candidate| candidate.suggestion),
+        Some(PromptSuggestion::AgentPrompt { .. })
+    ));
+}
+
+#[test]
+fn proven_missing_with_custom_output_produces_generic_agent_prompt() {
+    let mut block = failed_block(127, "terraform plan");
+    block.id = "target".to_string();
+    block.origin = CommandOrigin::UserInteractive;
+    let path = write_output(b"custom localized missing diagnostic");
+    block.output.terminal_output_ref = Some(path.clone());
+    block.output.terminal_output_bytes = 35;
+    let events = [
+        proven_missing_event(&block, "ambiguous"),
+        failed_event(&block),
+    ];
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+
+    collect_failed_command_insights(&events, &[block], &mut state, &mut Vec::new(), 0)
+        .expect("collect command-not-found fallback");
+
+    std::fs::remove_file(path).expect("remove output");
+    assert!(matches!(
+        state
+            .pending_command_insight
+            .and_then(|candidate| candidate.suggestion),
+        Some(PromptSuggestion::AgentPrompt { .. })
+    ));
+}
+
+#[test]
+fn proven_missing_without_output_produces_generic_agent_prompt() {
+    let mut block = failed_block(127, "terraform plan");
+    block.id = "target".to_string();
+    block.origin = CommandOrigin::UserInteractive;
+    let events = [
+        proven_missing_event(&block, "ambiguous"),
+        failed_event(&block),
+    ];
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+
+    collect_failed_command_insights(&events, &[block], &mut state, &mut Vec::new(), 0)
+        .expect("collect silent command-not-found fallback");
+
+    assert!(matches!(
+        state
+            .pending_command_insight
+            .and_then(|candidate| candidate.suggestion),
+        Some(PromptSuggestion::AgentPrompt { .. })
+    ));
+}
+
+#[test]
+fn proven_missing_user_handler_non_127_has_no_command_not_found_fallback() {
+    let mut block = failed_block(42, "terraform plan");
+    block.id = "target".to_string();
+    block.origin = CommandOrigin::UserInteractive;
+    let path = write_output(b"zsh: command not found: handler_inner_missing");
+    block.output.terminal_output_ref = Some(path.clone());
+    block.output.terminal_output_bytes = 45;
+    let events = [
+        proven_missing_event(&block, "ambiguous"),
+        failed_event(&block),
+    ];
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+
+    collect_failed_command_insights(&events, &[block], &mut state, &mut Vec::new(), 0)
+        .expect("collect non-127 handler result");
+
+    std::fs::remove_file(path).expect("remove output");
+    assert!(state.pending_command_insight.is_none());
+}
+
+#[test]
+fn unsafe_missing_has_no_command_not_found_fallback() {
+    let mut block = failed_block(127, "invalid input");
+    block.id = "target".to_string();
+    block.origin = CommandOrigin::UserInteractive;
+    let path = write_output(b"bash: invalid: command not found");
+    block.output.terminal_output_ref = Some(path.clone());
+    block.output.terminal_output_bytes = 32;
+    let mut routing = proven_missing_event(&block, "ambiguous");
+    routing
+        .routing
+        .as_mut()
+        .expect("routing metadata")
+        .unsafe_input = true;
+    let events = [routing, failed_event(&block)];
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+
+    collect_failed_command_insights(&events, &[block], &mut state, &mut Vec::new(), 0)
+        .expect("collect unsafe missing result");
+
+    std::fs::remove_file(path).expect("remove output");
+    assert!(state.pending_command_insight.is_none());
+}
+
+#[test]
+fn ai_disabled_natural_language_has_no_command_not_found_fallback() {
+    let mut block = failed_block(127, "Kindly explain this");
+    block.id = "target".to_string();
+    block.origin = CommandOrigin::UserInteractive;
+    let path = write_output(b"zsh: command not found: Kindly");
+    block.output.terminal_output_ref = Some(path.clone());
+    block.output.terminal_output_bytes = 30;
+    let events = [
+        proven_missing_event(&block, "natural_language"),
+        failed_event(&block),
+    ];
+    let mut state = InlineState {
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+
+    collect_failed_command_insights(&events, &[block], &mut state, &mut Vec::new(), 0)
+        .expect("collect disabled natural-language result");
+
+    std::fs::remove_file(path).expect("remove output");
     assert!(state.pending_command_insight.is_none());
 }
 

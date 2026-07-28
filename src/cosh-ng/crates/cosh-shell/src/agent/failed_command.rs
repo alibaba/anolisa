@@ -1,5 +1,11 @@
+// Owner: agent. Candidate construction is split under failed_command/.
+mod candidate;
+mod routing;
+
 use crate::hooks::interrupt::command_should_skip_failure_analysis;
 use crate::runtime::prelude::*;
+use candidate::command_not_found_agent_candidate;
+use routing::has_proven_top_level_missing;
 
 use crate::command::{classify_failure, FailureClass, FailureConfidence, FailureReason};
 use crate::evidence::model::{EvidenceExcerpt, OutputExcerptDirection};
@@ -68,8 +74,8 @@ pub(crate) fn collect_failed_command_insights<W: Write>(
 
         let excerpt = failure_output_evidence(block);
         let semantics = classify_failure(block, events, excerpt.text.as_deref());
-        let command_not_found = semantics.class == FailureClass::CommandNotFound;
-        let rewrite = if state.analysis_mode != AnalysisMode::Manual && command_not_found {
+        let proven_missing = block.exit_code == 127 && has_proven_top_level_missing(events, block);
+        let rewrite = if state.analysis_mode != AnalysisMode::Manual && proven_missing {
             let diagnostic_tail = command_not_found_diagnostic_tail(block);
             state
                 .shell_rewrite
@@ -79,6 +85,10 @@ pub(crate) fn collect_failed_command_insights<W: Write>(
         };
         let candidate = rewrite
             .map(|text| shell_rewrite_candidate(block, text))
+            .or_else(|| {
+                (state.analysis_mode != AnalysisMode::Manual && proven_missing)
+                    .then(|| command_not_found_agent_candidate(block, &excerpt))
+            })
             .or_else(|| failed_command_candidate(events, block));
         let Some(candidate) = candidate else {
             continue;
@@ -592,6 +602,7 @@ pub(crate) fn start_agent_for_block<W: Write>(
             if options.trigger == FailedCommandAnalysisTrigger::Auto
                 && !request.context_hints.is_empty()
                 && state.agent_run.active.is_none()
+                && !crate::slash::session::compaction_active(state)
             {
                 writeln!(
                     output,
@@ -625,17 +636,46 @@ pub(crate) fn start_agent_for_block<W: Write>(
                 )?;
             }
             state.agent_run.needs_prompt_after_run = true;
-            start_agent_run_with_origin(
+            let (origin, intent) = match options.trigger {
+                // Automatic analysis is internal best-effort; a user-confirmed
+                // action is an explicit user request.
+                FailedCommandAnalysisTrigger::Auto => (
+                    AgentRunOrigin::AutoFailure,
+                    AgentStartIntent::InternalBestEffort,
+                ),
+                FailedCommandAnalysisTrigger::UserConfirmed => {
+                    (AgentRunOrigin::Standard, AgentStartIntent::UserInitiated)
+                }
+            };
+            let disposition = start_agent_run_with_origin_disposition(
                 &request,
-                match options.trigger {
-                    FailedCommandAnalysisTrigger::Auto => AgentRunOrigin::AutoFailure,
-                    FailedCommandAnalysisTrigger::UserConfirmed => AgentRunOrigin::Standard,
-                },
+                origin,
+                intent,
                 adapter,
                 state,
                 output,
                 options.selectable_after_event_index,
-            )
+            )?;
+            if matches!(
+                disposition,
+                AgentStartDisposition::SuppressedByCompaction | AgentStartDisposition::QueueFull
+            ) {
+                // The analysis did not run and was not queued (a background
+                // compaction rejected it, or the pending queue was full). Undo
+                // the dedup mark so the block is not permanently recorded as
+                // analyzed when it never ran.
+                state.analyzed_blocks.remove(&block.id);
+                state.queued_analysis_notices.remove(&block.id);
+            }
+            // A queue-full rejection of an explicit user-confirmed analysis must
+            // be surfaced, not dropped silently. (A compaction rejection of the
+            // best-effort auto path is intentionally quiet.)
+            if disposition == AgentStartDisposition::QueueFull
+                && intent == AgentStartIntent::UserInitiated
+            {
+                crate::slash::session::render_agent_queue_full_notice(state, output)?;
+            }
+            Ok(())
         }
         None => Ok(()),
     }

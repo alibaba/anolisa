@@ -53,7 +53,18 @@ pub enum ProviderTarget {
     /// Raw artifact ANOLISA will own.
     Owned { version: String },
     /// Native package transaction ANOLISA will request.
-    Delegated { pm: NativePm, package: String },
+    Delegated {
+        pm: NativePm,
+        /// Bare package identity: the name used for rpmdb observation and the
+        /// persisted delegated record. Never carries version/arch decoration.
+        package: String,
+        /// Exact native-manager transaction spec (an RPM NEVRA) when a
+        /// `--version` pin resolved to a concrete repository candidate. `None`
+        /// installs the repository default. Kept separate from `package` so a
+        /// pin reaches only the [`Step::NativeTransaction`] — the observation,
+        /// the `DelegatedIdentity`, and persisted state stay on the bare name.
+        artifact: Option<String>,
+    },
 }
 
 /// Update parameters resolved by the observe stage.
@@ -468,12 +479,19 @@ fn plan_install(req: &InstallRequest, facts: &Facts) -> Result<Plan, PlanError> 
                     Step::EnableServices,
                     Step::WriteRecord(RecordWrite::Owned),
                 ])),
-                ProviderTarget::Delegated { pm, package } => Ok(Plan::execute(vec![
-                    // I2
+                ProviderTarget::Delegated {
+                    pm,
+                    package,
+                    artifact,
+                } => Ok(Plan::execute(vec![
+                    // I2: the native transaction targets the pinned artifact
+                    // (exact NEVRA) when a version was resolved, otherwise the
+                    // bare package (repository default). Observation and the
+                    // record always use the bare package identity.
                     Step::NativeTransaction {
                         pm: *pm,
                         action: NativeAction::Install,
-                        packages: vec![package.clone()],
+                        packages: vec![artifact.clone().unwrap_or_else(|| package.clone())],
                     },
                     Step::Observe {
                         packages: vec![package.clone()],
@@ -869,6 +887,15 @@ mod tests {
         ProviderTarget::Delegated {
             pm: NativePm::Rpm,
             package: PKG.to_string(),
+            artifact: None,
+        }
+    }
+
+    fn delegated_pinned_target(artifact: &str) -> ProviderTarget {
+        ProviderTarget::Delegated {
+            pm: NativePm::Rpm,
+            package: PKG.to_string(),
+            artifact: Some(artifact.to_string()),
         }
     }
 
@@ -986,6 +1013,27 @@ mod tests {
     }
 
     #[test]
+    fn i2_pinned_delegated_install_targets_artifact_but_observes_bare_package() {
+        // A version pin renders the native transaction to the exact NEVRA
+        // while observation stays on the bare package identity.
+        let f = facts();
+        let artifact = format!("{PKG}-1.2.3-4.al8.x86_64");
+        let steps = expect_steps(plan(&install(delegated_pinned_target(&artifact)), &f));
+        assert_eq!(
+            steps,
+            vec![
+                Step::NativeTransaction {
+                    pm: NativePm::Rpm,
+                    action: NativeAction::Install,
+                    packages: vec![artifact.clone()],
+                },
+                observe(),
+                Step::WriteRecord(RecordWrite::DelegatedManaged),
+            ]
+        );
+    }
+
+    #[test]
     fn i3_existing_system_package_is_never_silently_adopted() {
         let mut f = facts();
         f.native = present();
@@ -1090,6 +1138,7 @@ mod tests {
             target: ProviderTarget::Delegated {
                 pm: NativePm::Rpm,
                 package: "other".to_string(),
+                artifact: None,
             },
             requested_version: None,
         });

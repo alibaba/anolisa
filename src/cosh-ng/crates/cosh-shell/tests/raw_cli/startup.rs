@@ -2,6 +2,94 @@ use super::*;
 use ratatui::text::Span;
 
 #[test]
+fn help_flag_writes_to_stdout_not_stderr() {
+    // POSIX/GNU convention: --help output goes to stdout, not stderr.
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn cosh-shell --help");
+
+    assert!(output.status.success(), "--help should exit 0");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("Usage: cosh-shell"),
+        "--help text should be on stdout, got stdout={:?}",
+        stdout
+    );
+    assert!(
+        stderr.is_empty(),
+        "--help should not write to stderr, got stderr={:?}",
+        stderr
+    );
+}
+
+#[test]
+fn version_flag_writes_to_stdout_not_stderr() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn cosh-shell --version");
+
+    assert!(output.status.success(), "--version should exit 0");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("cosh-shell"),
+        "--version text should be on stdout, got stdout={:?}",
+        stdout
+    );
+    assert!(
+        stderr.is_empty(),
+        "--version should not write to stderr, got stderr={:?}",
+        stderr
+    );
+}
+
+#[test]
+fn diagnostics_export_help_writes_to_stdout_not_stderr() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = Command::new(binary)
+        .args(["diagnostics", "export", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn cosh-shell diagnostics export --help");
+
+    assert!(
+        output.status.success(),
+        "diagnostics export --help should exit 0"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("Usage:"),
+        "diagnostics export --help should write to stdout, got stdout={:?}",
+        stdout
+    );
+    assert!(
+        stderr.is_empty(),
+        "diagnostics export --help should not write to stderr, got stderr={:?}",
+        stderr
+    );
+}
+
+#[test]
 fn raw_cli_startup_banner_renders_when_enabled() {
     let output = run_raw_cli_with_env(
         "fake",
@@ -100,7 +188,7 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
     let cwd = temp_shell_home("startup-health-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -115,7 +203,7 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -131,6 +219,24 @@ fn raw_cli_startup_health_fixture_renders_when_enabled() {
     assert_eq!(output.matches("[Health]").count(), 3, "{output}");
     assert!(!output.contains("Next:"), "{output}");
     assert_inline_before_followup(&output, "╭─ Health check", "exit");
+}
+
+#[test]
+fn raw_cli_startup_health_disabled_renders_no_row() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_HEALTH_SCAN", "disabled"),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+        ],
+    );
+
+    assert!(output.contains("/help"), "{output}");
+    assert!(!output.contains("Health: ok"), "{output}");
+    assert!(!output.contains("Health check"), "{output}");
 }
 
 #[test]
@@ -178,7 +284,7 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
     let cwd = temp_shell_home("startup-health-critical-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -193,7 +299,7 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -216,7 +322,47 @@ fn raw_cli_startup_health_critical_fixture_uses_compact_oom_copy() {
 }
 
 #[test]
-fn raw_cli_startup_health_healthy_fixture_keeps_only_default_startup_card() {
+fn raw_cli_startup_health_degraded_fixture_is_read_only() {
+    let cwd = temp_shell_home("startup-health-degraded-read-only");
+    let suppression_store = cwd.join("health-suppression");
+    let suppression_store = suppression_store.to_string_lossy().into_owned();
+    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_HEALTH_SCAN", "fixture:linux-degraded"),
+            (
+                "COSH_SHELL_HEALTH_SUPPRESSION_STORE",
+                suppression_store.as_str(),
+            ),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+        &cwd,
+        vec![
+            (b"\t\n".to_vec(), Duration::from_millis(1400)),
+            (b"exit\n".to_vec(), Duration::from_millis(700)),
+        ],
+    );
+
+    assert!(output.contains("Health check"), "{output}");
+    assert!(output.contains("degraded"), "{output}");
+    assert!(output.contains("Suggested prompts"), "{output}");
+    assert!(output.contains("[Health]"), "{output}");
+    assert!(!output.contains("[Personal]"), "{output}");
+    assert!(!output.contains("Tab insert"), "{output}");
+    assert!(!output.contains("Enter ask"), "{output}");
+    assert!(!output.contains("Shift+Tab cycle"), "{output}");
+    assert!(
+        !output.contains("Received shell prompt request:"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_startup_health_healthy_fixture_renders_startup_row_in_banner() {
     let cwd = temp_shell_home("startup-health-healthy-fixture");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
@@ -238,7 +384,12 @@ fn raw_cli_startup_health_healthy_fixture_keeps_only_default_startup_card() {
     );
 
     assert!(output.contains("cosh-shell"), "{output}");
-    assert!(!output.contains("Health:"), "{output}");
+    assert!(output.contains("Health: ok"), "{output}");
+    // The banner path marks the report rendered, so the deferred path must
+    // not emit the row a second time.
+    assert_eq!(output.matches("Health: ok").count(), 1, "{output}");
+    assert!(output.contains("Mem used"), "{output}");
+    assert!(output.contains("Disk"), "{output}");
     assert!(!output.contains("Health check"), "{output}");
     assert!(!output.contains("Suggested prompts"), "{output}");
     assert_inline_before_followup(&output, "╭ cosh-shell", "exit");
@@ -249,7 +400,7 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
     let cwd = temp_shell_home("startup-health-no-color");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -265,7 +416,7 @@ fn raw_cli_startup_health_no_color_keeps_readable_content() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(output.contains("Health check"), "{output}");
@@ -292,7 +443,7 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
     let cwd = temp_shell_home("startup-health-dumb");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -306,7 +457,7 @@ fn raw_cli_startup_health_dumb_terminal_uses_plain_fallback() {
             ("TERM", "dumb"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Mem used", b"exit\n")],
     );
 
     assert!(output.contains("Health check:"), "{output}");
@@ -341,12 +492,12 @@ fn raw_cli_startup_health_suppresses_all_three_visible_try_items() {
         ("COSH_SHELL_ISOLATED", "0"),
     ];
 
-    let first = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let first = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &env,
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
     assert!(first.contains("Suggested prompts"), "{first}");
     assert!(!first.contains("Next:"), "{first}");
@@ -394,7 +545,7 @@ fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
         "hidden health scan should not persist suppression"
     );
 
-    let shown = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let shown = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -409,7 +560,7 @@ fn raw_cli_startup_health_banner_disabled_does_not_suppress_later_prompt() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![(b"exit\n".to_vec(), Duration::from_millis(150))],
+        &[("Suggested prompts", b"exit\n")],
     );
 
     assert!(shown.contains("Health check"), "{shown}");
@@ -421,7 +572,7 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
     let cwd = temp_shell_home("startup-health-ghost-tab");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
-    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -438,9 +589,12 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
             ("COSH_SHELL_ISOLATED", "0"),
         ],
         &cwd,
-        vec![
-            (b"\t\n".to_vec(), Duration::from_millis(1400)),
-            (b"exit\n".to_vec(), Duration::from_millis(700)),
+        &[
+            (
+                " › Analyze memory pressure and identify top consumers",
+                b"\t\n",
+            ),
+            ("Received shell prompt request", b"exit\n"),
         ],
     );
 
@@ -810,7 +964,7 @@ fn raw_cli_startup_hooks_no_findings_use_zh_language_env() {
 fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
     let home = temp_shell_home("default-agent-auto");
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -818,12 +972,11 @@ fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
             ("COSH_SHELL_STARTUP_BANNER", "1"),
             ("COSH_SHELL_LANG", "en-US"),
         ],
-        vec![
-            (
-                b"?? request tool approval\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"?? request tool approval\n"),
+            ("Deferred req-1", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 

@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
-use crate::diagnostics::health::{record_startup_health_recommendations, HealthScanReport};
+use crate::diagnostics::health::{
+    record_startup_health_recommendations, HealthFindingCategory, HealthScanReport, HealthSeverity,
+};
 use crate::raw_input::{PromptGhostCandidate, PromptGhostRoute};
 use crate::recommendation::personal_context::discover_repo_context;
 use crate::recommendation::personal_crypto::random_hex;
@@ -44,7 +47,7 @@ const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
 
 mod recommendations;
 #[cfg(test)]
-pub(super) use recommendations::{
+use recommendations::{
     plan_startup_for_render, record_visible_personal_impressions, visible_personal_candidates,
     write_startup_suggestion_card,
 };
@@ -64,15 +67,42 @@ fn restore_startup_prompt<W: Write>(
     Ok(())
 }
 
-fn startup_prompt_ghost_allowed(_report: &HealthScanReport) -> bool {
-    startup_prompt_selection_supported(
-        std::env::var("COSH_SHELL_ISOLATED").is_ok(),
-        std::env::var("TERM").ok().as_deref(),
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupSuggestionMode {
+    Hidden,
+    ReadOnly,
+    Interactive,
 }
 
-fn startup_prompt_selection_supported(isolated: bool, term: Option<&str>) -> bool {
+fn startup_suggestion_mode(
+    isolated: bool,
+    term: Option<&str>,
+    report: &HealthScanReport,
+) -> StartupSuggestionMode {
+    if !startup_suggestion_display_supported(isolated, term) {
+        StartupSuggestionMode::Hidden
+    } else if health_report_supports_interactive_suggestions(report) {
+        StartupSuggestionMode::Interactive
+    } else {
+        StartupSuggestionMode::ReadOnly
+    }
+}
+
+fn startup_suggestion_display_supported(isolated: bool, term: Option<&str>) -> bool {
     !isolated && !term.is_some_and(|term| term.eq_ignore_ascii_case("dumb"))
+}
+
+fn health_report_supports_interactive_suggestions(report: &HealthScanReport) -> bool {
+    !report
+        .findings
+        .iter()
+        .any(|finding| finding.category == HealthFindingCategory::CollectionGap)
+        && !report.unavailable.iter().any(|item| {
+            matches!(
+                item.severity,
+                HealthSeverity::Unavailable | HealthSeverity::Degraded
+            )
+        })
 }
 
 fn startup_banner_enabled() -> bool {
@@ -180,7 +210,7 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
         let status = Command::new(command)
             .args(&args[3..])
             .status()
-            .map(|s| s.code().unwrap_or(1))
+            .map(passthrough_exit_code)
             .unwrap_or_else(|err| {
                 let command = crate::evidence::redact_sensitive_text(command).0;
                 let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
@@ -196,7 +226,7 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
         let status = Command::new(&shell)
             .args(&pass_args)
             .status()
-            .map(|s| s.code().unwrap_or(1))
+            .map(passthrough_exit_code)
             .unwrap_or_else(|err| {
                 eprintln!("cosh-shell: exec {shell} failed: {err}");
                 126
@@ -211,7 +241,7 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
             .args(&pass_args)
             .stdin(Stdio::inherit())
             .status()
-            .map(|s| s.code().unwrap_or(1))
+            .map(passthrough_exit_code)
             .unwrap_or_else(|err| {
                 eprintln!("cosh-shell: exec {shell} failed: {err}");
                 126
@@ -220,6 +250,13 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
     }
 
     None
+}
+
+fn passthrough_exit_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 pub(crate) fn passthrough_raw_non_interactive(args: &[String]) -> Option<i32> {
@@ -309,7 +346,7 @@ fn passthrough_shell_args(args: &[String]) -> Vec<String> {
 }
 
 pub(crate) fn print_usage_help() {
-    eprintln!(
+    println!(
         "Usage: cosh-shell [OPTIONS]\n\
          \n\
          AI-augmented interactive shell wrapper.\n\

@@ -498,6 +498,22 @@ tokenless env-check --all --checklist
 | adapter enable failed | `anolisa adapter scan` to confirm framework installed; `anolisa adapter status tokenless` for details |
 | System state out of sync after manual dnf | `sudo anolisa --install-mode system repair tokenless`; if the RPM is still present, use a system-scoped `forget` followed by `adopt` to recreate the record |
 
+### Qoder plugin cache recovery (only after upgrading from an affected version)
+
+Skip this section unless you upgraded from an affected version and see this symptom: Qoder IDE sessions block every Bash-class tool call with `python3: can't open file '/rewrite_hook.py'`. Affected installs leave the unexpanded `${QODER_TOKENLESS_HOOKS}` placeholder in the qodercli plugin cache, and the cache is only refreshed by re-registering the adapter:
+
+```bash
+# Upgrade to a release that includes the fix first
+anolisa adapter disable tokenless qoder
+anolisa adapter enable tokenless qoder
+
+# Expected: no output
+grep -R -n 'QODER_TOKENLESS_HOOKS' \
+  ~/.qoder/plugins/cache/local/tokenless*/*/hooks.json 2>/dev/null
+```
+
+Restart Qoder IDE afterwards — sessions already running may still hold the stale hook configuration.
+
 ### State-inconsistency repair
 
 If `dnf remove` / `rpm -e` was used to directly modify an ANOLISA-managed package:

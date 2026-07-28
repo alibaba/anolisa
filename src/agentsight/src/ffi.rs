@@ -44,6 +44,7 @@ enum ProbeCommand {
 pub(crate) struct FfiEventSender {
     tx: mpsc::SyncSender<FfiEvent>,
     eventfd: i32,
+    enable_raw_https: bool,
 }
 
 impl FfiEventSender {
@@ -68,6 +69,13 @@ impl FfiEventSender {
                 // Receiver gone; nothing to do.
             }
         }
+    }
+
+    pub fn send_https(&self, record: &HttpRecord) {
+        if !self.enable_raw_https {
+            return;
+        }
+        self.send(FfiEvent::Https(record.clone()));
     }
 }
 
@@ -226,17 +234,17 @@ type LlmCallbackFn = Option<unsafe extern "C" fn(*const AgentsightLLMData, *mut 
 pub const AGENTSIGHT_READ_BLOCK: c_int = 1;
 
 // ===========================================================================
-// Temporary data holders (keep CStrings alive during callbacks)
+// Temporary data holders (keep C strings and byte buffers alive during callbacks)
 // ===========================================================================
 
 struct HttpsDataHolder {
     c_data: AgentsightHttpsData,
     _method: CString,
     _path: CString,
-    _req_headers: CString,
-    _req_body: Option<CString>,
-    _resp_headers: CString,
-    _resp_body: Option<CString>,
+    _req_headers: Vec<u8>,
+    _req_body: Option<Vec<u8>>,
+    _resp_headers: Vec<u8>,
+    _resp_body: Option<Vec<u8>>,
 }
 
 struct LlmDataHolder {
@@ -259,10 +267,10 @@ struct LlmDataHolder {
 fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
     let method = safe_cstring(&record.method);
     let path = safe_cstring(&record.path);
-    let req_headers = safe_cstring(&record.request_headers);
-    let req_body = record.request_body.as_ref().map(|b| safe_cstring(b));
-    let resp_headers = safe_cstring(&record.response_headers);
-    let resp_body = record.response_body.as_ref().map(|b| safe_cstring(b));
+    let req_headers = record.request_headers.as_bytes().to_vec();
+    let req_body = record.request_body.as_ref().map(|b| b.as_bytes().to_vec());
+    let resp_headers = record.response_headers.as_bytes().to_vec();
+    let resp_body = record.response_body.as_ref().map(|b| b.as_bytes().to_vec());
 
     let c_data = AgentsightHttpsData {
         pid: record.pid as i32,
@@ -279,14 +287,16 @@ fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
         path: path.as_ptr(),
         status_code: record.status_code,
         is_sse: record.is_sse as u8,
-        request_headers: req_headers.as_ptr(),
-        request_headers_len: record.request_headers.len() as u32,
-        request_body: req_body.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-        request_body_len: record.request_body.as_ref().map_or(0, |s| s.len() as u32),
-        response_headers: resp_headers.as_ptr(),
-        response_headers_len: record.response_headers.len() as u32,
-        response_body: resp_body.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-        response_body_len: record.response_body.as_ref().map_or(0, |s| s.len() as u32),
+        request_headers: req_headers.as_ptr().cast(),
+        request_headers_len: req_headers.len() as u32,
+        request_body: req_body.as_ref().map_or(ptr::null(), |s| s.as_ptr().cast()),
+        request_body_len: req_body.as_ref().map_or(0, |s| s.len() as u32),
+        response_headers: resp_headers.as_ptr().cast(),
+        response_headers_len: resp_headers.len() as u32,
+        response_body: resp_body
+            .as_ref()
+            .map_or(ptr::null(), |s| s.as_ptr().cast()),
+        response_body_len: resp_body.as_ref().map_or(0, |s| s.len() as u32),
     };
 
     HttpsDataHolder {
@@ -526,6 +536,21 @@ pub unsafe extern "C" fn agentsight_config_set_log_path(
         } else {
             Some(CStr::from_ptr(path).to_string_lossy().to_string())
         };
+    }
+}
+
+/// Enable or disable raw HTTPS fallback events in FFI mode (0 = off, non-zero = on).
+///
+/// # Safety
+///
+/// `cfg` must be a valid pointer returned by `agentsight_config_new()`, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_set_enable_raw_https(
+    cfg: *mut AgentsightConfigHandle,
+    enabled: c_int,
+) {
+    if !cfg.is_null() {
+        unsafe { (*cfg).ffi_enable_raw_https = enabled != 0 };
     }
 }
 
@@ -777,7 +802,11 @@ fn ffi_background_thread(
     running: Arc<AtomicBool>,
     probe_cmd_rx: mpsc::Receiver<ProbeCommand>,
 ) {
-    let sender = FfiEventSender { tx, eventfd };
+    let sender = FfiEventSender {
+        tx,
+        eventfd,
+        enable_raw_https: config.ffi_enable_raw_https,
+    };
 
     let mut sight = match AgentSight::new(config) {
         Ok(s) => s,
@@ -1114,6 +1143,24 @@ mod tests {
     }
 
     #[test]
+    fn test_config_set_enable_raw_https() {
+        let cfg = agentsight_config_new();
+        assert!(!cfg.is_null());
+        assert!(!unsafe { (*cfg).ffi_enable_raw_https });
+
+        unsafe { agentsight_config_set_enable_raw_https(cfg, 1) };
+        assert!(unsafe { (*cfg).ffi_enable_raw_https });
+
+        unsafe { agentsight_config_set_enable_raw_https(cfg, 0) };
+        assert!(!unsafe { (*cfg).ffi_enable_raw_https });
+
+        unsafe {
+            agentsight_config_set_enable_raw_https(ptr::null_mut(), 1);
+            agentsight_config_free(cfg);
+        }
+    }
+
+    #[test]
     #[allow(clippy::needless_range_loop)]
     fn test_copy_process_name_truncate() {
         let name = "very_long_process_name_that_exceeds_16";
@@ -1151,6 +1198,90 @@ mod tests {
     }
 
     // ─── build_llm_data tests ───────────────────────────────────────────────
+
+    fn make_http_record(request_body: Option<String>, response_body: Option<String>) -> HttpRecord {
+        HttpRecord {
+            timestamp_ns: 1,
+            pid: 1,
+            comm: "test".to_string(),
+            method: "POST".to_string(),
+            path: "/raw".to_string(),
+            status_code: 200,
+            request_headers: "{\"host\":\"example.com\"}".to_string(),
+            request_body,
+            response_headers: "{\"content-type\":\"application/octet-stream\"}".to_string(),
+            response_body,
+            duration_ns: 1,
+            is_sse: false,
+            sse_event_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_build_https_data_preserves_interior_nul_bytes() {
+        let request_body = "a\0b\0c".to_string();
+        let response_body = "\0x\0y\0".to_string();
+        let request_headers = "{\0\"host\":\"example.com\"\0}".to_string();
+        let response_headers = "{\0\"content-type\":\"application/octet-stream\"\0}".to_string();
+        let mut record = make_http_record(Some(request_body.clone()), Some(response_body.clone()));
+        record.request_headers = request_headers.clone();
+        record.response_headers = response_headers.clone();
+        let holder = build_https_data(&record);
+
+        let copied_request_headers = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.request_headers.cast::<u8>(),
+                holder.c_data.request_headers_len as usize,
+            )
+        };
+        let copied_request = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.request_body.cast::<u8>(),
+                holder.c_data.request_body_len as usize,
+            )
+        };
+        let copied_response_headers = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.response_headers.cast::<u8>(),
+                holder.c_data.response_headers_len as usize,
+            )
+        };
+        let copied_response = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.response_body.cast::<u8>(),
+                holder.c_data.response_body_len as usize,
+            )
+        };
+        assert_eq!(copied_request_headers, request_headers.as_bytes());
+        assert_eq!(copied_request, request_body.as_bytes());
+        assert_eq!(copied_response_headers, response_headers.as_bytes());
+        assert_eq!(copied_response, response_body.as_bytes());
+    }
+
+    #[test]
+    fn test_disabled_https_sender_does_not_consume_channel_capacity() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let sender = FfiEventSender {
+            tx,
+            eventfd: -1,
+            enable_raw_https: false,
+        };
+        sender.send_https(&make_http_record(None, None));
+        sender.send(FfiEvent::Llm(make_llm_call(None, 1)));
+        assert!(matches!(rx.try_recv(), Ok(FfiEvent::Llm(_))));
+    }
+
+    #[test]
+    fn test_enabled_https_sender_enqueues_event() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let sender = FfiEventSender {
+            tx,
+            eventfd: -1,
+            enable_raw_https: true,
+        };
+        sender.send_https(&make_http_record(None, None));
+        assert!(matches!(rx.try_recv(), Ok(FfiEvent::Https(_))));
+    }
 
     fn make_llm_call(agent_name: Option<&str>, pid: i32) -> LLMCall {
         use crate::genai::semantic::{LLMRequest, LLMResponse};

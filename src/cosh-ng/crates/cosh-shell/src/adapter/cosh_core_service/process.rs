@@ -1,0 +1,398 @@
+//! Process and JSONL I/O primitives for the persistent cosh-core service.
+
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::process::{Child, ChildStdin};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+use crate::types::CoshApprovalMode;
+
+use super::super::claude::terminate_process;
+use super::super::cosh_core::question_ingress::{
+    protocol_error, CoreQuestionProtocolReason, CoshCoreQuestionGate,
+};
+use super::super::{
+    control_protocol, spawn_provider_child, AdapterError, ApprovalDecision, ApprovalResponse,
+    AuthResponse, PreparedInvocation, ProviderPromptArgMode, ProviderStdinMode,
+};
+use super::{
+    registry_timeout, PersistentCoshCoreRuntime, RegistryCommand, RegistryQueryError,
+    ServiceCommand,
+};
+
+impl Drop for PersistentCoshCoreRuntime {
+    fn drop(&mut self) {
+        if let Ok(current) = self.command_tx.get_mut() {
+            if let Some(sender) = current.take() {
+                let _ = sender.send(ServiceCommand::Shutdown);
+            }
+        }
+        if let Some(pid) = self.child_pid.lock().ok().and_then(|current| *current) {
+            terminate_process(pid);
+        }
+    }
+}
+
+pub(super) struct PersistentProcess {
+    pub(super) child: Child,
+    pub(super) stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
+    pub(super) output_rx: mpsc::Receiver<Result<String, String>>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
+    stderr_done: Arc<AtomicBool>,
+    pub(super) initialized: bool,
+    pub(super) approval_mode: CoshApprovalMode,
+    pub(super) session_id: Option<String>,
+    pub(super) workspace_scope: String,
+}
+
+pub(super) fn spawn_response_writer(
+    stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
+    done: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    approval_rx: mpsc::Receiver<ApprovalResponse>,
+    auth_rx: mpsc::Receiver<AuthResponse>,
+    question_gate: Arc<Mutex<CoshCoreQuestionGate>>,
+    failure_tx: mpsc::Sender<AdapterError>,
+    answer_confirmation_tx: mpsc::Sender<Result<String, AdapterError>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut approval_open = true;
+        let mut auth_open = true;
+        while !done.load(Ordering::SeqCst) && !cancelled.load(Ordering::SeqCst) {
+            if approval_open {
+                match approval_rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok(response) => {
+                        let message = approval_message(&response);
+                        if matches!(&response.decision, ApprovalDecision::Answer { .. }) {
+                            let write_result =
+                                question_gate.lock().map_err(|_| ()).and_then(|mut gate| {
+                                    send_json(&stdin, &message).map_err(|_| ())?;
+                                    gate.answer_written(&response.request_id);
+                                    Ok(())
+                                });
+                            if write_result.is_err() {
+                                let error =
+                                    protocol_error(CoreQuestionProtocolReason::AnswerWriteFailed);
+                                let _ = answer_confirmation_tx.send(Err(error.clone()));
+                                let _ = failure_tx.send(error);
+                                break;
+                            }
+                            let _ = answer_confirmation_tx.send(Ok(response.request_id.clone()));
+                        } else if send_json(&stdin, &message).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => approval_open = false,
+                }
+            }
+            if auth_open {
+                match auth_rx.try_recv() {
+                    Ok(response) => {
+                        let message = control_protocol::serialize_auth_response(
+                            &response.request_id,
+                            &response.provider_id,
+                            response.provider_type.as_deref(),
+                            &response.values,
+                            response.persist,
+                        );
+                        if send_json(&stdin, &message).is_err() {
+                            break;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => auth_open = false,
+                }
+            }
+            if !approval_open && !auth_open {
+                break;
+            }
+        }
+    })
+}
+
+fn approval_message(response: &ApprovalResponse) -> String {
+    match &response.decision {
+        ApprovalDecision::Allow => control_protocol::serialize_co_allow(&response.request_id),
+        ApprovalDecision::Deny { message } => {
+            control_protocol::serialize_deny(&response.request_id, message)
+        }
+        ApprovalDecision::HostExecutedShell { result } => {
+            control_protocol::serialize_host_executed_shell_result(&response.request_id, result)
+        }
+        ApprovalDecision::Answer { answer } => {
+            control_protocol::serialize_answer(&response.request_id, answer)
+        }
+        ApprovalDecision::ShellEvidence { result } => {
+            control_protocol::serialize_shell_evidence_result(&response.request_id, result)
+        }
+    }
+}
+
+pub(super) fn spawn_process(
+    prepared: &PreparedInvocation,
+    approval_mode: CoshApprovalMode,
+) -> Result<PersistentProcess, String> {
+    let mut child = spawn_provider_child(
+        prepared,
+        "cosh-core",
+        ProviderStdinMode::Piped,
+        ProviderPromptArgMode::None,
+    )
+    .map_err(|error| error.message)?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "failed to capture cosh-core stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to capture cosh-core stdout".to_string())?;
+    let (output_tx, output_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if output_tx.send(Ok(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ =
+                        output_tx.send(Err(format!("failed to read cosh-core stream: {error}")));
+                    return;
+                }
+            }
+        }
+        let _ = output_tx.send(Err("cosh-core output reached EOF".to_string()));
+    });
+    let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+    let stderr_done = Arc::new(AtomicBool::new(false));
+    if let Some(mut stderr) = child.stderr.take() {
+        let tail = Arc::clone(&stderr_tail);
+        let done = Arc::clone(&stderr_done);
+        thread::spawn(move || {
+            let mut chunk = [0_u8; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => append_bounded(&tail, &chunk[..read]),
+                }
+            }
+            done.store(true, Ordering::SeqCst);
+        });
+    } else {
+        stderr_done.store(true, Ordering::SeqCst);
+    }
+    Ok(PersistentProcess {
+        child,
+        stdin: Arc::new(Mutex::new(BufWriter::new(stdin))),
+        output_rx,
+        stderr_tail,
+        stderr_done,
+        initialized: false,
+        approval_mode,
+        session_id: None,
+        workspace_scope: String::new(),
+    })
+}
+
+const STDERR_TAIL_MAX_BYTES: usize = 64 * 1024;
+
+fn append_bounded(tail: &Arc<Mutex<Vec<u8>>>, bytes: &[u8]) {
+    let Ok(mut tail) = tail.lock() else {
+        return;
+    };
+    tail.extend_from_slice(bytes);
+    if tail.len() > STDERR_TAIL_MAX_BYTES {
+        let overflow = tail.len() - STDERR_TAIL_MAX_BYTES;
+        tail.drain(..overflow);
+    }
+}
+
+pub(super) fn process_error(process: &PersistentProcess, message: &str) -> String {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    while !process.stderr_done.load(Ordering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let stderr = process
+        .stderr_tail
+        .lock()
+        .ok()
+        .map(|tail| String::from_utf8_lossy(&tail).trim().to_string())
+        .unwrap_or_default();
+    if stderr.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message}\nstderr tail:\n{stderr}")
+    }
+}
+
+pub(super) fn execute_registry(
+    process: &mut PersistentProcess,
+    command: &RegistryCommand,
+) -> Result<Value, RegistryQueryError> {
+    let request = serde_json::json!({
+        "type": "registry_request",
+        "request_id": command.request_id,
+        "domain": command.domain,
+        "action": command.action,
+        "params": command.params,
+    });
+    send_json(&process.stdin, &request.to_string()).map_err(RegistryQueryError::Transport)?;
+    let deadline = Instant::now() + registry_timeout(&command.domain, &command.action);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(RegistryQueryError::Transport(
+                "live registry query timed out".to_string(),
+            ));
+        }
+        let line = match process.output_rx.recv_timeout(remaining) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => return Err(RegistryQueryError::Transport(error)),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(RegistryQueryError::Transport(
+                    "live registry query timed out".to_string(),
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(RegistryQueryError::Transport(
+                    "cosh-core output stream disconnected".to_string(),
+                ));
+            }
+        };
+        let response: Value = match serde_json::from_str(line.trim()) {
+            Ok(response) => response,
+            Err(_) => continue,
+        };
+        // The service loop serializes Agent turns and registry commands through one stdout reader.
+        // A line belongs to this command only when both its discriminator and correlation ID match.
+        if !is_registry_response_for(&response, &command.request_id) {
+            continue;
+        }
+        if response
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(response.get("data").cloned().unwrap_or(Value::Null));
+        }
+        return Err(RegistryQueryError::Response(
+            response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown live registry error")
+                .to_string(),
+        ));
+    }
+}
+
+fn is_registry_response_for(response: &Value, request_id: &str) -> bool {
+    response.get("type").and_then(Value::as_str) == Some("registry_response")
+        && response.get("request_id").and_then(Value::as_str) == Some(request_id)
+}
+
+pub(super) fn reset_process(
+    process: &mut Option<PersistentProcess>,
+    live: &Arc<AtomicBool>,
+    active_stdin: &Arc<Mutex<Option<Arc<Mutex<BufWriter<ChildStdin>>>>>>,
+    child_pid: &Arc<Mutex<Option<u32>>>,
+) {
+    if let Some(mut running) = process.take() {
+        stop_process(&mut running.child, Duration::ZERO);
+    }
+    live.store(false, Ordering::SeqCst);
+    if let Ok(mut current) = active_stdin.lock() {
+        *current = None;
+    }
+    if let Ok(mut pid) = child_pid.lock() {
+        *pid = None;
+    }
+}
+
+pub(super) fn stop_process(child: &mut Child, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+}
+
+pub(super) fn send_json(
+    stdin: &Arc<Mutex<BufWriter<ChildStdin>>>,
+    message: &str,
+) -> Result<(), String> {
+    let mut writer = stdin
+        .lock()
+        .map_err(|_| "cosh-core stdin lock poisoned".to_string())?;
+    writeln!(writer, "{message}")
+        .and_then(|()| writer.flush())
+        .map_err(|error| format!("failed to write cosh-core request: {error}"))
+}
+
+pub(super) fn control_request(subtype: &str, request_id: &str, fields: Value) -> String {
+    let mut request = serde_json::Map::new();
+    request.insert("subtype".to_string(), Value::String(subtype.to_string()));
+    if let Value::Object(fields) = fields {
+        request.extend(fields);
+    }
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": request,
+    })
+    .to_string()
+}
+
+pub(super) fn user_message(content: &str, session_id: Option<&str>, cwd: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": null,
+        "session_id": session_id.unwrap_or("default"),
+        "shell_context": {"cwd": cwd, "env": {}, "last_exit_code": 0},
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_registry_response_for;
+
+    #[test]
+    fn registry_response_requires_discriminator_and_correlation_id() {
+        let response = serde_json::json!({
+            "type": "registry_response",
+            "request_id": "reg-1",
+            "success": true,
+        });
+        assert!(is_registry_response_for(&response, "reg-1"));
+
+        let future_output = serde_json::json!({
+            "type": "future_output",
+            "request_id": "reg-1",
+        });
+        assert!(!is_registry_response_for(&future_output, "reg-1"));
+
+        let other_request = serde_json::json!({
+            "type": "registry_response",
+            "request_id": "reg-2",
+        });
+        assert!(!is_registry_response_for(&other_request, "reg-1"));
+    }
+}

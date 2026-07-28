@@ -107,6 +107,43 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingKernelPanic => "近期内核 panic",
         MessageId::HealthFindingServiceFailed => "服务失败",
         MessageId::HealthFindingServiceInactive => "服务未运行",
+        MessageId::HealthCollectorProvider => "Provider",
+        MessageId::HealthCollectorConfig => "配置",
+        MessageId::HealthCollectorHooks => "Hooks",
+        MessageId::HealthCollectorPty => "PTY",
+        MessageId::HealthCollectorPermissions => "权限",
+        MessageId::DoctorTitle => "cosh-shell 体检",
+        MessageId::DoctorStatusLabel => "状态",
+        MessageId::DoctorChecksLabel => "检查项",
+        MessageId::DoctorRemediationLabel => "补救",
+        MessageId::DoctorAllHealthy => "全部检查通过",
+        MessageId::HealthFindingProviderUnconfigured => "AI provider 未就绪",
+        MessageId::HealthFindingConfigUnavailable => "配置不可用",
+        MessageId::HealthFindingHooksUntrusted => "项目 hooks 未信任",
+        MessageId::HealthFindingPtyUnavailable => "PTY 支持不可用",
+        MessageId::HealthFindingPermissionsUnwritable => "配置目录不可写",
+        MessageId::HealthRemediationProvider => {
+            "为 adapter '{adapter}' 配置凭据（环境变量或 config.toml），或运行 /auth"
+        }
+        MessageId::HealthRemediationUnknownAdapter => {
+            "'{adapter}' 不是受支持的 adapter；请将 adapter_default 设为以下之一：fake, claude-code, qwen-cli, cosh-core"
+        }
+        MessageId::HealthRemediationConfig => {
+            "设置 HOME，以便 cosh-shell 解析 ~/.copilot-shell 并加载配置"
+        }
+        MessageId::HealthRemediationConfigUnreadable => {
+            "请将 ~/.copilot-shell/config.toml 设为可读文件（而非目录）并修正其权限"
+        }
+        MessageId::HealthRemediationConfigInvalid => {
+            "修复 ~/.copilot-shell/config.toml，使 cosh-shell 能加载（合法 TOML 或可识别的 key=value 条目）"
+        }
+        MessageId::HealthRemediationHooks => "检查并信任 {path} 下的项目 hooks 后它们才会运行",
+        MessageId::HealthRemediationPty => {
+            "请在真实终端中运行 cosh-shell；交互式 shell 需要 PTY（/dev/ptmx）"
+        }
+        MessageId::HealthRemediationPermissions => {
+            "修正 {path} 的权限，使 cosh-shell 能写入配置、日志与状态"
+        }
         MessageId::HealthTryReasonMemoryLow => "可用内存偏低",
         MessageId::HealthTryReasonSwapWithContext => "swap 偏高且有压力上下文",
         MessageId::HealthTryReasonRecentOom => "近期 OOM 值得回溯原因",

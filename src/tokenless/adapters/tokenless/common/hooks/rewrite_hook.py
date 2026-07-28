@@ -28,6 +28,7 @@ from hook_utils import (
     _TOKENLESS_LOCAL_SHARE,
     forward_stderr,
     parse_version,
+    resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
     skip,
@@ -38,7 +39,7 @@ from hook_utils import (
 # -- constants ---------------------------------------------------------------
 
 _MIN_RTK_VERSION = (0, 35, 0)
-_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
+_AGENT_ID = resolve_agent_id()
 
 
 # -- main --------------------------------------------------------------------
@@ -132,12 +133,16 @@ def main() -> None:
         skip()
 
     # 7. Build response
+    # Emit both formats for runtime compatibility:
+    # - ``tool_input``: Cosh-NG partial patch (merges with original params)
+    # - ``updatedInput``: copilot-shell full replacement (legacy)
     updated_input = dict(tool_input)
     updated_input["command"] = rewritten
 
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
+            "tool_input": {"command": rewritten},
             "updatedInput": updated_input,
         },
     }

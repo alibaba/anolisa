@@ -120,11 +120,9 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
     }
 
     // Suppress per-component rendering: the batch owns the final output.
-    let suppressed_ctx = CliContext {
-        json: false,
-        quiet: true,
-        ..ctx.clone()
-    };
+    let mut suppressed_ctx = ctx.clone();
+    suppressed_ctx.json = false;
+    suppressed_ctx.quiet = true;
 
     // Peek phase: plan every component read-only and classify. Delegated
     // refreshes (U5) merge into one native transaction; everything else
@@ -371,11 +369,9 @@ fn merged_update_package(planned: &PlannedComponentUpdate) -> Option<String> {
 /// the configured ANOLISA repo, degrade re-plans through the per-item
 /// pipeline.
 fn execute_merged_updates(group: Vec<MergedUpdate>, ctx: &CliContext) -> Vec<UpdateAllItem> {
-    let suppressed_ctx = CliContext {
-        json: false,
-        quiet: true,
-        ..ctx.clone()
-    };
+    let mut suppressed_ctx = ctx.clone();
+    suppressed_ctx.json = false;
+    suppressed_ctx.quiet = true;
     let (query, txn) = match update_backends(&group[0].name, &suppressed_ctx) {
         Ok(backends) => backends,
         Err(err) => {

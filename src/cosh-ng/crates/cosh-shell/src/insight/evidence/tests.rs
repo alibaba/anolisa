@@ -288,6 +288,7 @@ fn provider_target_facts_preserve_mandatory_identity_with_long_command() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let facts = provider_target_facts(
         &block,

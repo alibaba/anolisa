@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -48,6 +46,15 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or("missing 'content' parameter")?;
 
+        let placeholders = placeholder_markers(content);
+        if !placeholders.is_empty() {
+            return Ok(ToolResult::error(format!(
+                "Write refused: placeholder(s) detected: {}. The file was not modified; use an \
+                 interactive input path for credentials.",
+                placeholders.join(", "),
+            )));
+        }
+
         let path = resolve_path(path_str, &ctx.cwd);
 
         if let Some(parent) = path.parent() {
@@ -71,18 +78,39 @@ impl Tool for WriteFileTool {
     }
 }
 
-fn resolve_path(path_str: &str, cwd: &Path) -> std::path::PathBuf {
-    let p = std::path::Path::new(path_str);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
+// resolve_path is provided by the parent module (super::resolve_path)
+// and supports ~ expansion.
+use super::resolve_path;
+
+fn placeholder_markers(content: &str) -> Vec<&'static str> {
+    let upper = content.to_ascii_uppercase();
+    let mut markers = Vec::new();
+
+    if upper.contains("<REDACTED") {
+        markers.push("<redacted>");
     }
+    if upper.contains("[REDACTED:") {
+        markers.push("[REDACTED:...]");
+    }
+    if upper
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| {
+            word.starts_with("YOUR_")
+                && (word.ends_with("_KEY") || word.ends_with("_TOKEN") || word.ends_with("_SECRET"))
+        })
+    {
+        markers.push("YOUR_*_KEY/TOKEN/SECRET");
+    }
+
+    markers
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
     fn test_ctx_in(dir: &Path) -> ToolContext {
         ToolContext {
             cwd: dir.to_path_buf(),
@@ -142,5 +170,71 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert!(dir.path().join("relative.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn write_redacted_content_is_refused_before_fs_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool;
+        let parent = dir.path().join("new");
+        let path = parent.join("settings.json");
+        let content = r#"{\"token\": \"<redacted>\"}"#;
+
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": path, "content": content}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.starts_with("Write refused:"));
+        assert!(result.output.contains("<redacted>"));
+        assert!(result.output.contains("interactive input path"));
+        assert!(result.output.contains("file was not modified"));
+        assert!(!path.exists());
+        assert!(!parent.exists());
+    }
+
+    #[tokio::test]
+    async fn refused_write_does_not_overwrite_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool;
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "valid configuration").unwrap();
+
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": path, "content": "token=YOUR_API_TOKEN"}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("YOUR_*_KEY/TOKEN/SECRET"));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "valid configuration"
+        );
+    }
+
+    #[test]
+    fn detects_supported_placeholder_markers() {
+        let markers = placeholder_markers(
+            "<REDACTED private key block> [redacted: token] YOUR_API_KEY YOUR_ACCESS_TOKEN \
+             YOUR_DB_SECRET",
+        );
+
+        assert_eq!(
+            markers,
+            vec!["<redacted>", "[REDACTED:...]", "YOUR_*_KEY/TOKEN/SECRET"]
+        );
+    }
+
+    #[test]
+    fn ignores_non_placeholder_content() {
+        assert!(placeholder_markers("configured-token-value").is_empty());
     }
 }

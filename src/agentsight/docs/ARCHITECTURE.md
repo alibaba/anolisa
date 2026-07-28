@@ -275,9 +275,8 @@ src/
 │   ├── llm_tok.rs         # LlmTokenizer（llm-tokenizer 封装）
 │   ├── model_mapping.rs   # 模型名 → HuggingFace ID 映射
 │   └── multi_model.rs     # MultiModelTokenizer（多模型支持）
-├── atif/                  # ATIF 轨迹格式
-│   ├── schema.rs          # ATIF v1.6 数据结构
-│   └── converter.rs       # GenAI → ATIF 转换
+├── atif/                  # ATIF 轨迹导出（数据结构见 crates/agentsight-atif）
+│   └── converter.rs       # GenAI → ATIF v1.7 转换
 ├── agent_sec/             # agent-sec daemon 查询代理
 │   ├── mod.rs             # 模块导出
 │   └── client.rs          # Unix socket NDJSON client

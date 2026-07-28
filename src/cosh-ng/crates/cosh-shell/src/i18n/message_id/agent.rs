@@ -68,6 +68,19 @@ macro_rules! agent_ids {
     };
 }
 
+// Keep feature-specific additions in a trailing segment so existing public
+// MessageId discriminants remain stable.
+macro_rules! tool_argument_status_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentStatusToolArguments,
+            AgentStatusGeneratingToolArguments,
+        );
+    };
+}
+
 macro_rules! agent_queue_ids {
     ($next:ident, $remaining:tt, $($ids:ident,)*) => {
         $next!(
@@ -77,6 +90,30 @@ macro_rules! agent_queue_ids {
             AgentQueuedBodyCommand,
             AgentQueuedBodyActive,
             AgentQueuedFooter,
+        );
+    };
+}
+
+macro_rules! compaction_queue_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentQueueFullTitle,
+            AgentControlQueueFullBody,
+        );
+    };
+}
+
+macro_rules! question_hardening_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentQuestionUnavailableTitle,
+            AgentQuestionUnavailableBody,
+            AgentAnswerDeliveryUnknownTitle,
+            AgentAnswerDeliveryUnknownBody,
         );
     };
 }

@@ -10,7 +10,7 @@
 //! Everything that is not a fresh delegated install keeps the per-item
 //! pipeline unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -49,8 +49,9 @@ use super::{COMMAND, InstallArgs};
 // shared guards it mirrors.
 use super::io_util::now_iso8601;
 use super::{
-    PlannedComponent, PlannedRoute, handle_one, host_backends, plan_component, quarantined,
-    require_configured_rpm_backend, revalidate_native_absence, step_label,
+    PlannedComponent, PlannedRoute, handle_one, handle_one_with_planned_components, host_backends,
+    plan_component, quarantined, require_configured_rpm_backend, revalidate_native_absence,
+    step_label,
 };
 // ── --all support ───────────────────────────────────────────────────
 
@@ -118,11 +119,9 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
     // Each handle_one call runs in quiet mode so it doesn't print individual
     // JSON envelopes or human-mode messages — only the batch summary at the
     // end goes to stdout.
-    let suppressed_ctx = CliContext {
-        json: false,
-        quiet: true,
-        ..ctx.clone()
-    };
+    let mut suppressed_ctx = ctx.clone();
+    suppressed_ctx.json = false;
+    suppressed_ctx.quiet = true;
 
     // Peek phase: plan every component read-only and classify. Fresh
     // delegated installs merge into one native transaction; everything else
@@ -159,6 +158,10 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
         (!merged.is_empty()).then(|| merged.iter().map(|item| item.package.clone()).collect());
 
     let mut results: HashMap<String, AllSummaryItem> = HashMap::with_capacity(names.len());
+    // Dry-run does not persist each successful member, so carry the batch's
+    // simulated state forward to keep later raw conflict checks aligned with
+    // the sequential real execution order.
+    let mut planned_components: HashSet<String> = HashSet::new();
     let mut fail_fast_tripped = false;
 
     if !merged.is_empty() {
@@ -193,6 +196,7 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
                         plan: Some(labels),
                     },
                 );
+                planned_components.insert(item.name.clone());
             }
         } else {
             let statuses = execute_merged_group(merged, &args, ctx);
@@ -215,10 +219,18 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
             println!("{} {name}", color.label("==>"));
         }
         let per_args = per_component_args(name, &args);
-        match handle_one(name.clone(), per_args, &suppressed_ctx) {
+        match handle_one_with_planned_components(
+            name.clone(),
+            per_args,
+            &suppressed_ctx,
+            &planned_components,
+        ) {
             // Map (outcome, dry-run) to a batch status string (§7.5).
             // Dry-run successes are "planned": nothing was written.
             Ok(outcome) => {
+                if ctx.dry_run && outcome == InstallOutcome::Installed {
+                    planned_components.insert(name.clone());
+                }
                 results.insert(
                     name.clone(),
                     AllSummaryItem {
@@ -406,11 +418,9 @@ fn execute_merged_group(
     ctx: &CliContext,
 ) -> Vec<AllSummaryItem> {
     let per_args = per_component_args(&group[0].name, args);
-    let suppressed_ctx = CliContext {
-        json: false,
-        quiet: true,
-        ..ctx.clone()
-    };
+    let mut suppressed_ctx = ctx.clone();
+    suppressed_ctx.json = false;
+    suppressed_ctx.quiet = true;
     let (query, txn) = match host_backends(&group[0].name, &per_args, &suppressed_ctx) {
         Ok(backends) => backends,
         Err(err) => {
@@ -638,9 +648,12 @@ fn execute_merged_group_with_deps(
                             finished_at: Some(now_iso8601()),
                             parent_operation_id: Some(batch_operation_id.clone()),
                         });
-                        for warning in
-                            super::io_util::snapshot_datadir_contract(&layout, &target, COMMAND)
-                        {
+                        for warning in super::io_util::snapshot_datadir_contract(
+                            &layout,
+                            &target,
+                            COMMAND,
+                            ctx.packaged_data_probe(),
+                        ) {
                             eprintln!("warning: {warning}");
                         }
                         items.push(AllSummaryItem {
@@ -953,6 +966,7 @@ mod tests {
             component_identity_pinned: false,
             family: "rpm".to_string(),
             native_package: Some(package.to_string()),
+            delegated_pin: None,
             scope: InstallationScope::System,
             now: NOW.to_string(),
             store: StateStore::empty(),

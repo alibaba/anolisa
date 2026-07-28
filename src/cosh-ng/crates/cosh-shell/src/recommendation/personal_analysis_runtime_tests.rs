@@ -66,6 +66,7 @@ fn gate4_real_core_uses_one_bare_toolless_request_without_touching_foreground_st
         program: wrapper.to_string_lossy().into_owned(),
         allow_model_call: false,
         session: foreground_session.clone(),
+        ..CoshCoreAdapter::default()
     };
 
     let now_secs = 1_800_000_000;

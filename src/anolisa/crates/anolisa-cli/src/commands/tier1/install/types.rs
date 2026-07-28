@@ -16,6 +16,10 @@ pub(crate) struct RawResolution {
     pub(crate) package: String,
     pub(crate) entry: DistributionEntry,
     pub(crate) artifact_url: String,
+    /// Repository base URL the index was fetched from, kept so a
+    /// version-pinned install can attribute the resolved candidate to its
+    /// source repository in the result envelope.
+    pub(crate) base_url: String,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -47,6 +51,7 @@ pub(crate) struct LoadedInstallContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallContractSource {
     EmbeddedArtifact,
+    SidecarMeta,
 }
 
 /// What `handle_one` did, so `--all` can distinguish outcomes in its batch

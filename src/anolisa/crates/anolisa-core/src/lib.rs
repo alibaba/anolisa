@@ -21,12 +21,11 @@ pub mod feature_flags;
 pub mod health;
 pub mod hooks;
 pub mod install_runner;
-pub mod instance;
+
 pub mod integrity;
 pub mod lifecycle;
 pub mod lock;
 pub mod manifest;
-pub mod metadata;
 pub mod osbase_install;
 pub mod owned_executor;
 pub mod path_safety;
@@ -42,6 +41,7 @@ pub mod sandbox_manifest;
 pub mod self_update;
 pub mod service;
 pub mod state;
+mod state_identity;
 pub mod state_migration;
 pub mod state_store;
 pub mod system_helper;
@@ -82,7 +82,6 @@ pub use hooks::{
 pub use install_runner::{
     InstallError, InstallOutcome, InstallRunner, InstalledFile, ResolvedInstallFile,
 };
-pub use instance::{InstanceInfo, InstanceProber, InstanceSnapshot};
 pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{
     ComponentLifecyclePlan, FileAction, FileActionKind, FileOwner as LifecycleFileOwner,
@@ -91,17 +90,16 @@ pub use lifecycle::{
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{
-    AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind, PackageNames,
-    RuntimeDependency, ServiceScope, declared_unit_scope,
+    AdapterNotice, AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind,
+    NoticeLevel, NoticeWhen, PackageNames, RuntimeDependency, ServiceScope, declared_unit_scope,
 };
-pub use metadata::MetadataClient;
 pub use provisioner::{
     ManualDependency, ProvisionOutcome, ProvisionPlan, ProvisionStrategy, ProvisionablePackage,
     UnresolvableDependency,
 };
 pub use register::{
-    ConsentState, HistoryAction, HistoryEntry, ProductType, RegisterRecord, RegisterSource,
-    RegisterState, RegistrationManager, SubscriptionError, current_operator, require_root,
+    ConsentState, HistoryAction, HistoryEntry, RegisterRecord, RegisterSource, RegisterState,
+    RegistrationManager, SubscriptionError, current_operator, generate_link_id, require_root,
 };
 pub use registry::{
     FetchFailure, FetchedMeta, HttpFetch, IndexFreshness, Registry, RegistryClient, RegistryConfig,
@@ -126,7 +124,12 @@ pub use state::{
     InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, OwnedFileKind, Ownership,
     RpmMetadata, STATE_SCHEMA_VERSION, ServiceRef, StateError, SubscriptionScope,
 };
-pub use telemetry::{TelemetryConfig, TelemetryError, TelemetryStarter, validate_sls_account_id};
+pub use telemetry::instance::{InstanceInfo, InstanceProber, InstanceSnapshot};
+pub use telemetry::metadata::MetadataClient;
+pub use telemetry::{
+    DISABLE_MARKER_PATH, Endpoint, FileOffset, LegacyAccountsConfig, LegacyIlogtail, ProductType,
+    TelemetryChannel, TelemetryConfig, TelemetryError, Uploader, UploaderConfig, UploaderError,
+};
 pub use transaction::{
     DelegatedRecordAction, DelegatedRecoveryContext, JOURNAL_SCHEMA_VERSION, RollbackAction,
     RollbackActionKind, Transaction, TransactionError, TransactionOutcome,

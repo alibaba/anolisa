@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use blaze_core::backend::BackendKind;
 use blaze_core::config::DaemonConfig;
@@ -15,6 +15,7 @@ use blaze_core::kernel::HookRegistry;
 use blaze_core::lifecycle::SandboxInstance;
 use blaze_core::policy::PolicyEngine;
 use blaze_core::pool::PoolManager;
+use blaze_core::storage::StorageProvider;
 use blaze_core::template::TemplateRegistry;
 use uuid::Uuid;
 
@@ -37,6 +38,7 @@ pub struct ServerState {
     /// API handlers use this to constrain availability to the single active
     /// backend rather than reporting all configured binaries.
     pub active_backend: BackendKind,
+    pub storage: Arc<dyn StorageProvider>,
     pub state_dir: PathBuf,
     pub metrics: Metrics,
 }
@@ -45,6 +47,7 @@ impl ServerState {
     /// Build a server state, scanning `state_dir` to repopulate the
     /// `instances` map from previous runs (best-effort; corrupt entries
     /// are skipped with a warning).
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         config: DaemonConfig,
         policy: PolicyEngine,
@@ -53,6 +56,7 @@ impl ServerState {
         hook: HookRegistry,
         spawner: DynSpawner,
         active_backend: BackendKind,
+        storage: Arc<dyn StorageProvider>,
     ) -> Self {
         let state_dir = config.daemon.state_dir.clone();
         let instances = scan_state_dir(&state_dir).unwrap_or_else(|err| {
@@ -70,6 +74,7 @@ impl ServerState {
             spawn_handles: Mutex::new(HashMap::new()),
             spawner,
             active_backend,
+            storage,
             state_dir,
             metrics: Metrics::new(),
         }

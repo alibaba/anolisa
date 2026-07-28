@@ -29,11 +29,21 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentStatusWaitingUserAnswer => "waiting for user answer: {question}",
         MessageId::AgentStatusWaitingApprovalCommand => "waiting for approval: {command}",
         MessageId::AgentStatusTool => "tool",
+        MessageId::AgentStatusToolArguments => "tool arguments",
+        MessageId::AgentStatusGeneratingToolArguments => "generating {tool} arguments...",
         MessageId::AgentStatusCapturingToolOutput => "capturing output from {tool_id}",
         MessageId::AgentStatusToolCompleted => "{tool_id} completed with status {status}",
         MessageId::AgentStatusCompleted => "completed",
         MessageId::AgentStatusFailed => "failed",
         MessageId::AgentStatusCancelled => "cancelled",
+        MessageId::AgentQuestionUnavailableTitle => "Agent question unavailable",
+        MessageId::AgentQuestionUnavailableBody => {
+            "The Agent returned an incomplete question. Please retry."
+        }
+        MessageId::AgentAnswerDeliveryUnknownTitle => "Agent answer delivery uncertain",
+        MessageId::AgentAnswerDeliveryUnknownBody => {
+            "The Agent connection closed while sending your answer. Delivery could not be confirmed."
+        }
         MessageId::AgentStatusRunningApprovedProviderTool => "running approved provider tool",
         MessageId::AgentProviderTimeoutDroppedQueuedBody => {
             "{dropped} queued requests skipped after provider timeout"
@@ -76,6 +86,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentQueuedBodyActive => "Current Agent run is still streaming.",
         MessageId::AgentQueuedFooter => {
             "This failure will be analyzed after the current Agent run finishes."
+        }
+        MessageId::AgentQueueFullTitle => "Agent queue full",
+        MessageId::AgentControlQueueFullBody => {
+            "Too many queued requests to accept this response right now. \
+             The card is still pending — answer it again in a moment."
         }
         _ => return None,
     })

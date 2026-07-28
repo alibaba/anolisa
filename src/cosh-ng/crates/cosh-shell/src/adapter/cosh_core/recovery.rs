@@ -117,6 +117,30 @@ impl SessionRuntimeState {
         self.selected_attempt_generation = None;
     }
 
+    /// Detaches every active and selected provider-session binding without
+    /// touching persisted sessions, so the next Agent request starts a fresh
+    /// conversation.
+    ///
+    /// Returns the provider session we detached from — the committed active id
+    /// when present, otherwise the pending selection — or `None` when nothing
+    /// was bound (the operation is idempotent). Supersedes every in-flight
+    /// attempt so a late commit from the old conversation cannot re-bind this
+    /// runtime to a stale provider session.
+    pub(super) fn start_fresh_session(&mut self) -> Option<String> {
+        let previous = self
+            .active
+            .as_ref()
+            .map(|active| active.session_id.clone())
+            .or_else(|| self.recovery.selected_session_id.clone());
+        self.active = None;
+        self.recovery.state = SessionRecoveryState::None;
+        self.recovery.selected_session_id = None;
+        self.recovery.selected_workspace_scope = None;
+        self.recovery.last_error = None;
+        self.supersede_current_attempt();
+        previous
+    }
+
     /// Replaces the selection while making every in-flight attempt stale.
     pub(super) fn select_session(&mut self, session_id: String, workspace_scope: String) {
         self.supersede_current_attempt();
@@ -168,7 +192,7 @@ pub(in crate::adapter) enum SessionResumeAttempt {
 }
 
 impl SessionResumeAttempt {
-    fn session_id(&self) -> Option<&str> {
+    pub(in crate::adapter) fn session_id(&self) -> Option<&str> {
         match self {
             Self::Fresh { .. } => None,
             Self::Selected { session_id, .. } | Self::Active { session_id, .. } => Some(session_id),
@@ -362,6 +386,21 @@ pub(in crate::adapter) fn commit_pending_session_for_scope(
     }
     state.recovery.last_error = None;
     SessionCommitOutcome::Continue
+}
+
+/// Returns whether a failed turn still leaves a safely persisted session that
+/// must remain selectable for manual compaction.
+pub(in crate::adapter) fn retain_context_session(
+    terminal_events: &[AgentEvent],
+    session_error_phase: Option<&str>,
+) -> bool {
+    session_error_phase != Some("persist")
+        && terminal_events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::AgentFailed { error, .. } if error.starts_with("context_limit:")
+            )
+        })
 }
 
 pub(in crate::adapter) fn invalidate_resume_on_session_failure(

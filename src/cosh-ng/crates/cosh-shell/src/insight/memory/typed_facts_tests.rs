@@ -25,6 +25,7 @@ fn block(command: &str) -> CommandBlock {
             terminal_output_bytes: 100,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 

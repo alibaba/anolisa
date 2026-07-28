@@ -126,6 +126,56 @@ If an RPM-installed component has no package datadir contract, commands should
 treat adapter declarations as unavailable and report that the RPM does not
 publish an ANOLISA component contract.
 
+## Adapter Operation Notices
+
+An adapter contract may declare static, display-only operator notices that
+ANOLISA shows after `adapter enable` or `adapter disable` succeeds. Notices
+are declared with `[[adapters.notices]]` on a generic adapter entry, or with
+`[[adapters.openclaw.notices]]` / `[[adapters.hermes.notices]]` in a
+framework-specific section (which takes precedence over the generic entry):
+
+```toml
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+
+[[adapters.notices]]
+when = "post_enable"
+level = "info"
+text = "Restart the framework to load the plugin."
+command = "openclaw restart"
+
+[[adapters.notices]]
+when = "post_disable"
+level = "warning"
+text = "Cached tokens remain until the framework restarts."
+```
+
+Each notice has:
+
+- `when` (required): `post_enable` or `post_disable`.
+- `level` (optional): `info` (default) or `warning`.
+- `text` (required): the notice body.
+- `command` (optional): a display-only command hint.
+
+Notices are inert text. `text` and `command` are never shell-expanded,
+template-substituted, or executed. Human-readable output escapes control
+characters to protect terminal state, while structured JSON preserves the
+declared values. Required framework configuration is not a notice — it stays
+a structured `[[adapters.config]]` entry.
+
+Display behavior:
+
+- `adapter enable` shows `post_enable` notices after a successful enable;
+  `adapter disable` shows `post_disable` notices after a successful disable.
+  `post_disable` notices are taken from the enable-time receipt, so they are
+  shown even if the component manifest is no longer present.
+- Human-readable output prints the notices; `--quiet` suppresses them.
+- `--json` returns the notices in a stable `data.notices` array.
+- `--dry-run` previews the notices that a real operation would show, labeled
+  as a preview; nothing is executed.
+
 ## Contract Template
 
 Use a shipped component manifest such as

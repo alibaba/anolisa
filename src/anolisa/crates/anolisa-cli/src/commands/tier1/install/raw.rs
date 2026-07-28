@@ -4,16 +4,18 @@
 
 use std::path::Path;
 
-use anolisa_core::download::DownloadCache;
+use anolisa_core::download::{DownloadCache, DownloadError};
 use anolisa_core::install_runner::{
     ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES, read_embedded_component_manifest_text,
 };
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::{
     ArtifactType, CapabilityRequest, ComponentManifest, DistributionIndex, FileKind, HookPhase,
-    HookSpec, ResolveQuery, ServiceRequest, expand_layout_placeholders, resolve_manifest_hooks,
+    HookSpec, ResolveError, ResolveQuery, ServiceRequest, expand_layout_placeholders,
+    resolve_manifest_hooks,
 };
 use anolisa_platform::fs_layout::FsLayout;
+use sha2::{Digest, Sha256};
 
 use crate::context::CliContext;
 use crate::repo_config::{
@@ -49,12 +51,16 @@ pub(crate) fn resolve_raw(
             command: COMMAND.to_string(),
             reason: format!("failed to fetch distribution index {index_url}: {err}"),
         })?;
-    let index = DistributionIndex::load(&downloaded_index.cached_path)
-        .map(installable_raw_index)
-        .map_err(|err| CliError::Runtime {
+    // The unfiltered index is kept for error attribution: a pinned version
+    // that only ships non-installable artifact types must be reported as
+    // "published but not installable", not as unpublished.
+    let full_index = DistributionIndex::load(&downloaded_index.cached_path).map_err(|err| {
+        CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!("failed to parse distribution index {index_url}: {err}"),
-        })?;
+        }
+    })?;
+    let index = installable_raw_index(full_index.clone());
 
     // The index is keyed by the backend-native package name so that
     // `package_map` / `--package` select between alternate publications.
@@ -69,15 +75,59 @@ pub(crate) fn resolve_raw(
         pkg_base: env.pkg_base.as_deref(),
         preferred_types: &[],
     };
-    let entry = index.resolve(&query).map_err(|err| CliError::InvalidArgument {
-        command: COMMAND.to_string(),
-        reason: format!(
-            "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_url}: {err}",
-            version.unwrap_or("latest"),
-            env.os,
-            env.arch,
-            ctx.install_mode.as_str(),
-        ),
+    let entry = index.resolve(&query).map_err(|err| {
+        // A pinned version the installable index cannot satisfy gets a
+        // dedicated refusal, symmetric with the rpm backend's version-pin
+        // errors. The unfiltered index decides the wording: a version that
+        // exists there but not in the installable view is published — only
+        // its artifact types are outside what the raw backend can place.
+        // Every other resolution failure keeps the generic query rendering.
+        if let (Some(pinned), ResolveError::NotFound) = (version, &err) {
+            let unversioned = ResolveQuery {
+                version: None,
+                ..query.clone()
+            };
+            let installable = index.matching_versions(&unversioned);
+            let installable_note = if installable.is_empty() {
+                String::new()
+            } else {
+                format!(" — installable versions: {}", installable.join(", "))
+            };
+            let published_any_type = full_index
+                .matching_versions(&unversioned)
+                .iter()
+                .any(|v| v == pinned);
+            if published_any_type {
+                return CliError::InvalidArgument {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "version '{pinned}' of component '{component}' (package '{package}') is published in the raw repository {index_url} but only with artifact types the raw backend cannot install (supported: {}); nothing was changed{installable_note}",
+                        SUPPORTED_ARTIFACT_TYPES.join(", "),
+                    ),
+                };
+            }
+            if !installable.is_empty() {
+                return CliError::InvalidArgument {
+                    command: COMMAND.to_string(),
+                    reason: format!(
+                        "version '{pinned}' of component '{component}' (package '{package}') is not published in the raw repository {index_url} for {}/{} ({} mode); nothing was changed{installable_note}",
+                        env.os,
+                        env.arch,
+                        ctx.install_mode.as_str(),
+                    ),
+                };
+            }
+        }
+        CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "cannot resolve package '{package}' (component '{component}', version {}, {}/{}, {} mode) from {index_url}: {err}",
+                version.unwrap_or("latest"),
+                env.os,
+                env.arch,
+                ctx.install_mode.as_str(),
+            ),
+        }
     })?;
 
     let wire_type = artifact_type_wire(&entry.artifact_type);
@@ -125,6 +175,7 @@ pub(crate) fn resolve_raw(
         package,
         artifact_url,
         entry,
+        base_url,
         warnings,
     })
 }
@@ -196,8 +247,109 @@ impl InstallContractSource {
     fn label(self) -> &'static str {
         match self {
             Self::EmbeddedArtifact => "embedded artifact manifest",
+            Self::SidecarMeta => "sidecar meta.toml",
         }
     }
+}
+
+/// Load the published lightweight install contract without fetching the full
+/// artifact, so dry-run can enforce manifest-backed refusals such as component
+/// conflicts.
+pub(crate) fn load_dry_run_install_contract(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    resolution: &RawResolution,
+) -> Result<Option<LoadedInstallContract>, CliError> {
+    let Some(meta_url) = sidecar_meta_url(
+        &resolution.artifact_url,
+        &resolution.entry.component,
+        &resolution.entry.version,
+    ) else {
+        return Ok(None);
+    };
+    let expected_sha = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?;
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let downloaded = match cache.fetch(&meta_url, expected_sha) {
+        Ok(downloaded) => downloaded,
+        Err(DownloadError::HttpStatus { status: 404, .. }) => return Ok(None),
+        Err(DownloadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!("failed to fetch sidecar metadata {meta_url}: {err}"),
+            });
+        }
+    };
+    let toml =
+        std::fs::read_to_string(&downloaded.cached_path).map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "failed to read sidecar metadata {} from cache: {err}",
+                downloaded.cached_path.display()
+            ),
+        })?;
+    let manifest = ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
+    })?;
+    validate_manifest_contract_header(
+        &manifest,
+        resolution,
+        ctx.install_mode.as_str(),
+        InstallContractSource::SidecarMeta,
+    )?;
+    Ok(Some(LoadedInstallContract {
+        manifest,
+        source: InstallContractSource::SidecarMeta,
+        toml,
+    }))
+}
+
+fn sidecar_meta_url(artifact_url: &str, component: &str, version: &str) -> Option<String> {
+    let version_marker = format!("/{component}/{version}/");
+    if let Some(index) = artifact_url.rfind(&version_marker) {
+        return Some(format!(
+            "{}meta.toml",
+            &artifact_url[..index + version_marker.len()]
+        ));
+    }
+
+    artifact_url
+        .rfind('/')
+        .map(|index| format!("{}/meta.toml", &artifact_url[..index]))
+}
+
+fn manifest_digest_sha256(digest: Option<&str>) -> Result<Option<&str>, CliError> {
+    match digest {
+        None => Ok(None),
+        Some(value) => value
+            .strip_prefix("sha256:")
+            .map(Some)
+            .ok_or_else(|| CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!("unsupported manifest_digest '{value}' in the distribution index"),
+            }),
+    }
+}
+
+fn validate_manifest_digest(toml: &str, resolution: &RawResolution) -> Result<(), CliError> {
+    let Some(expected) = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?
+    else {
+        return Ok(());
+    };
+    let actual = format!("{:x}", Sha256::digest(toml.as_bytes()));
+    if expected.eq_ignore_ascii_case(&actual) {
+        return Ok(());
+    }
+    Err(CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!(
+            "embedded component manifest digest for '{}' {} does not match the distribution index: expected {expected}, got {actual}",
+            resolution.component, resolution.entry.version
+        ),
+    })
 }
 
 pub(crate) fn prepare_raw_execution(
@@ -274,6 +426,7 @@ fn load_execution_install_contract(
                         resolution.artifact_url
                     ),
                 })?;
+            validate_manifest_digest(&toml, resolution)?;
             Ok(LoadedInstallContract {
                 manifest,
                 source: InstallContractSource::EmbeddedArtifact,
@@ -306,6 +459,40 @@ fn resolve_manifest_contract(
     mode: &str,
     source: InstallContractSource,
 ) -> Result<ResolvedContract, CliError> {
+    validate_manifest_contract_header(manifest, resolution, mode, source)?;
+
+    let mut files = resolve_manifest_files(manifest, layout, &resolution.component)?;
+    if files.is_empty() {
+        return Err(CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{}' declares no [install.files] — nothing to install",
+                resolution.component
+            ),
+        });
+    }
+    // Adapter resources are laid alongside the component's own files, from
+    // the same artifact. Install only *places* them under the standard
+    // `{datadir}/adapters/<component>/<framework>/` tree — enabling them
+    // against a framework is the separate `anolisa adapter enable` step.
+    files.extend(resolve_adapter_files(
+        manifest,
+        layout,
+        &resolution.component,
+    )?);
+
+    let services = resolve_manifest_services(manifest, &resolution.component, mode)?;
+    let capabilities = resolve_manifest_capabilities(manifest, layout, &resolution.component)?;
+
+    Ok((files, services, capabilities))
+}
+
+fn validate_manifest_contract_header(
+    manifest: &ComponentManifest,
+    resolution: &RawResolution,
+    mode: &str,
+    source: InstallContractSource,
+) -> Result<(), CliError> {
     if manifest.component.name.as_str() != resolution.component {
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
@@ -342,31 +529,7 @@ fn resolve_manifest_contract(
             ),
         });
     }
-
-    let mut files = resolve_manifest_files(manifest, layout, &resolution.component)?;
-    if files.is_empty() {
-        return Err(CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!(
-                "component '{}' declares no [install.files] — nothing to install",
-                resolution.component
-            ),
-        });
-    }
-    // Adapter resources are laid alongside the component's own files, from
-    // the same artifact. Install only *places* them under the standard
-    // `{datadir}/adapters/<component>/<framework>/` tree — enabling them
-    // against a framework is the separate `anolisa adapter enable` step.
-    files.extend(resolve_adapter_files(
-        manifest,
-        layout,
-        &resolution.component,
-    )?);
-
-    let services = resolve_manifest_services(manifest, &resolution.component, mode)?;
-    let capabilities = resolve_manifest_capabilities(manifest, layout, &resolution.component)?;
-
-    Ok((files, services, capabilities))
+    Ok(())
 }
 
 /// Render the manifest's `[[component.services]]` into activation requests:

@@ -289,6 +289,7 @@ fn adapter_claim(component: &str) -> AdapterClaim {
         bundle_digest: None,
         driver_schema: 1,
         status: ClaimStatus::Enabled,
+        notices: Vec::new(),
         resources: Vec::new(),
         driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
             state_dir_resource: "state".to_string(),

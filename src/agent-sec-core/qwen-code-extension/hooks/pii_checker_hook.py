@@ -26,7 +26,7 @@ import sys
 from typing import Any
 
 from pii_text import value_to_text
-from qwen_trace_context import with_trace_context
+from trace_context import with_trace_context
 
 _DEFAULT_TIMEOUT_SECONDS = 5.0
 _MAX_TIMEOUT_SECONDS = 8.0

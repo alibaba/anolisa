@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from agent_sec_cli.skill_ledger.core import certifier as certifier_core
 from agent_sec_cli.skill_ledger.core import resolver as resolver_core
+from agent_sec_cli.skill_ledger.core.auditor import audit
 from agent_sec_cli.skill_ledger.core.certifier import (
     certify,
     scan_batch,
@@ -355,3 +356,66 @@ def test_unprojectable_io_path_fails_before_snapshot_creation(
     assert str(live) not in str(exc_info.value)
     assert not (live / ".skill-meta" / "latest.json").exists()
     assert not list((live / ".skill-meta" / "versions").glob("*.snapshot"))
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "exact-alias-action",
+        "resolved-physical-version",
+        "file-hash-value-type",
+        "latest-version-id",
+    ],
+)
+def test_audit_projects_io_paths_from_corrupted_manifests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    canonical = tmp_path / "mount" / "weather"
+    physical = _make_skill(tmp_path / "backing", "weather", "weather")
+    live_alias = tmp_path / "resolved" / "weather"
+    live_alias.parent.mkdir()
+    live_alias.symlink_to(physical, target_is_directory=True)
+    root = ResolvedSkillRoot(canonical, live_alias, "skillfs")
+    _write_config(tmp_path, [canonical])
+    backend = _backend(tmp_path, monkeypatch)
+    certified = certify(
+        root,
+        backend,
+        findings_path=str(_write_findings(tmp_path, "weather")),
+    )
+    version_path = (
+        live_alias / ".skill-meta" / "versions" / f"{certified['versionId']}.json"
+    )
+    manifest_path = (
+        live_alias / ".skill-meta" / "latest.json"
+        if corruption == "latest-version-id"
+        else version_path
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    if corruption == "exact-alias-action":
+        manifest["userDecision"] = {"action": str(live_alias)}
+    elif corruption == "resolved-physical-version":
+        manifest["version"] = str(physical.resolve())
+    elif corruption == "file-hash-value-type":
+        manifest["fileHashes"] = {str(physical.resolve()): 7}
+    else:
+        manifest["versionId"] = str(physical.resolve())
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = audit(root, backend)
+
+    serialized = json.dumps(result)
+    serialized_errors = json.dumps(result["errors"])
+    assert result["valid"] is False
+    assert result["errors"]
+    assert str(canonical) in serialized
+    if corruption == "latest-version-id":
+        assert str(canonical) in serialized_errors
+    assert str(live_alias) not in serialized
+    assert str(physical.resolve()) not in serialized
+    assert "resolved/weather" not in serialized
+    assert "backing/weather" not in serialized
+    assert not root.contains_io_path(result)

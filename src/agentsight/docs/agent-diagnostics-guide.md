@@ -428,7 +428,7 @@ Environment=SLS_LOGTAIL_FILE=/var/sysom/ilog/agentsight
 
 ### 10.3 ATIF 标准格式导出
 
-支持将 Agent 对话轨迹以 ATIF（Agent Trajectory Interchange Format）v1.6 标准格式导出：
+支持将 Agent 对话轨迹以 ATIF（Agent Trajectory Interchange Format）v1.7 标准格式导出：
 
 ```bash
 # 按 trace 导出

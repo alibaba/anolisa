@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use std::time::Duration;
-
-use tokio::io::AsyncBufReadExt;
+use std::fmt;
 
 use crate::config::{CoreConfig, ProviderConfig};
-use crate::protocol::{
-    AuthField, AuthProvider, ControlResponseBody, InputMessage, ShellControlRequest,
-};
+use crate::protocol::{AuthField, AuthProvider};
 
-/// Timeout for waiting for auth response from Shell.
-pub const AUTH_TIMEOUT: Duration = Duration::from_secs(300);
+mod exchange;
+mod validation;
+
+pub(crate) use exchange::request_validated_auth;
+pub(crate) use validation::AuthConfigValidationError;
+use validation::{validate_auth_response, validate_base_url};
 
 /// Returns the builtin provider templates for the auth UI.
 pub fn builtin_auth_providers() -> Vec<AuthProvider> {
@@ -21,7 +21,10 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
                 AuthField {
                     name: "api_key".to_string(),
                     label: "API Key".to_string(),
-                    hint: Some("获取地址: https://dashscope.console.aliyun.com/apiKey".to_string()),
+                    hint: Some(
+                        "获取地址: https://bailian.console.aliyun.com/?tab=model#/api-key"
+                            .to_string(),
+                    ),
                     secret: true,
                     required: true,
                     placeholder: None,
@@ -116,26 +119,47 @@ pub struct AuthResponse {
     pub persist: bool,
 }
 
-/// Apply auth credentials to the config, rebuilding provider settings.
-pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) {
+/// Applies validated auth credentials and rebuilds provider settings.
+///
+/// # Errors
+///
+/// Returns an error when a required credential field is missing or a supplied
+/// base URL is malformed.
+pub(crate) fn apply_auth_credentials(
+    config: &mut CoreConfig,
+    response: &AuthResponse,
+) -> Result<(), AuthConfigValidationError> {
     let template_id = response
         .provider_type
         .as_deref()
         .unwrap_or(response.provider_id.as_str());
     let template = builtin_auth_providers()
         .into_iter()
-        .find(|p| p.id == template_id);
+        .find(|provider| provider.id == template_id);
+    match template.as_ref() {
+        Some(template) => validate_auth_response(template, response)?,
+        None => {
+            let base_url = response
+                .values
+                .get("base_url")
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    AuthConfigValidationError::MissingRequiredField("base_url".to_string())
+                })?;
+            validate_base_url(base_url)?;
+        }
+    }
 
     let (base_url, provider_type, default_model) = match template {
-        Some(ref t) => (
+        Some(template) => (
             response
                 .values
                 .get("base_url")
                 .cloned()
-                .or_else(|| t.builtin_base_url.clone())
+                .or(template.builtin_base_url)
                 .unwrap_or_default(),
-            t.builtin_provider_type.clone(),
-            t.builtin_default_model.clone(),
+            template.builtin_provider_type,
+            template.builtin_default_model,
         ),
         None => (
             response.values.get("base_url").cloned().unwrap_or_default(),
@@ -195,91 +219,74 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
             .providers
             .insert(response.provider_id.clone(), provider);
     }
+    Ok(())
 }
 
-/// Result of waiting for auth, including any stdin lines consumed during the wait.
-pub struct AuthWaitResult {
-    pub response: Option<AuthResponse>,
-    /// Lines consumed from stdin during auth wait that should be replayed.
-    pub buffered_lines: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoveAuthProviderError {
+    NotFound,
+    NotEditable,
 }
 
-/// Wait for an auth response from Shell via stdin JSONL.
-/// Returns the auth response (if any) and any non-auth messages that were
-/// consumed from stdin during the wait (so callers can replay them).
-pub async fn wait_for_auth_response<R: AsyncBufReadExt + Unpin>(
-    expected_request_id: &str,
-    reader: &mut tokio::io::Lines<R>,
-) -> AuthWaitResult {
-    let mut buffered_lines: Vec<String> = Vec::new();
-    let result = tokio::time::timeout(AUTH_TIMEOUT, async {
-        while let Ok(Some(line)) = reader.next_line().await {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
-            let msg: InputMessage = match serde_json::from_str(&line) {
-                Ok(m) => m,
-                Err(_) => {
-                    // Let the headless input loop emit the protocol error.
-                    buffered_lines.push(line);
-                    continue;
-                }
-            };
-            match msg {
-                InputMessage::ControlResponse { response } => {
-                    if response.request_id != expected_request_id {
-                        continue;
-                    }
-                    return parse_auth_response(&response.response);
-                }
-                InputMessage::ControlRequest { request, .. } => {
-                    if matches!(request, ShellControlRequest::Interrupt) {
-                        return None;
-                    }
-                    // Buffer non-interrupt control requests for later
-                    buffered_lines.push(line);
-                }
-                _ => {
-                    // Buffer user messages and other lines for later replay
-                    buffered_lines.push(line);
-                }
-            }
-        }
-        None
-    })
-    .await;
-
-    match result {
-        Ok(response) => AuthWaitResult {
-            response,
-            buffered_lines,
-        },
-        Err(_) => {
-            tracing::warn!("Auth timeout after {}s", AUTH_TIMEOUT.as_secs());
-            AuthWaitResult {
-                response: None,
-                buffered_lines,
-            }
+impl fmt::Display for RemoveAuthProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("provider not found"),
+            Self::NotEditable => formatter.write_str("provider is not removable"),
         }
     }
 }
 
-/// Parse auth-specific fields from the ControlResponseBody.
-fn parse_auth_response(body: &ControlResponseBody) -> Option<AuthResponse> {
-    // Check if user denied
-    if body.behavior.as_deref() == Some("deny") {
-        return None;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemovedAuthProvider {
+    pub(crate) active_provider: Option<String>,
+}
+
+pub(crate) fn remove_auth_provider(
+    config: &mut CoreConfig,
+    provider_id: &str,
+) -> Result<RemovedAuthProvider, RemoveAuthProviderError> {
+    if !config.user_ai.providers.contains_key(provider_id) {
+        return Err(if config.ai.providers.contains_key(provider_id) {
+            RemoveAuthProviderError::NotEditable
+        } else {
+            RemoveAuthProviderError::NotFound
+        });
     }
 
-    let provider_id = body.provider_id.as_ref()?;
-    let values = body.values.clone().unwrap_or_default();
+    let was_active = config.ai.active_provider.as_deref() == Some(provider_id);
+    config.user_ai.providers.remove(provider_id);
+    if config.user_ai.active_provider.as_deref() == Some(provider_id) {
+        config.user_ai.active_provider = None;
+    }
 
-    Some(AuthResponse {
-        provider_id: provider_id.clone(),
-        provider_type: body.provider_type.clone(),
-        values,
-        persist: body.persist.unwrap_or(true),
+    if let Some(system_provider) = config.system_ai.providers.get(provider_id).cloned() {
+        config
+            .ai
+            .providers
+            .insert(provider_id.to_string(), system_provider);
+    } else {
+        config.ai.providers.remove(provider_id);
+    }
+
+    if was_active {
+        let active_provider = config
+            .system_ai
+            .active_provider
+            .clone()
+            .filter(|fallback| config.ai.providers.contains_key(fallback));
+        config.ai.active_provider = active_provider.clone();
+        config.ai.active_model = active_provider.as_ref().and_then(|fallback| {
+            config
+                .ai
+                .providers
+                .get(fallback)
+                .and_then(|provider| provider.model.clone())
+        });
+    }
+
+    Ok(RemovedAuthProvider {
+        active_provider: config.ai.active_provider.clone(),
     })
 }
 
@@ -291,33 +298,6 @@ pub fn is_auth_error(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
-
-    #[tokio::test]
-    async fn buffers_invalid_jsonl_during_auth_wait() {
-        let (mut input, output) = tokio::io::duplex(1024);
-        input
-            .write_all(b"token=must-not-echo\n")
-            .await
-            .expect("write invalid JSONL");
-        input
-            .write_all(
-                br#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-init","response":{"provider_id":"dashscope","values":{"api_key":"test-key"},"persist":false}}}"#,
-            )
-            .await
-            .expect("write auth response");
-        input
-            .write_all(b"\n")
-            .await
-            .expect("terminate auth response");
-        drop(input);
-
-        let mut lines = tokio::io::BufReader::new(output).lines();
-        let result = wait_for_auth_response("auth-init", &mut lines).await;
-
-        assert_eq!(result.buffered_lines, vec!["token=must-not-echo"]);
-        assert!(result.response.is_some(), "expected auth response");
-    }
 
     #[test]
     fn builtin_providers_have_correct_ids() {
@@ -358,7 +338,7 @@ mod tests {
             values: HashMap::from([("api_key".to_string(), "sk-test123".to_string())]),
             persist: true,
         };
-        apply_auth_credentials(&mut config, &response);
+        apply_auth_credentials(&mut config, &response).unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("dashscope"));
         let p = config.ai.providers.get("dashscope").unwrap();
@@ -383,10 +363,11 @@ mod tests {
                     "https://api.openai.com/v1".to_string(),
                 ),
                 ("api_key".to_string(), "sk-openai".to_string()),
+                ("model".to_string(), "gpt-4o".to_string()),
             ]),
             persist: false,
         };
-        apply_auth_credentials(&mut config, &response);
+        apply_auth_credentials(&mut config, &response).unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("openai_compat"));
         let p = config.ai.providers.get("openai_compat").unwrap();
@@ -405,7 +386,7 @@ mod tests {
             persist: true,
         };
 
-        apply_auth_credentials(&mut config, &response);
+        apply_auth_credentials(&mut config, &response).unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("qwen-prod"));
         assert!(config.ai.providers.contains_key("qwen-prod"));
@@ -417,6 +398,80 @@ mod tests {
             provider.base_url.as_deref(),
             Some("https://dashscope.aliyuncs.com/compatible-mode/v1")
         );
+    }
+
+    #[test]
+    fn apply_unknown_provider_preserves_generic_fallback() {
+        let mut config = CoreConfig::default();
+        let response = AuthResponse {
+            provider_id: "custom-provider".to_string(),
+            provider_type: Some("custom-provider".to_string()),
+            values: HashMap::from([
+                (
+                    "base_url".to_string(),
+                    "https://api.example.com/v1".to_string(),
+                ),
+                ("api_key".to_string(), "sk-custom".to_string()),
+                ("model".to_string(), "custom-model".to_string()),
+            ]),
+            persist: true,
+        };
+
+        apply_auth_credentials(&mut config, &response).unwrap();
+
+        let provider = config.ai.providers.get("custom-provider").unwrap();
+        assert_eq!(provider.provider_type.as_deref(), Some("generic"));
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://api.example.com/v1")
+        );
+        assert_eq!(provider.model.as_deref(), Some("custom-model"));
+    }
+
+    #[test]
+    fn apply_unknown_provider_rejects_invalid_base_url() {
+        let mut config = CoreConfig::default();
+        let response = AuthResponse {
+            provider_id: "custom-provider".to_string(),
+            provider_type: Some("custom-provider".to_string()),
+            values: HashMap::from([(
+                "base_url".to_string(),
+                "file:///tmp/custom-provider".to_string(),
+            )]),
+            persist: true,
+        };
+
+        assert_eq!(
+            apply_auth_credentials(&mut config, &response),
+            Err(AuthConfigValidationError::InvalidBaseUrl)
+        );
+        assert!(config.ai.providers.is_empty());
+        assert!(config.user_ai.providers.is_empty());
+    }
+
+    #[test]
+    fn apply_unknown_provider_requires_base_url() {
+        for values in [
+            HashMap::new(),
+            HashMap::from([("base_url".to_string(), " ".to_string())]),
+        ] {
+            let mut config = CoreConfig::default();
+            let response = AuthResponse {
+                provider_id: "custom-provider".to_string(),
+                provider_type: Some("custom-provider".to_string()),
+                values,
+                persist: true,
+            };
+
+            assert_eq!(
+                apply_auth_credentials(&mut config, &response),
+                Err(AuthConfigValidationError::MissingRequiredField(
+                    "base_url".to_string()
+                ))
+            );
+            assert!(config.ai.providers.is_empty());
+            assert!(config.user_ai.providers.is_empty());
+        }
     }
 
     #[test]
@@ -437,7 +492,7 @@ mod tests {
             persist: true,
         };
 
-        apply_auth_credentials(&mut config, &response);
+        apply_auth_credentials(&mut config, &response).unwrap();
 
         assert!(config.ai.providers.contains_key("system-provider"));
         assert!(config.ai.providers.contains_key("user-provider"));
@@ -457,53 +512,100 @@ mod tests {
     }
 
     #[test]
+    fn remove_auth_provider_drops_user_credentials_and_active_selection() {
+        let provider = ProviderConfig {
+            provider_type: Some("dashscope".to_string()),
+            api_key: Some("sk-user".to_string()),
+            model: Some("user-model".to_string()),
+            ..Default::default()
+        };
+        let mut config = CoreConfig::default();
+        config.ai.active_provider = Some("user-provider".to_string());
+        config.ai.active_model = Some("user-model".to_string());
+        config
+            .ai
+            .providers
+            .insert("user-provider".to_string(), provider.clone());
+        config.user_ai.active_provider = Some("user-provider".to_string());
+        config
+            .user_ai
+            .providers
+            .insert("user-provider".to_string(), provider);
+
+        let removed = remove_auth_provider(&mut config, "user-provider").unwrap();
+
+        assert_eq!(removed.active_provider, None);
+        assert_eq!(config.ai.active_provider, None);
+        assert_eq!(config.ai.active_model, None);
+        assert!(!config.ai.providers.contains_key("user-provider"));
+        assert!(!config.user_ai.providers.contains_key("user-provider"));
+    }
+
+    #[test]
+    fn remove_auth_provider_reveals_system_provider_with_same_id() {
+        let system_provider = ProviderConfig {
+            provider_type: Some("dashscope".to_string()),
+            api_key: Some("sk-system".to_string()),
+            model: Some("system-model".to_string()),
+            ..Default::default()
+        };
+        let user_provider = ProviderConfig {
+            provider_type: Some("openai".to_string()),
+            api_key: Some("sk-user".to_string()),
+            model: Some("user-model".to_string()),
+            ..Default::default()
+        };
+        let mut config = CoreConfig::default();
+        config.ai.active_provider = Some("shared".to_string());
+        config
+            .ai
+            .providers
+            .insert("shared".to_string(), user_provider.clone());
+        config
+            .system_ai
+            .providers
+            .insert("shared".to_string(), system_provider);
+        config.system_ai.active_provider = Some("shared".to_string());
+        config.user_ai.active_provider = Some("shared".to_string());
+        config
+            .user_ai
+            .providers
+            .insert("shared".to_string(), user_provider);
+
+        let removed = remove_auth_provider(&mut config, "shared").unwrap();
+
+        assert_eq!(removed.active_provider.as_deref(), Some("shared"));
+        assert_eq!(
+            config
+                .ai
+                .providers
+                .get("shared")
+                .and_then(|provider| provider.api_key.as_deref()),
+            Some("sk-system")
+        );
+        assert_eq!(config.ai.active_model.as_deref(), Some("system-model"));
+        assert_eq!(config.user_ai.active_provider, None);
+    }
+
+    #[test]
+    fn remove_auth_provider_rejects_system_provider() {
+        let mut config = CoreConfig::default();
+        config
+            .ai
+            .providers
+            .insert("system-provider".to_string(), ProviderConfig::default());
+
+        assert_eq!(
+            remove_auth_provider(&mut config, "system-provider"),
+            Err(RemoveAuthProviderError::NotEditable)
+        );
+    }
+
+    #[test]
     fn is_auth_error_detects_401() {
         assert!(is_auth_error("API error 401: invalid api key"));
         assert!(is_auth_error("HTTP 403 Forbidden"));
         assert!(is_auth_error("Unauthorized access"));
         assert!(!is_auth_error("API error 500: internal server error"));
-    }
-
-    #[test]
-    fn parse_auth_response_deny() {
-        let body = ControlResponseBody {
-            behavior: Some("deny".to_string()),
-            message: None,
-            result: None,
-            tool_use_id: None,
-            updated_permissions: None,
-            answer: None,
-            selected_options: None,
-            provider_id: None,
-            provider_type: None,
-            values: None,
-            persist: None,
-        };
-        assert!(parse_auth_response(&body).is_none());
-    }
-
-    #[test]
-    fn parse_auth_response_success() {
-        let body = ControlResponseBody {
-            behavior: None,
-            message: None,
-            result: None,
-            tool_use_id: None,
-            updated_permissions: None,
-            answer: None,
-            selected_options: None,
-            provider_id: Some("dashscope".to_string()),
-            provider_type: None,
-            values: Some(HashMap::from([(
-                "api_key".to_string(),
-                "sk-xxx".to_string(),
-            )])),
-            persist: Some(true),
-        };
-        let resp = parse_auth_response(&body).unwrap();
-        assert_eq!(resp.provider_id, "dashscope");
-        assert_eq!(resp.provider_type, None);
-        assert_eq!(resp.values.get("api_key").unwrap(), "sk-xxx");
-        assert!(resp.persist);
     }
 }

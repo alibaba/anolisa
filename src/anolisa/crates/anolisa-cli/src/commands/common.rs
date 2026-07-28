@@ -6,11 +6,13 @@
 
 use std::path::PathBuf;
 
-use anolisa_core::ObjectKind;
 use anolisa_core::adapter::manager::{AdapterManager, VisibleRoot};
-use anolisa_core::domain::InstallationScope;
+use anolisa_core::domain::{
+    Installation, InstallationScope, NativePm, PackageIdentity, ProviderBinding,
+};
 use anolisa_core::facts::{JournalEvidence, JournalInventory};
 use anolisa_core::state_store::StateStore;
+use anolisa_core::{ComponentManifest, ObjectKind};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::color::Palette;
@@ -29,13 +31,7 @@ const INSTALLED_COMPONENT_MANIFEST_FILE: &str = "component.toml";
 /// Build the layout for the active install mode, honoring `--prefix`
 /// (system-mode) and the current process user's home (user-mode).
 pub fn resolve_layout(ctx: &CliContext) -> FsLayout {
-    match ctx.install_mode {
-        InstallMode::System => FsLayout::system(ctx.prefix.clone()),
-        InstallMode::User => {
-            let home = anolisa_env::EnvService::detect().home;
-            FsLayout::user(home)
-        }
-    }
+    ctx.layout().clone()
 }
 
 /// Build a consistent package-transaction permission error.
@@ -174,10 +170,13 @@ pub(crate) fn load_repo_config(
     command: &str,
     persist_policy: RepoPersistPolicy,
 ) -> Result<RepoConfig, CliError> {
-    let repo_load = RepoConfig::load(layout, ctx.dry_run).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: err.to_string(),
-    })?;
+    let repo_load =
+        RepoConfig::load(layout, ctx.dry_run, ctx.packaged_data_probe()).map_err(|err| {
+            CliError::Runtime {
+                command: command.to_string(),
+                reason: err.to_string(),
+            }
+        })?;
     enforce_repo_persist_policy(&repo_load.provisioning, persist_policy, command)?;
     render_repo_config_provisioning(ctx, &repo_load.provisioning);
     Ok(repo_load.config)
@@ -396,6 +395,42 @@ pub fn installed_component_manifest_path(
     )
 }
 
+/// Legacy manifest directory eligible for cleanup after a record mutation.
+pub(crate) fn legacy_component_manifest_dir_for_installation(
+    layout: &FsLayout,
+    installation: &Installation,
+    command: &str,
+) -> Result<Option<PathBuf>, CliError> {
+    Ok(legacy_cosh_ng_manifest_path(layout, installation, command)?
+        .and_then(|path| path.parent().map(PathBuf::from)))
+}
+
+fn legacy_cosh_ng_manifest_path(
+    layout: &FsLayout,
+    installation: &Installation,
+    command: &str,
+) -> Result<Option<PathBuf>, CliError> {
+    if installation.name != "cosh-ng"
+        || !matches!(
+            &installation.binding,
+            ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Resolved { name },
+                ..
+            } if name == "cosh-ng"
+        )
+    {
+        return Ok(None);
+    }
+
+    let legacy = installed_component_manifest_path(layout, "cosh", command)?;
+    let matches_legacy_identity = legacy.is_file()
+        && ComponentManifest::from_file(&legacy).is_ok_and(|manifest| {
+            manifest.component.name == "cosh" && manifest.rpm_package() == Some("cosh-ng")
+        });
+    Ok(matches_legacy_identity.then_some(legacy))
+}
+
 /// Directory for the component manifest saved as part of an installed
 /// component's local state.
 pub fn installed_component_manifest_dir(
@@ -426,7 +461,7 @@ fn validate_component_path_segment(component: &str, command: &str) -> Result<(),
 }
 
 /// Wire-friendly status label for a v5
-/// [`Installation`](anolisa_core::domain::Installation), same vocabulary as
+/// [`Installation`], same vocabulary as
 /// [`installation_status_str`] vocabulary: a delegated adopted/observed row
 /// reports its management relation (the legacy state collapsed both into one
 /// `adopted` status), any other row reports its lifecycle health.
@@ -467,9 +502,12 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
     let (mut manager, layout) = new_adapter_manager(ctx);
 
     match StateView::load(ctx, "adapter", StateVisibility::UserPlusSystem) {
-        Ok(view) => configure_adapter_manager(&mut manager, &view),
+        Ok(view) => configure_adapter_manager(&mut manager, &view, ctx.packaged_data_probe()),
         Err(_) => {
-            manager.set_visible_roots(vec![visible_root_for_adapter(&layout)]);
+            manager.set_visible_roots(vec![visible_root_for_adapter(
+                &layout,
+                ctx.packaged_data_probe(),
+            )]);
         }
     }
 
@@ -483,7 +521,7 @@ pub(crate) fn build_adapter_manager_from_view(
     view: &StateView,
 ) -> AdapterManager {
     let (mut manager, _) = new_adapter_manager(ctx);
-    configure_adapter_manager(&mut manager, view);
+    configure_adapter_manager(&mut manager, view, ctx.packaged_data_probe());
     manager
 }
 
@@ -496,11 +534,15 @@ fn new_adapter_manager(ctx: &CliContext) -> (AdapterManager, FsLayout) {
     )
 }
 
-fn configure_adapter_manager(manager: &mut AdapterManager, view: &StateView) {
+fn configure_adapter_manager(
+    manager: &mut AdapterManager,
+    view: &StateView,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) {
     let roots = view
         .visible_roots
         .iter()
-        .map(|root| visible_root_for_adapter(&root.layout))
+        .map(|root| visible_root_for_adapter(&root.layout, packaged_data_probe))
         .collect();
     manager.set_visible_roots(roots);
     for warning in &view.warnings {
@@ -508,14 +550,20 @@ fn configure_adapter_manager(manager: &mut AdapterManager, view: &StateView) {
     }
 }
 
-fn visible_root_for_adapter(layout: &FsLayout) -> VisibleRoot {
+fn visible_root_for_adapter(
+    layout: &FsLayout,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) -> VisibleRoot {
     VisibleRoot {
         state_dir: layout.state_dir.clone(),
-        contract_datadir_roots: adapter_contract_datadir_roots(layout),
+        contract_datadir_roots: adapter_contract_datadir_roots(layout, packaged_data_probe),
     }
 }
 
-fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
+fn adapter_contract_datadir_roots(
+    layout: &FsLayout,
+    packaged_data_probe: &packaged::PackagedDataProbe,
+) -> Vec<PathBuf> {
     // Two independent datadir-discovery mechanisms are layered here:
     //
     //   packaged_datadir_root()  — runtime probe: env override → exe-sibling
@@ -532,7 +580,7 @@ fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
     // exe-sibling probe handles relocated installs; the FHS constant handles
     // cross-install-method discovery (raw binary + RPM components).
     let mut roots = vec![layout.datadir.clone()];
-    if let Some(packaged) = packaged::packaged_datadir_root(layout)
+    if let Some(packaged) = packaged::packaged_datadir_root(layout, packaged_data_probe)
         && !roots.contains(&packaged)
     {
         roots.push(packaged);
@@ -855,6 +903,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: Vec::new(),
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "state".to_string(),

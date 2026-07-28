@@ -146,6 +146,32 @@ pub struct CommandAssessment {
 
 pub type RiskReason = &'static str;
 
+/// Card-facing high-risk explanation whitelist (ARP SDD design.md §4).
+/// Shared by the reason ordering rule in `assess_shell_command` and the
+/// approval-card phrase policy in the UI layer so the two cannot drift.
+pub const HIGH_RISK_EXPLANATION_REASONS: &[&str] = &[
+    "privilege-escalation",
+    "credential-access",
+    "filesystem-delete",
+    "filesystem-write",
+    "permission-change",
+    "process-control",
+    "service-control",
+    "service-or-container-control",
+    "package-manager-mutation",
+    "interactive-editor",
+    "remote-code-execution",
+    "sensitive-path",
+    "sensitive-search",
+    "command-substitution",
+    "redirection-write",
+    "awk-shell-execution",
+];
+
+pub fn is_high_risk_explanation(code: &str) -> bool {
+    HIGH_RISK_EXPLANATION_REASONS.contains(&code)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssessmentSummary {
     pub impact: RiskImpact,

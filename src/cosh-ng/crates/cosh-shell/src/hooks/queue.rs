@@ -248,6 +248,7 @@ fn block_for_pending_consultation(consultation: &PendingConsultation) -> Command
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 

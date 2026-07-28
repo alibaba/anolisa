@@ -1,12 +1,17 @@
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use super::{
     extract_bootstrap_path, merge_path_lists, plan_startup_for_render, raw_passthrough_args,
     record_visible_personal_impressions, render_pending_recommendation_notice,
-    startup_prompt_selection_supported, visible_personal_candidates, write_startup_suggestion_card,
+    startup_suggestion_mode, visible_personal_candidates, write_startup_suggestion_card,
+    StartupSuggestionMode,
 };
 use crate::config::Language;
-use crate::diagnostics::health::{HealthMessageId, HealthScanReport, HealthTryItem, HealthTryKind};
+use crate::diagnostics::health::{
+    HealthCollector, HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport,
+    HealthSeverity, HealthTryItem, HealthTryKind, HealthUnavailableReason, UnavailableCollector,
+};
 use crate::recommendation::personal_feedback::FrozenPromptBinding;
 use crate::recommendation::personal_model::{
     ActivityPayload, CandidateEvidenceSummary, CandidateSource, ContextAffinity, FeedbackAction,
@@ -32,6 +37,7 @@ fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
         .unwrap()
         .spawn_writer()
         .unwrap();
+    wait_for_writer(|| writer.poll_snapshot());
     let mut state = InlineState {
         personalization: crate::recommendation::personal_state::PersonalizationState {
             writer: Some(writer),
@@ -53,16 +59,16 @@ fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
     }
     assert!(state.personalization.notice_shown);
     assert!(state.trigger_pty_prompt);
-    assert_eq!(
+    let persisted = wait_for_writer(|| {
         state
             .personalization
             .writer
             .as_ref()
-            .unwrap()
-            .poll_snapshot()
-            .unwrap()
-            .preferences
-            .notice_version_seen,
+            .and_then(|writer| writer.poll_snapshot())
+            .filter(|snapshot| snapshot.preferences.notice_version_seen == DISCLOSURE_VERSION)
+    });
+    assert_eq!(
+        persisted.preferences.notice_version_seen,
         crate::recommendation::personal_model::DISCLOSURE_VERSION
     );
 
@@ -72,9 +78,7 @@ fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
     assert!(second.is_empty());
 
     let mut writer = state.personalization.writer.take().unwrap();
-    writer
-        .shutdown(1, std::time::Duration::from_secs(1))
-        .unwrap();
+    writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -110,9 +114,7 @@ fn recommendation_notice_waits_until_smart_or_auto_ai_mode() {
     assert!(output.is_empty());
 
     let mut writer = state.personalization.writer.take().unwrap();
-    writer
-        .shutdown(1, std::time::Duration::from_secs(1))
-        .unwrap();
+    writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -154,9 +156,7 @@ fn repeated_candidate_impressions_use_distinct_activity_identities() {
     }
 
     let mut writer = state.personalization.writer.take().unwrap();
-    writer
-        .shutdown(1, std::time::Duration::from_secs(1))
-        .unwrap();
+    writer.shutdown(1, Duration::from_secs(5)).unwrap();
     let snapshot = writer.poll_snapshot().unwrap();
     let impressions = snapshot
         .journal
@@ -174,6 +174,20 @@ fn repeated_candidate_impressions_use_distinct_activity_identities() {
         .count();
     assert_eq!(impressions, 2);
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn wait_for_writer<T>(mut poll: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(value) = poll() {
+            return value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recommendation writer did not become observable before the fixture deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn health_try(id: &str, score: i32) -> HealthTryItem {
@@ -306,6 +320,7 @@ fn suggestion_card_labels_health_before_personal_and_explains_all_keys() {
     write_startup_suggestion_card(
         &state,
         &RatatuiInlineRenderer::with_width(120).with_language(Language::ZhCn),
+        StartupSuggestionMode::Interactive,
         &rendered.visible_candidates,
         &mut output,
     )
@@ -326,6 +341,7 @@ fn single_suggestion_hides_cycle_instruction() {
     write_startup_suggestion_card(
         &state,
         &RatatuiInlineRenderer::with_width(120),
+        StartupSuggestionMode::Interactive,
         &[personal("recent-a")],
         &mut output,
     )
@@ -337,17 +353,79 @@ fn single_suggestion_hides_cycle_instruction() {
 }
 
 #[test]
-fn prompt_selection_requires_capable_terminal_but_not_color() {
-    assert!(startup_prompt_selection_supported(
-        false,
-        Some("xterm-256color")
-    ));
-    assert!(startup_prompt_selection_supported(false, None));
-    assert!(!startup_prompt_selection_supported(false, Some("dumb")));
-    assert!(!startup_prompt_selection_supported(
-        true,
-        Some("xterm-256color")
-    ));
+fn startup_suggestion_mode_separates_display_and_interaction_policy() {
+    let healthy = HealthScanReport::new("healthy", 0);
+    let mut warning = HealthScanReport::new("warning", 0);
+    warning.overall_severity = HealthSeverity::Warning;
+    let mut critical = HealthScanReport::new("critical", 0);
+    critical.overall_severity = HealthSeverity::Critical;
+
+    assert_eq!(
+        startup_suggestion_mode(false, Some("xterm-256color"), &healthy),
+        StartupSuggestionMode::Interactive
+    );
+    assert_eq!(
+        startup_suggestion_mode(false, Some("xterm-256color"), &warning),
+        StartupSuggestionMode::Interactive
+    );
+    assert_eq!(
+        startup_suggestion_mode(false, Some("xterm-256color"), &critical),
+        StartupSuggestionMode::Interactive
+    );
+
+    let degraded_gap = collection_gap_report(HealthSeverity::Degraded);
+    let unavailable_gap = collection_gap_report(HealthSeverity::Unavailable);
+    let warning_gap = collection_gap_report(HealthSeverity::Warning);
+    let critical_gap = collection_gap_report(HealthSeverity::Critical);
+    for report in [&degraded_gap, &unavailable_gap, &warning_gap, &critical_gap] {
+        assert_eq!(
+            startup_suggestion_mode(false, Some("xterm-256color"), report),
+            StartupSuggestionMode::ReadOnly
+        );
+    }
+
+    assert_eq!(
+        startup_suggestion_mode(true, Some("xterm-256color"), &healthy),
+        StartupSuggestionMode::Hidden
+    );
+    assert_eq!(
+        startup_suggestion_mode(false, Some("dumb"), &healthy),
+        StartupSuggestionMode::Hidden
+    );
+
+    for (collector, severity) in [
+        (HealthCollector::Memory, HealthSeverity::Degraded),
+        (HealthCollector::KernelSignal, HealthSeverity::Unavailable),
+        (HealthCollector::ConfiguredService, HealthSeverity::Degraded),
+    ] {
+        let mut report = HealthScanReport::new("collector-unavailable", 0);
+        report.unavailable.push(UnavailableCollector {
+            collector,
+            reason: HealthUnavailableReason::Timeout,
+            severity,
+            elapsed_ms: 0,
+        });
+        assert_eq!(
+            startup_suggestion_mode(false, Some("xterm-256color"), &report),
+            StartupSuggestionMode::ReadOnly
+        );
+    }
+}
+
+fn collection_gap_report(overall_severity: HealthSeverity) -> HealthScanReport {
+    let mut report = HealthScanReport::new("collection-gap", 0);
+    report.overall_severity = overall_severity;
+    report.findings.push(HealthFinding {
+        id: "collection-gap".to_string(),
+        severity: HealthSeverity::Degraded,
+        category: HealthFindingCategory::CollectionGap,
+        title_id: HealthMessageId::HealthFindingCoreCollectorUnavailable,
+        detail_id: None,
+        detail_args: BTreeMap::new(),
+        evidence_fact_ids: Vec::new(),
+        suggested_try_ids: Vec::new(),
+    });
+    report
 }
 
 #[test]

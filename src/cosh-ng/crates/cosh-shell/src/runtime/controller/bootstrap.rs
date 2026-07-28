@@ -122,6 +122,9 @@ pub(crate) fn run_raw(
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     inline_state.shell_session_id = Some(config.session_id.clone());
+    inline_state.audit = Some(crate::journal::audit::ShellAuditRecorder::initialize(
+        config.session_id.clone(),
+    ));
     if let Some(resume) = launch_options.resume {
         inline_state
             .control
@@ -195,7 +198,7 @@ pub(crate) fn run_raw(
     inline_state.approval_mode = approval_mode_from_config(&cosh_config.approval_mode);
     for cmd in &cosh_config.trusted_commands {
         if let Some(key) = trust_key_from_command(cmd) {
-            inline_state.control.trust_session_command(key);
+            inline_state.control.trust.trust_session_command(key);
         }
     }
     apply_readonly_config(&cosh_config);

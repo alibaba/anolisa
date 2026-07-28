@@ -11,6 +11,8 @@ use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::common;
+use crate::context::InstallMode;
+use crate::test_support::{TestContextOptions, TestSandbox};
 use tempfile::tempdir;
 
 /// v5 store as the pipeline persisted it for a system-prefix layout.
@@ -99,6 +101,10 @@ fn install_dry_run_does_not_download_the_artifact() {
             .iter()
             .all(|name| !name.ends_with("remote-only-1.0.0-linux-x86_64.tar.gz")),
         "dry-run must not download the install artifact; cache entries: {cached_names:?}"
+    );
+    assert!(
+        cached_names.iter().any(|name| name.ends_with("meta.toml")),
+        "dry-run must fetch the lightweight contract; cache entries: {cached_names:?}"
     );
 }
 
@@ -771,7 +777,14 @@ fn install_resolves_legacy_template_form_repo_url() {
 fn install_unpublished_version_is_invalid_argument() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
-    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    // Two published versions, so the refusal must enumerate the complete
+    // list (highest-first), not just whichever entry resolution saw last.
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
@@ -780,6 +793,142 @@ fn install_unpublished_version_is_invalid_argument() {
         .expect_err("must fail to resolve");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(err.reason().contains("9.9.9"), "got: {}", err.reason());
+    // The pin refusal must name what the repository actually publishes, so
+    // the caller can correct the request without a second query.
+    assert!(
+        err.reason().contains("not published"),
+        "pin refusal must be a dedicated message: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("installable versions: 0.2.0, 0.1.0"),
+        "pin refusal must list every installable version, highest first: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_pinned_unsupported_artifact_type_is_reported_as_not_installable() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    // Publish 9.0.0 as a binary-only entry: present in the repository, but
+    // outside what the raw backend can install.
+    let index_path = repo_root.join("v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    let env = anolisa_env::EnvService::detect();
+    index.push_str(&format!(
+        r#"
+[[entries]]
+component = "agentsight"
+version = "9.0.0"
+channel = "stable"
+artifact_type = "binary"
+backend = "raw"
+url = "legacy-agentsight-9.0.0"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{sha}"
+"#,
+        os = env.os,
+        arch = env.arch,
+        sha = "0".repeat(64),
+    ));
+    std::fs::write(index_path, index).expect("write mixed index");
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("9.0.0".to_string());
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("must fail to resolve");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    // A published-but-binary-only pin must not be misreported as
+    // unpublished; the refusal names the artifact-type gap instead.
+    assert!(
+        !err.reason().contains("not published"),
+        "published version must not be reported as unpublished: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason()
+            .contains("artifact types the raw backend cannot install"),
+        "refusal must name the artifact-type gap: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("installable versions: 0.2.0"),
+        "refusal must still list installable versions: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_pinned_version_places_exact_published_version() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.1.0".to_string());
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("pinned install must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(layout.bin_dir.join("agentsight").exists());
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("installed object");
+    let artifact = owned_artifact(installation);
+    assert_eq!(
+        artifact.version, "0.1.0",
+        "the pin must beat the higher published 0.2.0"
+    );
+    assert!(
+        artifact
+            .distribution_source
+            .as_deref()
+            .is_some_and(|url| url.ends_with("agentsight-0.1.0.tar.gz")),
+        "distribution_source must record the pinned artifact URL: {:?}",
+        artifact.distribution_source
+    );
+}
+
+#[test]
+fn install_pinned_version_dry_run_previews_without_writing_files() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "agentsight",
+        &["0.1.0", "0.2.0"],
+        &["system"],
+    );
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.version = Some("0.1.0".to_string());
+    let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    ctx.dry_run = true;
+    handle_with_fake_rpm(a, &ctx).expect("pinned dry-run must succeed");
+
+    let layout = FsLayout::system(Some(prefix));
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "dry-run must not install the binary"
+    );
+    assert!(
+        !layout.state_dir.join("installed.toml").exists(),
+        "dry-run must not write state"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -799,6 +948,8 @@ fn write_local_repo_with_conflicts(
     std::fs::create_dir_all(&v1).expect("create repo dirs");
 
     let manifest = component_manifest_toml_with_conflicts(component, version, modes, conflicts);
+    let manifest_sha = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+    std::fs::write(v1.join("meta.toml"), &manifest).expect("write sidecar manifest");
     let bin_path = format!("bin/{component}");
     let payload = format!("#!/bin/sh\necho {component}\n");
     let artifact = build_tar_gz(&[
@@ -827,6 +978,7 @@ os = "{os}"
 arch = "{arch}"
 install_modes = {modes_str}
 sha256 = "{sha}"
+manifest_digest = "sha256:{manifest_sha}"
 "#,
         os = env.os,
         arch = env.arch,
@@ -835,13 +987,85 @@ sha256 = "{sha}"
     format!("file://{}", v1.display())
 }
 
-#[test]
-fn install_conflict_blocks_when_conflicting_component_is_installed() {
-    let tmp = tempdir().expect("tmpdir");
-    let prefix = tmp.path().join("sys");
-    let layout = FsLayout::system(Some(prefix.clone()));
+fn write_published_batch_conflict_repo(root: &Path) -> String {
+    let v1 = root.join("v1");
+    std::fs::create_dir_all(&v1).expect("create repo dirs");
+    let env = anolisa_env::EnvService::detect();
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
 
-    // Pre-seed state: cosh v2.6.0 is already installed.
+    for (component, conflicts) in [("cosh", &[][..]), ("cosh-ng", &["cosh"][..])] {
+        let version = "1.0.0";
+        let version_dir = v1.join(component).join(version);
+        let artifact_dir = version_dir.join(&env.os).join(&env.arch);
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact dirs");
+
+        let manifest =
+            component_manifest_toml_with_conflicts(component, version, &["user"], conflicts);
+        std::fs::write(version_dir.join("meta.toml"), &manifest).expect("write sidecar manifest");
+        let manifest_sha = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+        let bin_path = format!("bin/{component}");
+        let payload = format!("#!/bin/sh\necho {component}\n");
+        let artifact = build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            (bin_path.as_str(), payload.as_bytes()),
+        ]);
+        let artifact_name = format!(
+            "{component}-{version}-{os}-{arch}.tar.gz",
+            os = env.os,
+            arch = env.arch
+        );
+        std::fs::write(artifact_dir.join(&artifact_name), &artifact).expect("write artifact");
+        let artifact_sha = format!("{:x}", Sha256::digest(&artifact));
+        let url = format!(
+            "{component}/{version}/{os}/{arch}/{artifact_name}",
+            os = env.os,
+            arch = env.arch
+        );
+        index.push_str(&format!(
+            r#"
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{url}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["user"]
+sha256 = "{artifact_sha}"
+manifest_digest = "sha256:{manifest_sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ));
+    }
+    std::fs::write(v1.join("index.toml"), index).expect("write distribution index");
+    std::fs::write(
+        v1.join("components.toml"),
+        r#"schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "raw"
+package = "cosh"
+
+[[components]]
+name = "cosh-ng"
+
+[[components.backends]]
+kind = "raw"
+package = "cosh-ng"
+"#,
+    )
+    .expect("write component index");
+    format!("file://{}", v1.display())
+}
+
+fn seed_installed_component(layout: &FsLayout, component: &str, version: &str) {
     std::fs::create_dir_all(&layout.state_dir).expect("create state dir");
     let mut state = anolisa_core::InstalledState {
         install_mode: StateInstallMode::System,
@@ -850,12 +1074,12 @@ fn install_conflict_blocks_when_conflicting_component_is_installed() {
     };
     state.upsert_object(InstalledObject {
         kind: ObjectKind::Component,
-        name: "cosh".to_string(),
-        version: "2.6.0".to_string(),
+        name: component.to_string(),
+        version: version.to_string(),
         status: ObjectStatus::Installed,
         manifest_digest: None,
-        distribution_source: Some("file:///repo/v1/cosh.tar.gz".to_string()),
-        raw_package: Some("cosh".to_string()),
+        distribution_source: Some(format!("file:///repo/v1/{component}.tar.gz")),
+        raw_package: Some(component.to_string()),
         install_backend: Some("raw".to_string()),
         ownership: None,
         rpm_metadata: None,
@@ -875,6 +1099,15 @@ fn install_conflict_blocks_when_conflicting_component_is_installed() {
     state
         .save(&layout.state_dir.join("installed.toml"))
         .expect("save state");
+}
+
+#[test]
+fn install_conflict_blocks_when_conflicting_component_is_installed() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+
+    seed_installed_component(&layout, "cosh", "2.6.0");
 
     // Write a repo with cosh-ng that declares conflicts = ["cosh"].
     let repo_url = write_local_repo_with_conflicts(
@@ -906,6 +1139,157 @@ fn install_conflict_blocks_when_conflicting_component_is_installed() {
         err.reason().contains("uninstall 'cosh' first"),
         "error must provide remediation: {}",
         err.reason()
+    );
+}
+
+#[test]
+fn install_dry_run_reports_conflict_without_downloading_artifact() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+    seed_installed_component(&layout, "cosh", "2.6.0");
+    let repo_url = write_local_repo_with_conflicts(
+        &tmp.path().join("repo"),
+        "cosh-ng",
+        "0.11.0",
+        &["system"],
+        &["cosh"],
+    );
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    let mut ctx = ctx_with_prefix(false, Some(prefix));
+    ctx.dry_run = true;
+    let err = handle_with_fake_rpm(a, &ctx).expect_err("dry-run must report the conflict");
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason()
+            .contains("conflicts with installed component 'cosh'"),
+        "got: {}",
+        err.reason()
+    );
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names.iter().any(|name| name.ends_with("meta.toml")),
+        "dry-run must fetch the lightweight contract; cache entries: {cached_names:?}"
+    );
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("cosh-ng.tar.gz")),
+        "dry-run must not fetch the install artifact; cache entries: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_all_dry_run_rejects_conflicts_between_planned_components() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_published_batch_conflict_repo(sandbox.repo_root());
+    let ctx = sandbox.context_with(
+        InstallMode::User,
+        TestContextOptions {
+            dry_run: true,
+            ..Default::default()
+        },
+    );
+    let layout = common::resolve_layout(&ctx);
+    std::fs::create_dir_all(&layout.etc_dir).expect("create config dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{repo_url}\"\n"
+        ),
+    )
+    .expect("write repo config");
+    let batch_args = InstallArgs {
+        component: None,
+        all: true,
+        fail_fast: false,
+        version: None,
+        backend: Some("raw".to_string()),
+        repo: None,
+        package: None,
+    };
+
+    let err = handle_all(batch_args, &ctx)
+        .expect_err("the second component must conflict with the first planned component");
+
+    assert!(matches!(err, CliError::BatchPartial { .. }), "got: {err}");
+    assert!(
+        !layout.state_dir.join("installed.toml").exists(),
+        "dry-run must not persist simulated batch state"
+    );
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        cached_names
+            .iter()
+            .filter(|name| name.ends_with("meta.toml"))
+            .count(),
+        2,
+        "both batch contracts must be checked; cache entries: {cached_names:?}"
+    );
+    assert!(
+        cached_names.iter().all(|name| !name.ends_with(".tar.gz")),
+        "dry-run must not fetch batch artifacts; cache entries: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_dry_run_rejects_mismatched_sidecar_digest() {
+    let tmp = tempdir().expect("tmpdir");
+    let repo_root = tmp.path().join("repo");
+    let repo_url =
+        write_local_repo_with_conflicts(&repo_root, "cosh-ng", "0.11.0", &["system"], &["cosh"]);
+    std::fs::write(
+        repo_root.join("v1/meta.toml"),
+        component_manifest_toml("cosh-ng", "0.11.0", &["system"]),
+    )
+    .expect("replace sidecar manifest");
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let mut ctx = ctx_with_prefix(false, Some(prefix));
+    ctx.dry_run = true;
+    let err = handle_with_fake_rpm(a, &ctx).expect_err("digest mismatch must fail dry-run");
+
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(err.reason().contains("sha256 mismatch"), "got: {err}");
+    let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("cosh-ng.tar.gz")),
+        "digest failure must not fetch the install artifact; cache entries: {cached_names:?}"
     );
 }
 

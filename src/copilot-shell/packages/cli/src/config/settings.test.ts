@@ -51,12 +51,14 @@ import {
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { loadCoshNgProviderFallback } from './coshNgProviderFallback.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
   getSettingsWarnings,
   loadSettings,
   USER_SETTINGS_PATH, // This IS the mocked path.
+  USER_SETTINGS_DIR,
   getSystemSettingsPath,
   getSystemDefaultsPath,
   SETTINGS_DIRECTORY_NAME, // This is from the original module, but used by the mock.
@@ -102,6 +104,14 @@ vi.mock('fs', async (importOriginal) => {
 
 vi.mock('./extension.js', () => ({
   disableExtension: vi.fn(),
+}));
+
+// Parsing of cosh-ng's config.toml is covered by coshNgProviderFallback.test.ts;
+// here we only exercise how loadSettings merges whatever it returns. Mocking it
+// also keeps the blanket `existsSync -> true` mocks in this file from feeding
+// JSON to a TOML parser.
+vi.mock('./coshNgProviderFallback.js', () => ({
+  loadCoshNgProviderFallback: vi.fn(),
 }));
 
 vi.mock('strip-json-comments', () => ({
@@ -1938,6 +1948,201 @@ describe('Settings Loading and Merging', () => {
           [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         });
       });
+    });
+  });
+
+  describe('cosh-ng config.toml auth fallback', () => {
+    const AUTH_ENV_VARS = [
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_BASE_URL',
+    ];
+
+    const COSH_NG_FALLBACK: TestSettings = {
+      security: {
+        auth: {
+          selectedType: 'openai',
+          apiKey: 'sk-from-cosh-ng',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          openaiModel: 'qwen3-235b-a22b',
+        },
+      },
+      model: { name: 'qwen3-235b-a22b' },
+    };
+
+    /** Makes only settings.json exist, with the given content. */
+    const mockUserSettings = (userSettings: TestSettings) => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? JSON.stringify(userSettings) : '{}',
+      );
+    };
+
+    beforeEach(() => {
+      for (const key of AUTH_ENV_VARS) {
+        vi.stubEnv(key, '');
+      }
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("adopts cosh-ng's active provider when no native auth type is set", () => {
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(COSH_NG_FALLBACK);
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(loadCoshNgProviderFallback).toHaveBeenCalledWith(
+        USER_SETTINGS_DIR,
+      );
+      expect(settings.merged.security?.auth).toEqual(
+        COSH_NG_FALLBACK.security?.auth,
+      );
+      expect(settings.merged.model?.name).toBe('qwen3-235b-a22b');
+    });
+
+    it('keeps the fallback out of originalSettings so it is never persisted', () => {
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(COSH_NG_FALLBACK);
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.systemDefaults.originalSettings).toEqual({});
+      expect(settings.systemDefaults.settings.security?.auth?.apiKey).toBe(
+        'sk-from-cosh-ng',
+      );
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('is not consulted when a native selectedType is present', () => {
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(COSH_NG_FALLBACK);
+      mockUserSettings({
+        security: { auth: { selectedType: 'anthropic' } },
+      } as TestSettings);
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(loadCoshNgProviderFallback).not.toHaveBeenCalled();
+      expect(settings.merged.security?.auth?.selectedType).toBe('anthropic');
+      expect(settings.merged.security?.auth?.apiKey).toBeUndefined();
+    });
+
+    it('fills credentials after /model persisted only auth type and model', () => {
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(COSH_NG_FALLBACK);
+      mockUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'model-selected-via-dialog' },
+      } as TestSettings);
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.security?.auth).toEqual({
+        selectedType: 'openai',
+        apiKey: 'sk-from-cosh-ng',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        openaiModel: 'qwen3-235b-a22b',
+      });
+      expect(settings.merged.model?.name).toBe('model-selected-via-dialog');
+    });
+
+    it('does not override an auth type inferred from environment variables', () => {
+      vi.stubEnv('GEMINI_API_KEY', 'gemini-from-env');
+      vi.stubEnv('GEMINI_MODEL', 'gemini-model-from-env');
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(COSH_NG_FALLBACK);
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(loadCoshNgProviderFallback).not.toHaveBeenCalled();
+      expect(settings.merged.security?.auth?.selectedType).toBeUndefined();
+    });
+
+    it('ignores selectedType from an untrusted workspace', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(COSH_NG_FALLBACK);
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === MOCK_WORKSPACE_SETTINGS_PATH
+            ? JSON.stringify({
+                security: { auth: { selectedType: 'anthropic' } },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.security?.auth).toEqual(
+        COSH_NG_FALLBACK.security?.auth,
+      );
+    });
+
+    it('lets native settings win field by field over the fallback', () => {
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(COSH_NG_FALLBACK);
+      mockUserSettings({
+        model: { name: 'model-from-settings-json' },
+      } as TestSettings);
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.security?.auth?.selectedType).toBe('openai');
+      expect(settings.merged.model?.name).toBe('model-from-settings-json');
+    });
+
+    // The cosh-ng reader has already expanded ${VAR} with cosh-ng's own
+    // semantics, so this layer must pass credentials through untouched - a
+    // second pass would also rewrite bare $VAR and corrupt a key containing a
+    // dollar sign.
+    it('does not re-resolve environment references in the fallback', () => {
+      const originalEnv = process.env['MOCK_COSH_NG_KEY'];
+      process.env['MOCK_COSH_NG_KEY'] = 'sk-from-env';
+      try {
+        vi.mocked(loadCoshNgProviderFallback).mockReturnValue({
+          security: {
+            auth: {
+              selectedType: 'openai',
+              apiKey: 'sk-literal$MOCK_COSH_NG_KEY',
+              baseUrl: 'https://example.com/v1',
+              openaiModel: 'custom-model',
+            },
+          },
+          model: { name: 'custom-model' },
+        } as TestSettings);
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.merged.security?.auth?.apiKey).toBe(
+          'sk-literal$MOCK_COSH_NG_KEY',
+        );
+      } finally {
+        if (originalEnv === undefined) {
+          delete process.env['MOCK_COSH_NG_KEY'];
+        } else {
+          process.env['MOCK_COSH_NG_KEY'] = originalEnv;
+        }
+      }
+    });
+
+    it('leaves settings untouched when there is nothing to inherit', () => {
+      vi.mocked(loadCoshNgProviderFallback).mockReturnValue(undefined);
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged).toEqual({});
     });
   });
 

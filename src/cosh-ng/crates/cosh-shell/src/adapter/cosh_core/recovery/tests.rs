@@ -173,6 +173,55 @@ fn successful_selected_restore_commits_atomically_and_clears_selection() {
 }
 
 #[test]
+fn context_limit_failure_retains_the_persisted_session_for_compaction() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "context_limit: effective context exceeds the emergency threshold".to_string(),
+    }];
+
+    assert!(retain_context_session(&events, None));
+}
+
+#[test]
+fn ordinary_failure_does_not_retain_a_provider_session() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "API error 500".to_string(),
+    }];
+
+    assert!(!retain_context_session(&events, None));
+}
+
+#[test]
+fn persist_failure_does_not_retain_a_context_limited_session() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "context_limit: effective context exceeds the emergency threshold".to_string(),
+    }];
+    let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
+    let attempt = begin_session_attempt(&state, None, SCOPE);
+    let retain = retain_context_session(&events, Some("persist"));
+
+    assert!(!retain);
+    assert_eq!(
+        commit_pending_session_for_scope(
+            retain,
+            !retain,
+            &state,
+            &Arc::new(Mutex::new(Some(NEW_ID.to_string()))),
+            SCOPE,
+            Some(true),
+            &attempt,
+        ),
+        SessionCommitOutcome::Continue
+    );
+    assert_eq!(
+        state.lock().expect("session state").active_session_id(),
+        None
+    );
+}
+
+#[test]
 fn fresh_non_resumable_turn_preserves_unattempted_active_and_selection() {
     let state = selected_state();
     let attempt = begin_session_attempt(&state, None, SCOPE);
@@ -513,6 +562,68 @@ fn failed_selection_invalidates_the_attempt_it_superseded() {
             .as_ref()
             .map(|error| error.code.as_str()),
         Some("not_found")
+    );
+}
+
+#[test]
+fn start_fresh_session_detaches_bindings_and_invalidates_in_flight_attempts() {
+    let state = selected_state();
+    // An attempt is already resuming the selected session when the user
+    // detaches, mirroring a late-arriving commit from the old conversation.
+    let old_attempt = begin_selected(&state);
+
+    let previous = state.lock().expect("session state").start_fresh_session();
+    // The active committed id is preferred over the pending selection.
+    assert_eq!(previous.as_deref(), Some(ACTIVE_ID));
+    {
+        let state = state.lock().expect("session state");
+        assert_eq!(state.active_session_id(), None);
+        assert_eq!(state.recovery.state, SessionRecoveryState::None);
+        assert_eq!(state.recovery.selected_session_id, None);
+        assert_eq!(state.recovery.selected_workspace_scope, None);
+        assert!(state.recovery.last_error.is_none());
+    }
+
+    // The superseded attempt must commit as stale, never re-binding a session.
+    let outcome = commit_pending_session_for_scope(
+        true,
+        false,
+        &state,
+        &Arc::new(Mutex::new(Some(SELECTED_ID.to_string()))),
+        SCOPE,
+        Some(true),
+        &old_attempt,
+    );
+    assert_eq!(outcome, SessionCommitOutcome::StaleAttempt);
+    assert_eq!(
+        state.lock().expect("session state").active_session_id(),
+        None
+    );
+}
+
+#[test]
+fn start_fresh_session_reports_selection_when_no_session_is_active() {
+    let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
+    {
+        let mut state = state.lock().expect("session state");
+        state.select_session(SELECTED_ID.to_string(), SCOPE.to_string());
+    }
+
+    let previous = state.lock().expect("session state").start_fresh_session();
+    assert_eq!(previous.as_deref(), Some(SELECTED_ID));
+    let state = state.lock().expect("session state");
+    assert_eq!(state.recovery.state, SessionRecoveryState::None);
+    assert_eq!(state.recovery.selected_session_id, None);
+}
+
+#[test]
+fn start_fresh_session_is_idempotent_without_any_binding() {
+    let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
+    let previous = state.lock().expect("session state").start_fresh_session();
+    assert_eq!(previous, None);
+    assert_eq!(
+        state.lock().expect("session state").recovery.state,
+        SessionRecoveryState::None
     );
 }
 

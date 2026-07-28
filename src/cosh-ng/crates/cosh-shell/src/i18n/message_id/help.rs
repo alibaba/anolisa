@@ -6,6 +6,7 @@ macro_rules! help_core_ids {
             HelpTitle,
             HelpFooter,
             HelpGroupConfig,
+            HelpGroupHealth,
             HelpGroupModes,
             HelpGroupHooks,
             HelpSummaryHelp,
@@ -20,6 +21,7 @@ macro_rules! help_core_ids {
             HelpSummaryDetails,
             HelpSummaryAudit,
             HelpSummaryHooks,
+            HelpSummaryHealth,
             HelpSummarySelect,
             HelpSummaryCopy,
             HelpSummaryDebug,
@@ -77,6 +79,69 @@ macro_rules! help_registry_ids {
             SlashHooksAgentUnavailable,
             SlashExtensionsEmptyBody,
             SlashSkillsEmptyBody,
+        );
+    };
+}
+
+macro_rules! slash_parse_error_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            SlashInvalidArgumentsTitle,
+            SlashQuotedArgumentsUnsupported,
+        );
+    };
+}
+
+macro_rules! status_query_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpGroupStatus,
+            HelpSummaryStatus,
+            HelpSummaryStats,
+            SlashValueUnavailable,
+            SlashValueNotStarted,
+            SlashValueIdle,
+            SlashValueActive,
+            SlashStatusTitle,
+            SlashStatusVersionLine,
+            SlashStatusBackendLine,
+            SlashStatusProviderLine,
+            SlashStatusModelLine,
+            SlashStatusSessionLine,
+            SlashStatusOsLine,
+            SlashStatusModesLine,
+            SlashStatusProviderUnavailableLine,
+            SlashStatusFooter,
+            SlashStatsTitle,
+            SlashStatsModelTitle,
+            SlashStatsToolsTitle,
+            SlashStatsModelLine,
+            SlashStatsBackendLine,
+            SlashStatsRunStateLine,
+            SlashStatsToolTotalsLine,
+            SlashStatsNoToolCalls,
+            SlashStatsToolRow,
+            SlashStatsTelemetryUnavailable,
+            SlashStatsUsageLine,
+            SlashStatsFooter,
+        );
+    };
+}
+
+macro_rules! prompt_soft_newline_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            PromptSoftNewlineTip,
+            PromptDraftTitle,
+            PromptDraftFooterEditing,
+            PromptDraftFooterSubmitted,
+            PromptDraftFooterCancelled,
         );
     };
 }

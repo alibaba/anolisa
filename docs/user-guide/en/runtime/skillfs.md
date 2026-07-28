@@ -241,6 +241,20 @@ In activation file mode, activation JSON expresses fallback and hidden states.
 It does not write current/live state. If a skill has no activation JSON or
 activation xattr in this mode, SkillFS treats it as hidden by fail-safe default.
 
+### Permission Sources
+
+Visibility decides **which** content is read; permissions decide **whether** it
+can be read or written. Since 0.4.0 the two are resolved from different sources:
+
+| Operation | Permission source |
+| --- | --- |
+| Agent-visible read | The activated target's own permissions — for fallback, the snapshot's |
+| Write | The live source's permissions |
+
+A skill can therefore be readable through its snapshot while its live source is
+not writable. If you relied on reads following live-source permissions before
+0.4.0, review the permission bits on your snapshots.
+
 ## Read-Time Transforms
 
 After the activation target is resolved, `SKILL.md` bytes pass through an
@@ -437,7 +451,7 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --foreground \
   --security \
   --activation-mode file \
-  --notify-socket /run/skill-ledger.sock \
+  --notify-socket "$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock" \
   --activation-events-log /var/log/skillfs/activation-events.jsonl \
   --activation-reload-mode poll
 ```
@@ -455,6 +469,14 @@ Agent or installer writes through SkillFS
 `--activation-reload-mode poll` requires `--notify-socket` or
 `--activation-events-log`, because SkillFS needs a trigger source for polling.
 
+`--notify-socket` points at a socket the **external daemon** listens on, not one
+SkillFS creates. In a joint deployment with Skill Ledger this is the
+agent-sec-core daemon endpoint, which defaults to
+`$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` and can be overridden with
+`AGENT_SEC_DAEMON_SOCKET`. Note that a failed notify delivery is only a warning
+and never stops the FUSE service, so pointing at the wrong path shows up as
+skills staying hidden rather than as an obvious error.
+
 For in-place activation and notify mounts, set `--ledger-backing-root` to a
 daemon-visible backing source path and enable the authenticated resolver.
 Notify v2 carries canonical identity only, so startup rejects an in-place
@@ -467,7 +489,7 @@ skillfs mount /path/to/skills /path/to/skills \
   --security-mode \
   --security \
   --activation-mode file \
-  --notify-socket /run/skill-ledger.sock \
+  --notify-socket "$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock" \
   --trusted-peer-exe /usr/bin/python3.11 \
   --ledger-backing-root /run/user/$UID/skillfs-ledger/source
 ```
@@ -526,6 +548,14 @@ active endpoint; only a confirmed-stale socket that SkillFS owns is reclaimed.
 
 No `register`, `mountId`, or `generation` handshake is required — the endpoint
 is stable per UID and the resolver is queried directly.
+
+> **Do not use a custom endpoint in a joint deployment with Skill Ledger.** The
+> Skill Ledger resolver client only probes the default
+> `/run/user/<uid>/skillfs/control.sock`; no configuration key or command-line
+> option makes it follow a custom path. If you point `--control-socket` or
+> `[control_socket].path` elsewhere, Ledger fails to find the default socket and
+> silently falls back to host mode, canonical path resolution stops working, and
+> neither side reports an error. This is a current M1 limitation.
 
 Supported JSONL request examples:
 
@@ -659,14 +689,19 @@ shares the same file for compatibility.
 | `--foreground` | Run in the foreground |
 | `--managed` | Start a detached supervised mount |
 | `--security-mode` | Require source and mountpoint to be the same path |
+| `--skill-layout <MODE>` | `auto` (default, detect Hermes from source-root markers), `flat`, or `hermes`; `hermes` is incompatible with `--decision-command` |
 | `--security` | Enable security integration |
 | `--activation-mode file` | Consume activation JSON/xattr state |
 | `--activation-reload-mode poll` | Poll activation after notify triggers |
 | `--notify-socket <PATH>` | Send mutation events to an external daemon |
 | `--activation-events-log <PATH>` | Write activation protocol events as JSONL |
 | `--audit-log <PATH>` | Write filesystem audit events as JSONL |
-| `--control-socket <PATH>` | Override the control socket endpoint (default: `/run/user/<uid>/skillfs/control.sock`) |
+| `--audit-queue-capacity <N>` | Queue size for the audit writer thread; `0` uses the built-in default, and it only applies with `--audit-log` |
+| `--events-log <PATH>` | Write legacy security decision events as JSONL; only applies with `--security --decision-command` |
+| `--control-socket <PATH>` | Override the control socket endpoint (default: `/run/user/<uid>/skillfs/control.sock`); do not use in a joint deployment with Skill Ledger |
 | `--trusted-peer-exe <PATH>` | Pin the trusted control socket peer (enables the control plane on the default endpoint if no path is given) |
+| `--trusted-peer-uid <UID>` | Additionally constrain the control socket peer's UID (from `SO_PEERCRED`) |
+| `--trusted-peer-gid <GID>` | Additionally constrain the control socket peer's GID (from `SO_PEERCRED`) |
 | `--trusted-writer-exe <PATH>` | Pin a trusted mount-path writer |
 | `--ledger-backing-root <PATH>` | Provide a daemon-visible source view |
 | `--decision-command <CMD>` | Use legacy external decision mode |

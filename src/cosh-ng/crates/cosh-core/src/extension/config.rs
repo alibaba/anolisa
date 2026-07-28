@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::config::HookDefinition;
@@ -83,6 +85,10 @@ pub struct CommandHookConfig {
     pub description: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// Environment variables for this hook's child process. Passed through to
+    /// [`HookDefinition::env`] verbatim; see there for the scoping guarantees.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 /// A hook group containing an optional matcher and an array of hook configs.
@@ -118,6 +124,7 @@ impl HookGroup {
                 matcher: self.matcher.clone(),
                 timeout: h.timeout,
                 sequential: self.sequential,
+                env: h.env.clone(),
             })
             .collect()
     }
@@ -275,6 +282,7 @@ mod tests {
                     name: Some("hook-a".to_string()),
                     description: None,
                     timeout: Some(3000),
+                    env: BTreeMap::from([("TOKENLESS_AGENT_ID".to_string(), "cosh".to_string())]),
                 }],
             },
             HookGroup {
@@ -286,6 +294,7 @@ mod tests {
                     name: None,
                     description: None,
                     timeout: None,
+                    env: BTreeMap::new(),
                 }],
             },
         ];
@@ -295,10 +304,15 @@ mod tests {
         assert_eq!(flat[0].command, "echo a");
         assert_eq!(flat[0].matcher.as_deref(), Some("skill"));
         assert_eq!(flat[0].timeout, Some(3000));
+        assert_eq!(
+            flat[0].env.get("TOKENLESS_AGENT_ID").map(String::as_str),
+            Some("cosh")
+        );
         // Second hook inherits sequential from group, no matcher
         assert_eq!(flat[1].command, "echo b");
         assert!(flat[1].matcher.is_none());
         assert_eq!(flat[1].sequential, Some(true));
+        assert!(flat[1].env.is_empty());
     }
 
     #[test]

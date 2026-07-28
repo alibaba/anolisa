@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest  # noqa: F401  (used by pytest parametrize, keep for linting)
 from agent_sec_cli.code_scanner.engine.code_extractor import extract_inline_code
 from agent_sec_cli.code_scanner.models import Language
+from standalone_hook_test_loader import load_standalone_hook
 
 # Path to the standalone cosh hook script
 _COSH_HOOK = str(
@@ -17,8 +18,10 @@ _COSH_HOOK = str(
     / "code_scanner_hook.py"
 )
 
-sys.path.insert(0, str(Path(_COSH_HOOK).parent))
-import code_scanner_hook  # noqa: E402
+code_scanner_hook = load_standalone_hook(
+    "cosh_code_scanner_hook",
+    Path(_COSH_HOOK),
+)
 
 # ---------------------------------------------------------------------------
 # Tests for utils/code_extractor.py

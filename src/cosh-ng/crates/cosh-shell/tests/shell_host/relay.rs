@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-invalid-utf8-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = with_raw_byte_readline(ShellHostConfig::new("invalid-utf8-test", &work_dir));
+    config.native_mode = false;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash(
+        &config,
+        std::io::Cursor::new(vec![0xff, b'\n', b'e', b'x', b'i', b't', b'\n']),
+        &mut rendered,
+    )
+    .expect("invalid utf8 relay");
+
+    assert!(!format!("{:?}", output.events).contains('\u{fffd}'));
+    #[cfg(not(target_os = "linux"))]
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command != "exit")
+    }));
+    #[cfg(target_os = "linux")]
+    {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandStarted
+                && event.command.as_deref() == Some("<redacted sensitive command>")
+        }));
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandRoutingObserved
+                && event
+                    .routing
+                    .as_ref()
+                    .is_some_and(|routing| routing.proven && routing.unsafe_input)
+        }));
+    }
+}
+
+#[test]
 fn raw_relay_zsh_adapter_uses_shared_event_contract() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
@@ -166,6 +208,66 @@ fn raw_relay_bash_intercepts_fragmented_slash_while_typing() {
         output.events
     );
     assert!(!rendered_text.contains("bash: /mode"), "{rendered_text}");
+}
+
+#[test]
+fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-recalled-slash-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         export HISTCONTROL=ignoredups\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+    std::fs::write(home.join(".bash_history"), "/skills detail xlsx\n").expect("history");
+
+    let config = ShellHostConfig::new("bash-recalled-slash-test", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("recalled slash relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    let intercept_count = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("/skills detail xlsx")
+                && event.component.as_deref() == Some("slash")
+        })
+        .count();
+    assert_eq!(intercept_count, 2, "{rendered_text}");
+    assert!(
+        !rendered_text.contains("bash: /skills: No such file or directory"),
+        "{rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]
@@ -379,4 +481,345 @@ fn raw_relay_hold_mode_still_observes_ctrl_c() {
             && event.component.as_deref() == Some("control")
             && event.input.as_deref() == Some("ctrl_c")
     }));
+}
+
+#[test]
+fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-capture-drain-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("capture-drain-test", &work_dir);
+    config.native_mode = false;
+    let capture = RawInputCapture::Question {
+        id: "question-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"yes\necho capture-drain-ok\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+        ],
+        Vec::new(),
+        move |events, _| {
+            if events.iter().any(|event| {
+                event.component.as_deref() == Some("card")
+                    && event.message.as_deref() == Some("answer")
+            }) {
+                Ok(RawObserverAction::Continue)
+            } else {
+                Ok(RawObserverAction::CaptureInput(capture.clone()))
+            }
+        },
+    )
+    .expect("capture drain relay");
+
+    let blocks: Vec<_> = ledger_from_output(&output)
+        .blocks
+        .into_iter()
+        .filter(|block| block.command == "echo capture-drain-ok")
+        .collect();
+    assert!(blocks.is_empty(), "{:?}", output.events);
+    assert!(output.events.iter().any(|event| {
+        event.message.as_deref() == Some("capture_submitted")
+            && event.capture.as_ref().is_some_and(|capture| {
+                capture.kind.as_deref() == Some("question")
+                    && capture.target_id.as_deref() == Some("question-1")
+                    && capture.generation > 0
+                    && capture.lifecycle == cosh_shell::types::ShellCaptureLifecycle::Submitted
+            })
+    }));
+    assert!(output
+        .events
+        .iter()
+        .any(|event| event.message.as_deref() == Some("capture_drained")));
+}
+
+#[test]
+fn raw_relay_capture_chain_discards_old_generation_suffix() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-capture-chain-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("capture-chain-test", &work_dir);
+    config.native_mode = false;
+    let first = RawInputCapture::Question {
+        id: "question-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let second = RawInputCapture::Question {
+        id: "question-2".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"first\nsecond\necho capture-chain-ok\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"actual-second\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+        ],
+        Vec::new(),
+        move |events, _| {
+            if events.iter().any(|event| {
+                event.component.as_deref() == Some("card")
+                    && event.message.as_deref() == Some("answer")
+                    && event.input.as_deref() == Some("actual-second")
+            }) {
+                Ok(RawObserverAction::Continue)
+            } else if events.iter().any(|event| {
+                event.component.as_deref() == Some("card")
+                    && event.message.as_deref() == Some("answer")
+                    && event.input.as_deref() == Some("first")
+            }) {
+                Ok(RawObserverAction::CaptureInput(second.clone()))
+            } else {
+                Ok(RawObserverAction::CaptureInput(first.clone()))
+            }
+        },
+    )
+    .expect("capture chain relay");
+
+    let blocks: Vec<_> = ledger_from_output(&output)
+        .blocks
+        .into_iter()
+        .filter(|block| block.command == "echo capture-chain-ok")
+        .collect();
+    assert!(blocks.is_empty(), "{:?}", output.events);
+    for answer in ["first", "actual-second"] {
+        assert!(output.events.iter().any(|event| {
+            event.message.as_deref() == Some("answer") && event.input.as_deref() == Some(answer)
+        }));
+    }
+    assert!(!output.events.iter().any(|event| {
+        event.message.as_deref() == Some("answer") && event.input.as_deref() == Some("second")
+    }));
+}
+
+#[test]
+fn raw_relay_capture_target_gone_discards_old_suffix_then_installs_new_target() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-capture-target-gone-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("capture-target-gone-test", &work_dir);
+    config.native_mode = false;
+    let first = RawInputCapture::Question {
+        id: "question-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let second = RawInputCapture::Question {
+        id: "question-2".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let third = RawInputCapture::Question {
+        id: "question-3".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut calls_after_first_drain = 0;
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"first\necho abandoned-suffix-ok\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"answer-b\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"echo after-abandon-ok\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+        ],
+        Vec::new(),
+        move |events, _| {
+            if events.iter().any(|event| {
+                event.message.as_deref() == Some("answer")
+                    && event.input.as_deref() == Some("answer-b")
+            }) {
+                Ok(RawObserverAction::Continue)
+            } else if events
+                .iter()
+                .any(|event| event.message.as_deref() == Some("capture_drained"))
+            {
+                calls_after_first_drain += 1;
+                if calls_after_first_drain == 1 {
+                    Ok(RawObserverAction::Continue)
+                } else {
+                    Ok(RawObserverAction::CaptureInput(third.clone()))
+                }
+            } else if events.iter().any(|event| {
+                event.message.as_deref() == Some("answer")
+                    && event.input.as_deref() == Some("first")
+            }) {
+                Ok(RawObserverAction::CaptureInput(second.clone()))
+            } else {
+                Ok(RawObserverAction::CaptureInput(first.clone()))
+            }
+        },
+    )
+    .expect("capture target gone relay");
+
+    let ledger = ledger_from_output(&output);
+    assert_eq!(
+        ledger
+            .blocks
+            .iter()
+            .filter(|block| block.command == "echo abandoned-suffix-ok")
+            .count(),
+        0,
+        "{:?}",
+        output.events
+    );
+    assert_eq!(
+        ledger
+            .blocks
+            .iter()
+            .filter(|block| block.command == "echo after-abandon-ok")
+            .count(),
+        1,
+        "{:?}",
+        output.events
+    );
+    assert!(!output.events.iter().any(|event| {
+        event.message.as_deref() == Some("answer")
+            && event.input.as_deref() == Some("echo abandoned-suffix-ok")
+    }));
+    assert!(output.events.iter().any(|event| {
+        event.message.as_deref() == Some("answer") && event.input.as_deref() == Some("answer-b")
+    }));
+}
+
+#[test]
+fn raw_relay_capture_eof_discards_old_generation_suffix() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-capture-eof-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("capture-eof-test", &work_dir);
+    config.native_mode = false;
+    let first = RawInputCapture::Question {
+        id: "question-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let second = RawInputCapture::Question {
+        id: "question-2".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(b"first\necho eof-suffix-ok\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+        ],
+        Vec::new(),
+        move |events, _| {
+            if events
+                .iter()
+                .any(|event| event.message.as_deref() == Some("capture_drained"))
+            {
+                Ok(RawObserverAction::Continue)
+            } else if events.iter().any(|event| {
+                event.message.as_deref() == Some("answer")
+                    && event.input.as_deref() == Some("first")
+            }) {
+                Ok(RawObserverAction::CaptureInput(second.clone()))
+            } else {
+                Ok(RawObserverAction::CaptureInput(first.clone()))
+            }
+        },
+    )
+    .expect("capture eof relay");
+
+    assert_eq!(
+        ledger_from_output(&output)
+            .blocks
+            .iter()
+            .filter(|block| block.command == "echo eof-suffix-ok")
+            .count(),
+        0,
+        "{:?}",
+        output.events
+    );
+}
+
+#[test]
+fn raw_relay_capture_owned_input_overflow_is_visible_and_discarded() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-capture-overflow-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("capture-overflow-test", &work_dir);
+    config.native_mode = false;
+    let capture = RawInputCapture::Question {
+        id: "question-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut input = b"yes\n#".to_vec();
+    input.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    input.extend_from_slice(b"\necho capture-overflow-ok\n");
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(50)),
+            RawRelayAction::write(input),
+            RawRelayAction::wait(Duration::from_millis(100)),
+        ],
+        Vec::new(),
+        move |events, _| {
+            if events
+                .iter()
+                .any(|event| event.message.as_deref() == Some("capture_overflow"))
+            {
+                Ok(RawObserverAction::Continue)
+            } else {
+                Ok(RawObserverAction::CaptureInput(capture.clone()))
+            }
+        },
+    )
+    .expect("capture overflow relay");
+
+    let blocks: Vec<_> = ledger_from_output(&output)
+        .blocks
+        .into_iter()
+        .filter(|block| block.command == "echo capture-overflow-ok")
+        .collect();
+    assert!(blocks.is_empty(), "{:?}", output.events);
+    assert!(output
+        .events
+        .iter()
+        .any(|event| event.message.as_deref() == Some("capture_overflow")));
 }

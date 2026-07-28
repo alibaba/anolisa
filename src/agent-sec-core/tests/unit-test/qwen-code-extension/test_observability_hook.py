@@ -1,6 +1,5 @@
 """Unit tests for the Qwen Code observability command hook."""
 
-import importlib.util
 import io
 import json
 import sys
@@ -8,24 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 _ROOT = Path(__file__).resolve().parents[3]
 _EXTENSION_DIR = _ROOT / "qwen-code-extension"
 _HOOK_PATH = _EXTENSION_DIR / "hooks" / "observability_hook.py"
-sys.path.insert(0, str(_HOOK_PATH.parent))
 
-
-def _load_observability_hook():
-    spec = importlib.util.spec_from_file_location("qwen_observability_hook", _HOOK_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-observability_hook = _load_observability_hook()
+observability_hook = load_standalone_hook("qwen_observability_hook", _HOOK_PATH)
 
 _TS = "2026-07-14T10:00:00Z"
 
@@ -124,6 +112,21 @@ def test_pre_tool_use_prefers_tool_call_id_and_hashes_parameters():
             observability_hook.value_to_text(tool_input)
         ),
     }
+
+
+def test_observability_metadata_uses_bounded_shared_trace_context():
+    record = _record(
+        _base(
+            "PreToolUse",
+            tool_name="run_shell_command",
+            tool_input={"command": "pwd"},
+            session_id="s" * 300,
+            tool_call_id="t" * 300,
+        )
+    )
+
+    assert record["metadata"]["sessionId"] == "s" * 256
+    assert record["metadata"]["toolCallId"] == "t" * 256
 
 
 def test_post_tool_use_maps_nested_exit_code_and_result():
@@ -481,7 +484,7 @@ def test_non_object_json_returns_noop_without_cli(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {}
 
 
-def test_manifest_mounts_skill_ledger_before_observability_and_pii_hooks():
+def test_manifest_mounts_skill_ledger_code_scanner_observability_and_pii_hooks():
     manifest = json.loads((_EXTENSION_DIR / "qwen-extension.json").read_text())
     expected_events = {
         "UserPromptSubmit",
@@ -494,7 +497,7 @@ def test_manifest_mounts_skill_ledger_before_observability_and_pii_hooks():
 
     assert set(manifest["hooks"]) == expected_events
     pre_tool_entries = manifest["hooks"]["PreToolUse"]
-    assert len(pre_tool_entries) == 2
+    assert len(pre_tool_entries) == 3
     skill_group = pre_tool_entries[0]
     assert skill_group["matcher"] == "^skill$"
     assert skill_group["sequential"] is True
@@ -504,6 +507,18 @@ def test_manifest_mounts_skill_ledger_before_observability_and_pii_hooks():
     assert skill_hook["command"] == (
         'python3 "${extensionPath}${/}hooks${/}skill_ledger_hook.py"'
     )
+
+    scanner_group = pre_tool_entries[1]
+    assert scanner_group["matcher"] == "^run_shell_command$"
+    scanner_hooks = scanner_group["hooks"]
+    assert len(scanner_hooks) == 1
+    scanner_hook = scanner_hooks[0]
+    assert scanner_hook["name"] == "agent-sec-code-scan-shell-command"
+    assert scanner_hook["command"] == (
+        'python3 "${extensionPath}${/}hooks${/}code_scanner_hook.py"'
+    )
+    assert scanner_hook["timeout"] == 10000
+    assert "async" not in scanner_hook
 
     for event_name, entries in manifest["hooks"].items():
         policy_group = entries[-1]

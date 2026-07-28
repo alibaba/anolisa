@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+mod audit;
 mod auth;
 mod cli;
+mod compaction;
 mod compression;
 mod config;
 mod context;
@@ -17,7 +19,6 @@ mod metrics;
 mod migrate;
 mod process;
 mod protocol;
-mod provider;
 mod redaction;
 mod registry;
 mod session;
@@ -29,6 +30,7 @@ mod tool;
 mod truncator;
 
 use clap::Parser;
+use cosh_core::provider;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +48,12 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     if resolved.provider_type == "mock" {
         if resolved.model == "mock-partial-error" {
             return Box::new(provider::mock::MockProvider::partial_error());
+        }
+        if resolved.model == "mock-compact-summary" {
+            // Deterministic bounded output for compaction lifecycle tests.
+            return Box::new(provider::mock::MockProvider::repeat_text(
+                "## Objective and constraints\n- deterministic mock summary",
+            ));
         }
         return Box::new(provider::mock::MockProvider::history_echo());
     }
@@ -144,8 +152,15 @@ async fn run() {
     logging::init_logging(&log_level);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-core starting");
 
-    if args.is_registry() {
+    if let Some(cli::Command::Mcp(mcp)) = args.command {
+        if let Err(error) = tool::mcp::run_command(mcp, &config).await {
+            eprintln!("MCP command failed: {error}");
+            std::process::exit(1);
+        }
+    } else if args.is_registry() {
         registry::run(&args, config).await;
+    } else if args.is_compact() {
+        std::process::exit(compaction::run_compact_cli(&args, config).await);
     } else if args.is_headless() {
         match headless::run(&args, config).await {
             Ok(0) => {}

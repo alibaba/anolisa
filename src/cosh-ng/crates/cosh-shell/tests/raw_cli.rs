@@ -16,14 +16,22 @@ mod agent_input;
 mod animation;
 #[path = "raw_cli/approval.rs"]
 mod approval;
+#[path = "raw_cli/audit.rs"]
+mod audit;
+#[path = "raw_cli/auth.rs"]
+mod auth;
 #[path = "raw_cli/cancellation.rs"]
 mod cancellation;
+#[path = "raw_cli/compaction.rs"]
+mod compaction;
 #[path = "raw_cli/config.rs"]
 mod config;
 #[path = "raw_cli/cosh_core/mod.rs"]
 mod cosh_core;
 #[path = "raw_cli/diagnostics.rs"]
 mod diagnostics;
+#[path = "raw_cli/doctor.rs"]
+mod doctor;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
 #[path = "raw_cli/external_hook.rs"]
@@ -44,6 +52,8 @@ mod mode;
 mod native;
 #[path = "raw_cli/passthrough.rs"]
 mod passthrough;
+#[path = "raw_cli/prompt_replay.rs"]
+mod prompt_replay;
 #[path = "raw_cli/provider_handoff/mod.rs"]
 mod provider_handoff;
 #[path = "raw_cli/provider_tools.rs"]
@@ -77,6 +87,20 @@ fn approval_request_card_visible(output: &str) -> bool {
 
 fn assert_no_approval_request_card(output: &str) {
     assert!(!approval_request_card_visible(output), "{output}");
+}
+
+fn bash_supports_command_not_found_handler() -> bool {
+    Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-ic",
+            "command_not_found_handle(){ return 0; }; __cosh_missing_probe",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub(crate) fn assert_approval_prompt_visible(output: &str) {

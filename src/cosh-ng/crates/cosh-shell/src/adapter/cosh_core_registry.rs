@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -6,18 +7,65 @@ use serde_json::Value;
 
 use super::CoshCoreAdapter;
 
-/// Default timeout for registry queries (5 seconds).
-const REGISTRY_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const REGISTRY_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Distinguishes registry protocol failures from transport failures.
+pub(crate) enum RegistryQueryError {
+    /// The request could not produce a valid, correlated registry response.
+    Transport(String),
+    /// The core returned a valid registry response that rejected the request.
+    Response(String),
+}
+
+impl RegistryQueryError {
+    /// Preserves the existing string-based adapter API for ordinary callers.
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Transport(message) | Self::Response(message) => message,
+        }
+    }
+}
 
 impl CoshCoreAdapter {
-    /// Synchronous registry query: spawns a short-lived `cosh-core --registry` process,
-    /// sends one registry_request via stdin, reads one registry_response from stdout.
+    /// Routes registry requests through the live core, falling back before a runtime exists.
     pub fn registry_query(
         &self,
         domain: &str,
         action: &str,
         params: Value,
     ) -> Result<Value, String> {
+        self.registry_query_classified(domain, action, params)
+            .map_err(RegistryQueryError::into_message)
+    }
+
+    /// Returns a classified error for callers that may recover transport failures.
+    pub(crate) fn registry_query_classified(
+        &self,
+        domain: &str,
+        action: &str,
+        params: Value,
+    ) -> Result<Value, RegistryQueryError> {
+        if let Some(result) = self
+            .runtime
+            .live_registry_query(domain, action, params.clone())
+        {
+            return result;
+        }
+        let result = self.registry_query_short(domain, action, params);
+        if result.is_ok() {
+            self.runtime.note_external_mutation(domain, action);
+        }
+        result
+    }
+
+    fn registry_query_short(
+        &self,
+        domain: &str,
+        action: &str,
+        params: Value,
+    ) -> Result<Value, RegistryQueryError> {
         let request_id = format!("reg-{}", std::process::id());
         let request = serde_json::json!({
             "type": "registry_request",
@@ -27,33 +75,43 @@ impl CoshCoreAdapter {
             "params": params,
         });
 
-        let request_json =
-            serde_json::to_string(&request).map_err(|e| format!("serialize error: {e}"))?;
+        let request_json = serde_json::to_string(&request)
+            .map_err(|error| RegistryQueryError::Transport(format!("serialize error: {error}")))?;
 
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .arg("--registry")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("failed to spawn cosh-core --registry: {e}"))?;
+            .process_group(0);
+        let mut child = command.spawn().map_err(|error| {
+            RegistryQueryError::Transport(format!("failed to spawn cosh-core --registry: {error}"))
+        })?;
 
         // Write request to stdin
-        {
-            let stdin = child
-                .stdin
-                .as_mut()
-                .ok_or_else(|| "failed to open stdin".to_string())?;
-            writeln!(stdin, "{request_json}").map_err(|e| format!("write error: {e}"))?;
-            // Drop stdin to signal EOF
+        let write_result = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| RegistryQueryError::Transport("failed to open stdin".to_string()))
+            .and_then(|stdin| {
+                writeln!(stdin, "{request_json}")
+                    .map_err(|error| RegistryQueryError::Transport(format!("write error: {error}")))
+            });
+        if let Err(error) = write_result {
+            super::terminate_and_reap_process(&mut child);
+            return Err(error);
         }
+        // Drop stdin to signal EOF.
         drop(child.stdin.take());
 
         // Read response from stdout with timeout
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "failed to open stdout".to_string())?;
+        let Some(stdout) = child.stdout.take() else {
+            super::terminate_and_reap_process(&mut child);
+            return Err(RegistryQueryError::Transport(
+                "failed to open stdout".to_string(),
+            ));
+        };
 
         let (tx, rx) = std::sync::mpsc::channel();
         let reader_handle = std::thread::spawn(move || {
@@ -74,15 +132,19 @@ impl CoshCoreAdapter {
             let _ = tx.send(Err("no response received (EOF)".to_string()));
         });
 
-        let response_line = match rx.recv_timeout(REGISTRY_TIMEOUT) {
+        let response_line = match rx.recv_timeout(registry_timeout(domain, action)) {
             Ok(Ok(line)) => line,
             Ok(Err(e)) => {
-                let _ = child.kill();
-                return Err(e);
+                super::terminate_and_reap_process(&mut child);
+                let _ = reader_handle.join();
+                return Err(RegistryQueryError::Transport(e));
             }
             Err(_) => {
-                let _ = child.kill();
-                return Err("registry query timed out".to_string());
+                super::terminate_and_reap_process(&mut child);
+                let _ = reader_handle.join();
+                return Err(RegistryQueryError::Transport(
+                    "registry query timed out".to_string(),
+                ));
             }
         };
 
@@ -90,8 +152,8 @@ impl CoshCoreAdapter {
         let _ = child.wait();
 
         // Parse the response
-        let resp: Value =
-            serde_json::from_str(&response_line).map_err(|e| format!("parse error: {e}"))?;
+        let resp: Value = serde_json::from_str(&response_line)
+            .map_err(|error| RegistryQueryError::Transport(format!("parse error: {error}")))?;
 
         let success = resp
             .get("success")
@@ -105,7 +167,43 @@ impl CoshCoreAdapter {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string();
-            Err(error)
+            Err(RegistryQueryError::Response(error))
         }
+    }
+}
+
+pub(super) fn extension_mutation_requires_reload(domain: &str, action: &str) -> bool {
+    domain == "extensions"
+        && matches!(
+            action,
+            "enable"
+                | "disable"
+                | "select-source"
+                | "settings-set"
+                | "settings-unset"
+                | "commit"
+                | "update-all-commit"
+                | "uninstall"
+                | "recover"
+                | "reload"
+        )
+}
+
+pub(super) fn registry_timeout(domain: &str, action: &str) -> Duration {
+    let long_running_extension_action = extension_mutation_requires_reload(domain, action)
+        || (domain == "extensions"
+            && matches!(
+                action,
+                "install-preflight"
+                    | "link-preflight"
+                    | "update-preflight"
+                    | "update-all-preflight"
+                    | "doctor"
+                    | "new"
+            ));
+    if long_running_extension_action {
+        REGISTRY_MUTATION_TIMEOUT
+    } else {
+        REGISTRY_READ_TIMEOUT
     }
 }

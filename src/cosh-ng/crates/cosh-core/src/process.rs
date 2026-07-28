@@ -191,21 +191,36 @@ async fn join_reader(task: &mut ReaderTask) -> std::io::Result<Vec<u8>> {
 pub(crate) mod test_support {
     //! Shared fixtures for process-tree cleanup regression tests.
 
-    use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
 
-    /// Delay before the leaked grandchild writes its marker file. PID
-    /// liveness polling must finish well before this elapses; the margin
-    /// is generous because CI runs these suites under heavy parallel load.
-    pub const MARKER_DELAY: Duration = Duration::from_secs(5);
+    /// Serializes real process-tree fixtures inside one test binary.
+    ///
+    /// These tests intentionally create and SIGKILL process groups. Running
+    /// several at once can delay shell reaping enough for a marker deadline
+    /// to fire under CI load, even though each isolated cleanup succeeds.
+    pub async fn exclusive_process_tree_test() -> tokio::sync::OwnedMutexGuard<()> {
+        static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+        LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+            .lock_owned()
+            .await
+    }
+
+    fn marker_trigger(marker: &Path) -> PathBuf {
+        marker.with_extension("trigger")
+    }
 
     /// Shell script that backgrounds a grandchild which writes `marker`
-    /// after [`MARKER_DELAY`], records `<shell-pid> <grandchild-pid>` into
-    /// `pids`, then blocks far past any test timeout.
+    /// after the test releases its probe, records `<shell-pid>
+    /// <grandchild-pid>` into `pids`, then blocks far past any test timeout.
     pub fn leak_script(marker: &Path, pids: &Path) -> String {
+        let trigger = marker_trigger(marker);
         format!(
-            "(sleep {}; : > '{}') & echo $$ $! > '{}'; sleep 30",
-            MARKER_DELAY.as_secs(),
+            "(while [ ! -e '{}' ]; do sleep 0.05; done; : > '{}') & \
+             echo $$ $! > '{}'; sleep 30",
+            trigger.display(),
             marker.display(),
             pids.display()
         )
@@ -214,9 +229,11 @@ pub(crate) mod test_support {
     /// Variant of [`leak_script`] whose direct child exits successfully at
     /// once, leaving the grandchild as the only holder of stdout/stderr.
     pub fn stdout_holder_script(marker: &Path, pids: &Path) -> String {
+        let trigger = marker_trigger(marker);
         format!(
-            "(sleep {}; : > '{}') & echo $$ $! > '{}'; exit 0",
-            MARKER_DELAY.as_secs(),
+            "(while [ ! -e '{}' ]; do sleep 0.05; done; : > '{}') & \
+             echo $$ $! > '{}'; exit 0",
+            trigger.display(),
             marker.display(),
             pids.display()
         )
@@ -255,8 +272,7 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Asserts `pid` terminates within 2.5s — well before [`MARKER_DELAY`],
-    /// so a leaked-but-finishing grandchild cannot fake a pass.
+    /// Asserts `pid` terminates within 2.5s.
     pub fn assert_process_gone(pid: i32) {
         for _ in 0..125 {
             if !process_can_run(pid) {
@@ -298,13 +314,11 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Sleeps until safely past the grandchild's scheduled marker write.
-    pub fn wait_past_marker_deadline(started: Instant) {
-        let budget = MARKER_DELAY + Duration::from_millis(500);
-        let elapsed = started.elapsed();
-        if elapsed < budget {
-            std::thread::sleep(budget - elapsed);
-        }
+    /// Releases the survivor probe and gives any leaked grandchild time to
+    /// write its marker without depending on scheduler-relative deadlines.
+    pub fn release_marker_probe(marker: &Path) {
+        std::fs::write(marker_trigger(marker), b"release").expect("release marker probe");
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -345,11 +359,11 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_kills_grandchildren() {
+        let _fixture_guard = exclusive_process_tree_test().await;
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let pid_file = dir.path().join("pids");
 
-        let started = Instant::now();
         let err = output_with_timeout(
             sh(&leak_script(&marker, &pid_file)),
             None,
@@ -364,7 +378,7 @@ mod tests {
         for pid in &pids {
             assert_process_gone(*pid);
         }
-        wait_past_marker_deadline(started);
+        release_marker_probe(&marker);
         assert!(!marker.exists(), "grandchild survived the timeout");
     }
 
@@ -383,6 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn grandchild_holding_stdout_cannot_stall_past_deadline() {
+        let _fixture_guard = exclusive_process_tree_test().await;
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let pid_file = dir.path().join("pids");
@@ -405,7 +420,7 @@ mod tests {
         let _cleanup = PidCleanup(pids.clone());
         // The grandchild pipe holder must be killed with the group.
         assert_process_gone(pids[1]);
-        wait_past_marker_deadline(started);
+        release_marker_probe(&marker);
         assert!(!marker.exists(), "grandchild survived the drain timeout");
     }
 
@@ -413,12 +428,12 @@ mod tests {
     // while the cancelled future runs on another worker.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_caller_kills_process_tree() {
+        let _fixture_guard = exclusive_process_tree_test().await;
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let pid_file = dir.path().join("pids");
         let script = leak_script(&marker, &pid_file);
 
-        let started = Instant::now();
         let handle = tokio::spawn(output_with_timeout(
             sh(&script),
             None,
@@ -434,7 +449,7 @@ mod tests {
         for pid in &pids {
             assert_process_gone(*pid);
         }
-        wait_past_marker_deadline(started);
+        release_marker_probe(&marker);
         assert!(!marker.exists(), "grandchild survived caller cancellation");
     }
 }

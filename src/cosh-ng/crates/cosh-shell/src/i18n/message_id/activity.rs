@@ -94,3 +94,13 @@ macro_rules! tool_summary_ids {
         );
     };
 }
+
+macro_rules! activity_untracked_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ActivityStatusCompletedUntracked,
+        );
+    };
+}

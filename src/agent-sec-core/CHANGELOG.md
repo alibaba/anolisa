@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.9.0
+
+**Qoder CLI & Qwen Code Hook Capability Expansion**
+
+- Added Qwen plugin and observability hooks. (#1473)
+- Added Qoder CLI hook framework support. (#1480)
+- Added Qoder prompt injection scanner hook integration. (#1529)
+- Added Qwen prompt scanner hook integration. (#1538)
+- Added code scanner hook integration for Qoder CLI and Qwen Code. (#1535)
+- Added Qoder CLI Skill PreToolUse skill ledger checks for user and project skills. (#1552)
+- Added Qwen PII hooks. (#1559)
+- Added Qwen skill ledger hook integration. (#1561)
+- Added Qoder CLI observability hook integration. (#1580)
+- Unified Qwen Code hook trace context handling. (#1738)
+
+**Codex & OpenClaw Hook Integrations**
+
+- Added observability capability in the Codex plugin. (#1495)
+- Added Codex PreToolUse PII checker hook integration. (#1501)
+- Showed OpenClaw policy hints in hook responses. (#1525)
+
+**Scanner & Policy Engine**
+
+- Skipped prompt model downloads when the model cache already exists. (#1467)
+- Added custom PII regex rules. (#1522)
+- Satisfied L1-L3 telemetry requirements. (#1527)
+- Added Chinese prompt-injection and jailbreak rules covering instruction override, authority escalation, encoding evasion, and role-play framing. (#1554)
+- Unified model resources into handles to make prompt scanning resource lifecycle more consistent. (#1553)
+- Made prompt scan mode configurable through environment variables. (#1620)
+- Hardened audit, PII, and notify hook behavior. (#1649)
+
+**Skill Ledger Runtime**
+
+- Isolated the skill ledger worker for more reliable hook execution. (#1492)
+- Resolved canonical skill roots for skill ledger checks. (#1558)
+- Exposed skill ledger verdicts to hook callers. (#1577)
+
+**Build & Packaging**
+
+- Moved prompt-scan benchmarks to a standalone repository to keep the CLI package lean. (#1557)
+- Rejected stale CLI wheels during packaging and runtime validation. (#1651)
+- Replaced and restarted the daemon service when upgrading RPM packages. (#1681)
+
+**Testing & CI**
+
+- Fixed OpenClaw E2E test dependencies by excluding ML packages. (#1631)
+- Fixed skill-ledger E2E test execution on macOS. (#1643)
+
+**Documentation**
+
+- Centralized user guides and added documentation lint CI. (#1586)
+
 ## 0.8.0
 
 **Build & Packaging**

@@ -54,6 +54,8 @@ if command -v tokenless >/dev/null 2>&1; then
     TOKENLESS_BIN="$(command -v tokenless)"
 elif [[ -x "$BINDIR/tokenless" ]]; then
     TOKENLESS_BIN="$BINDIR/tokenless"
+elif [[ -x /usr/local/bin/tokenless ]]; then
+    TOKENLESS_BIN="/usr/local/bin/tokenless"
 elif [[ -x /usr/bin/tokenless ]]; then
     TOKENLESS_BIN="/usr/bin/tokenless"
 fi

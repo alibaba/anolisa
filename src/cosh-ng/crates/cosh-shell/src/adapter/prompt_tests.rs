@@ -1,7 +1,8 @@
 use super::prompt::{
     prompt_from_request, prompt_from_request_with_evidence_access,
     prompt_from_request_with_evidence_policy, provider_prompt_contract,
-    provider_prompt_contract_for_language, provider_prompt_contract_with_evidence_access,
+    provider_prompt_contract_for_language, provider_prompt_contract_for_request,
+    provider_prompt_contract_with_evidence_access,
 };
 use crate::evidence::ShellEvidenceAccess;
 use crate::types::{
@@ -33,7 +34,7 @@ fn prompt_includes_recent_shell_context_refs_without_full_output() {
     let prompt = prompt_from_request(&request);
     assert!(prompt.contains("runtime_frame:"), "{prompt}");
     assert!(prompt.contains("cwd: /repo"), "{prompt}");
-    assert!(prompt.contains("mode: RecommendOnly"), "{prompt}");
+    assert!(!prompt.contains("mode: RecommendOnly"), "{prompt}");
     assert!(
         prompt.contains("Recent shell context (1 commands)"),
         "{prompt}"
@@ -317,7 +318,7 @@ fn bound_insight_in_recommend_mode_names_missing_evidence_without_requesting_too
 }
 
 #[test]
-fn provider_prompt_redacts_all_user_and_runtime_text_boundaries() {
+fn provider_prompt_preserves_user_input_and_redacts_runtime_text() {
     let github_token = "ghp_abcdefghijklmnopqrstuvwxyz123456";
     let request = AgentRequest {
         id: "agent-request-secret".to_string(),
@@ -346,17 +347,13 @@ fn provider_prompt_redacts_all_user_and_runtime_text_boundaries() {
 
     let prompt = prompt_from_request(&request);
 
-    for secret in [
-        "user-secret",
-        github_token,
-        "hint-secret",
-        "hook-secret",
-        "description-secret",
-    ] {
+    for secret in ["user-secret", github_token] {
+        assert!(prompt.contains(secret), "{prompt}");
+    }
+    for secret in ["hint-secret", "hook-secret", "description-secret"] {
         assert!(!prompt.contains(secret), "{prompt}");
     }
-    assert!(prompt.contains("password=<redacted>"), "{prompt}");
-    assert!(prompt.contains("api_key=<redacted>"), "{prompt}");
+    assert!(prompt.contains("<redacted>"), "{prompt}");
 }
 
 #[test]
@@ -972,14 +969,145 @@ fn provider_prompt_contract_includes_language_hint_without_losing_governance() {
         crate::Language::ZhCn,
     );
 
-    assert!(en.contains("Respond in English"), "{en}");
+    assert!(
+        en.contains("If the user explicitly asks for replies in a specific language"),
+        "{en}"
+    );
+    assert!(
+        en.contains("reply in the language of the user's message"),
+        "{en}"
+    );
+    assert!(en.contains("respond in English by default"), "{en}");
     assert!(en.contains("do not emit tool calls"), "{en}");
-    assert!(zh.contains("Respond in Simplified Chinese"), "{zh}");
+    assert!(
+        zh.contains("If the user explicitly asks for replies in a specific language"),
+        "{zh}"
+    );
+    assert!(
+        zh.contains("reply in the language of the user's message"),
+        "{zh}"
+    );
+    assert!(
+        zh.contains("respond in Simplified Chinese by default"),
+        "{zh}"
+    );
     assert!(
         zh.contains("approval system is handled by cosh-shell"),
         "{zh}"
     );
     assert!(zh.contains("run_shell_command"), "{zh}");
+}
+
+fn shell_handoff_continuation_request(user_mode: &str) -> AgentRequest {
+    let mut request = AgentRequest {
+        id: "agent-request-shell-evidence-req-1".to_string(),
+        session_id: "session-1".to_string(),
+        command_block: command_block("shell-evidence-req-1", "ls -la crates/", 0, None),
+        context_blocks: Vec::new(),
+        context_hints: vec![
+            crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
+            "shell handoff recovery owner: req-1/prov-1/toolu-1".to_string(),
+        ],
+        user_input: Some(
+            "ShellCommandCompleted evidence\ncommand: ls -la crates/\nexit_code: 0".to_string(),
+        ),
+        findings: Vec::new(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
+    };
+    request.context_hints.push(format!(
+        "{}{user_mode}",
+        crate::types::USER_APPROVAL_MODE_HINT_PREFIX
+    ));
+    request
+}
+
+#[test]
+fn continuation_contract_reports_unchanged_auto_mode_without_recommend_claims() {
+    let request = shell_handoff_continuation_request("auto");
+    let contract =
+        provider_prompt_contract_for_request(&request, CoshApprovalMode::Recommend, "Bash");
+
+    assert!(contract.contains("Mode: agent."), "{contract}");
+    assert!(
+        contract.contains("analysis-only continuation after a foreground shell handoff"),
+        "{contract}"
+    );
+    assert!(
+        contract.contains("approval mode is auto and has not changed"),
+        "{contract}"
+    );
+    assert!(contract.contains("applies only to this turn"), "{contract}");
+    assert!(
+        contract.contains("Do not emit tool calls in this turn"),
+        "{contract}"
+    );
+    assert!(
+        contract.contains("do not request shell output automatically"),
+        "{contract}"
+    );
+    assert!(!contract.contains("recommend mode"), "{contract}");
+    assert!(!contract.contains("Mode: recommend"), "{contract}");
+}
+
+#[test]
+fn continuation_contract_keeps_recommend_mode_name_for_recommend_users() {
+    let request = shell_handoff_continuation_request("recommend");
+    let contract =
+        provider_prompt_contract_for_request(&request, CoshApprovalMode::Recommend, "Bash");
+
+    assert!(contract.contains("Mode: recommend."), "{contract}");
+    assert!(
+        contract.contains("approval mode is recommend and has not changed"),
+        "{contract}"
+    );
+}
+
+#[test]
+fn continuation_prompt_retains_analysis_only_deny_gate_markers() {
+    let request = shell_handoff_continuation_request("auto");
+    let prompt = format!(
+        "{}{}",
+        prompt_from_request(&request),
+        provider_prompt_contract_for_request(&request, CoshApprovalMode::Recommend, "Bash")
+    );
+
+    assert!(prompt.contains("ShellCommandCompleted"), "{prompt}");
+    assert!(
+        prompt.contains("analysis-only continuation after foreground shell handoff"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("__cosh_user_approval_mode="), "{prompt}");
+}
+
+#[test]
+fn non_continuation_request_contract_matches_mode_contract() {
+    let mut request = shell_handoff_continuation_request("auto");
+    request.context_hints.clear();
+    let contract = provider_prompt_contract_for_request(&request, CoshApprovalMode::Auto, "Bash");
+
+    assert_eq!(
+        contract,
+        provider_prompt_contract(CoshApprovalMode::Auto, "Bash")
+    );
+    assert!(contract.contains("agent mode"), "{contract}");
+}
+
+#[test]
+fn provider_prompt_contract_never_claims_user_mode_changed() {
+    for mode in [
+        CoshApprovalMode::Recommend,
+        CoshApprovalMode::Auto,
+        CoshApprovalMode::Trust,
+    ] {
+        let contract = provider_prompt_contract(mode, "Bash");
+        assert!(
+            contract.contains("never tell the user their approval mode changed"),
+            "{contract}"
+        );
+    }
 }
 
 fn command_block(
@@ -1009,6 +1137,7 @@ fn command_block(
             terminal_output_bytes: 24,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     }
 }
 

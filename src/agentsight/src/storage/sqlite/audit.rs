@@ -272,10 +272,10 @@ impl AuditStore {
         }
 
         let mut providers: Vec<(String, u64)> = provider_counts.into_iter().collect();
-        providers.sort_by(|a, b| b.1.cmp(&a.1));
+        providers.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let mut top_commands: Vec<(String, u64)> = cmd_counts.into_iter().collect();
-        top_commands.sort_by(|a, b| b.1.cmp(&a.1));
+        top_commands.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         top_commands.truncate(10);
 
         Ok(AuditSummary {

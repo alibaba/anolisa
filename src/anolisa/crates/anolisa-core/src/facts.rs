@@ -18,6 +18,7 @@ use crate::integrity::{IntegrityStatus, check_owned_file};
 use crate::planner::{Facts, NativeProbe, RecordFacts};
 use crate::providers::{DelegatedProvider, ProviderError};
 use crate::state::{ObjectKind, OperationRecord};
+use crate::state_identity::repair_known_transaction_identity;
 use crate::state_store::StateStore;
 use crate::transaction::{Transaction, TransactionError};
 
@@ -172,7 +173,9 @@ pub struct JournalInventory {
 }
 
 impl JournalInventory {
-    /// Load and validate every `*.journal.toml` file covered by `evidence`.
+    /// Load and validate every journal file (see
+    /// [`JOURNAL_FILE_SUFFIX`](crate::transaction::JOURNAL_FILE_SUFFIX))
+    /// covered by `evidence`.
     ///
     /// A missing directory is an empty inventory. Enumeration, IO, parse, and
     /// schema failures are returned with the directory or journal path that
@@ -198,10 +201,13 @@ impl JournalInventory {
                 source,
             })?;
             let path = entry.path();
-            if !path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with(".journal.toml"))
-            {
+            // Filter on the shared naming constant: the journal dir also
+            // holds `<op>.state.snapshot` sidecars that must not be
+            // parsed as journals.
+            if !path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .ends_with(crate::transaction::JOURNAL_FILE_SUFFIX)
+            }) {
                 continue;
             }
             paths.push(path);
@@ -211,7 +217,7 @@ impl JournalInventory {
         let entries = paths
             .into_iter()
             .map(|path| {
-                let transaction =
+                let mut transaction =
                     Transaction::load_journal(&path).map_err(|source| FactsError::JournalLoad {
                         path: path.clone(),
                         source,
@@ -222,6 +228,7 @@ impl JournalInventory {
                         source,
                     }
                 })?;
+                repair_known_transaction_identity(&mut transaction);
                 let effective_pending = transaction.is_pending()
                     && !legacy_rpm_install_is_committed(&transaction, evidence.operations);
                 Ok(JournalEntry {
@@ -434,7 +441,8 @@ mod tests {
     use crate::providers::test_fakes::{FakeQuery, FakeTxn, InstalledOutcome, pkg_info};
     use crate::state::{FileOwner, OperationRecord, OwnedFile, OwnedFileKind};
     use crate::transaction::{
-        DelegatedRecordAction, DelegatedRecoveryContext, TransactionOutcomeStatus, TransactionStep,
+        DelegatedRecordAction, DelegatedRecoveryContext, JOURNAL_SCHEMA_VERSION,
+        TransactionOutcomeStatus, TransactionStep,
     };
 
     const NOW: &str = "2026-07-16T00:00:00Z";
@@ -502,6 +510,33 @@ mod tests {
             ])
             .expect("record legacy steps");
         journal
+    }
+
+    fn begin_legacy_cosh_ng_journal(operation: &str, root: &Path) {
+        let mut journal = Transaction::begin_with_subject(
+            operation,
+            Some("cosh"),
+            root.join("installed.toml"),
+            &root.join("journal"),
+        )
+        .expect("begin delegated journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("cosh-ng".to_string()),
+                    record_action: if operation == "install" {
+                        DelegatedRecordAction::WriteManaged
+                    } else {
+                        DelegatedRecordAction::Refresh
+                    },
+                    pinned: None,
+                },
+                [TransactionStep::planned(
+                    "native", "cosh-ng", operation, None,
+                )],
+            )
+            .expect("record delegated recovery");
     }
 
     fn operation(operation_id: &str, status: &str) -> OperationRecord {
@@ -657,6 +692,57 @@ mod tests {
     }
 
     #[test]
+    fn legacy_cosh_ng_journals_follow_the_repaired_subject() {
+        for operation in ["install", "update"] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            begin_legacy_cosh_ng_journal(operation, tmp.path());
+
+            let inventory =
+                JournalInventory::load(JournalEvidence::new(&tmp.path().join("journal"), &[]))
+                    .expect("load inventory");
+
+            assert!(inventory.blocking_for("cosh-ng").is_some());
+            assert!(inventory.recoverable_for("cosh-ng").is_some());
+            assert!(inventory.blocking_for("cosh").is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_cosh_journal_for_another_rpm_keeps_its_subject() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            tmp.path().join("installed.toml"),
+            &tmp.path().join("journal"),
+        )
+        .expect("begin delegated journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("copilot-shell".to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: None,
+                },
+                [TransactionStep::planned(
+                    "native",
+                    "copilot-shell",
+                    "install",
+                    None,
+                )],
+            )
+            .expect("record delegated recovery");
+
+        let inventory =
+            JournalInventory::load(JournalEvidence::new(&tmp.path().join("journal"), &[]))
+                .expect("load inventory");
+
+        assert!(inventory.recoverable_for("cosh").is_some());
+        assert!(inventory.blocking_for("cosh-ng").is_none());
+    }
+
+    #[test]
     fn committed_legacy_journal_does_not_block_an_unrelated_fact() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let layout = layout_under(tmp.path());
@@ -751,6 +837,7 @@ mod tests {
             pm: NativePm::Rpm,
             package: Some("copilot-shell".to_string()),
             record_action: DelegatedRecordAction::WriteManaged,
+            pinned: None,
         });
         assert!(!is_legacy_rpm_install_journal(&delegated));
 
@@ -884,7 +971,11 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read journal");
         fs::write(
             &path,
-            text.replacen("schema_version = 1", "schema_version = 999", 1),
+            text.replacen(
+                &format!("schema_version = {JOURNAL_SCHEMA_VERSION}"),
+                "schema_version = 999",
+                1,
+            ),
         )
         .expect("write future journal");
 
@@ -1087,6 +1178,7 @@ mod tests {
                 bundle_digest: None,
                 driver_schema: 1,
                 status: ClaimStatus::Enabled,
+                notices: Vec::new(),
                 resources: Vec::new(),
                 driver_payload: DriverPayload::Cosh(CoshClaim {
                     extension_dir_resource: "ext".to_string(),

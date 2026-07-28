@@ -37,7 +37,7 @@ use crate::interruption::{DetectorConfig, InterruptionDetector, recover_oom_even
 use crate::parser::Parser;
 use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
-use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
+use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore, sibling_db_path};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
 use crate::tokenizer::LlmTokenizer;
 
@@ -100,9 +100,6 @@ pub struct AgentSight {
     pid_agent_name_cache: lru::LruCache<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
-    /// Domain filter gating raw-HTTP (`AgentsightHttpsData`) FFI reporting.
-    /// Built from the config `https` + `http` rules; empty = report everything.
-    http_report_filter: crate::discovery::HttpReportFilter,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
     pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
     /// DeadLoop auto-kill: enabled flag
@@ -466,10 +463,7 @@ impl AgentSight {
         // Initialize interruption store only when interruption detection is enabled.
         let interruption_store: Option<Arc<InterruptionStore>> =
             if config.features.interruption_detection_enabled {
-                let db_path = GenAISqliteStore::default_path()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                    .join("interruption_events.db");
+                let db_path = sibling_db_path("interruption_events.db");
                 match InterruptionStore::new_with_path(&db_path) {
                     Ok(store) => {
                         log::info!("Interruption events store initialized at {db_path:?}");
@@ -519,22 +513,26 @@ impl AgentSight {
             crate::background::start_stale_scanner(Arc::clone(sqlite_store), Arc::clone(&running));
         }
 
-        // Domain filter for raw-HTTP FFI reporting: reuse the config `https`
-        // globs and `http` domain/endpoint rules. Empty → report everything.
-        let mut report_patterns: Vec<String> = config
-            .https_rules
-            .iter()
-            .map(|r| r.pattern.clone())
-            .collect();
-        report_patterns.extend(http_domains.iter().cloned());
-        for target in &config.http_targets {
-            if let crate::config::HttpTarget::Endpoint(ep) = target {
-                if let Some(ip) = ep.ip {
-                    report_patterns.push(ip.to_string());
-                }
-            }
+        // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
+        // Feature-gated (default off); the thread shares `running` as stop flag.
+        if config.features.trajectory_collection_enabled {
+            let collector_config = agentsight_trajectory_collector::CollectorConfig {
+                scan_interval_secs: config.features.trajectory_scan_interval_secs,
+                scan_dirs: config
+                    .features
+                    .trajectory_scan_dirs
+                    .as_ref()
+                    .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
+                db_path: sibling_db_path("trajectories.db"),
+            };
+            let stop = Arc::clone(&running);
+            std::thread::Builder::new()
+                .name("trajectory-collector".to_string())
+                .spawn(move || {
+                    agentsight_trajectory_collector::run_collector_loop(&collector_config, &stop);
+                })
+                .ok();
         }
-        let http_report_filter = crate::discovery::HttpReportFilter::new(report_patterns);
 
         Ok(AgentSight {
             probes,
@@ -569,7 +567,6 @@ impl AgentSight {
             last_interruption_purge: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
-            http_report_filter,
             pending_logtail,
             deadloop_kill_enabled: config.deadloop_kill_enabled,
             deadloop_kill_after_count: config.deadloop_kill_after_count,
@@ -789,7 +786,7 @@ impl AgentSight {
                 self.ffi_sender.is_some() && events_are_empty_llm(&output.events);
 
             if !output.events.is_empty() && !ffi_https_fallback {
-                if output.pending_response_id.is_some() {
+                if let Some(response_id) = output.pending_response_id {
                     // Session_id not yet resolved — queue for deferred resolution.
                     // Write a pending row NOW so crash detection can see this call
                     // during the deferral window (up to PENDING_SESSION_TIMEOUT).
@@ -806,12 +803,12 @@ impl AgentSight {
                     } else {
                         log::warn!(
                             "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
-                            output.pending_response_id.as_deref().unwrap_or("unknown")
+                            response_id
                         );
                     }
                     self.pending_genai.push(PendingGenAI {
                         events: output.events,
-                        response_id: output.pending_response_id.unwrap(),
+                        response_id,
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });
@@ -864,20 +861,11 @@ impl AgentSight {
                 }
             } else if let Some(ref sender) = self.ffi_sender {
                 // Either no LLM event was produced, or all LLM events were
-                // semantically empty (fallback). Send raw HTTP via FFI, but only
-                // for flows whose host matches the configured domain rules.
-                // An empty rule set reports everything (backward compatible).
+                // semantically empty (fallback). The FFI sender suppresses
+                // raw HTTPS before cloning or enqueueing when it is disabled.
                 for ar in &analysis_results {
                     if let crate::analyzer::AnalysisResult::Http(record) = ar {
-                        let host = Self::http_record_host(record);
-                        if self.http_report_filter.should_report(host.as_deref()) {
-                            sender.send(FfiEvent::Https(record.clone()));
-                        } else {
-                            log::debug!(
-                                "Skipping AgentsightHttpsData for host {:?}: no domain-rule match",
-                                host
-                            );
-                        }
+                        sender.send_https(record);
                     }
                 }
             }
@@ -1026,23 +1014,6 @@ impl AgentSight {
         self.ffi_sender = Some(sender);
     }
 
-    /// Extract the target host from an `HttpRecord`'s request headers.
-    ///
-    /// Checks the `host`, `Host`, and HTTP/2 `:authority` header keys. Returns
-    /// `None` when headers are unparseable or no host header is present.
-    fn http_record_host(record: &crate::analyzer::HttpRecord) -> Option<String> {
-        let headers: serde_json::Value = serde_json::from_str(&record.request_headers).ok()?;
-        let obj = headers.as_object()?;
-        for key in ["host", "Host", ":authority"] {
-            if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
-            }
-        }
-        None
-    }
-
     /// Export GenAI events to all registered exporters
     fn export_genai_events(&self, events: &[GenAISemanticEvent]) {
         if let Some(ref sender) = self.ffi_sender {
@@ -1092,6 +1063,27 @@ impl AgentSight {
     /// column on the corresponding `genai_events` row when SQLite is in use.
     fn detect_and_store_interruptions(&self, events: &[GenAISemanticEvent]) {
         if let Some(ref istore) = self.interruption_store {
+            // Build a call_id → (session_id, conversation_id) lookup from
+            // LLMCall events in this batch, so ToolUse events can inherit
+            // the conversation context of their parent call.
+            let call_context: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+                events
+                    .iter()
+                    .filter_map(|e| {
+                        if let GenAISemanticEvent::LLMCall(c) = e {
+                            Some((
+                                c.call_id.clone(),
+                                (
+                                    c.metadata.get("session_id").cloned(),
+                                    c.metadata.get("conversation_id").cloned(),
+                                ),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
             for event in events {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
                     let interruptions = self.interruption_detector.detect(llm_call);
@@ -1235,6 +1227,47 @@ impl AgentSight {
                                 }
                             }
                         }
+                    }
+                } else if let GenAISemanticEvent::ToolUse(tool) = event {
+                    // ── Tool failure detection ──────────────────────────────
+                    let (session_id, conversation_id) = tool
+                        .parent_llm_call_id
+                        .as_ref()
+                        .and_then(|cid| call_context.get(cid))
+                        .cloned()
+                        .unwrap_or((None, None));
+                    let interruptions = self.interruption_detector.detect_tool_use(
+                        tool,
+                        session_id,
+                        conversation_id,
+                    );
+                    for ie in &interruptions {
+                        // Deduplicate against unresolved interruptions already recorded
+                        // for this conversation, mirroring the LLMCall path above: a
+                        // tool that keeps failing the same way in a loop should not
+                        // flood the store with one row per attempt.
+                        if let Some(ref cid) = ie.conversation_id {
+                            let error_msg = tool.error.as_deref();
+                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
+                            {
+                                log::debug!(
+                                    "Skipping duplicate {:?} for conversation_id={} tool={}",
+                                    ie.interruption_type,
+                                    cid,
+                                    tool.tool_name
+                                );
+                                continue;
+                            }
+                        }
+                        if let Err(e) = istore.insert(ie) {
+                            log::warn!("Failed to store tool_failure interruption: {e}");
+                        }
+                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
+                        log::warn!(
+                            "ToolFailure detected: tool={} error={:?}",
+                            tool.tool_name,
+                            tool.error
+                        );
                     }
                 }
             }
@@ -2341,24 +2374,6 @@ mod tests {
 
     // ── Tests for the AgentsightHttpsData fallback path ──
 
-    fn make_http_record(request_headers: &str) -> crate::analyzer::HttpRecord {
-        crate::analyzer::HttpRecord {
-            timestamp_ns: 1,
-            pid: 1,
-            comm: "test".to_string(),
-            method: "POST".to_string(),
-            path: "/v1/chat/completions".to_string(),
-            status_code: 200,
-            request_headers: request_headers.to_string(),
-            request_body: None,
-            response_headers: "{}".to_string(),
-            response_body: None,
-            duration_ns: 0,
-            is_sse: false,
-            sse_event_count: 0,
-        }
-    }
-
     #[test]
     fn test_events_are_empty_llm() {
         use crate::genai::semantic::{InputMessage, MessagePart};
@@ -2395,46 +2410,5 @@ mod tests {
             pid: 1,
         });
         assert!(!events_are_empty_llm(&[empty, tool]));
-    }
-
-    #[test]
-    fn test_http_record_host_extraction() {
-        // Lowercase `host` key.
-        let r = make_http_record(r#"{"host":"api.openai.com","accept":"*/*"}"#);
-        assert_eq!(
-            AgentSight::http_record_host(&r).as_deref(),
-            Some("api.openai.com")
-        );
-
-        // HTTP/2 `:authority` pseudo-header.
-        let r = make_http_record(r#"{":authority":"api.anthropic.com"}"#);
-        assert_eq!(
-            AgentSight::http_record_host(&r).as_deref(),
-            Some("api.anthropic.com")
-        );
-
-        // No host header → None.
-        let r = make_http_record(r#"{"accept":"*/*"}"#);
-        assert_eq!(AgentSight::http_record_host(&r), None);
-
-        // Unparseable headers → None.
-        let r = make_http_record("not json");
-        assert_eq!(AgentSight::http_record_host(&r), None);
-    }
-
-    #[test]
-    fn test_http_report_filter_gates_by_host() {
-        use crate::discovery::HttpReportFilter;
-
-        let filter = HttpReportFilter::new(vec!["*.openai.com".to_string()]);
-        let matched = make_http_record(r#"{"host":"api.openai.com"}"#);
-        let other = make_http_record(r#"{"host":"telemetry.example.com"}"#);
-
-        assert!(filter.should_report(AgentSight::http_record_host(&matched).as_deref()));
-        assert!(!filter.should_report(AgentSight::http_record_host(&other).as_deref()));
-
-        // Empty rule set reports everything (backward compatible).
-        let unrestricted = HttpReportFilter::new(vec![]);
-        assert!(unrestricted.should_report(AgentSight::http_record_host(&other).as_deref()));
     }
 }

@@ -144,7 +144,11 @@ impl ContractRefreshOutcome {
     }
 }
 
-fn datadir_contract_roots(layout: &FsLayout, policy: ContractSourcePolicy) -> Vec<PathBuf> {
+fn datadir_contract_roots(
+    layout: &FsLayout,
+    policy: ContractSourcePolicy,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
+) -> Vec<PathBuf> {
     if matches!(policy, ContractSourcePolicy::RpmReconciliation) {
         return vec![
             layout
@@ -157,7 +161,7 @@ fn datadir_contract_roots(layout: &FsLayout, policy: ContractSourcePolicy) -> Ve
     if let Some(package_datadir) = layout.package_datadir() {
         roots.push(package_datadir);
     }
-    if let Some(packaged) = crate::packaged::packaged_datadir_root(layout)
+    if let Some(packaged) = crate::packaged::packaged_datadir_root(layout, packaged_data_probe)
         && !roots.iter().any(|root| root == &packaged)
     {
         roots.push(packaged);
@@ -172,9 +176,10 @@ fn lookup_datadir_contract(
     layout: &FsLayout,
     component: &str,
     policy: ContractSourcePolicy,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> DatadirContractLookup {
     let mut searched: Vec<PathBuf> = Vec::new();
-    for datadir_root in datadir_contract_roots(layout, policy) {
+    for datadir_root in datadir_contract_roots(layout, policy, packaged_data_probe) {
         let source_path = FsLayout::component_contract_path(&datadir_root, component);
         match std::fs::read_to_string(&source_path) {
             Ok(content) => {
@@ -207,29 +212,34 @@ pub(crate) fn inspect_datadir_contract_drift(
     layout: &FsLayout,
     component: &str,
     command: &str,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> ContractDriftInspection {
-    let contract =
-        match lookup_datadir_contract(layout, component, ContractSourcePolicy::RpmReconciliation) {
-            DatadirContractLookup::Found(contract) => contract,
-            DatadirContractLookup::Missing(_) => {
-                return ContractDriftInspection {
-                    drifted: false,
-                    warnings: Vec::new(),
-                };
-            }
-            DatadirContractLookup::Unreadable {
-                source_path,
-                source,
-            } => {
-                return ContractDriftInspection {
-                    drifted: false,
-                    warnings: vec![format!(
-                        "could not read datadir component contract at {}: {source}",
-                        source_path.display()
-                    )],
-                };
-            }
-        };
+    let contract = match lookup_datadir_contract(
+        layout,
+        component,
+        ContractSourcePolicy::RpmReconciliation,
+        packaged_data_probe,
+    ) {
+        DatadirContractLookup::Found(contract) => contract,
+        DatadirContractLookup::Missing(_) => {
+            return ContractDriftInspection {
+                drifted: false,
+                warnings: Vec::new(),
+            };
+        }
+        DatadirContractLookup::Unreadable {
+            source_path,
+            source,
+        } => {
+            return ContractDriftInspection {
+                drifted: false,
+                warnings: vec![format!(
+                    "could not read datadir component contract at {}: {source}",
+                    source_path.display()
+                )],
+            };
+        }
+    };
     let destination = match common::installed_component_manifest_path(layout, component, command) {
         Ok(path) => path,
         Err(err) => {
@@ -297,6 +307,7 @@ pub(crate) fn snapshot_datadir_contract(
     layout: &FsLayout,
     component: &str,
     command: &str,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> Vec<String> {
     snapshot_datadir_contract_with_missing_policy(
         layout,
@@ -304,6 +315,7 @@ pub(crate) fn snapshot_datadir_contract(
         command,
         true,
         ContractSourcePolicy::InstallOrAdopt,
+        packaged_data_probe,
     )
     .warnings
 }
@@ -317,6 +329,7 @@ pub(crate) fn refresh_datadir_contract_snapshot(
     layout: &FsLayout,
     component: &str,
     command: &str,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> ContractRefreshOutcome {
     snapshot_datadir_contract_with_missing_policy(
         layout,
@@ -324,6 +337,7 @@ pub(crate) fn refresh_datadir_contract_snapshot(
         command,
         false,
         ContractSourcePolicy::RpmReconciliation,
+        packaged_data_probe,
     )
 }
 
@@ -333,9 +347,10 @@ fn snapshot_datadir_contract_with_missing_policy(
     command: &str,
     warn_if_missing: bool,
     policy: ContractSourcePolicy,
+    packaged_data_probe: &crate::packaged::PackagedDataProbe,
 ) -> ContractRefreshOutcome {
     let mut warnings: Vec<String> = Vec::new();
-    let contract = match lookup_datadir_contract(layout, component, policy) {
+    let contract = match lookup_datadir_contract(layout, component, policy, packaged_data_probe) {
         DatadirContractLookup::Found(contract) => contract,
         DatadirContractLookup::Missing(searched) => {
             if warn_if_missing {

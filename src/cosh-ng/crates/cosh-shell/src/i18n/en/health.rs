@@ -117,6 +117,45 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HealthFindingKernelPanic => "recent kernel panic",
         MessageId::HealthFindingServiceFailed => "service failed",
         MessageId::HealthFindingServiceInactive => "service inactive",
+        MessageId::HealthCollectorProvider => "Provider",
+        MessageId::HealthCollectorConfig => "Config",
+        MessageId::HealthCollectorHooks => "Hooks",
+        MessageId::HealthCollectorPty => "PTY",
+        MessageId::HealthCollectorPermissions => "Permissions",
+        MessageId::DoctorTitle => "cosh-shell doctor",
+        MessageId::DoctorStatusLabel => "status",
+        MessageId::DoctorChecksLabel => "checks",
+        MessageId::DoctorRemediationLabel => "remediation",
+        MessageId::DoctorAllHealthy => "all checks passed",
+        MessageId::HealthFindingProviderUnconfigured => "AI provider not ready",
+        MessageId::HealthFindingConfigUnavailable => "configuration unavailable",
+        MessageId::HealthFindingHooksUntrusted => "project hooks not trusted",
+        MessageId::HealthFindingPtyUnavailable => "PTY support unavailable",
+        MessageId::HealthFindingPermissionsUnwritable => "config directory not writable",
+        MessageId::HealthRemediationProvider => {
+            "configure credentials for adapter '{adapter}' (env or config.toml) or run /auth"
+        }
+        MessageId::HealthRemediationUnknownAdapter => {
+            "'{adapter}' is not a supported adapter; set adapter_default to one of: fake, claude-code, qwen-cli, cosh-core"
+        }
+        MessageId::HealthRemediationConfig => {
+            "set HOME so cosh-shell can resolve ~/.copilot-shell and load config"
+        }
+        MessageId::HealthRemediationConfigUnreadable => {
+            "make ~/.copilot-shell/config.toml a readable file (not a directory) and fix its permissions"
+        }
+        MessageId::HealthRemediationConfigInvalid => {
+            "repair ~/.copilot-shell/config.toml so cosh-shell can load it (valid TOML or recognized key=value entries)"
+        }
+        MessageId::HealthRemediationHooks => {
+            "review and trust project hooks under {path} before they can run"
+        }
+        MessageId::HealthRemediationPty => {
+            "run cosh-shell from a real terminal; interactive shell needs a PTY (/dev/ptmx)"
+        }
+        MessageId::HealthRemediationPermissions => {
+            "fix permissions on {path} so cosh-shell can write config, logs and state"
+        }
         MessageId::HealthTryReasonMemoryLow => "available memory is low",
         MessageId::HealthTryReasonSwapWithContext => "swap is high with pressure context",
         MessageId::HealthTryReasonRecentOom => "recent OOM is worth reviewing",

@@ -8,6 +8,55 @@ use ratatui::{
 
 use super::super::buffer_to_lines;
 use super::super::wrap::{char_width, display_width};
+use super::highlight::styled_code_spans;
+
+/// Styled counterpart of `render_ratatui_code_block` for the styled
+/// terminal path. Builds `Line`s with styled spans directly instead of
+/// flattening a `Buffer` through `buffer_to_lines`, which would drop all
+/// cell styles (issue #1751: both `Span::raw` content and that flattening
+/// erased syntax colors). Geometry (borders, padding, wrapping) matches
+/// the unstyled renderer so panel width/height math stays identical.
+pub(super) fn styled_code_block_lines(
+    i18n: &crate::I18n,
+    language: &str,
+    lines: &[String],
+    width: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(20);
+    let content_width = width.saturating_sub(4).max(10);
+    let code_lines = wrapped_code_lines(lines, content_width);
+    let border_style = Style::default().fg(Color::DarkGray);
+    let title = styled_code_title(i18n, language, width);
+    let title_width = display_width(&title);
+    let mut rendered = Vec::new();
+
+    let top_fill = width.saturating_sub(title_width + 2);
+    rendered.push(Line::from(vec![
+        Span::styled("┌".to_string(), border_style),
+        Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}┐", "─".repeat(top_fill)), border_style),
+    ]));
+
+    let content_rows = if code_lines.is_empty() {
+        vec![String::new()]
+    } else {
+        code_lines
+    };
+    for line in content_rows {
+        let fill = content_width.saturating_sub(display_width(&line));
+        let mut spans = vec![Span::styled("│ ".to_string(), border_style)];
+        spans.extend(styled_code_spans(language, &line));
+        spans.push(Span::raw(" ".repeat(fill)));
+        spans.push(Span::styled(" │".to_string(), border_style));
+        rendered.push(Line::from(spans));
+    }
+
+    rendered.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(width.saturating_sub(2))),
+        border_style,
+    )));
+    rendered
+}
 
 pub(super) fn render_ratatui_code_block(
     i18n: &crate::I18n,
@@ -86,6 +135,28 @@ fn code_block_title(i18n: &crate::I18n, language: &str) -> String {
             &[("language", language)],
         )
     }
+}
+
+/// Title for the styled border, truncated to the block width so an
+/// over-long fenced-code info string cannot produce an over-wide `Line`
+/// that the outer `Paragraph` re-wraps into broken borders. The unstyled
+/// path gets this clipping for free from its fixed-width `Buffer`.
+fn styled_code_title(i18n: &crate::I18n, language: &str, width: usize) -> String {
+    let title = format!(" {} ", code_block_title(i18n, language));
+    // Keep room for both corner glyphs.
+    let max_width = width.saturating_sub(2);
+    if display_width(&title) <= max_width {
+        return title;
+    }
+    let target = max_width.saturating_sub(2).max(1);
+    let mut clipped = String::new();
+    for ch in title.trim_end().chars() {
+        if display_width(&clipped) + char_width(ch) > target {
+            break;
+        }
+        clipped.push(ch);
+    }
+    format!("{clipped}… ")
 }
 
 fn wrap_code_line(line: &str, width: usize) -> Vec<String> {

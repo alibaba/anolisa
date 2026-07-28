@@ -230,12 +230,11 @@ mod tests {
         panic!("process {pid} survived the timeout kill");
     }
 
-    /// Sleeps until safely past the grandchild's scheduled marker write.
-    fn wait_past_marker_deadline(started: Instant) {
-        let budget = Duration::from_millis(5500);
-        if started.elapsed() < budget {
-            std::thread::sleep(budget - started.elapsed());
-        }
+    /// Releases the survivor probe and gives any leaked grandchild time to
+    /// write its marker without depending on scheduler-relative deadlines.
+    fn release_marker_probe(marker: &std::path::Path) {
+        std::fs::write(marker.with_extension("trigger"), b"release").expect("release marker probe");
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     #[test]
@@ -243,18 +242,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let pid_file = dir.path().join("pids");
-        // Grandchild writes the marker after 5s; the direct child records
-        // `<shell-pid> <grandchild-pid>` and blocks past the timeout.
+        let trigger = marker.with_extension("trigger");
+        // The direct child records `<shell-pid> <grandchild-pid>` and
+        // blocks; a surviving grandchild writes only after the test probe.
         let script = format!(
-            "(sleep 5; : > '{}') & echo $$ $! > '{}'; sleep 30",
+            "(while [ ! -e '{}' ]; do sleep 0.05; done; : > '{}') & \
+             echo $$ $! > '{}'; sleep 30",
+            trigger.display(),
             marker.display(),
             pid_file.display()
         );
 
-        let started = Instant::now();
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
-        let err = run_command(&mut cmd, Duration::from_millis(300), "test").unwrap_err();
+        // Leave enough startup budget for a loaded CI host to spawn the
+        // grandchild and persist both PIDs before the timeout kills the group.
+        let err = run_command(&mut cmd, Duration::from_secs(1), "test").unwrap_err();
         assert!(matches!(err.code, ErrorCode::Timeout));
 
         let pids = read_pids(&pid_file);
@@ -264,7 +267,7 @@ mod tests {
             assert_process_gone(*pid);
         }
 
-        wait_past_marker_deadline(started);
+        release_marker_probe(&marker);
         assert!(!marker.exists(), "grandchild survived the timeout");
     }
 
@@ -273,10 +276,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let pid_file = dir.path().join("pids");
+        let trigger = marker.with_extension("trigger");
         // The direct child exits immediately with success, but its
         // backgrounded grandchild inherits stdout and keeps it open.
         let script = format!(
-            "(sleep 5; : > '{}') & echo $$ $! > '{}'; exit 0",
+            "(while [ ! -e '{}' ]; do sleep 0.05; done; : > '{}') & \
+             echo $$ $! > '{}'; exit 0",
+            trigger.display(),
             marker.display(),
             pid_file.display()
         );
@@ -284,7 +290,9 @@ mod tests {
         let started = Instant::now();
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
-        let err = run_command(&mut cmd, Duration::from_millis(300), "test").unwrap_err();
+        // This fixture also needs its PID handshake to complete before the
+        // deadline; the explicit trigger keeps the survivor probe deterministic.
+        let err = run_command(&mut cmd, Duration::from_secs(1), "test").unwrap_err();
         assert!(matches!(err.code, ErrorCode::Timeout));
         assert!(
             started.elapsed() < Duration::from_millis(2500),
@@ -297,7 +305,7 @@ mod tests {
         // The grandchild pipe holder must be killed with the group.
         assert_process_gone(pids[1]);
 
-        wait_past_marker_deadline(started);
+        release_marker_probe(&marker);
         assert!(!marker.exists(), "grandchild survived the drain timeout");
     }
 }

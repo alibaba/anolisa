@@ -5,6 +5,7 @@
 import asyncio
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from agent_sec_cli.daemon.errors import BadRequestError
@@ -95,6 +96,27 @@ def test_parse_skillfs_change_accepts_reconcile_with_empty_paths(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
+    ("unknown_field", "value"),
+    [
+        ("exists", False),
+        ("exists", True),
+        ("futureField", {"semantics": "unsupported"}),
+    ],
+)
+def test_parse_skillfs_change_rejects_unknown_fields(
+    tmp_path: Path,
+    unknown_field: str,
+    value: Any,
+):
+    skill_dir = make_skill(tmp_path, "weather")
+    params = request_for(skill_dir).params
+    params[unknown_field] = value
+
+    with pytest.raises(BadRequestError, match=f"unknown fields: {unknown_field}"):
+        parse_skillfs_change(params)
+
+
+@pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"schemaVersion": 1}, "schemaVersion"),
@@ -148,12 +170,25 @@ def test_parse_skillfs_change_accepts_flat_skill_id(tmp_path: Path):
     assert change.reported_skill_id == "weather"
 
 
-def test_parse_skillfs_change_rejects_missing_skill_id(tmp_path: Path):
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schemaVersion",
+        "canonicalSkillDir",
+        "skillId",
+        "eventKind",
+        "paths",
+    ],
+)
+def test_parse_skillfs_change_rejects_missing_required_fields(
+    tmp_path: Path,
+    field: str,
+):
     skill_dir = tmp_path / "hidden" / "weather"
     params = request_for(skill_dir).params
-    params.pop("skillId")
+    params.pop(field)
 
-    with pytest.raises(BadRequestError, match="skillId"):
+    with pytest.raises(BadRequestError, match=f"required fields: {field}"):
         parse_skillfs_change(params)
 
 
@@ -190,6 +225,36 @@ def test_metadata_only_notification_still_requires_skill_id(tmp_path: Path):
 
     with pytest.raises(BadRequestError, match="skillId"):
         skillfs_notify_change_handler(request, runtime)
+
+
+@pytest.mark.parametrize(
+    ("paths", "unknown_fields"),
+    [
+        (["SKILL.md"], {"exists": False}),
+        (["SKILL.md"], {"exists": True}),
+        ([".skill-meta/latest.json"], {"futureField": "unsupported"}),
+    ],
+)
+def test_notify_rejects_unknown_fields_before_ignore_or_enqueue(
+    monkeypatch,
+    tmp_path: Path,
+    paths: list[str],
+    unknown_fields: dict[str, Any],
+):
+    skill_dir = make_skill(tmp_path, "weather")
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    job = SkillLedgerActivationJob()
+    enqueue = Mock(return_value=True)
+    monkeypatch.setattr(job, "enqueue", enqueue)
+    runtime.jobs.register(job)
+
+    with pytest.raises(BadRequestError, match="unknown fields"):
+        skillfs_notify_change_handler(
+            request_for(skill_dir, paths=paths, **unknown_fields),
+            runtime,
+        )
+
+    enqueue.assert_not_called()
 
 
 def test_notify_enqueues_registered_activation_job(monkeypatch, tmp_path: Path):

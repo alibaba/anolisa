@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::model::{
     HealthCollector, HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue,
-    HealthScanReport, HealthSeverity, HealthUnavailableReason, UnavailableCollector,
+    HealthFinding, HealthScanReport, HealthSeverity, HealthUnavailableReason, UnavailableCollector,
 };
 
 pub(crate) fn health_scan_id(started_at_ms: u128) -> String {
@@ -87,6 +87,11 @@ impl HealthReportBuilder {
             severity,
             elapsed_ms,
         });
+        self
+    }
+
+    pub(crate) fn add_finding(&mut self, finding: HealthFinding) -> &mut Self {
+        self.report.findings.push(finding);
         self
     }
 

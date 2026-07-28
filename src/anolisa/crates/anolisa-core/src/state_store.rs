@@ -26,6 +26,7 @@ use crate::state::{
     BackupRecord, InstallMode, InstalledState, ObjectKind, OperationRecord, StateError,
     now_iso8601, write_atomic,
 };
+use crate::state_identity::repair_known_installation_identities;
 use crate::state_migration::{MigrationRule, QuarantinedObject, migrate_state};
 
 /// Schema version this store reads natively and always writes.
@@ -211,10 +212,12 @@ impl StateStore {
                     path: path.to_path_buf(),
                     source,
                 })?;
+            let mut installations = file.installations;
+            repair_known_installation_identities(&mut installations);
             return Ok(Self {
                 install_mode: file.install_mode,
                 prefix: file.prefix,
-                installations: file.installations,
+                installations,
                 quarantined: file.quarantined,
                 backups: file.backups,
                 operations: file.operations,
@@ -235,10 +238,12 @@ impl StateStore {
             InstallMode::User => InstallationScope::User { uid },
         };
         let migration = migrate_state(&legacy.objects, scope);
+        let mut installations = migration.active;
+        repair_known_installation_identities(&mut installations);
         Ok(Self {
             install_mode: legacy.install_mode,
             prefix: legacy.prefix,
-            installations: migration.active,
+            installations,
             quarantined: migration.quarantined,
             backups: legacy.backups,
             operations: legacy.operations,
@@ -506,6 +511,29 @@ id = "op-1"
 command = "install"
 status = "ok"
 started_at = "2026-07-01T00:00:00Z"
+"#;
+
+    const LEGACY_COSH_NG_RPM: &str = r#"
+schema_version = 4
+updated_at = "2026-07-01T00:00:00Z"
+install_mode = "system"
+prefix = "/"
+anolisa_version = "0.2.4"
+
+[[objects]]
+kind = "component"
+name = "cosh"
+version = "0.13.0"
+status = "installed"
+install_backend = "rpm"
+ownership = "rpm_managed"
+installed_at = "2026-07-01T00:00:00Z"
+
+[objects.rpm_metadata]
+package_name = "cosh-ng"
+evr = "0.13.0-1"
+arch = "x86_64"
+source_repo = "anolisa"
 "#;
 
     fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
@@ -782,6 +810,50 @@ started_at = "2026-07-01T00:00:00Z"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn v5_load_repairs_cosh_ng_rpm_identity_in_memory() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("installed.toml");
+        let mut store = StateStore::empty();
+        store.upsert(Installation {
+            binding: ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Resolved {
+                    name: "cosh-ng".to_string(),
+                },
+                relation: ManagementRelation::Managed {
+                    since: "2026-07-01T00:00:00Z".to_string(),
+                },
+                last_observed: None,
+            },
+            ..owned_installation("cosh", "0.13.0")
+        });
+        store.save(&path).expect("save legacy identity as v5");
+
+        let reloaded = StateStore::load(&path, 1000).expect("reload");
+
+        assert!(
+            reloaded.find(ObjectKind::Component, "cosh").is_none(),
+            "the incorrect identity must disappear from active state"
+        );
+        assert!(
+            reloaded.find(ObjectKind::Component, "cosh-ng").is_some(),
+            "the backing package identifies the canonical component"
+        );
+    }
+
+    #[test]
+    fn legacy_load_repairs_cosh_ng_rpm_identity_after_migration() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", LEGACY_COSH_NG_RPM);
+
+        let store = StateStore::load(&path, 1000).expect("load legacy RPM record");
+
+        assert!(store.migrated_from_legacy());
+        assert!(store.find(ObjectKind::Component, "cosh").is_none());
+        assert!(store.find(ObjectKind::Component, "cosh-ng").is_some());
     }
 
     #[test]

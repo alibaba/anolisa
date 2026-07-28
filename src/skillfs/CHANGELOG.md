@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-24
+
+### Added
+- Configurable read-time transforms now keep directive compilation enabled by
+  default and add an opt-in OS adapter with bundled Ubuntu/Alinux rules and
+  external catalog overrides
+  ([#1484](https://github.com/alibaba/anolisa/pull/1484)).
+- An authenticated live-source resolver and notify v2 protocol now give Skill
+  Ledger canonical flat or Hermes skill identities, event kinds, and changed
+  paths without exposing backing-root details
+  ([#1517](https://github.com/alibaba/anolisa/pull/1517)).
+
+### Changed
+- Agent-visible access checks now follow activated snapshot permissions while
+  live-source permissions continue to govern writes
+  ([#1517](https://github.com/alibaba/anolisa/pull/1517)).
+
+### Fixed
+- SLS telemetry writers now honor `/etc/anolisa/.telemetry_disabled`
+  dynamically and fail closed when the gate cannot be inspected
+  ([#1584](https://github.com/alibaba/anolisa/pull/1584)).
+- Hermes symlink boundaries, resolver paths, socket ownership, and peer
+  authentication now fail closed across discovery, reads, and mutations
+  ([#1517](https://github.com/alibaba/anolisa/pull/1517)).
+- Control-socket prerequisite diagnostics now consistently include the public
+  `--control-socket` flag name
+  ([#1739](https://github.com/alibaba/anolisa/pull/1739)).
+
 ## [0.3.4] - 2026-07-16
 
 ### Fixed

@@ -527,15 +527,16 @@ mod tests {
     #[test]
     fn missing_central_log_yields_empty_recent_logs() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let ctx = CliContext {
-            install_mode: crate::context::InstallMode::System,
-            prefix: Some(tmp.path().to_path_buf()),
-            json: false,
-            dry_run: false,
-            verbose: false,
-            quiet: false,
-            no_color: false,
-        };
+        let ctx = crate::test_support::context_for_root(
+            tmp.path(),
+            crate::context::InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+            crate::test_support::TestContextOptions {
+                quiet: false,
+                no_color: false,
+                ..Default::default()
+            },
+        );
 
         let logs = collect_recent_logs(None, DEFAULT_LIMIT, &ctx).expect("missing log is ok");
 

@@ -76,7 +76,7 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     // legacy state the migration refused to classify and repair cannot
     // recover.
     let provenance = record_provenance(&store, target);
-    let provenance = provenance.ok_or_else(|| CliError::InvalidArgument {
+    let provenance = provenance.ok_or_else(|| CliError::NotInstalled {
         command: command.clone(),
         reason: format!(
             "component '{target}' is not installed — nothing to forget (run `anolisa status` to see what is tracked)"
@@ -213,8 +213,18 @@ fn persist_forget(
             "component '{component}' disappeared from state during forget; nothing removed"
         ),
     })?;
+    let legacy_manifest_dir = store
+        .find(ObjectKind::Component, component)
+        .map(|installation| {
+            common::legacy_component_manifest_dir_for_installation(&layout, installation, command)
+        })
+        .transpose()?
+        .flatten();
     store.remove(ObjectKind::Component, component);
     remove_component_manifest_snapshot(&layout, component, command)?;
+    if let Some(dir) = legacy_manifest_dir {
+        remove_manifest_snapshot_dir(&dir, command)?;
+    }
 
     let now = now_iso8601();
     let lock_ts = Utc::now();
@@ -293,7 +303,11 @@ fn remove_component_manifest_snapshot(
     command: &str,
 ) -> Result<(), CliError> {
     let dir = common::installed_component_manifest_dir(layout, component, command)?;
-    match std::fs::remove_dir_all(&dir) {
+    remove_manifest_snapshot_dir(&dir, command)
+}
+
+fn remove_manifest_snapshot_dir(dir: &std::path::Path, command: &str) -> Result<(), CliError> {
+    match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(CliError::Runtime {
@@ -381,15 +395,15 @@ mod tests {
     use crate::context::InstallMode;
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
-        CliContext {
+        crate::test_support::context_for_root(
+            &prefix,
             install_mode,
-            prefix: Some(prefix),
-            json: false,
-            dry_run,
-            verbose: false,
-            quiet: true,
-            no_color: true,
-        }
+            Some(prefix.clone()),
+            crate::test_support::TestContextOptions {
+                dry_run,
+                ..Default::default()
+            },
+        )
     }
 
     /// An adopted rpm-observed component object (legacy v4 shape; loading it
@@ -468,6 +482,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: Vec::new(),
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "state".to_string(),
@@ -561,6 +576,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn forget_repaired_cosh_ng_removes_the_legacy_snapshot() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![rpm_observed_object("cosh", "cosh-ng", "0.13.0-1.al8")],
+            Vec::new(),
+        );
+        let layout = common::resolve_layout(&c);
+        let legacy_snapshot = common::installed_component_manifest_path(&layout, "cosh", COMMAND)
+            .expect("legacy snapshot path");
+        std::fs::create_dir_all(legacy_snapshot.parent().expect("snapshot dir"))
+            .expect("create snapshot dir");
+        std::fs::write(
+            &legacy_snapshot,
+            r#"
+            [component]
+            name = "cosh"
+            version = "0.13.0"
+
+            [backends.rpm]
+            package = "cosh-ng"
+            "#,
+        )
+        .expect("write legacy snapshot");
+
+        handle(
+            ForgetArgs {
+                component: "cosh-ng".to_string(),
+            },
+            &c,
+        )
+        .expect("forget repaired cosh-ng");
+
+        assert!(!legacy_snapshot.exists());
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "cosh-ng")
+                .is_none()
+        );
+    }
+
     /// forget is the documented exit for quarantined records: it drops the
     /// quarantine entry like any other record.
     #[test]
@@ -599,9 +657,9 @@ mod tests {
         );
     }
 
-    /// Forgetting an absent component routes to INVALID_ARGUMENT (exit 2).
+    /// Forgetting an absent component routes to NOT_INSTALLED (exit 2).
     #[test]
-    fn forget_unknown_component_routes_to_invalid_argument() {
+    fn forget_unknown_component_routes_to_not_installed() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let err = handle(
@@ -611,7 +669,7 @@ mod tests {
             &c,
         )
         .expect_err("absent component must error");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert_eq!(err.exit_code(), 2);
         assert!(err.reason().contains("not installed"));
     }

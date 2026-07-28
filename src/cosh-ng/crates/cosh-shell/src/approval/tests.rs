@@ -171,20 +171,20 @@ fn provider_shell_permission_approval_records_foreground_metadata() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
     assert_eq!(handoff.source, "approved_provider_shell_tool");
 }
 
 #[test]
-fn duplicate_provider_permission_tool_use_id_is_not_recorded_twice() {
+fn replayed_control_request_with_same_request_id_is_recorded_once() {
     let mut state = InlineState::default();
     let first = governed_provider_tool_permission("ctrl-1", "toolu-1");
-    let duplicate = governed_provider_tool_permission("ctrl-2", "toolu-1");
+    let replay = governed_provider_tool_permission("ctrl-1", "toolu-1");
 
     let ids = record_approval_requests(
         &mut state,
-        &[first, duplicate],
+        &[first, replay],
         None,
         AgentRunOrigin::Standard,
         false,
@@ -200,6 +200,100 @@ fn duplicate_provider_permission_tool_use_id_is_not_recorded_twice() {
         state.approvals.requests[0].tool_use_id.as_deref(),
         Some("toolu-1")
     );
+}
+
+#[test]
+fn distinct_control_requests_reusing_tool_use_id_are_recorded_separately() {
+    // A follow-up approval (e.g. sandbox-bypass retry) reuses the failed
+    // tool call's tool_use_id under a fresh request_id; collapsing them
+    // leaves the provider waiting forever for a response (#1920).
+    let mut state = InlineState::default();
+    let first = governed_provider_tool_permission("ctrl-1", "toolu-1");
+    let followup = governed_provider_tool_permission("ctrl-2", "toolu-1");
+
+    let ids = record_approval_requests(
+        &mut state,
+        &[first, followup],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+
+    assert_eq!(ids, vec!["req-1", "req-2"]);
+    assert_eq!(state.approvals.requests.len(), 2);
+    assert_eq!(
+        state.approvals.requests[1].request_id.as_deref(),
+        Some("ctrl-2")
+    );
+    assert_eq!(
+        state.approvals.requests[1].tool_use_id.as_deref(),
+        Some("toolu-1")
+    );
+    assert_eq!(
+        state.approvals.requests[1].status,
+        ApprovalRequestStatus::Pending
+    );
+}
+
+#[test]
+fn hook_followup_control_request_after_resolved_fallback_is_recorded() {
+    // #1920 regression: a trust-mode auto-approved fallback entry
+    // (request_id=None) for the same tool_use_id must not swallow the
+    // control-protocol approval that arrives after the tool failed.
+    let mut state = InlineState::default();
+    let fallback_ids = record_approval_requests(
+        &mut state,
+        &[governed_shell_tool_call("echo ok")],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+    assert_eq!(fallback_ids, vec!["req-1"]);
+    assert!(state.approvals.requests[0].request_id.is_none());
+    assert_eq!(
+        state.approvals.requests[0].tool_use_id.as_deref(),
+        Some("tool-1")
+    );
+    state.approvals.requests[0].status = ApprovalRequestStatus::Approved;
+
+    let followup = governed_provider_tool_permission("ctrl-9", "tool-1");
+    let ids = record_approval_requests(
+        &mut state,
+        &[followup],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+
+    assert_eq!(ids, vec!["req-2"]);
+    assert_eq!(state.approvals.requests.len(), 2);
+    assert_eq!(
+        state.approvals.requests[1].request_id.as_deref(),
+        Some("ctrl-9")
+    );
+    assert_eq!(
+        state.approvals.requests[1].status,
+        ApprovalRequestStatus::Pending
+    );
+}
+
+#[test]
+fn duplicate_fallback_tool_call_with_same_tool_use_id_is_recorded_once() {
+    let mut state = InlineState::default();
+    let ids = record_approval_requests(
+        &mut state,
+        &[
+            governed_shell_tool_call("echo ok"),
+            governed_shell_tool_call("echo ok"),
+        ],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+
+    assert_eq!(ids, vec!["req-1"]);
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert!(state.approvals.requests[0].request_id.is_none());
 }
 
 #[test]
@@ -276,7 +370,7 @@ fn streamed_tool_fallback_handoff_strips_control_request_id() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
 
     assert_eq!(handoff.command, "echo fallback");
@@ -301,7 +395,7 @@ fn provider_tool_call_fallback_handoff_keeps_provider_source() {
     let handoff = state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("handoff");
 
     assert_eq!(handoff.command, "echo provider-fallback");
@@ -482,6 +576,7 @@ fn control_shell_permission_uses_same_command_assessment_risk() {
             tool_input: serde_json::json!({ "command": "ps aux --sort=-%mem | head -20" }),
             tool_use_id: "toolu-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     };
 
@@ -516,6 +611,7 @@ fn control_shell_permission_missing_command_blocks_as_unsafe_binding() {
             tool_input: serde_json::json!({ "description": "missing command" }),
             tool_use_id: "toolu-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     };
 
@@ -600,7 +696,7 @@ fn provider_approval_without_owner_starts_origin_preserving_recovery() {
     recover_undelivered_provider_approval(
         ProviderApprovalDelivery::OwnerUnavailable,
         &request,
-        7,
+        Some(7),
         &adapter,
         &mut state,
         &mut output,
@@ -662,12 +758,133 @@ fn shell_handoff_validation_message_uses_active_language() {
     assert_eq!(unknown, "custom validation");
 }
 
+#[test]
+fn full_control_queue_keeps_approval_pending_and_journal_untouched() {
+    use crate::agent::queue::MAX_TOTAL_QUEUED_AGENT_REQUESTS;
+    use crate::agent::run::{AgentStartIntent, PendingAgentRequest, PendingRequestClass};
+
+    let mut state = InlineState::default();
+    state.approvals.requests.push(provider_tool_request(
+        "run_shell_command",
+        Some(serde_json::json!({ "command": "echo reserved" })),
+    ));
+    let approval_id = state.approvals.requests[0].id.clone();
+
+    // Force queueing (compaction recommended) and exhaust the hard cap.
+    crate::slash::session::note_compaction_recommendation(
+        &mut state,
+        "00000000-0000-4000-8000-000000000000:1:0:200000:100000",
+    );
+    for index in 0..MAX_TOTAL_QUEUED_AGENT_REQUESTS {
+        let mut filler_event =
+            ShellEvent::user_input_intercepted("session-1", format!("filler {index}"));
+        filler_event.cwd = Some("/repo".to_string());
+        let request = agent_request_from_intercepted_input(&filler_event, index + 10, true)
+            .expect("filler request");
+        state
+            .agent_run
+            .queued_requests
+            .push_back(PendingAgentRequest {
+                request,
+                origin: AgentRunOrigin::Standard,
+                intent: AgentStartIntent::UserInitiated,
+                class: PendingRequestClass::ControlResponse,
+                selectable_after_event_index: None,
+                before_held_text: false,
+            });
+    }
+
+    let mut approve = ShellEvent::user_input_intercepted("session-1", &approval_id);
+    approve.component = Some("card".to_string());
+    approve.message = Some("approve".to_string());
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_approval_actions(&[approve], &[], &adapter, &mut state, &mut output, 200)
+        .expect("approval action");
+
+    // Nothing was half-consumed: the approval stays pending and retryable,
+    // the journal recorded nothing, and the queue did not grow.
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert!(state.approvals.journal.is_empty());
+    assert_eq!(
+        state.agent_run.queued_requests.len(),
+        MAX_TOTAL_QUEUED_AGENT_REQUESTS
+    );
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(rendered.contains("still pending"), "{rendered}");
+}
+
+#[test]
+fn full_queue_does_not_block_direct_owner_approval_resolution() {
+    use crate::agent::queue::MAX_TOTAL_QUEUED_AGENT_REQUESTS;
+    use crate::agent::run::{AgentStartIntent, PendingAgentRequest, PendingRequestClass};
+
+    // The active provider run owns this control request: the resolution is
+    // delivered directly through its handle and consumes no queue slot, so a
+    // full queue must never reject it — the provider is blocked on exactly
+    // this response and the queue cannot drain while it waits.
+    let mut state = InlineState::default();
+    let (dir, mut active_run) = active_run_for_approval_test();
+    active_run
+        .governed_events
+        .push(governed_provider_tool_permission("ctrl-1", "toolu-1"));
+    state.agent_run.active = Some(active_run);
+    state.approvals.requests.push(provider_tool_request(
+        "Read",
+        Some(serde_json::json!({ "file_path": "Cargo.toml" })),
+    ));
+    for index in 0..MAX_TOTAL_QUEUED_AGENT_REQUESTS {
+        let mut filler_event =
+            ShellEvent::user_input_intercepted("session-1", format!("filler {index}"));
+        filler_event.cwd = Some("/repo".to_string());
+        let request = agent_request_from_intercepted_input(&filler_event, index + 500, true)
+            .expect("filler request");
+        state
+            .agent_run
+            .queued_requests
+            .push_back(PendingAgentRequest {
+                request,
+                origin: AgentRunOrigin::Standard,
+                intent: AgentStartIntent::UserInitiated,
+                class: PendingRequestClass::ControlResponse,
+                selectable_after_event_index: None,
+                before_held_text: false,
+            });
+    }
+
+    let mut approve = ShellEvent::user_input_intercepted("session-1", "req-1");
+    approve.component = Some("card".to_string());
+    approve.message = Some("approve".to_string());
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut output = Vec::new();
+    render_approval_actions(&[approve], &[], &adapter, &mut state, &mut output, 300)
+        .expect("approval action");
+
+    // The approval resolved (delivered to the owner), the queue did not grow,
+    // and no queue-full rejection was shown.
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved
+    );
+    assert_eq!(
+        state.agent_run.queued_requests.len(),
+        MAX_TOTAL_QUEUED_AGENT_REQUESTS
+    );
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert!(!rendered.contains("still pending"), "{rendered}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn provider_tool_request(
     tool_name: &str,
     tool_input: Option<serde_json::Value>,
 ) -> RuntimeApprovalRequest {
     RuntimeApprovalRequest {
         id: "req-1".to_string(),
+        audit_ref: None,
         run_id: "run-1".to_string(),
         origin: AgentRunOrigin::Standard,
         session_id: "sess-1".to_string(),
@@ -718,6 +935,7 @@ fn active_run_for_approval_test() -> (std::path::PathBuf, ActiveAgentRun) {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -795,11 +1013,7 @@ exit 1
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-core");
-    let adapter = CoshCoreAdapter {
-        program: program.to_string_lossy().to_string(),
-        allow_model_call: true,
-        session: std::sync::Arc::default(),
-    };
+    let adapter = CoshCoreAdapter::new(program.to_string_lossy().to_string(), true);
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
@@ -829,6 +1043,7 @@ fn governed_provider_tool_permission(request_id: &str, tool_use_id: &str) -> Gov
             tool_input: serde_json::json!({ "command": "df -h" }),
             tool_use_id: tool_use_id.to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         },
     }
 }
@@ -875,4 +1090,227 @@ fn command_matches_trust_key_basic() {
 fn command_matches_trust_key_empty_set() {
     let trusted = HashSet::new();
     assert!(!command_matches_trust_key("npm test", &trusted));
+}
+
+// ─── Turn-scope batch consent (issue #1773) ─────────────────────────
+
+use crate::approval::panel::approval_action_set_for;
+use crate::approval::resolution::{apply_batch_consent_decision, batch_consent_covers_request};
+
+fn turn_request(
+    id: &str,
+    run_id: &str,
+    command: &str,
+    risk: &'static str,
+) -> RuntimeApprovalRequest {
+    let mut request = provider_tool_request(
+        "run_shell_command",
+        Some(serde_json::json!({ "command": command })),
+    );
+    request.id = id.to_string();
+    request.run_id = run_id.to_string();
+    request.risk = risk;
+    request
+}
+
+/// FAIL→PASS 对照（S2 探针转正）：同 run 内给出轮次级同意后，另一条
+/// 不同命令必须被覆盖（SC1/V1）；同时 session trust 零写入（N7）。
+#[test]
+fn approve_turn_covers_other_commands_in_same_run() {
+    let mut state = InlineState::default();
+    state.approvals.requests.push(turn_request(
+        "req-1",
+        "run-1",
+        "systemctl status nginx",
+        "medium",
+    ));
+
+    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
+        .expect("approval decision");
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    assert_eq!(state.control.trust.run_batch_consent(), Some("run-1"));
+    assert_eq!(
+        state.approvals.journal.last().map(|entry| entry.actor),
+        Some("user_batch")
+    );
+    assert!(state.control.trust.session_trusted_commands().is_empty());
+
+    let other = turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium");
+    let consented_run = state
+        .control
+        .trust
+        .run_batch_consent()
+        .expect("consent granted");
+    assert!(
+        batch_consent_covers_request(&other, consented_run),
+        "a different command from the same run should be covered by batch consent"
+    );
+}
+
+/// 放行谓词的 fail-closed 边界：high risk、hook、异 run、非 bash tool、
+/// 已 resolve 状态均不被覆盖（N1/N3/N4/N9/I2）。
+#[test]
+fn run_batch_consent_covers_is_fail_closed() {
+    let covered = turn_request("req-2", "run-1", "ss -lntp", "medium");
+    assert!(batch_consent_covers_request(&covered, "run-1"));
+
+    let high = turn_request("req-3", "run-1", "rm -rf /var/log/nginx", "high");
+    assert!(!batch_consent_covers_request(&high, "run-1"));
+
+    let mut hooked = turn_request("req-4", "run-1", "ss -lntp", "medium");
+    hooked.hook_requires_approval = true;
+    assert!(!batch_consent_covers_request(&hooked, "run-1"));
+
+    let foreign_run = turn_request("req-5", "run-2", "ss -lntp", "medium");
+    assert!(!batch_consent_covers_request(&foreign_run, "run-1"));
+
+    let non_bash = provider_tool_request("Write", None);
+    assert!(!batch_consent_covers_request(&non_bash, "run-1"));
+
+    let mut resolved = turn_request("req-6", "run-1", "ss -lntp", "medium");
+    resolved.status = ApprovalRequestStatus::Approved;
+    assert!(!batch_consent_covers_request(&resolved, "run-1"));
+
+    // 未授权（consent 已清除）时，到达路径根本不会进入清扫。
+    let mut state = InlineState::default();
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
+    state.control.trust.clear_run_batch_consent();
+    assert_eq!(state.control.trust.run_batch_consent(), None);
+}
+
+/// Blocked turn decisions keep the blocked title and never grant consent.
+#[test]
+fn approve_turn_blocked_request_does_not_grant_consent() {
+    let mut state = InlineState::default();
+    // `run_shell_command` without a command payload fails shell-handoff
+    // validation and resolves Blocked.
+    state
+        .approvals
+        .requests
+        .push(provider_tool_request("run_shell_command", None));
+
+    let direct_decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::ApproveTurn)
+        .expect("approval decision");
+    assert_eq!(
+        direct_decision.request.status,
+        ApprovalRequestStatus::Blocked
+    );
+    assert_eq!(
+        direct_decision.title,
+        MessageId::ApprovalResolutionBlockedTitle
+    );
+    assert_eq!(state.control.trust.run_batch_consent(), None);
+
+    state
+        .approvals
+        .requests
+        .push(provider_tool_request("run_shell_command", None));
+    let batch_decision =
+        apply_batch_consent_decision(&mut state, 1).expect("batch consent decision");
+    assert_eq!(
+        batch_decision.request.status,
+        ApprovalRequestStatus::Blocked
+    );
+    assert_eq!(
+        batch_decision.title,
+        MessageId::ApprovalResolutionBlockedTitle
+    );
+}
+
+/// 批量清扫决策复用同一管线，journal 逐条留痕 actor=batch_consent，
+/// preview/risk/run_id 完整（V2/G4/I3）。
+#[test]
+fn batch_consent_decision_journals_batch_actor() {
+    let mut state = InlineState::default();
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
+    state.approvals.requests.push(turn_request(
+        "req-2",
+        "run-1",
+        "journalctl -u nginx -n 50",
+        "medium",
+    ));
+
+    let decision = apply_batch_consent_decision(&mut state, 0).expect("batch decision");
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    let entry = state.approvals.journal.last().expect("journal entry");
+    assert_eq!(entry.actor, "batch_consent");
+    assert_eq!(entry.run_id, "run-1");
+    assert_eq!(entry.preview, "$ journalctl -u nginx -n 50");
+    assert_eq!(entry.risk, "medium");
+    // Sweep resolutions never (re-)grant or widen consent scope.
+    assert_eq!(state.control.trust.run_batch_consent(), Some("run-1"));
+    assert!(state.control.trust.session_trusted_commands().is_empty());
+}
+
+/// run 结束（stop 出口）即清除授权，不跨 run 泄漏（N2/G3/I4）。
+#[test]
+fn stopping_active_run_clears_batch_consent() {
+    let mut state = InlineState::default();
+    let (dir, active_run) = active_run_for_approval_test();
+    state.agent_run.active = Some(active_run);
+    state
+        .control
+        .trust
+        .grant_run_batch_consent("run-1".to_string());
+
+    let mut output = Vec::new();
+    stop_active_agent_run_without_rendering(&mut state, &mut output).expect("stop run");
+    assert_eq!(state.control.trust.run_batch_consent(), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 展示条件矩阵（D7）：单卡轮 Standard；队列多条首卡即 TurnConsent；
+/// 串行第 2 卡 TurnConsent（前序已 resolve 也计入）；新 run 回到
+/// Standard；hook 永远 Hook（SC7/SC8/V9/N8/N9）。
+#[test]
+fn approval_action_set_matrix() {
+    // 单卡轮次：Standard。
+    let solo = vec![turn_request("req-1", "run-1", "git status", "medium")];
+    assert_eq!(
+        approval_action_set_for(&solo[0], &solo),
+        ApprovalActionSet::Standard
+    );
+
+    // 队列批量到达：首卡即 TurnConsent。
+    let queued = vec![
+        turn_request("req-1", "run-1", "systemctl status nginx", "medium"),
+        turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium"),
+    ];
+    assert_eq!(
+        approval_action_set_for(&queued[0], &queued),
+        ApprovalActionSet::TurnConsent
+    );
+
+    // 串行到达：前序已 resolve 也计入，第 2 卡 TurnConsent。
+    let mut serial = vec![
+        turn_request("req-1", "run-1", "systemctl status nginx", "medium"),
+        turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium"),
+    ];
+    serial[0].status = ApprovalRequestStatus::Approved;
+    assert_eq!(
+        approval_action_set_for(&serial[1], &serial),
+        ApprovalActionSet::TurnConsent
+    );
+
+    // 新 run 首卡：上轮请求不同 run_id，回到 Standard。
+    let mut next_turn = serial.clone();
+    next_turn.push(turn_request("req-3", "run-2", "free -m", "medium"));
+    assert_eq!(
+        approval_action_set_for(&next_turn[2], &next_turn),
+        ApprovalActionSet::Standard
+    );
+
+    // hook 请求永远 Hook，即使同 run 多条（C4）。
+    let mut hooked = turn_request("req-4", "run-1", "git status", "medium");
+    hooked.subject = "HOOK: PreToolUse".to_string();
+    assert_eq!(
+        approval_action_set_for(&hooked, &queued),
+        ApprovalActionSet::Hook
+    );
 }

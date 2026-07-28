@@ -216,9 +216,14 @@ fn host_executed_shell_result_from_view(
     evidence: &RuntimeShellCommandCompleted,
     view: crate::evidence::output_policy::EvidenceView,
 ) -> HostExecutedShellResult {
+    let untracked_notice = if evidence.status == crate::types::SHELL_HANDOFF_UNTRACKED_STATUS {
+        "\nexecution was not tracked (preexec marker missing); exit code and output are unavailable and must not be treated as a command result. Suggest rerunning the command if its outcome matters."
+    } else {
+        ""
+    };
     let llm_content = format!(
         "ShellCommandCompleted evidence\n\
-         {}",
+         {}{untracked_notice}",
         view.provider_summary,
     );
     HostExecutedShellResult {
@@ -263,16 +268,21 @@ fn shell_handoff_continuation_request(
         .and_then(|request| request.original_user_request.as_deref())
         .unwrap_or("<unknown>");
     let view = EvidenceState::provider_visible_view(evidence);
+    let untracked_notice = if evidence.status == crate::types::SHELL_HANDOFF_UNTRACKED_STATUS {
+        "\nexecution was not tracked (preexec marker missing); exit code and output are unavailable and must not be treated as a command result."
+    } else {
+        ""
+    };
     let user_input = format!(
         "ShellCommandCompleted evidence\n\
          The foreground shell executed this command after user approval. Treat this as shell evidence, not as a provider-native tool_result.\n\
-         Continue the analysis-only Agent turn from the prior request. Further shell commands require a fresh approval.\n\
+         Continue the analysis-only Agent turn from the prior request. The user's cosh-shell approval mode is unchanged. Further shell commands require a fresh approval.\n\
          original_user_request: {original_user_request}\n\
          approval_id: {approval_id}\n\
          provider_tool: {subject}\n\
          provider_request_id: {provider_request_id}\n\
          tool_use_id: {tool_use_id}\n\
-         {}",
+         {}{untracked_notice}",
         view.provider_summary,
     );
     let mut request = AgentRequest {
@@ -303,6 +313,7 @@ fn shell_handoff_continuation_request(
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: vec![

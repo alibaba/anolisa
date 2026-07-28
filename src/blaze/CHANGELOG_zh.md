@@ -9,6 +9,16 @@
 
 ## [未发布]
 
+## [0.3.0] - 2026-07-22
+
+### 新增
+
+- 通用 `StorageProvider` trait，支持可插拔存储后端架构。
+- `FileStorageProvider`：默认文件存储后端，适用于开发和标准部署。
+- `[storage]` 配置段：`provider`、`pool_size`、`prefork`、`flush_interval` 字段，均有向后兼容的默认值。
+- `GET /v1/health` 现返回 `storage_pool` 状态（ready/capacity/pending）。
+- `BackendSpawner` trait 扩展 `restore`、`pause`、`resume`、`create_snapshot` 方法（默认返回不支持，为后续快照工作流预留接口）。
+
 ## [0.2.1] - 2026-07-21
 
 ### 变更

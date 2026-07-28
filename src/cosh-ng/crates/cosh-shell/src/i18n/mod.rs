@@ -109,6 +109,54 @@ mod tests {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);
         }
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 750);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 751);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 752);
+        assert_eq!(
+            MessageId::AgentQuestionUnavailableTitle as usize,
+            MessageId::SlashQuotedArgumentsUnsupported as usize + 1
+        );
+        assert_eq!(
+            MessageId::ApprovalTitle as usize,
+            MessageId::QuestionNoPendingBody as usize + 1
+        );
+        assert_eq!(
+            MessageId::AgentStatusToolArguments as usize,
+            MessageId::ALL.len() - 2
+        );
+        assert_eq!(
+            MessageId::AgentStatusGeneratingToolArguments as usize,
+            MessageId::ALL.len() - 1
+        );
+    }
+
+    #[test]
+    fn question_interaction_messages_match_the_approved_contract() {
+        let en = I18n::new(Language::EnUs);
+        let zh = I18n::new(Language::ZhCn);
+        assert_eq!(
+            en.t(MessageId::QuestionRequiredGhost),
+            "Please enter an answer"
+        );
+        assert_eq!(
+            en.t(MessageId::QuestionInvalidGhost),
+            "Choose a valid answer"
+        );
+        assert_eq!(
+            en.t(MessageId::QuestionAnswerNotSentTitle),
+            "Answer not sent"
+        );
+        assert_eq!(
+            en.t(MessageId::QuestionAnswerNotSentBody),
+            "The question is still pending. Retry or press Ctrl+C to cancel."
+        );
+        assert_eq!(zh.t(MessageId::QuestionRequiredGhost), "请先输入回答");
+        assert_eq!(zh.t(MessageId::QuestionInvalidGhost), "请选择有效回答");
+        assert_eq!(zh.t(MessageId::QuestionAnswerNotSentTitle), "回答未发送");
+        assert_eq!(
+            zh.t(MessageId::QuestionAnswerNotSentBody),
+            "问题仍在等待回答，请重试或按 Ctrl+C 取消。"
+        );
     }
 
     #[test]
@@ -149,5 +197,71 @@ mod tests {
             i18n.t(MessageId::ApprovalResolutionAutoApprovedTitle),
             "已自动批准"
         );
+    }
+
+    #[test]
+    fn quoted_argument_error_is_localized() {
+        let en = I18n::new(Language::EnUs);
+        assert_eq!(
+            en.t(MessageId::SlashInvalidArgumentsTitle),
+            "Invalid slash arguments"
+        );
+        assert_eq!(
+            en.t(MessageId::SlashQuotedArgumentsUnsupported),
+            "Quoted arguments are not supported. Use /mode approval trust confirm instead."
+        );
+
+        let zh = I18n::new(Language::ZhCn);
+        assert_eq!(
+            zh.t(MessageId::SlashInvalidArgumentsTitle),
+            "Slash 参数错误"
+        );
+        assert_eq!(
+            zh.t(MessageId::SlashQuotedArgumentsUnsupported),
+            "不支持带引号的参数。本例请改用 /mode approval trust confirm。"
+        );
+    }
+
+    #[test]
+    fn help_and_mode_messages_distinguish_recommendation_and_insight_scopes() {
+        let en = I18n::new(Language::EnUs);
+        let zh = I18n::new(Language::ZhCn);
+
+        // /help: /recommendations is scoped to personalization only and points to /mode analysis.
+        assert!(en
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("personalized prompt recommendations only"));
+        assert!(en
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("/mode analysis"));
+        assert!(zh
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("仅管理个性化提示词推荐"));
+        assert!(zh
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("/mode analysis"));
+
+        // /help: /mode analysis owns passive suggestions and failure insights.
+        assert!(en
+            .t(MessageId::HelpSummaryModeAnalysis)
+            .contains("failure insights"));
+        assert!(zh
+            .t(MessageId::HelpSummaryModeAnalysis)
+            .contains("失败命令 Insight"));
+
+        // /mode analysis manual: footer states insight scope and the asymmetric
+        // pause of personalized recommendations.
+        assert!(en
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("failure insights"));
+        assert!(en
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("/recommendations"));
+        assert!(zh
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("失败命令 Insight"));
+        assert!(zh
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("/recommendations"));
     }
 }

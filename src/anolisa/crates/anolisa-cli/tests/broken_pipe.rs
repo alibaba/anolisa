@@ -69,21 +69,9 @@ fn successful_stdout_paths_survive_an_immediately_closed_reader() {
 
 #[test]
 fn json_business_failure_keeps_exit_code_when_stdout_reader_closes() {
-    let prefix = tempfile::tempdir().expect("temporary prefix must be created");
-    let prefix = prefix.path().to_string_lossy();
-
-    assert_graceful_closed_stdout(
-        &[
-            "--json",
-            "--install-mode",
-            "user",
-            "--prefix",
-            &prefix,
-            "forget",
-            "definitely-missing",
-        ],
-        2,
-    );
+    // A targetless update fails before repository or state discovery, keeping
+    // this stdout regression independent of the invoking user's HOME.
+    assert_graceful_closed_stdout(&["--json", "update"], 2);
 }
 
 #[cfg(target_os = "linux")]

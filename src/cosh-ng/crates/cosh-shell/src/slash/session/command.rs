@@ -3,10 +3,12 @@
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SessionCommand<'a> {
     OpenPicker,
+    New,
     Status,
     List,
     Resume(&'a str),
     Clear(Vec<String>),
+    Compact(Option<&'a str>),
     Usage,
 }
 
@@ -14,6 +16,7 @@ pub(super) fn parse_session_command(arguments: &str) -> SessionCommand<'_> {
     let tokens = arguments.split_whitespace().collect::<Vec<_>>();
     match tokens.as_slice() {
         [] | ["resume"] => SessionCommand::OpenPicker,
+        ["new"] => SessionCommand::New,
         ["status"] => SessionCommand::Status,
         ["list"] => SessionCommand::List,
         ["resume", session_id] => SessionCommand::Resume(session_id),
@@ -28,13 +31,19 @@ pub(super) fn parse_session_command(arguments: &str) -> SessionCommand<'_> {
                     .collect(),
             )
         }
+        ["compact"] => SessionCommand::Compact(None),
+        ["compact", subcommand] => SessionCommand::Compact(Some(subcommand)),
         [session_id] if is_bare_session_id(session_id) => SessionCommand::Resume(session_id),
         _ => SessionCommand::Usage,
     }
 }
 
 fn is_bare_session_id(value: &str) -> bool {
-    !value.starts_with('-') && !matches!(value, "status" | "list" | "resume" | "clear")
+    !value.starts_with('-')
+        && !matches!(
+            value,
+            "new" | "status" | "list" | "resume" | "clear" | "compact"
+        )
 }
 
 #[cfg(test)]
@@ -47,6 +56,7 @@ mod tests {
     fn parses_session_command_grammar_without_fallthrough() {
         let cases = [
             ("", SessionCommand::OpenPicker),
+            ("new", SessionCommand::New),
             ("status", SessionCommand::Status),
             ("list", SessionCommand::List),
             ("resume", SessionCommand::OpenPicker),
@@ -62,7 +72,11 @@ mod tests {
                 "clear --all",
                 SessionCommand::Clear(vec!["--all".to_string()]),
             ),
+            ("compact", SessionCommand::Compact(None)),
+            ("compact status", SessionCommand::Compact(Some("status"))),
+            ("compact cancel", SessionCommand::Compact(Some("cancel"))),
             (SESSION_ID, SessionCommand::Resume(SESSION_ID)),
+            ("new extra", SessionCommand::Usage),
             ("status extra", SessionCommand::Usage),
             ("list extra", SessionCommand::Usage),
             ("--all", SessionCommand::Usage),
@@ -70,6 +84,7 @@ mod tests {
             ("resume status extra", SessionCommand::Usage),
             ("clear --all extra", SessionCommand::Usage),
             ("clear first --all", SessionCommand::Usage),
+            ("compact status extra", SessionCommand::Usage),
             ("-reserved", SessionCommand::Usage),
         ];
 

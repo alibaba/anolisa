@@ -1,6 +1,8 @@
-use libbpf_cargo::SkeletonBuilder;
 use std::env;
 use std::path::PathBuf;
+
+#[cfg(target_os = "linux")]
+use libbpf_cargo::SkeletonBuilder;
 
 /// Read the Ring Buffer size (in MiB) from the `AGENTSIGHT_RING_BUFFER_MB`
 /// environment variable and return the corresponding clang `-D` flag.
@@ -10,6 +12,7 @@ use std::path::PathBuf;
 /// validate at load time; common values are 8, 16, 32, 64.
 ///
 /// Default: 32 MiB (matches `common.h` fallback).
+#[cfg(target_os = "linux")]
 fn ring_buffer_clang_define() -> String {
     let mb = env::var("AGENTSIGHT_RING_BUFFER_MB")
         .ok()
@@ -25,6 +28,7 @@ fn ring_buffer_clang_define() -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn generate_skeleton(out: &mut PathBuf, name: &str, clang_define: &str) {
     let c_path = format!("src/bpf/{name}.bpf.c");
     let rs_name = format!("{name}.skel.rs");
@@ -41,6 +45,7 @@ fn generate_skeleton(out: &mut PathBuf, name: &str, clang_define: &str) {
     println!("cargo:rerun-if-changed={c_path}");
 }
 
+#[cfg(target_os = "linux")]
 fn generate_header(out: &mut PathBuf, name: &str) {
     let header_path = format!("src/bpf/{name}.h");
     let rs_name = format!("{name}.rs");
@@ -57,96 +62,33 @@ fn generate_header(out: &mut PathBuf, name: &str) {
     println!("cargo:rerun-if-changed={header_path}");
 }
 
-fn main() {
-    let mut out =
-        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"));
-
-    // Read AGENTSIGHT_RING_BUFFER_MB once and pass to every BPF skeleton build.
+#[cfg(target_os = "linux")]
+fn generate_ebpf_artifacts(out: &mut PathBuf) {
     let ring_define = ring_buffer_clang_define();
-    // Rebuild when the env var changes.
     println!("cargo:rerun-if-env-changed=AGENTSIGHT_RING_BUFFER_MB");
 
-    generate_skeleton(&mut out, "sslsniff", &ring_define);
-    generate_header(&mut out, "sslsniff");
+    generate_skeleton(out, "sslsniff", &ring_define);
+    generate_header(out, "sslsniff");
 
-    // Generate proctrace skeleton and bindings
-    generate_skeleton(&mut out, "proctrace", &ring_define);
-    generate_header(&mut out, "proctrace");
+    generate_skeleton(out, "proctrace", &ring_define);
+    generate_header(out, "proctrace");
 
-    // Generate procmon skeleton and bindings
-    generate_skeleton(&mut out, "procmon", &ring_define);
-    generate_header(&mut out, "procmon");
+    generate_skeleton(out, "procmon", &ring_define);
+    generate_header(out, "procmon");
 
-    // Generate filewatch skeleton and bindings
-    generate_skeleton(&mut out, "filewatch", &ring_define);
-    generate_header(&mut out, "filewatch");
+    generate_skeleton(out, "filewatch", &ring_define);
+    generate_header(out, "filewatch");
 
-    // Generate filewrite skeleton and bindings
-    generate_skeleton(&mut out, "filewrite", &ring_define);
-    generate_header(&mut out, "filewrite");
+    generate_skeleton(out, "filewrite", &ring_define);
+    generate_header(out, "filewrite");
 
-    // Generate udpdns skeleton and bindings
-    generate_skeleton(&mut out, "udpdns", &ring_define);
-    generate_header(&mut out, "udpdns");
+    generate_skeleton(out, "udpdns", &ring_define);
+    generate_header(out, "udpdns");
 
-    // Generate tcpsniff skeleton (no header — reuses sslsniff.h event format)
-    generate_skeleton(&mut out, "tcpsniff", &ring_define);
-
-    // generate_header(&mut out, "frametypes");
-    // generate_header(&mut out, "errors");
-    // generate_header(&mut out, "stackdeltatypes");
-
-    // 确保 frontend-dist 目录存在，避免 include_dir! 宏在编译期因目录不存在而 panic
-    // 前端构建产物放入该目录后重新编译即可嵌入
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
-    let frontend_dist = PathBuf::from(&manifest_dir).join("frontend-dist");
-    if !frontend_dist.exists() {
-        std::fs::create_dir_all(&frontend_dist).expect("Failed to create frontend-dist directory");
-    }
-    // Watch the directory AND each file inside it so cargo detects content changes
-    println!("cargo:rerun-if-changed=frontend-dist");
-    if let Ok(entries) = std::fs::read_dir(&frontend_dist) {
-        for entry in entries.flatten() {
-            println!("cargo:rerun-if-changed={}", entry.path().display());
-        }
-    }
-
-    // Generate C header from src/ffi.rs via cbindgen
-    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let header_path = PathBuf::from(&crate_dir)
-        .join("include")
-        .join("agentsight.h");
-    std::fs::create_dir_all(header_path.parent().unwrap())
-        .expect("Failed to create include/ directory");
-    cbindgen::Builder::new()
-        .with_crate(&crate_dir)
-        .with_config(
-            cbindgen::Config::from_file(PathBuf::from(&crate_dir).join("cbindgen.toml"))
-                .expect("Failed to read cbindgen.toml"),
-        )
-        .with_parse_exclude(&["skill_metrics".to_string()])
-        .generate()
-        .expect("cbindgen failed to generate C header")
-        .write_to_file(&header_path);
-    println!("cargo:rerun-if-changed=src/ffi.rs");
-    println!("cargo:rerun-if-changed=cbindgen.toml");
-
-    // Drift guard: cbindgen 0.27 silently skips `#[unsafe(no_mangle)]`, so the
-    // function declarations in cbindgen.toml are hand-maintained. Compare the
-    // export NAMES on both sides and fail the build if they disagree.
-    //
-    // NOTE: this guard checks NAMES only — it does NOT verify return types or
-    // parameter signatures. A maintainer changing only a return type or arg
-    // list (no name change) will pass this check but still produce an ABI
-    // mismatch. Keep cbindgen.toml's hand-written signatures in lockstep with
-    // src/ffi.rs by hand until cbindgen learns the new attribute.
-    check_ffi_header_drift(&crate_dir, &header_path);
+    generate_skeleton(out, "tcpsniff", &ring_define);
 }
 
-/// Extract every `agentsight_<ident>` that appears as a function declaration
-/// `<...> agentsight_<ident>(` in the generated header. Skips doc comments,
-/// `#define`, `#include`, `typedef`, and multi-line parameter continuations
-/// by only considering lines that begin with an identifier character.
+#[cfg(target_os = "linux")]
 fn extract_header_decl_names(header: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for l in header.lines() {
@@ -168,7 +110,7 @@ fn extract_header_decl_names(header: &str) -> std::collections::BTreeSet<String>
                 }
                 if j < bytes.len() && bytes[j] == b'(' {
                     out.insert(l[i..j].to_string());
-                    break; // one declaration per line
+                    break;
                 }
                 i = j;
             } else {
@@ -179,17 +121,11 @@ fn extract_header_decl_names(header: &str) -> std::collections::BTreeSet<String>
     out
 }
 
-/// Extract every `pub [unsafe] extern "C" fn agentsight_<ident>` from src/ffi.rs.
-/// We match the function name directly (no need to find the matching
-/// `#[unsafe(no_mangle)]` attribute first — every export uses that signature
-/// shape, and a stray `agentsight_*` identifier elsewhere in the file would
-/// not be preceded by `extern "C" fn`).
+#[cfg(target_os = "linux")]
 fn extract_ffi_export_names(src: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for l in src.lines() {
         let t = l.trim_start();
-        // Both `pub extern "C" fn agentsight_X(` and
-        // `pub unsafe extern "C" fn agentsight_X(` shapes.
         let after_fn = if let Some(rest) = t.strip_prefix("pub extern \"C\" fn ") {
             rest
         } else if let Some(rest) = t.strip_prefix("pub unsafe extern \"C\" fn ") {
@@ -207,6 +143,7 @@ fn extract_ffi_export_names(src: &str) -> std::collections::BTreeSet<String> {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn check_ffi_header_drift(crate_dir: &str, header_path: &std::path::Path) {
     let ffi_path = PathBuf::from(crate_dir).join("src/ffi.rs");
     let ffi_src = std::fs::read_to_string(&ffi_path).unwrap_or_else(|e| {
@@ -227,9 +164,6 @@ fn check_ffi_header_drift(crate_dir: &str, header_path: &std::path::Path) {
     let ffi_names = extract_ffi_export_names(&ffi_src);
     let header_names = extract_header_decl_names(&header);
 
-    // Sanity check: the FFI side count should match `#[unsafe(no_mangle)]`
-    // occurrences. A mismatch means our extractor missed an export shape we
-    // don't know about — fail loudly rather than under-reporting.
     let marker_count = ffi_src.matches("#[unsafe(no_mangle)]").count();
     assert_eq!(
         marker_count,
@@ -252,5 +186,54 @@ fn check_ffi_header_drift(crate_dir: &str, header_path: &std::path::Path) {
              NOTE: this guard checks NAMES only; signature drift (return type, \
              parameter types/order) is NOT detected — verify by hand.",
         );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn generate_c_header(crate_dir: &str) {
+    let header_path = PathBuf::from(crate_dir)
+        .join("include")
+        .join("agentsight.h");
+    std::fs::create_dir_all(header_path.parent().unwrap())
+        .expect("Failed to create include/ directory");
+    cbindgen::Builder::new()
+        .with_crate(crate_dir)
+        .with_config(
+            cbindgen::Config::from_file(PathBuf::from(crate_dir).join("cbindgen.toml"))
+                .expect("Failed to read cbindgen.toml"),
+        )
+        .with_parse_exclude(&["skill_metrics".to_string()])
+        .generate()
+        .expect("cbindgen failed to generate C header")
+        .write_to_file(&header_path);
+    println!("cargo:rerun-if-changed=src/ffi.rs");
+    println!("cargo:rerun-if-changed=cbindgen.toml");
+
+    check_ffi_header_drift(crate_dir, &header_path);
+}
+
+fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        let mut out =
+            PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"));
+        generate_ebpf_artifacts(&mut out);
+    }
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
+    let frontend_dist = PathBuf::from(&manifest_dir).join("frontend-dist");
+    if !frontend_dist.exists() {
+        std::fs::create_dir_all(&frontend_dist).expect("Failed to create frontend-dist directory");
+    }
+    println!("cargo:rerun-if-changed=frontend-dist");
+    if let Ok(entries) = std::fs::read_dir(&frontend_dist) {
+        for entry in entries.flatten() {
+            println!("cargo:rerun-if-changed={}", entry.path().display());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        generate_c_header(&manifest_dir);
     }
 }

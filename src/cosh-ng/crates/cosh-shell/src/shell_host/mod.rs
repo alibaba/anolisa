@@ -1,6 +1,7 @@
 mod adapter;
 mod auth;
 mod bootstrap;
+mod input_intent;
 mod io_loop;
 mod lifecycle;
 mod line_interactive;
@@ -13,6 +14,7 @@ mod osc_tests;
 mod prompt_replay;
 mod raw_relay;
 mod raw_runner;
+mod routing;
 mod scripted;
 
 pub use line_interactive::{run_line_interactive_bash, LineInteractiveOutput};

@@ -115,7 +115,10 @@
             "label": "component:cosh-ng",
             "maintainers": [
                 {
-                    "github": "samchu-zsl"
+                    "github": "SunnyQjm"
+                },
+                {
+                    "github": "KaiLongZhou"
                 }
             ]
         }

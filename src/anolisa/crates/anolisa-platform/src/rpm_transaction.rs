@@ -320,6 +320,31 @@ mod tests {
     }
 
     #[test]
+    fn install_with_repo_places_pinned_nevra_after_repository_packages_install() {
+        // A version-pinned install hands an exact NEVRA in place of the bare
+        // package; it must land immediately after `repository-packages <repo>
+        // install`, unchanged, so dnf pulls exactly that build from the
+        // configured repo.
+        let t = txn_with_repo(
+            "install",
+            "agentsight-0.6.2-1.alnx4.x86_64",
+            &[
+                "-y",
+                "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                "--enablerepo=anolisa-configured",
+                "--setopt=anolisa-configured.gpgcheck=1",
+                "repository-packages",
+                "anolisa-configured",
+                "install",
+                "agentsight-0.6.2-1.alnx4.x86_64",
+            ],
+            ok_out(Some(0), "Installed:\n  agentsight\n", ""),
+        );
+        t.install(&["agentsight-0.6.2-1.alnx4.x86_64"])
+            .expect("pinned install ok");
+    }
+
+    #[test]
     fn install_many_packages_share_one_dnf_invocation() {
         // The whole point of the multi-package contract: one dnf process sees
         // the full set, so the solver resolves it as a single transaction.

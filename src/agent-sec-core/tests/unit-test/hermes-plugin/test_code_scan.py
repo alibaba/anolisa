@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-# Add hermes-plugin/ to sys.path so 'src' is importable as a package
-_HERMES_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "hermes-plugin"
-sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
-
-from src.capabilities.code_scan import CodeScanCapability  # noqa: E402
-from src.cli_runner import CliResult  # noqa: E402
+from hermes_plugin_src.capabilities.code_scan import CodeScanCapability
+from hermes_plugin_src.cli_runner import CliResult
 
 
 def _make_capability(enable_block: bool = True) -> CodeScanCapability:
@@ -60,7 +53,7 @@ class TestCodeScanPreToolCall:
         result = capability._on_pre_tool_call("terminal", None)
         assert result is None
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_verdict_pass_returns_none(self, mock_cli, capability):
         """verdict=pass should return None (allow)."""
         mock_cli.return_value = CliResult(
@@ -71,7 +64,7 @@ class TestCodeScanPreToolCall:
         result = capability._on_pre_tool_call("terminal", {"command": "ls -la"})
         assert result is None
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_passes_hermes_trace_context_to_cli(self, mock_cli, capability):
         """Hermes tracing fields should be propagated to scan-code."""
         mock_cli.return_value = CliResult(
@@ -95,7 +88,7 @@ class TestCodeScanPreToolCall:
         }
         assert "run_id" not in mock_cli.call_args.kwargs["trace_context"]
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_verdict_deny_returns_block(self, mock_cli, capability):
         """verdict=deny with enable_block=True should return block action."""
         mock_cli.return_value = CliResult(
@@ -116,7 +109,7 @@ class TestCodeScanPreToolCall:
         assert result["action"] == "block"
         assert "R001" in result["message"]
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_verdict_warn_returns_block(self, mock_cli, capability):
         """verdict=warn with enable_block=True should also return block action."""
         mock_cli.return_value = CliResult(
@@ -136,7 +129,7 @@ class TestCodeScanPreToolCall:
         assert result is not None
         assert result["action"] == "block"
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_verdict_deny_observe_mode_returns_none(self, mock_cli, capability_observe):
         """verdict=deny with enable_block=False should return None (observe)."""
         mock_cli.return_value = CliResult(
@@ -149,7 +142,7 @@ class TestCodeScanPreToolCall:
         )
         assert result is None
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_execute_code_intercept(self, mock_cli, capability):
         """execute_code tool should also be intercepted."""
         mock_cli.return_value = CliResult(
@@ -173,21 +166,21 @@ class TestCodeScanPreToolCall:
         assert "--language" in call_args
         assert "python" in call_args
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_cli_nonzero_exit_failopen(self, mock_cli, capability):
         """Non-zero exit code should fail-open (return None)."""
         mock_cli.return_value = CliResult(stdout="", stderr="error", exit_code=1)
         result = capability._on_pre_tool_call("terminal", {"command": "rm -rf /"})
         assert result is None
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_cli_timeout_failopen(self, mock_cli, capability):
         """Timeout should fail-open (return None)."""
         mock_cli.return_value = CliResult(stdout="", stderr="timed out", exit_code=124)
         result = capability._on_pre_tool_call("terminal", {"command": "rm -rf /"})
         assert result is None
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_invalid_json_failopen(self, mock_cli, capability):
         """Invalid JSON response should fail-open."""
         mock_cli.return_value = CliResult(stdout="not json", stderr="", exit_code=0)
@@ -198,7 +191,7 @@ class TestCodeScanPreToolCall:
 class TestCodeScanSelfProtect:
     """Tests for self-protect forced block behavior."""
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_self_protect_hermes_disable_blocks(self, mock_cli, capability_observe):
         """Self-protect rule forces block even when enable_block=False."""
         mock_cli.return_value = CliResult(
@@ -225,7 +218,7 @@ class TestCodeScanSelfProtect:
         assert result["action"] == "block"
         assert "自我保护" in result["message"]
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_self_protect_hermes_remove_blocks(self, mock_cli, capability_observe):
         """Self-protect rule forces block for remove command."""
         mock_cli.return_value = CliResult(
@@ -252,7 +245,7 @@ class TestCodeScanSelfProtect:
         assert result["action"] == "block"
         assert "手动执行" in result["message"]
 
-    @patch("src.capabilities.code_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_self_protect_other_plugin_not_blocked(self, mock_cli, capability_observe):
         """Non-self-protect findings respect enable_block=False (observe mode)."""
         mock_cli.return_value = CliResult(

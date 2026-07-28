@@ -96,7 +96,7 @@ const ANOLISA_GROUP: &str = "anolisa";
 
 /// Resolve the system-mode FsLayout from context.
 fn resolve_layout(ctx: &CliContext) -> FsLayout {
-    FsLayout::system(ctx.prefix.clone())
+    ctx.visible_system_layout().clone()
 }
 
 fn require_root(command: &str, reason: &str, hint: &str) -> Result<(), CliError> {

@@ -1,6 +1,5 @@
 """Unit tests for codex-plugin/hooks/observability_hook.py."""
 
-import importlib.util
 import io
 import json
 import subprocess
@@ -9,22 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 _CODEX_PLUGIN_DIR = Path(__file__).resolve().parents[2] / ".." / "codex-plugin"
 _HOOK = _CODEX_PLUGIN_DIR / "hooks-plugin" / "hooks" / "observability_hook.py"
-
-
-def _load_observability_hook():
-    spec = importlib.util.spec_from_file_location("codex_observability_hook", _HOOK)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-observability_hook = _load_observability_hook()
+observability_hook = load_standalone_hook("codex_observability_hook", _HOOK)
 
 _TS = "2026-07-15T08:00:00Z"
 

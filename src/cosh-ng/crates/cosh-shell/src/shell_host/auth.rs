@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::input_intent::shell_intent_helpers;
+
 static MARKER_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn generate_marker_token() -> String {
@@ -17,12 +19,16 @@ pub(super) fn marker_script_with_token(
     token: &str,
     recovery_request_file: &str,
     handoff_request_file: &str,
+    ai_enabled: bool,
 ) -> String {
+    let ai_enabled = u8::from(ai_enabled);
     format!(
-        "COSH_MARKER_TOKEN='{}'\nCOSH_RECOVERY_REQUEST_FILE='{}'\nCOSH_HANDOFF_REQUEST_FILE='{}'\n{}",
+        "COSH_MARKER_TOKEN='{}'\nCOSH_RECOVERY_REQUEST_FILE='{}'\nCOSH_HANDOFF_REQUEST_FILE='{}'\nreadonly _COSH_SESSION_AI_ENABLED='{}'\n{}\n{}",
         shell_single_quote_value(token),
         shell_single_quote_value(recovery_request_file),
         shell_single_quote_value(handoff_request_file),
+        ai_enabled,
+        shell_intent_helpers(),
         script
     )
 }

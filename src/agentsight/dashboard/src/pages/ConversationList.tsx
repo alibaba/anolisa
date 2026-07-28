@@ -882,7 +882,6 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   const initStart = Number(searchParams.get('start')) || (now - 24 * 3600 * 1000);
   const initEnd   = Number(searchParams.get('end'))   || now;
   const initAgent = searchParams.get('agent') ?? '';
-  const initQueried = searchParams.get('q') === '1';
 
   // Time range state
   const [startMs, setStartMs] = useState(initStart);
@@ -1077,10 +1076,10 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     }
   }, [startMs, selectedAgent, syncParams, runQuery]);
 
-  // Auto-restore: if URL has q=1, replay the query on mount using URL params
+  // Auto-load on mount: show all records for the default time range immediately
   const hasRestoredRef = React.useRef(false);
   useEffect(() => {
-    if (initQueried && !hasRestoredRef.current) {
+    if (!hasRestoredRef.current) {
       hasRestoredRef.current = true;
       const startNs = initStart * 1_000_000;
       const endNs = initEnd * 1_000_000;
@@ -1472,13 +1471,6 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
           </>
         )}
 
-        {/* Prompt before first query */}
-        {!hasQueried && !loading && (
-          <div className="flex flex-col items-center justify-center py-20 text-gray-400">
-            <div className="text-5xl mb-4">🔎</div>
-            <p className="text-base">请选择时间范围和 Agent，然后点击「查询」</p>
-          </div>
-        )}
       </main>
     </>
   );

@@ -156,13 +156,13 @@ mod tests {
     async fn shell_timeout_kills_process_group() {
         use crate::process::test_support::*;
 
+        let _fixture_guard = exclusive_process_tree_test().await;
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let pid_file = dir.path().join("pids");
         let command = leak_script(&marker, &pid_file);
 
         let tool = ShellTool;
-        let started = std::time::Instant::now();
         let result = tool
             .invoke(
                 serde_json::json!({"command": command, "timeout_ms": 300}),
@@ -178,7 +178,7 @@ mod tests {
         for pid in &pids {
             assert_process_gone(*pid);
         }
-        wait_past_marker_deadline(started);
+        release_marker_probe(&marker);
         assert!(!marker.exists(), "grandchild survived the tool timeout");
     }
 

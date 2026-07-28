@@ -47,6 +47,54 @@ fn raw_cli_double_dash_passthrough_preserves_exit_status() {
 }
 
 #[test]
+fn raw_cli_double_dash_passthrough_preserves_signal_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+
+    for (signal, expected) in [("INT", 130), ("TERM", 143), ("KILL", 137)] {
+        let command = format!("kill -{signal} $$");
+        let output = raw_cli_command(binary)
+            .args(["--", "sh", "-c", command.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run direct command terminated by signal");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "signal={signal}\nstdout={stdout}\nstderr={stderr}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_double_dash_passthrough_preserves_start_failure_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = raw_cli_command(binary)
+        .args(["--", "/definitely/not/a/cosh-shell-command"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run missing direct command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(126),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("exec /definitely/not/a/cosh-shell-command failed"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
 fn raw_cli_double_dash_passthrough_does_not_capture_child_help_arg() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let output = raw_cli_command(binary)
@@ -117,6 +165,30 @@ fn raw_cli_dash_c_passthrough_preserves_exit_status() {
         !stdout.contains("Thinking..."),
         "stdout={stdout}\nstderr={stderr}"
     );
+}
+
+#[test]
+fn raw_cli_dash_c_passthrough_preserves_signal_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+
+    for (signal, expected) in [("INT", 130), ("TERM", 143), ("KILL", 137)] {
+        let command = format!("kill -{signal} $$");
+        let output = raw_cli_command(binary)
+            .args(["-c", command.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run dash-c command terminated by signal");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "signal={signal}\nstdout={stdout}\nstderr={stderr}"
+        );
+    }
 }
 
 #[test]
@@ -236,6 +308,34 @@ fn raw_cli_stdin_passthrough_preserves_exit_status() {
         !stdout.contains("Thinking..."),
         "stdout={stdout}\nstderr={stderr}"
     );
+}
+
+#[test]
+fn raw_cli_stdin_passthrough_preserves_signal_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+
+    for (signal, expected) in [("INT", 130), ("TERM", 143), ("KILL", 137)] {
+        let mut child = raw_cli_command(binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stdin passthrough");
+
+        {
+            let mut stdin = child.stdin.take().expect("child stdin");
+            writeln!(stdin, "kill -{signal} $$").expect("write stdin command terminated by signal");
+        }
+
+        let output = child.wait_with_output().expect("wait stdin passthrough");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "signal={signal}\nstdout={stdout}\nstderr={stderr}"
+        );
+    }
 }
 
 #[test]

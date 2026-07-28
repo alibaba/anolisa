@@ -18,13 +18,14 @@ cosh-platform = { path = "../cosh-platform" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["full"] }
-uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["stream", "json", "native-tls"] }
+uuid.workspace = true
+reqwest = { version = "0.12", features = ["blocking", "stream", "json", "native-tls"] }
 tokio-stream = "0.1"
 futures = "0.3"
 async-trait = "0.1"
 dirs = "5"
 chrono = { workspace = true, features = ["clock"] }
+glob.workspace = true
 which.workspace = true
 toml.workspace = true
 regex.workspace = true
@@ -32,6 +33,10 @@ aes-gcm = "0.10"
 scrypt = "0.11"
 hmac = "0.12"
 sha2.workspace = true
+semver.workspace = true
+fs2.workspace = true
+keyring.workspace = true
+nix.workspace = true
 hex = "0.4"
 notify = "6"
 serde_yaml = "0.9"
@@ -40,6 +45,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 signal-hook.workspace = true
+wait-timeout.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

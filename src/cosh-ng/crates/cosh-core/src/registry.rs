@@ -5,10 +5,242 @@ use serde_json::Value;
 use crate::cli::CliArgs;
 use crate::config::CoreConfig;
 use crate::extension::config::flatten_hook_groups;
-use crate::extension::ExtensionManager;
+use crate::extension::generation::ReloadOutcome;
+use crate::extension::installer::ExtensionInstaller;
+use crate::extension::scaffold::{scaffold_extension, ExtensionTemplate};
+use crate::extension::settings::{ExtensionSettings, SettingScope, SettingsError};
+use crate::extension::{
+    ExtensionManager, GenerationController, McpRuntime, RuntimeSnapshot, RuntimeSnapshotBuilder,
+};
 use crate::protocol::{InputMessage, OutputMessage};
 use crate::skill::manager::expand_path;
 use crate::skill::SkillManager;
+
+mod auth;
+mod extensions;
+
+use auth::handle_auth;
+use extensions::handle_extensions;
+
+/// Bridge from registry mutations into the generation controller of a live core process.
+#[derive(Clone)]
+pub(crate) struct LiveExtensionRuntime {
+    controller: GenerationController,
+    enable_shell_evidence_tool: bool,
+    load_skills: bool,
+    tool_selection: Option<String>,
+    state_dir_override: Option<std::path::PathBuf>,
+    settings_override: Option<std::sync::Arc<ExtensionSettings>>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimePublication {
+    activation: &'static str,
+    candidate_generation: u64,
+    current_generation: u64,
+    active_runs: usize,
+    pending: bool,
+}
+
+impl LiveExtensionRuntime {
+    pub(crate) fn new(
+        controller: GenerationController,
+        enable_shell_evidence_tool: bool,
+        load_skills: bool,
+        tool_selection: Option<String>,
+    ) -> Self {
+        Self {
+            controller,
+            enable_shell_evidence_tool,
+            load_skills,
+            tool_selection,
+            state_dir_override: None,
+            settings_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_isolated(
+        controller: GenerationController,
+        enable_shell_evidence_tool: bool,
+        state_dir: std::path::PathBuf,
+        settings: std::sync::Arc<ExtensionSettings>,
+    ) -> Self {
+        Self {
+            controller,
+            enable_shell_evidence_tool,
+            load_skills: true,
+            tool_selection: None,
+            state_dir_override: Some(state_dir),
+            settings_override: Some(settings),
+        }
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.controller.status().current.saturating_add(1).max(1)
+    }
+
+    fn configure_builder<'a>(
+        &'a self,
+        builder: RuntimeSnapshotBuilder<'a>,
+    ) -> RuntimeSnapshotBuilder<'a> {
+        builder
+            .with_shell_evidence(self.enable_shell_evidence_tool)
+            .with_skill_loading(self.load_skills)
+            .with_tool_selection(self.tool_selection.as_deref())
+    }
+
+    async fn publish(&self, snapshot: RuntimeSnapshot) -> Result<RuntimePublication, String> {
+        let candidate_generation = snapshot.generation.id;
+        if let Some(previous) = self.controller.stage(snapshot) {
+            previous.mcp.shutdown().await;
+        }
+        let outcome = self.controller.reload();
+        if matches!(
+            outcome,
+            ReloadOutcome::NoCandidate
+                | ReloadOutcome::CandidateUnhealthy
+                | ReloadOutcome::CandidateStale
+        ) {
+            if let Some(candidate) = self.controller.discard_candidate() {
+                candidate.mcp.shutdown().await;
+            }
+            return Err(format!(
+                "extension_runtime_publish_failed: reload outcome was {outcome:?}"
+            ));
+        }
+        let status = self.controller.status();
+        if outcome == ReloadOutcome::Activated {
+            crate::extension::state::persist_active_generation(
+                status.current,
+                self.state_dir_override.as_deref(),
+            )
+            .map_err(|error| format!("{}: {error}", error.code()))?;
+        }
+        Ok(RuntimePublication {
+            activation: if outcome == ReloadOutcome::Activated {
+                "immediate"
+            } else {
+                "pending_safe_reload"
+            },
+            candidate_generation,
+            current_generation: status.current,
+            active_runs: status.active_runs,
+            pending: status.pending,
+        })
+    }
+
+    pub(crate) fn persist_current_generation(&self) -> Result<u64, String> {
+        let current = self.controller.status().current;
+        crate::extension::state::persist_active_generation(
+            current,
+            self.state_dir_override.as_deref(),
+        )
+        .map_err(|error| format!("{}: {error}", error.code()))
+    }
+
+    pub(crate) async fn refresh_linked_runtime(
+        &self,
+        config: &CoreConfig,
+        manager: &mut ExtensionManager,
+    ) -> Result<bool, String> {
+        manager.refresh();
+        let linked_change = manager.list().iter().any(|extension| {
+            extension.source == crate::extension::ExtensionSourceKind::Link
+                && extension.diagnostics.iter().any(|diagnostic| {
+                    matches!(
+                        diagnostic.code.as_str(),
+                        "extension_link_stale" | "extension_link_consent_stale"
+                    )
+                })
+        });
+        if !linked_change {
+            return Ok(false);
+        }
+        let current_fingerprint = self.controller.current().generation.fingerprint.clone();
+        let observed_fingerprint = manager
+            .runtime_fingerprint()
+            .map_err(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))?;
+        if observed_fingerprint == current_fingerprint {
+            return Ok(false);
+        }
+
+        let generation = self.next_generation();
+        let workspace = manager.workspace_dir().to_path_buf();
+        let mut builder = self.configure_builder(RuntimeSnapshotBuilder::new(
+            manager, config, workspace, generation,
+        ));
+        if let Some(settings) = self.settings_override.as_deref() {
+            builder = builder.with_settings(settings);
+        }
+        let mut snapshot = builder.build().await;
+        manager.refresh();
+        let final_fingerprint = manager
+            .runtime_fingerprint()
+            .map_err(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))?;
+        if final_fingerprint != snapshot.generation.fingerprint {
+            snapshot.generation.stale = true;
+        }
+        if !snapshot.generation.healthy {
+            let diagnostics = snapshot
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            snapshot.mcp.shutdown().await;
+            return Err(format!(
+                "extension_link_candidate_unhealthy: generation {generation} failed: {diagnostics}"
+            ));
+        }
+        self.publish(snapshot).await.map(|_| true)
+    }
+
+    fn projection(&self, extension: Option<&str>) -> Value {
+        let status = self.controller.status();
+        let snapshot = self.controller.current();
+        let prefix = extension.map(|name| format!("{name}/"));
+        let mcp_servers = snapshot
+            .mcp
+            .statuses()
+            .iter()
+            .filter(|server| {
+                prefix
+                    .as_ref()
+                    .is_none_or(|prefix| server.id.starts_with(prefix))
+            })
+            .collect::<Vec<_>>();
+        let agents = snapshot
+            .agents
+            .list()
+            .iter()
+            .filter(|agent| {
+                prefix
+                    .as_ref()
+                    .is_none_or(|prefix| agent.id.starts_with(prefix))
+            })
+            .collect::<Vec<_>>();
+        let is_active = extension
+            .map(|name| snapshot.active_extensions.contains(name))
+            .unwrap_or(true);
+        let health = extension.and_then(|name| snapshot.extension_health.get(name));
+        serde_json::json!({
+            "active_runs": status.active_runs,
+            "agents": agents,
+            "candidate_generation": status.candidate,
+            "diagnostics": snapshot.diagnostics,
+            "effective_state": if is_active { "enabled" } else { "disabled" },
+            "fingerprint": snapshot.generation.fingerprint,
+            "generation": status.current,
+            "health": health,
+            "healthy": snapshot.generation.healthy,
+            "is_active": is_active,
+            "mcp_servers": mcp_servers,
+            "pending": status.pending,
+            "stale": snapshot.generation.stale,
+        })
+    }
+}
 
 pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     let stdin = io::stdin();
@@ -65,8 +297,9 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
                 &action,
                 &params,
                 &mut config,
-                &ext_manager,
-                &skill_manager,
+                &mut ext_manager,
+                Some(&skill_manager),
+                None,
             )
             .await;
             emit(&mut writer, &response);
@@ -77,19 +310,33 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     }
 }
 
-async fn handle_registry_request(
+pub(crate) async fn handle_registry_request(
     request_id: &str,
     domain: &str,
     action: &str,
     params: &Value,
     config: &mut CoreConfig,
-    ext_manager: &ExtensionManager,
-    skill_manager: &SkillManager,
+    ext_manager: &mut ExtensionManager,
+    skill_manager: Option<&SkillManager>,
+    live_runtime: Option<&LiveExtensionRuntime>,
 ) -> OutputMessage {
     match domain {
         "auth" => handle_auth(request_id, action, params, config),
-        "extensions" => handle_extensions(request_id, action, params, ext_manager),
-        "skills" => handle_skills(request_id, action, params, skill_manager).await,
+        "extensions" => {
+            handle_extensions(
+                request_id,
+                action,
+                params,
+                config,
+                ext_manager,
+                live_runtime,
+            )
+            .await
+        }
+        "skills" => match registry_skills(skill_manager, live_runtime).await {
+            Ok(skills) => handle_skills(request_id, action, params, &skills),
+            Err(error) => registry_error(request_id, error),
+        },
         "hooks" => handle_hooks(request_id, action, params, ext_manager),
         _ => OutputMessage::RegistryResponse {
             request_id: request_id.to_string(),
@@ -97,261 +344,6 @@ async fn handle_registry_request(
             data: None,
             error: Some(format!("unknown domain: {domain}")),
         },
-    }
-}
-
-fn handle_auth(
-    request_id: &str,
-    action: &str,
-    params: &Value,
-    config: &mut CoreConfig,
-) -> OutputMessage {
-    match action {
-        "state" => {
-            let templates: Vec<Value> = crate::auth::builtin_auth_providers()
-                .into_iter()
-                .map(|provider| {
-                    serde_json::json!({
-                        "id": provider.id,
-                        "provider_type": provider.id,
-                        "label": provider.label,
-                        "fields": provider.fields,
-                        "builtin_base_url": provider.builtin_base_url,
-                        "builtin_default_model": provider.builtin_default_model,
-                    })
-                })
-                .collect();
-            let active_provider = config.ai.active_provider.clone();
-            let effective_auth_required = config.resolve_provider().auth_required();
-            let saved_providers: Vec<Value> = config
-                .ai
-                .providers
-                .iter()
-                .map(|(provider_id, provider)| {
-                    let source = if config.user_ai.providers.contains_key(provider_id) {
-                        "user"
-                    } else if config.system_ai.providers.contains_key(provider_id) {
-                        "system"
-                    } else {
-                        "runtime"
-                    };
-                    let editable = source == "user";
-                    serde_json::json!({
-                        "provider_id": provider_id,
-                        "provider_type": provider.provider_type,
-                        "source": source,
-                        "editable": editable,
-                        "auth_source": provider.auth_source,
-                        "model": provider.model,
-                        "base_url": provider.base_url,
-                        "api_key_len": provider.api_key.as_ref().map(|v| v.chars().count()).unwrap_or(0),
-                        "access_key_id_len": provider.access_key_id.as_ref().map(|v| v.chars().count()).unwrap_or(0),
-                        "access_key_secret_len": provider.access_key_secret.as_ref().map(|v| v.chars().count()).unwrap_or(0),
-                        "security_token_len": provider.security_token.as_ref().map(|v| v.chars().count()).unwrap_or(0),
-                        "active": Some(provider_id) == active_provider.as_ref(),
-                        "has_api_key": provider.api_key.as_ref().is_some_and(|v| !v.is_empty()),
-                        "has_access_key_id": provider.access_key_id.as_ref().is_some_and(|v| !v.is_empty()),
-                        "has_access_key_secret": provider.access_key_secret.as_ref().is_some_and(|v| !v.is_empty()),
-                    })
-                })
-                .collect();
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(serde_json::json!({
-                    "templates": templates,
-                    "saved_providers": saved_providers,
-                    "active_provider": active_provider,
-                    "effective_auth_required": effective_auth_required,
-                })),
-                error: None,
-            }
-        }
-        "activate" => {
-            let provider_id = params
-                .get("provider_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if provider_id.is_empty() || !config.ai.providers.contains_key(provider_id) {
-                return registry_error(request_id, "provider not found");
-            }
-            config.ai.active_provider = Some(provider_id.to_string());
-            config.user_ai.active_provider = Some(provider_id.to_string());
-            if let Some(model) = config
-                .ai
-                .providers
-                .get(provider_id)
-                .and_then(|provider| provider.model.clone())
-            {
-                config.ai.active_model = Some(model);
-            }
-            if let Err(e) = crate::config::persist_config(config) {
-                return registry_error(request_id, &format!("failed to persist config: {e}"));
-            }
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(serde_json::json!({ "active_provider": provider_id })),
-                error: None,
-            }
-        }
-        "prepare" => {
-            let provider_type = params
-                .get("provider_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if provider_type.is_empty() {
-                return registry_error(request_id, "missing provider_type");
-            }
-            let data = if provider_type == "aliyun" {
-                match crate::provider::sysom::detect_ecs_auth_challenge() {
-                    Some(challenge) => serde_json::json!({
-                        "mode": "ecs_ram_role",
-                        "instance_id": challenge.instance_id,
-                        "console_url": challenge.console_url,
-                        "values": {
-                            "auth_source": "ecs_ram_role"
-                        }
-                    }),
-                    None => serde_json::json!({
-                        "mode": "manual"
-                    }),
-                }
-            } else {
-                serde_json::json!({
-                    "mode": "manual"
-                })
-            };
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(data),
-                error: None,
-            }
-        }
-        "verify" => {
-            let provider_type = params
-                .get("provider_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let auth_source = params
-                .get("auth_source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if provider_type == "aliyun" && auth_source == "ecs_ram_role" {
-                let authorized = crate::provider::sysom::ecs_ram_role_credentials_available();
-                OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: true,
-                    data: Some(serde_json::json!({
-                        "authorized": authorized
-                    })),
-                    error: None,
-                }
-            } else {
-                OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: true,
-                    data: Some(serde_json::json!({
-                        "authorized": true
-                    })),
-                    error: None,
-                }
-            }
-        }
-        "configure" => {
-            let provider_id = params
-                .get("provider_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let provider_type = params
-                .get("provider_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if provider_id.is_empty() || provider_type.is_empty() {
-                return registry_error(request_id, "missing provider_id or provider_type");
-            }
-            if !is_valid_provider_id(provider_id) {
-                return registry_error(request_id, "invalid provider_id");
-            }
-            if config.ai.providers.contains_key(provider_id)
-                && !config.user_ai.providers.contains_key(provider_id)
-            {
-                return registry_error(request_id, "provider is not editable");
-            }
-            let mut values: std::collections::HashMap<String, String> = params
-                .get("values")
-                .and_then(|v| v.as_object())
-                .map(|object| {
-                    object
-                        .iter()
-                        .filter_map(|(key, value)| {
-                            value.as_str().map(|s| (key.clone(), s.to_string()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(existing) = config.ai.providers.get(provider_id) {
-                preserve_masked_secret(&mut values, "api_key", existing.api_key.as_deref());
-                preserve_masked_secret(
-                    &mut values,
-                    "access_key_id",
-                    existing.access_key_id.as_deref(),
-                );
-                preserve_masked_secret(
-                    &mut values,
-                    "access_key_secret",
-                    existing.access_key_secret.as_deref(),
-                );
-                preserve_masked_secret(
-                    &mut values,
-                    "security_token",
-                    existing.security_token.as_deref(),
-                );
-            }
-            let response = crate::auth::AuthResponse {
-                provider_id: provider_id.to_string(),
-                provider_type: Some(provider_type.to_string()),
-                values,
-                persist: true,
-            };
-            crate::auth::apply_auth_credentials(config, &response);
-            if let Err(e) = crate::config::persist_config(config) {
-                return registry_error(request_id, &format!("failed to persist config: {e}"));
-            }
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(serde_json::json!({ "provider_id": provider_id })),
-                error: None,
-            }
-        }
-        _ => registry_error(
-            request_id,
-            &format!("unsupported action for auth: {action}"),
-        ),
-    }
-}
-
-fn is_valid_provider_id(provider_id: &str) -> bool {
-    !provider_id.is_empty()
-        && provider_id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-}
-
-fn preserve_masked_secret(
-    values: &mut std::collections::HashMap<String, String>,
-    key: &str,
-    existing: Option<&str>,
-) {
-    let Some(value) = values.get(key) else {
-        return;
-    };
-    if !value.is_empty() && value.chars().all(|ch| ch == '•') {
-        if let Some(existing) = existing {
-            values.insert(key.to_string(), existing.to_string());
-        }
     }
 }
 
@@ -364,155 +356,103 @@ fn registry_error(request_id: &str, error: &str) -> OutputMessage {
     }
 }
 
-fn handle_extensions(
-    request_id: &str,
-    action: &str,
-    params: &Value,
-    ext_manager: &ExtensionManager,
-) -> OutputMessage {
-    match action {
-        "list" => {
-            let extensions: Vec<Value> = ext_manager
-                .list()
-                .iter()
-                .map(|ext| {
-                    serde_json::json!({
-                        "name": ext.name,
-                        "version": ext.version,
-                        "is_active": ext.is_active,
-                        "path": ext.path.to_string_lossy(),
-                    })
-                })
-                .collect();
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(Value::Array(extensions)),
-                error: None,
-            }
-        }
-        "detail" => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            match ext_manager.list().iter().find(|e| e.name == name) {
-                Some(ext) => {
-                    let detail = serde_json::json!({
-                        "name": ext.name,
-                        "version": ext.version,
-                        "is_active": ext.is_active,
-                        "path": ext.path.to_string_lossy(),
-                        "has_hooks": !ext.config.hooks.is_empty(),
-                        "skill_dirs": ext.config.skills.0,
-                    });
-                    OutputMessage::RegistryResponse {
-                        request_id: request_id.to_string(),
-                        success: true,
-                        data: Some(detail),
-                        error: None,
-                    }
-                }
-                None => OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: false,
-                    data: None,
-                    error: Some(format!("extension not found: {name}")),
-                },
-            }
-        }
-        "enable" => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if name.is_empty() {
-                return OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: false,
-                    data: None,
-                    error: Some("missing 'name' parameter".to_string()),
-                };
-            }
-            // Validate extension exists
-            if !ext_manager.list().iter().any(|e| e.name == name) {
-                return OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: false,
-                    data: None,
-                    error: Some(format!("extension not found: {name}")),
-                };
-            }
-            // Remove extension from disabled list
-            if let Err(e) = crate::state::remove_disabled(crate::state::EXTENSIONS_STATE, name) {
-                return OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: false,
-                    data: None,
-                    error: Some(format!("failed to enable extension: {e}")),
-                };
-            }
-            // Cleanup: remove extension's hooks from hooks.json disabled list
-            let hook_names = ext_manager.extension_hook_names(name);
-            if !hook_names.is_empty() {
-                let _ = crate::state::remove_disabled_set(crate::state::HOOKS_STATE, &hook_names);
-            }
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(serde_json::json!({ "enabled": name })),
-                error: None,
-            }
-        }
-        "disable" => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if name.is_empty() {
-                return OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: false,
-                    data: None,
-                    error: Some("missing 'name' parameter".to_string()),
-                };
-            }
-            // Validate extension exists
-            if !ext_manager.list().iter().any(|e| e.name == name) {
-                return OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: false,
-                    data: None,
-                    error: Some(format!("extension not found: {name}")),
-                };
-            }
-            if let Err(e) = crate::state::add_disabled(crate::state::EXTENSIONS_STATE, name) {
-                return OutputMessage::RegistryResponse {
-                    request_id: request_id.to_string(),
-                    success: false,
-                    data: None,
-                    error: Some(format!("failed to disable extension: {e}")),
-                };
-            }
-            OutputMessage::RegistryResponse {
-                request_id: request_id.to_string(),
-                success: true,
-                data: Some(serde_json::json!({ "disabled": name })),
-                error: None,
-            }
-        }
-        _ => OutputMessage::RegistryResponse {
-            request_id: request_id.to_string(),
-            success: false,
-            data: None,
-            error: Some(format!("unsupported action for extensions: {action}")),
-        },
+#[cfg(all(test, unix))]
+mod link_runtime_tests {
+    use std::fs;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::extension::settings::KeyringSecretBackend;
+
+    #[tokio::test]
+    async fn linked_content_change_reloads_at_safe_point() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let user = temporary.path().join("extensions");
+        let system = temporary.path().join("system");
+        let states = temporary.path().join("states");
+        let workspace = temporary.path().join("workspace");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            source.join(crate::extension::EXTENSION_CONFIG_FILENAME),
+            r#"{
+                "schemaVersion": 1,
+                "name": "example.dev",
+                "version": "1.0.0",
+                "compatibility": {"cosh": ">=0.12.0"}
+            }"#,
+        )
+        .unwrap();
+        fs::write(source.join("README.md"), "one").unwrap();
+        let installer = ExtensionInstaller::new(user.clone(), states.clone());
+        let preflight = installer.preflight_link(&source).unwrap();
+        installer
+            .commit(&preflight.operation_id, &preflight.capability_fingerprint)
+            .unwrap();
+        let mut manager = ExtensionManager::new_isolated_with_state(
+            workspace.clone(),
+            Some(user),
+            Some(system),
+            states.clone(),
+        );
+        manager.refresh();
+        let settings = Arc::new(ExtensionSettings::new_isolated(
+            temporary.path().join("user-settings"),
+            temporary.path().join("workspace-settings"),
+            true,
+            Arc::new(KeyringSecretBackend),
+        ));
+        let initial =
+            RuntimeSnapshotBuilder::new(&mut manager, &CoreConfig::default(), workspace, 1)
+                .with_settings(&settings)
+                .build()
+                .await;
+        let runtime = LiveExtensionRuntime::new_isolated(
+            GenerationController::new(initial),
+            false,
+            states,
+            settings,
+        );
+
+        fs::write(source.join("README.md"), "two").unwrap();
+        assert!(runtime
+            .refresh_linked_runtime(&CoreConfig::default(), &mut manager)
+            .await
+            .unwrap());
+        assert_eq!(runtime.controller.status().current, 2);
+        assert!(runtime
+            .controller
+            .current()
+            .active_extensions
+            .contains("example.dev"));
     }
 }
 
-async fn handle_skills(
+async fn registry_skills(
+    skill_manager: Option<&SkillManager>,
+    live_runtime: Option<&LiveExtensionRuntime>,
+) -> Result<Vec<crate::skill::SkillConfig>, &'static str> {
+    if let Some(runtime) = live_runtime {
+        return Ok(runtime.controller.current().skills.clone());
+    }
+    match skill_manager {
+        Some(manager) => Ok(manager.list().await),
+        None => Err("skill registry is unavailable"),
+    }
+}
+
+fn handle_skills(
     request_id: &str,
     action: &str,
     params: &Value,
-    skill_manager: &SkillManager,
+    skills: &[crate::skill::SkillConfig],
 ) -> OutputMessage {
     match action {
         "list" => {
             let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
-            let skills: Vec<Value> = skill_manager
-                .list()
-                .await
+            let skills: Vec<Value> = skills
                 .iter()
                 .map(|s| {
                     let is_disabled = disabled.contains(&s.name);
@@ -533,7 +473,7 @@ async fn handle_skills(
         }
         "detail" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            match skill_manager.load(name).await {
+            match skills.iter().find(|skill| skill.name == name) {
                 Some(skill) => {
                     let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
                     let is_disabled = disabled.contains(&skill.name);
@@ -570,7 +510,7 @@ async fn handle_skills(
                 };
             }
             // Validate skill exists
-            if skill_manager.load(name).await.is_none() {
+            if !skills.iter().any(|skill| skill.name == name) {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
                     success: false,
@@ -604,7 +544,7 @@ async fn handle_skills(
                 };
             }
             // Validate skill exists
-            if skill_manager.load(name).await.is_none() {
+            if !skills.iter().any(|skill| skill.name == name) {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
                     success: false,
@@ -800,6 +740,106 @@ fn emit<W: Write>(writer: &mut W, msg: &OutputMessage) {
 mod tests {
     use super::*;
     use crate::config::{AiConfig, ProviderConfig};
+    use crate::extension::generation::ReloadOutcome;
+    use crate::extension::RuntimeGeneration;
+    use crate::skill::{SkillConfig, SkillLevel};
+    use crate::tool::ToolRegistry;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn runtime_skill(name: &str) -> SkillConfig {
+        SkillConfig {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            allowed_tools: Vec::new(),
+            body: format!("{name} body"),
+            level: SkillLevel::Extension,
+            file_path: PathBuf::from(format!("/{name}/SKILL.md")),
+            base_dir: PathBuf::from(format!("/{name}")),
+        }
+    }
+
+    fn runtime_snapshot(id: u64, names: &[&str], healthy: bool) -> RuntimeSnapshot {
+        let mut snapshot = RuntimeSnapshot::bootstrap(
+            RuntimeGeneration::healthy(id, format!("generation-{id}")),
+            Arc::new(ToolRegistry::new()),
+        );
+        snapshot.skills = names.iter().map(|name| runtime_skill(name)).collect();
+        snapshot.generation.healthy = healthy;
+        snapshot
+    }
+
+    async fn live_registry_skill_names(
+        runtime: &LiveExtensionRuntime,
+        config: &mut CoreConfig,
+        manager: &mut ExtensionManager,
+    ) -> Vec<String> {
+        let response = handle_registry_request(
+            "skills-list",
+            "skills",
+            "list",
+            &Value::Null,
+            config,
+            manager,
+            None,
+            Some(runtime),
+        )
+        .await;
+        let OutputMessage::RegistryResponse {
+            success: true,
+            data: Some(Value::Array(skills)),
+            ..
+        } = response
+        else {
+            panic!("unexpected response: {response:?}");
+        };
+        skills
+            .iter()
+            .filter_map(|skill| skill.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn live_skill_registry_follows_effective_generation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut manager = ExtensionManager::new(workspace.path().to_path_buf());
+        let mut config = CoreConfig::default();
+        let controller = GenerationController::new(runtime_snapshot(
+            1,
+            &["disabled-skill", "uninstalled-skill"],
+            true,
+        ));
+        let runtime = LiveExtensionRuntime::new(controller.clone(), false, true, None);
+
+        assert_eq!(
+            live_registry_skill_names(&runtime, &mut config, &mut manager).await,
+            ["disabled-skill", "uninstalled-skill"]
+        );
+
+        controller.stage(runtime_snapshot(2, &["uninstalled-skill"], true));
+        assert_eq!(controller.reload(), ReloadOutcome::Activated);
+        assert_eq!(
+            live_registry_skill_names(&runtime, &mut config, &mut manager).await,
+            ["uninstalled-skill"]
+        );
+
+        controller.stage(runtime_snapshot(3, &[], true));
+        assert_eq!(controller.reload(), ReloadOutcome::Activated);
+        assert!(
+            live_registry_skill_names(&runtime, &mut config, &mut manager)
+                .await
+                .is_empty()
+        );
+
+        controller.stage(runtime_snapshot(4, &["failed-candidate-skill"], false));
+        assert_eq!(controller.reload(), ReloadOutcome::CandidateUnhealthy);
+        assert!(
+            live_registry_skill_names(&runtime, &mut config, &mut manager)
+                .await
+                .is_empty()
+        );
+    }
 
     #[test]
     fn auth_state_marks_system_providers_as_not_editable() {
@@ -878,6 +918,33 @@ mod tests {
     }
 
     #[test]
+    fn auth_configure_rejects_invalid_base_url_without_mutating_config() {
+        let mut config = CoreConfig::default();
+        let response = handle_auth(
+            "test-1",
+            "configure",
+            &serde_json::json!({
+                "provider_id": "bad-url",
+                "provider_type": "openai_compat",
+                "values": {
+                    "base_url": "error-testhttps://api.example.com/v1",
+                    "api_key": "sk-user",
+                    "model": "qwen-test"
+                }
+            }),
+            &mut config,
+        );
+
+        let OutputMessage::RegistryResponse { success, error, .. } = response else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert!(!success);
+        assert!(error.unwrap().contains("invalid base_url"));
+        assert!(config.ai.providers.is_empty());
+        assert!(config.user_ai.providers.is_empty());
+    }
+
+    #[test]
     fn auth_configure_rejects_system_provider_overwrite() {
         let mut config = CoreConfig::default();
         config.ai.providers.insert(
@@ -912,5 +979,36 @@ mod tests {
         assert!(!success);
         assert!(error.unwrap().contains("not editable"));
         assert!(!config.user_ai.providers.contains_key("system-provider"));
+    }
+
+    #[test]
+    fn auth_delete_rejects_system_provider() {
+        let mut config = CoreConfig::default();
+        config.ai.providers.insert(
+            "system-provider".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-system".to_string()),
+                ..Default::default()
+            },
+        );
+        config.system_ai = AiConfig {
+            providers: config.ai.providers.clone(),
+            ..Default::default()
+        };
+
+        let response = handle_auth(
+            "test-1",
+            "delete",
+            &serde_json::json!({ "provider_id": "system-provider" }),
+            &mut config,
+        );
+
+        let OutputMessage::RegistryResponse { success, error, .. } = response else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert!(!success);
+        assert!(error.unwrap().contains("not removable"));
+        assert!(config.ai.providers.contains_key("system-provider"));
     }
 }

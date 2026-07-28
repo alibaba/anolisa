@@ -3,19 +3,31 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash commands",
-        MessageId::HelpFooter => "Mode: {mode}. Strategy: {strategy}.",
+        MessageId::HelpFooter => {
+            "Mode: {mode}. Strategy: {strategy}. Shift+Enter / Alt+Enter insert a newline in the prompt; start prompts with ?? to compose multi-line."
+        }
+        MessageId::PromptSoftNewlineTip => {
+            "Tip: start with ?? to compose multi-line prompts (Shift+Enter for newline)."
+        }
+        MessageId::PromptDraftTitle => "Prompt draft",
+        MessageId::PromptDraftFooterEditing => {
+            "Enter send · Shift+Enter newline · Esc cancel"
+        }
+        MessageId::PromptDraftFooterSubmitted => "Sent to agent",
+        MessageId::PromptDraftFooterCancelled => "Draft cancelled",
         MessageId::HelpGroupConfig => "Config",
+        MessageId::HelpGroupHealth => "Health",
         MessageId::HelpGroupModes => "Modes",
         MessageId::HelpGroupHooks => "Hooks",
         MessageId::HelpSummaryHelp => "show command reference",
         MessageId::HelpSummaryAuth => "configure AI provider credentials",
         MessageId::HelpSummaryConfig => "configure UI language",
         MessageId::HelpSummaryRecommendations => {
-            "manage recommendations; analysis sends bounded activity to the provider, and local clear does not control provider retention"
+            "manage personalized prompt recommendations only (failure insights: /mode analysis); analysis sends bounded activity to the provider, and local clear does not control provider retention"
         }
         MessageId::HelpSummaryModeApproval => "change approval mode",
         MessageId::HelpSummaryModeAnalysis => {
-            "choose suggested mode, automatic analysis, or no proactive assistance"
+            "choose suggested mode, automatic analysis, or no proactive assistance; controls passive suggestions and failure insights after failed commands"
         }
         MessageId::HelpSummaryAgent => "start an explicit Agent request",
         MessageId::HelpSummaryExplain => "analyze the last failed command",
@@ -23,6 +35,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryDetails => "inspect approval/activity details",
         MessageId::HelpSummaryAudit => "show audit entry points",
         MessageId::HelpSummaryHooks => "show hook status",
+        MessageId::HelpSummaryHealth => "run an on-demand health check",
         MessageId::HelpSummarySelect => "show a displayed recommendation",
         MessageId::HelpSummaryCopy => "copy a displayed recommendation",
         MessageId::HelpSummaryDebug => "show session debug details",
@@ -39,6 +52,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashUnknownBody => "Unknown slash command: {command}",
         MessageId::SlashUnknownSuggestionBody => "Did you mean {command}?",
         MessageId::SlashUnknownFooter => "Use /help to see available commands.",
+        MessageId::SlashInvalidArgumentsTitle => "Invalid slash arguments",
+        MessageId::SlashQuotedArgumentsUnsupported => {
+            "Quoted arguments are not supported. Use /mode approval trust confirm instead."
+        }
         MessageId::SlashInfoAuditTitle => "Audit",
         MessageId::SlashInfoAuditApprovalsBody => {
             "Approval decisions are available with Details actions."
@@ -63,13 +80,58 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "render fallback: set COSH_SHELL_RENDER=plain before starting cosh-shell."
         }
         MessageId::SlashInfoConfigFooter => {
-            "Use /config language [auto|en-US|zh-CN]. Saved language takes effect next startup."
+            "Use /config language [auto|en-US|zh-CN]. Takes effect immediately; agent replies follow your message language."
         }
         MessageId::HelpGroupSessions => "Sessions",
         MessageId::HelpSummarySession => "discover, resume, and clear Agent sessions",
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "list/manage cosh-core extensions",
         MessageId::HelpSummarySkills => "list/inspect cosh-core skills",
+        MessageId::HelpGroupStatus => "Status",
+        MessageId::HelpSummaryStatus => "show version, provider, model, and runtime status",
+        MessageId::HelpSummaryStats => "show model and tool session statistics",
+        MessageId::SlashValueUnavailable => "unavailable",
+        MessageId::SlashValueNotStarted => "not started",
+        MessageId::SlashValueIdle => "idle",
+        MessageId::SlashValueActive => "active",
+        MessageId::SlashStatusTitle => "Status",
+        MessageId::SlashStatusVersionLine => "cosh-shell: {version}",
+        MessageId::SlashStatusBackendLine => "Backend: {backend}",
+        MessageId::SlashStatusProviderLine => "Provider: {provider}",
+        MessageId::SlashStatusModelLine => "Model: {model}",
+        MessageId::SlashStatusSessionLine => "Session: {session}",
+        MessageId::SlashStatusOsLine => "OS: {os}",
+        MessageId::SlashStatusModesLine => {
+            "Modes: approval={approval}, analysis={analysis}"
+        }
+        MessageId::SlashStatusProviderUnavailableLine => {
+            "Provider details: unavailable from the current backend"
+        }
+        MessageId::SlashStatusFooter => {
+            "/about is an alias for /status. Use /stats [model|tools] for session statistics."
+        }
+        MessageId::SlashStatsTitle => "Session stats",
+        MessageId::SlashStatsModelTitle => "Model stats",
+        MessageId::SlashStatsToolsTitle => "Tool stats",
+        MessageId::SlashStatsModelLine => "Model: {model}",
+        MessageId::SlashStatsBackendLine => "Backend: {backend}",
+        MessageId::SlashStatsRunStateLine => "Agent run: {state}",
+        MessageId::SlashStatsToolTotalsLine => {
+            "Tools: {calls} calls, {successful} successful, {failed} failed, {pending} pending"
+        }
+        MessageId::SlashStatsNoToolCalls => {
+            "No tool calls have been recorded in this session."
+        }
+        MessageId::SlashStatsToolRow => {
+            "{name}: {calls} calls, {successful} successful, {failed} failed, {pending} pending"
+        }
+        MessageId::SlashStatsTelemetryUnavailable => {
+            "Token counts, API errors, and latency are not exposed by the current backend protocol."
+        }
+        MessageId::SlashStatsUsageLine => "Usage: /stats [model|tools]",
+        MessageId::SlashStatsFooter => {
+            "Statistics are read-only and cover data observed by this cosh-shell process."
+        }
         MessageId::SlashExtensionsTitle => "Extensions",
         MessageId::SlashSkillsTitle => "Skills",
         MessageId::SlashRegistryUnavailable => {

@@ -54,6 +54,9 @@ pub const DEFAULT_PID_CACHE_SIZE: usize = 1024;
 /// Default tokenizer cache size (number of loaded tokenizer models).
 pub const DEFAULT_TOKENIZER_CACHE_SIZE: usize = 4;
 
+/// Default seconds between two trajectory-collector scan rounds.
+pub const DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS: u64 = 30;
+
 /// Default maximum per-connection HTTP body buffer size (8 MB).
 pub const DEFAULT_MAX_CONNECTION_BODY_BYTES: usize = 8 * 1024 * 1024;
 
@@ -321,6 +324,8 @@ pub struct JsonFeatures {
     pub token_consumption: Option<bool>,
     /// SLS Logtail export.
     pub sls_logtail: Option<bool>,
+    /// Qoder/QoderWork trajectory collection into trajectories.db.
+    pub trajectory_collection: Option<JsonTrajectoryCollectionFeature>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug, Default)]
@@ -362,6 +367,17 @@ pub struct JsonInterruptionFeature {
     pub retention_days: Option<u64>,
     #[serde(default)]
     pub max_db_size_mb: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonTrajectoryCollectionFeature {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub scan_interval_secs: Option<u64>,
+    /// Optional override of the projects directories to scan.
+    #[serde(default)]
+    pub scan_dirs: Option<Vec<String>>,
 }
 
 /// Resource limits and channel policy for memory-leak prevention.
@@ -672,6 +688,12 @@ pub struct FeatureFlags {
     pub token_consumption_enabled: bool,
     /// SLS Logtail export.
     pub sls_logtail_enabled: bool,
+    /// Qoder/QoderWork trajectory collection (scan + ATIF convert + persist).
+    pub trajectory_collection_enabled: bool,
+    /// Seconds between two trajectory scan rounds.
+    pub trajectory_scan_interval_secs: u64,
+    /// Optional override of the trajectory projects directories to scan.
+    pub trajectory_scan_dirs: Option<Vec<String>>,
 }
 
 impl Default for FeatureFlags {
@@ -690,6 +712,9 @@ impl Default for FeatureFlags {
             audit_enabled: false,
             token_consumption_enabled: false,
             sls_logtail_enabled: false,
+            trajectory_collection_enabled: false,
+            trajectory_scan_interval_secs: DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS,
+            trajectory_scan_dirs: None,
         }
     }
 }
@@ -842,6 +867,9 @@ pub struct AgentsightConfig {
     pub https_rules: Vec<HttpsRule>,
     /// User-defined HTTP targets (IP/port endpoints + domains for tcpsniff)
     pub http_targets: Vec<HttpTarget>,
+    /// Whether FFI mode emits raw HTTPS fallback events.
+    /// This is configured only through the C API and is not part of agentsight.json.
+    pub ffi_enable_raw_https: bool,
 
     // --- Config File Path ---
     /// Path to JSON configuration file
@@ -929,6 +957,7 @@ impl Default for AgentsightConfig {
             cmdline_rules: Vec::new(),
             https_rules: Vec::new(),
             http_targets: Vec::new(),
+            ffi_enable_raw_https: false,
 
             // Config file path default
             config_path: None,
@@ -1164,6 +1193,20 @@ impl AgentsightConfig {
                 audit_enabled: features.audit.unwrap_or(false),
                 token_consumption_enabled: features.token_consumption.unwrap_or(false),
                 sls_logtail_enabled: features.sls_logtail.unwrap_or(false),
+                trajectory_collection_enabled: features
+                    .trajectory_collection
+                    .as_ref()
+                    .and_then(|f| f.enabled)
+                    .unwrap_or(false),
+                trajectory_scan_interval_secs: features
+                    .trajectory_collection
+                    .as_ref()
+                    .and_then(|f| f.scan_interval_secs)
+                    .unwrap_or(DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS),
+                trajectory_scan_dirs: features
+                    .trajectory_collection
+                    .as_ref()
+                    .and_then(|f| f.scan_dirs.clone()),
             };
         }
 
@@ -1946,6 +1989,50 @@ mod tests {
         assert!(!config.features.audit_enabled);
         assert!(config.features.token_consumption_enabled);
         assert!(config.features.sls_logtail_enabled);
+        // trajectory_collection absent -> defaults (disabled, 30s)
+        assert!(!config.features.trajectory_collection_enabled);
+        assert_eq!(
+            config.features.trajectory_scan_interval_secs,
+            DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS
+        );
+        assert!(config.features.trajectory_scan_dirs.is_none());
+    }
+
+    #[test]
+    fn test_load_from_json_trajectory_collection() {
+        let json = r#"{
+            "features": {
+                "trajectory_collection": {
+                    "enabled": true,
+                    "scan_interval_secs": 15,
+                    "scan_dirs": ["/tmp/projects"]
+                }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.features.trajectory_collection_enabled);
+        assert_eq!(config.features.trajectory_scan_interval_secs, 15);
+        assert_eq!(
+            config.features.trajectory_scan_dirs,
+            Some(vec!["/tmp/projects".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_load_from_json_trajectory_collection_disabled() {
+        let json = r#"{
+            "features": {
+                "trajectory_collection": { "enabled": false }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.features.trajectory_collection_enabled);
+        assert_eq!(
+            config.features.trajectory_scan_interval_secs,
+            DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS
+        );
     }
 
     #[test]

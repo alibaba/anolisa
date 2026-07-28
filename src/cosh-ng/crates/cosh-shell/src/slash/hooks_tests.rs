@@ -1,6 +1,63 @@
-use super::hooks::render_hooks_command;
+use super::hooks::{group_agent_hooks, render_hooks_command};
 use crate::hooks::state::{RuntimeHookDisplay, RuntimeHookFinding};
 use crate::runtime::prelude::*;
+
+#[test]
+fn agent_hooks_group_by_event_in_lifecycle_order() {
+    // Mirrors the #1713 reproduction: pii-checker registers five events and
+    // observability-hook seven; the flat rendering scattered them across the
+    // panel. Grouping must list each event once, hooks beneath it.
+    let data = serde_json::json!([
+        {"name": "skill-ledger", "event": "PreToolUse", "extension": "agent-sec-core", "disabled": false},
+        {"name": "pii-checker", "event": "PreToolUse", "extension": "agent-sec-core", "disabled": true},
+        {"name": "pii-checker", "event": "AfterModel", "extension": "agent-sec-core", "disabled": true},
+        {"name": "observability-hook", "event": "Stop", "extension": "agent-sec-core", "disabled": false},
+        {"name": "observability-hook", "event": "PreToolUse", "extension": "agent-sec-core", "disabled": false},
+        {"name": "tokenless-compress-schema", "event": "BeforeModel", "extension": "tokenless", "disabled": false},
+        {"name": "mystery", "event": "CustomEvent", "extension": "x", "disabled": false},
+    ]);
+
+    let groups = group_agent_hooks(&data);
+
+    // Event groups appear exactly once, in lifecycle order, unknown trailing.
+    let events: Vec<&str> = groups.iter().map(|group| group.event.as_str()).collect();
+    assert_eq!(
+        events,
+        vec![
+            "PreToolUse",
+            "BeforeModel",
+            "AfterModel",
+            "Stop",
+            "CustomEvent"
+        ],
+        "{events:?}"
+    );
+
+    // Hooks of one event sit contiguously in registry order with state kept.
+    let pre_tool = &groups[0];
+    let names: Vec<(&str, bool)> = pre_tool
+        .hooks
+        .iter()
+        .map(|hook| (hook.name.as_str(), hook.disabled))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("skill-ledger", false),
+            ("pii-checker", true),
+            ("observability-hook", false)
+        ]
+    );
+    assert_eq!(pre_tool.hooks[0].extension, "agent-sec-core");
+}
+
+#[test]
+fn agent_hooks_grouping_handles_empty_and_malformed_payloads() {
+    assert!(group_agent_hooks(&serde_json::json!([])).is_empty());
+    assert!(group_agent_hooks(&serde_json::json!({"not": "an array"})).is_empty());
+    // Records without a name are skipped entirely.
+    assert!(group_agent_hooks(&serde_json::json!([{"event": "PreToolUse"}])).is_empty());
+}
 
 struct EnvLock {
     path: std::path::PathBuf,

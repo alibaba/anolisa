@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,9 @@ pub struct CoreConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Trusted MCP client connections loaded from system or user configuration.
+    #[serde(default)]
+    pub mcp: McpConfig,
     #[serde(default)]
     pub session: SessionConfig,
     #[serde(default)]
@@ -68,6 +71,9 @@ pub struct AgentConfig {
     pub session_token_limit: u64,
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls_per_turn: u32,
+    /// Tools that bypass approval for this agent configuration.
+    #[serde(default)]
+    pub allowed_tools: HashSet<String>,
 }
 
 impl Default for AgentConfig {
@@ -77,6 +83,7 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             session_token_limit: default_session_token_limit(),
             max_tool_calls_per_turn: default_max_tool_calls(),
+            allowed_tools: HashSet::new(),
         }
     }
 }
@@ -116,7 +123,7 @@ pub struct HooksConfig {
     pub after_model: Vec<HookDefinition>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct HookDefinition {
     pub command: String,
     #[serde(default)]
@@ -127,6 +134,24 @@ pub struct HookDefinition {
     pub timeout: Option<u64>,
     #[serde(default)]
     pub sequential: Option<bool>,
+    /// Environment variables injected into this hook's child process only.
+    /// The child inherits the parent environment first, so an entry here
+    /// overrides an inherited value of the same name. The host never calls
+    /// `std::env::set_var`, so the cosh-ng process itself is unaffected.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Validates an environment variable name against POSIX rules
+/// (`[A-Za-z_][A-Za-z0-9_]*`). Only names are checked — values are opaque and
+/// must never be logged.
+pub fn is_valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -137,12 +162,82 @@ pub struct SkillsConfig {
     pub custom_paths: Vec<String>,
 }
 
+/// Configuration for locally managed MCP client connections.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpConfig {
+    /// Server definitions keyed by a stable, user-visible server name.
+    #[serde(default)]
+    pub servers: HashMap<String, McpServerConfig>,
+}
+
+/// A trusted MCP server that cosh-core may start locally or contact over HTTP.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfig {
+    /// Executable for a locally managed stdio server, launched without a shell.
+    #[serde(default)]
+    pub command: String,
+    /// Streamable HTTP endpoint. Mutually exclusive with `command`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Arguments passed to the configured executable.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Explicit environment variables available to the child process.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Optional static bearer token for an HTTP server.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+    /// OAuth settings for a Streamable HTTP server. Tokens are stored separately.
+    #[serde(default)]
+    pub oauth: McpOAuthConfig,
+    /// Startup and request timeout in milliseconds.
+    #[serde(default = "default_mcp_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Server startup and tool discovery timeout in milliseconds.
+    #[serde(default = "default_mcp_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
+    /// `None` exposes every server tool; an empty list exposes none.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+/// Non-secret OAuth settings for a Streamable HTTP MCP server.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpOAuthConfig {
+    /// Pre-registered public client identifier. When absent, dynamic registration is used.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Requested OAuth scopes when the server does not advertise them.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// OAuth resource indicator. Defaults to the MCP endpoint.
+    #[serde(default)]
+    pub resource: Option<String>,
+    /// Authorization-server metadata URL, bypassing protected-resource discovery.
+    #[serde(default)]
+    pub auth_server_metadata_url: Option<String>,
+    /// Local callback port. An ephemeral port is used when omitted.
+    #[serde(default)]
+    pub callback_port: Option<u16>,
+}
+
+fn default_mcp_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_mcp_startup_timeout_ms() -> u64 {
+    30_000
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionConfig {
     #[serde(default = "default_true")]
     pub auto_persist: bool,
     #[serde(default = "default_persist_dir")]
     pub persist_dir: String,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 impl Default for SessionConfig {
@@ -150,8 +245,124 @@ impl Default for SessionConfig {
         Self {
             auto_persist: true,
             persist_dir: default_persist_dir(),
+            compaction: CompactionConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+/// Model-aware session context compaction policy (`[session.compaction]`).
+pub struct CompactionConfig {
+    /// Master switch for manual and automatic compaction.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Whether idle-boundary automatic compaction may trigger.
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// Optional absolute trigger bound; always clamped to the model budget.
+    #[serde(default)]
+    pub auto_compact_token_limit: Option<u64>,
+    /// Fraction of the usable history budget that triggers normal compaction.
+    #[serde(default = "default_trigger_ratio")]
+    pub trigger_ratio: f64,
+    /// Fraction of the usable history budget that arms emergency protection.
+    #[serde(default = "default_emergency_ratio")]
+    pub emergency_ratio: f64,
+    /// Best-effort post-compaction fraction of the usable history budget.
+    #[serde(default = "default_target_ratio")]
+    pub target_ratio: f64,
+    /// Minimum recent complete Agent runs kept verbatim by automatic and
+    /// emergency compaction; at least one is always retained. Explicit manual
+    /// compaction may summarize the latest complete run.
+    #[serde(default = "default_preserve_recent_runs")]
+    pub preserve_recent_runs: usize,
+    /// Explicit user override for the model context window, in tokens.
+    #[serde(default)]
+    pub model_context_window: Option<u64>,
+    /// Explicit user override for the maximum model output reserve, in tokens.
+    #[serde(default)]
+    pub model_max_output_tokens: Option<u64>,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto: true,
+            auto_compact_token_limit: None,
+            trigger_ratio: default_trigger_ratio(),
+            emergency_ratio: default_emergency_ratio(),
+            target_ratio: default_target_ratio(),
+            preserve_recent_runs: default_preserve_recent_runs(),
+            model_context_window: None,
+            model_max_output_tokens: None,
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Replaces unusable ratio overrides with the compiled-in defaults.
+    ///
+    /// TOML happily deserializes `nan`, `inf`, and `-inf` into `f64`, and
+    /// `f64::clamp` panics when a bound is NaN — a project-level
+    /// `.copilot-shell/config.toml` must never be able to crash every Agent
+    /// turn. Non-finite or out-of-range fields fall back individually; a
+    /// combination that cannot satisfy `target <= trigger <= emergency` falls
+    /// back as a whole group so the documented 70/90/30 semantics hold.
+    pub(crate) fn sanitize_ratios(&mut self) {
+        fn sanitize_field(name: &str, value: &mut f64, default: f64) {
+            if value.is_finite() && (0.0..=1.0).contains(value) {
+                return;
+            }
+            eprintln!(
+                "[cosh-core] Warning: [session.compaction] {name} = {value} is not a \
+                 finite ratio in [0, 1]; using default {default}"
+            );
+            *value = default;
+        }
+        sanitize_field(
+            "trigger_ratio",
+            &mut self.trigger_ratio,
+            DEFAULT_TRIGGER_RATIO,
+        );
+        sanitize_field(
+            "emergency_ratio",
+            &mut self.emergency_ratio,
+            DEFAULT_EMERGENCY_RATIO,
+        );
+        sanitize_field("target_ratio", &mut self.target_ratio, DEFAULT_TARGET_RATIO);
+        if !(self.target_ratio <= self.trigger_ratio && self.trigger_ratio <= self.emergency_ratio)
+        {
+            eprintln!(
+                "[cosh-core] Warning: [session.compaction] ratios cannot satisfy \
+                 target <= trigger <= emergency ({} / {} / {}); using default policy",
+                self.target_ratio, self.trigger_ratio, self.emergency_ratio
+            );
+            self.trigger_ratio = DEFAULT_TRIGGER_RATIO;
+            self.emergency_ratio = DEFAULT_EMERGENCY_RATIO;
+            self.target_ratio = DEFAULT_TARGET_RATIO;
+        }
+    }
+}
+
+/// Default normal automatic trigger fraction of the usable history budget.
+pub(crate) const DEFAULT_TRIGGER_RATIO: f64 = 0.70;
+/// Default emergency protection fraction of the usable history budget.
+pub(crate) const DEFAULT_EMERGENCY_RATIO: f64 = 0.90;
+/// Default best-effort post-compaction fraction of the usable history budget.
+pub(crate) const DEFAULT_TARGET_RATIO: f64 = 0.30;
+
+fn default_trigger_ratio() -> f64 {
+    DEFAULT_TRIGGER_RATIO
+}
+fn default_emergency_ratio() -> f64 {
+    DEFAULT_EMERGENCY_RATIO
+}
+fn default_target_ratio() -> f64 {
+    DEFAULT_TARGET_RATIO
+}
+fn default_preserve_recent_runs() -> usize {
+    2
 }
 
 fn default_true() -> bool {
@@ -192,6 +403,7 @@ struct PartialCoreConfig {
     agent: Option<PartialAgentConfig>,
     hooks: Option<PartialHooksConfig>,
     skills: Option<PartialSkillsConfig>,
+    mcp: Option<McpConfig>,
     session: Option<PartialSessionConfig>,
     logging: Option<PartialLoggingConfig>,
 }
@@ -212,6 +424,7 @@ struct PartialAgentConfig {
     max_turns: Option<u32>,
     session_token_limit: Option<u64>,
     max_tool_calls_per_turn: Option<u32>,
+    allowed_tools: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -245,6 +458,20 @@ struct PartialSkillsConfig {
 struct PartialSessionConfig {
     auto_persist: Option<bool>,
     persist_dir: Option<String>,
+    compaction: Option<PartialCompactionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialCompactionConfig {
+    enabled: Option<bool>,
+    auto: Option<bool>,
+    auto_compact_token_limit: Option<u64>,
+    trigger_ratio: Option<f64>,
+    emergency_ratio: Option<f64>,
+    target_ratio: Option<f64>,
+    preserve_recent_runs: Option<usize>,
+    model_context_window: Option<u64>,
+    model_max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -314,6 +541,9 @@ fn apply_user_layer(config: &mut CoreConfig, layer: &PartialCoreConfig) {
                 .insert(provider_id.clone(), provider.clone());
         }
     }
+    if let Some(ref mcp) = layer.mcp {
+        config.mcp.servers.extend(mcp.servers.clone());
+    }
     apply_common_layers(config, layer);
 }
 
@@ -332,6 +562,12 @@ fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path:
             );
         }
         apply_ai_preferences(&mut config.ai, ai);
+    }
+    if layer.mcp.is_some() {
+        eprintln!(
+            "[cosh-core] Warning: ignoring MCP servers from project config {}",
+            path.display()
+        );
     }
     apply_common_layers(config, layer);
 }
@@ -378,6 +614,9 @@ fn apply_agent_layer(config: &mut AgentConfig, layer: &PartialAgentConfig) {
     }
     if let Some(value) = layer.max_tool_calls_per_turn {
         config.max_tool_calls_per_turn = value;
+    }
+    if let Some(ref value) = layer.allowed_tools {
+        config.allowed_tools = value.clone();
     }
 }
 
@@ -426,6 +665,41 @@ fn apply_session_layer(config: &mut SessionConfig, layer: &PartialSessionConfig)
     }
     if let Some(ref value) = layer.persist_dir {
         config.persist_dir = value.clone();
+    }
+    // The compaction table is merged field-by-field so a higher-priority
+    // layer that sets only one key does not reset the others to defaults.
+    if let Some(ref value) = layer.compaction {
+        apply_compaction_layer(&mut config.compaction, value);
+    }
+}
+
+fn apply_compaction_layer(config: &mut CompactionConfig, layer: &PartialCompactionConfig) {
+    if let Some(value) = layer.enabled {
+        config.enabled = value;
+    }
+    if let Some(value) = layer.auto {
+        config.auto = value;
+    }
+    if let Some(value) = layer.auto_compact_token_limit {
+        config.auto_compact_token_limit = Some(value);
+    }
+    if let Some(value) = layer.trigger_ratio {
+        config.trigger_ratio = value;
+    }
+    if let Some(value) = layer.emergency_ratio {
+        config.emergency_ratio = value;
+    }
+    if let Some(value) = layer.target_ratio {
+        config.target_ratio = value;
+    }
+    if let Some(value) = layer.preserve_recent_runs {
+        config.preserve_recent_runs = value;
+    }
+    if let Some(value) = layer.model_context_window {
+        config.model_context_window = Some(value);
+    }
+    if let Some(value) = layer.model_max_output_tokens {
+        config.model_max_output_tokens = Some(value);
     }
 }
 
@@ -504,6 +778,10 @@ impl CoreConfig {
             }
         }
 
+        // Any layer (including an untrusted project config) may have written
+        // non-finite or contradictory compaction ratios; validate once after
+        // all layers so every consumer sees a policy that can never panic.
+        config.session.compaction.sanitize_ratios();
         config
     }
 
@@ -628,6 +906,22 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
     persist_config_to_dir(config, &dir)
 }
 
+/// Matches only the `[ai]` table header and its dotted children (`[ai.providers.x]`),
+/// not lookalike sections such as `[aider]` or `[ai_drivers]`.
+/// Trailing whitespace or an inline comment after the closing bracket is accepted.
+fn is_ai_section_header(line: &str) -> bool {
+    let t = line.trim();
+    let Some(end) = t.find(']') else {
+        return false;
+    };
+    let rest = t[end + 1..].trim_start();
+    if !(rest.is_empty() || rest.starts_with('#')) {
+        return false;
+    }
+    let header = &t[..end + 1];
+    header == "[ai]" || header.starts_with("[ai.")
+}
+
 fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
 
@@ -638,11 +932,11 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
     let mut preserved = String::new();
     let mut in_ai_section = false;
     for line in existing.lines() {
-        if line.trim().starts_with("[ai") {
+        if is_ai_section_header(line) {
             in_ai_section = true;
             continue;
         }
-        if in_ai_section && line.trim().starts_with('[') && !line.trim().starts_with("[ai") {
+        if in_ai_section && line.trim().starts_with('[') && !is_ai_section_header(line) {
             in_ai_section = false;
         }
         if !in_ai_section {
@@ -781,6 +1075,166 @@ max_tool_calls_per_turn = 20
 
         assert_eq!(config.agent.approval_mode, "trust");
         assert_eq!(config.agent.max_turns, 50);
+    }
+
+    #[test]
+    fn non_finite_compaction_ratios_from_toml_fall_back_to_defaults() {
+        // A project `.copilot-shell/config.toml` is untrusted input: TOML
+        // `nan`/`inf`/`-inf` deserialize into f64 and previously panicked the
+        // budget clamp on every Agent turn. The load layer must fall back.
+        for bad in ["nan", "inf", "-inf", "7.5", "-0.5"] {
+            for field in ["trigger_ratio", "emergency_ratio", "target_ratio"] {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let project_path = tmp.path().join("config.toml");
+                std::fs::write(
+                    &project_path,
+                    format!("[session.compaction]\n{field} = {bad}\n"),
+                )
+                .unwrap();
+                let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+                let compaction = &config.session.compaction;
+                assert!(
+                    compaction.trigger_ratio.is_finite()
+                        && compaction.emergency_ratio.is_finite()
+                        && compaction.target_ratio.is_finite(),
+                    "{field}={bad} left a non-finite ratio"
+                );
+                assert!(
+                    compaction.target_ratio <= compaction.trigger_ratio
+                        && compaction.trigger_ratio <= compaction.emergency_ratio,
+                    "{field}={bad} broke threshold ordering"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legal_compaction_ratio_overrides_survive_sanitization() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &project_path,
+            "[session.compaction]\ntrigger_ratio = 0.5\nemergency_ratio = 0.8\ntarget_ratio = 0.2\n",
+        )
+        .unwrap();
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        assert_eq!(config.session.compaction.trigger_ratio, 0.5);
+        assert_eq!(config.session.compaction.emergency_ratio, 0.8);
+        assert_eq!(config.session.compaction.target_ratio, 0.2);
+    }
+
+    #[test]
+    fn contradictory_compaction_ratios_fall_back_as_a_group() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_path = tmp.path().join("config.toml");
+        // Individually in range, but the trio cannot satisfy
+        // target <= trigger <= emergency.
+        std::fs::write(
+            &project_path,
+            "[session.compaction]\ntrigger_ratio = 0.9\nemergency_ratio = 0.2\ntarget_ratio = 0.95\n",
+        )
+        .unwrap();
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        assert_eq!(
+            config.session.compaction.trigger_ratio,
+            DEFAULT_TRIGGER_RATIO
+        );
+        assert_eq!(
+            config.session.compaction.emergency_ratio,
+            DEFAULT_EMERGENCY_RATIO
+        );
+        assert_eq!(config.session.compaction.target_ratio, DEFAULT_TARGET_RATIO);
+    }
+
+    #[test]
+    fn layered_compaction_merges_fields_without_wholesale_replacement() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+
+        // The user layer disables compaction and pins a large window.
+        std::fs::write(
+            &user_path,
+            "[session.compaction]\nenabled = false\nmodel_context_window = 200000\n",
+        )
+        .unwrap();
+        // The higher-priority project layer touches only the target ratio.
+        std::fs::write(&project_path, "[session.compaction]\ntarget_ratio = 0.2\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let compaction = &config.session.compaction;
+        // The project layer must not have reset the user-layer fields.
+        assert!(!compaction.enabled);
+        assert_eq!(compaction.model_context_window, Some(200_000));
+        // The project layer's explicit field is applied.
+        assert_eq!(compaction.target_ratio, 0.2);
+        // Fields set by neither layer keep their compiled-in defaults.
+        assert_eq!(compaction.trigger_ratio, DEFAULT_TRIGGER_RATIO);
+        assert_eq!(compaction.emergency_ratio, DEFAULT_EMERGENCY_RATIO);
+        assert!(compaction.auto);
+    }
+
+    #[test]
+    fn higher_priority_layer_overrides_lower_compaction_field() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+
+        std::fs::write(
+            &user_path,
+            "[session.compaction]\npreserve_recent_runs = 5\nauto = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            "[session.compaction]\npreserve_recent_runs = 9\n",
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let compaction = &config.session.compaction;
+        // The project layer's explicit value wins over the user layer's.
+        assert_eq!(compaction.preserve_recent_runs, 9);
+        // The user-layer field the project layer omitted is preserved.
+        assert!(compaction.auto);
+    }
+
+    #[test]
+    fn parse_stdio_mcp_config() {
+        let toml_str = r#"
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+timeout_ms = 5000
+allowed_tools = ["read_file", "list_directory"]
+
+[mcp.servers.filesystem.env]
+API_KEY = "${FILESYSTEM_API_KEY}"
+"#;
+
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let server = config.mcp.servers.get("filesystem").unwrap();
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.timeout_ms, 5000);
+        assert_eq!(server.startup_timeout_ms, 30_000);
+        assert_eq!(server.allowed_tools.as_ref().unwrap().len(), 2);
+        assert_eq!(server.env["API_KEY"], "${FILESYSTEM_API_KEY}");
+    }
+
+    #[test]
+    fn parse_streamable_http_mcp_config() {
+        let toml_str = r#"
+[mcp.servers.remote]
+url = "https://mcp.example.com/mcp"
+bearer_token = "${MCP_TOKEN}"
+allowed_tools = ["search"]
+"#;
+
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let server = config.mcp.servers.get("remote").unwrap();
+        assert_eq!(server.command, "");
+        assert_eq!(server.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(server.bearer_token.as_deref(), Some("${MCP_TOKEN}"));
     }
 
     #[test]
@@ -1045,6 +1499,33 @@ auth_source = "ecs_ram_role"
     }
 
     #[test]
+    fn project_mcp_config_is_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[mcp.servers.user]
+command = "user-server"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[mcp.servers.untrusted]
+command = "project-server"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        assert!(config.mcp.servers.contains_key("user"));
+        assert!(!config.mcp.servers.contains_key("untrusted"));
+    }
+
+    #[test]
     fn user_provider_overrides_system_provider_atomically() {
         let tmp = tempfile::TempDir::new().unwrap();
         let system_path = tmp.path().join("system-config.toml");
@@ -1174,5 +1655,141 @@ api_key = "sk-user"
         assert!(content.contains("api_key = \"sk-user\""));
         assert!(!content.contains("system-provider"));
         assert!(!content.contains("sk-system"));
+    }
+
+    #[test]
+    fn persist_preserves_non_ai_sections_whose_names_start_with_ai() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"[ai]
+active_provider = "old"
+
+[ai.providers.old]
+type = "openai_compat"
+base_url = "https://old.example/v1"
+api_key = "sk-old"
+model = "old-model"
+
+[aider]
+model = "claude-3-5-sonnet"
+edit_format = "diff"
+
+[aide]
+theme = "dark"
+
+[ai_drivers]
+enabled = true
+
+[agent]
+approval_mode = "balanced"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        config.user_ai.active_provider = Some("new-provider".to_string());
+        config.user_ai.providers.clear();
+        let provider = ProviderConfig {
+            provider_type: Some("openai_compat".to_string()),
+            base_url: Some("https://new.example/v1".to_string()),
+            api_key: Some("sk-new".to_string()),
+            model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+        config
+            .user_ai
+            .providers
+            .insert("new-provider".to_string(), provider);
+
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+
+        // Non-ai sections with ai-prefixed names must survive.
+        assert!(content.contains("[aider]"));
+        assert!(content.contains("model = \"claude-3-5-sonnet\""));
+        assert!(content.contains("edit_format = \"diff\""));
+        assert!(content.contains("[aide]"));
+        assert!(content.contains("theme = \"dark\""));
+        assert!(content.contains("[ai_drivers]"));
+        assert!(content.contains("enabled = true"));
+        assert!(content.contains("[agent]"));
+        assert!(content.contains("approval_mode = \"balanced\""));
+
+        // Old ai content must be gone, new content present exactly once.
+        assert!(!content.contains("sk-old"));
+        assert!(!content.contains("old-model"));
+        assert!(!content.contains("[ai.providers.old]"));
+        assert!(content.contains("active_provider = \"new-provider\""));
+        assert!(content.contains("[ai.providers.new-provider]"));
+        assert!(content.contains("api_key = \"sk-new\""));
+        assert_eq!(content.matches("[ai]").count(), 1);
+        assert_eq!(content.matches("[ai.providers.").count(), 1);
+    }
+
+    #[test]
+    fn persist_replaces_ai_headers_with_inline_comments_without_duplication() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"[ai] # valid inline comment
+active_provider = "old"
+
+[ai.providers.old] # legacy provider
+type = "openai_compat"
+api_key = "sk-old"
+
+[aider]
+model = "claude-3-5-sonnet"
+
+[agent]
+approval_mode = "balanced"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        config.user_ai.active_provider = Some("new-provider".to_string());
+        config.user_ai.providers.clear();
+        let provider = ProviderConfig {
+            provider_type: Some("openai_compat".to_string()),
+            api_key: Some("sk-new".to_string()),
+            ..Default::default()
+        };
+        config
+            .user_ai
+            .providers
+            .insert("new-provider".to_string(), provider);
+
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+
+        // No duplicate [ai] table; old content fully replaced.
+        assert_eq!(content.matches("[ai]").count(), 1);
+        assert!(!content.contains("sk-old"));
+        assert!(!content.contains("[ai.providers.old]"));
+        assert!(content.contains("active_provider = \"new-provider\""));
+        assert!(content.contains("[ai.providers.new-provider]"));
+
+        // Non-ai sections survive.
+        assert!(content.contains("[aider]"));
+        assert!(content.contains("model = \"claude-3-5-sonnet\""));
+        assert!(content.contains("[agent]"));
+
+        // Persisted output must be valid TOML that re-parses cleanly.
+        let parsed: CoreConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.ai.active_provider.as_deref(), Some("new-provider"));
+        assert!(parsed.ai.providers.contains_key("new-provider"));
+        assert_eq!(parsed.ai.providers.len(), 1);
     }
 }

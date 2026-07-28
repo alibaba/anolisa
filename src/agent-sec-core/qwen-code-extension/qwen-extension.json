@@ -46,6 +46,19 @@
         ]
       },
       {
+        "matcher": "^run_shell_command$",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-code-scan-shell-command",
+            "command": "python3 \"${extensionPath}${/}hooks${/}code_scanner_hook.py\"",
+            "description": "Scan Qwen Code shell commands for security issues before execution",
+            "timeout": 10000,
+            "statusMessage": "Scanning shell command for security issues..."
+          }
+        ]
+      },
+      {
         "hooks": [
           {
             "type": "command",

@@ -6,7 +6,6 @@ never forwards an unredacted sensitive metric when PII redaction fails.
 """
 
 import json
-import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -14,7 +13,7 @@ from typing import Any
 
 from pii_text import json_dumps as _json_dumps
 from pii_text import text_sha256, value_to_text
-from qwen_trace_context import with_trace_context
+from trace_context import trace_context, with_trace_context
 
 _CLI_TIMEOUT_SECONDS = 3
 # Read one extra byte below to distinguish an exact-limit payload from truncation.
@@ -75,23 +74,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _non_empty_string(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = value if isinstance(value, str) else str(value)
-    return text if text else None
-
-
-def _session_id(input_data: dict[str, Any]) -> str | None:
-    return _non_empty_string(input_data.get("session_id")) or _non_empty_string(
-        os.environ.get("QWEN_CODE_SESSION_ID")
-    )
-
-
 def _metadata(
     input_data: dict[str, Any], *, needs_tool_call_id: bool = False
 ) -> dict[str, Any] | None:
-    session_id = _session_id(input_data)
+    context = trace_context(input_data)
+    session_id = context.get("session_id")
     if session_id is None:
         return None
 
@@ -100,9 +87,7 @@ def _metadata(
         "runId": _ZERO_RUN_ID,
     }
     if needs_tool_call_id:
-        tool_call_id = _non_empty_string(
-            input_data.get("tool_call_id") or input_data.get("tool_use_id")
-        )
+        tool_call_id = context.get("tool_call_id")
         if tool_call_id is None:
             return None
         metadata["toolCallId"] = tool_call_id

@@ -464,6 +464,7 @@ fn invocation_id_uses_control_tool_use_id_for_permission_requests() {
             tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
             tool_use_id: "toolu-read-1".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -490,6 +491,7 @@ fn invocation_id_falls_back_to_request_id_when_control_tool_use_id_is_missing() 
             tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
             tool_use_id: String::new(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -1765,6 +1767,7 @@ fn control_permission_tool_request_is_hidden_when_approval_card_handles_it() {
             }),
             tool_use_id: "toolu-write".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -1806,6 +1809,7 @@ fn matching_tool_call_is_hidden_when_control_permission_card_handles_it() {
                 }),
                 tool_use_id: "toolu-write".to_string(),
                 hook_requires_approval: false,
+                audit_ref: None,
             }),
         ],
     );
@@ -1842,6 +1846,7 @@ fn recommend_mode_keeps_visible_control_permission_row_for_matching_tool_call() 
                 tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
                 tool_use_id: "toolu-read".to_string(),
                 hook_requires_approval: false,
+                audit_ref: None,
             }),
         ],
     );
@@ -1873,6 +1878,7 @@ fn recommend_mode_keeps_control_permission_tool_request_activity_visible() {
             }),
             tool_use_id: "toolu-write".to_string(),
             hook_requires_approval: false,
+            audit_ref: None,
         })],
     );
 
@@ -1942,6 +1948,7 @@ fn control_permission_shell_output_is_not_rendered_as_provider_native_transcript
                 tool_input: serde_json::json!({ "command": "ssh -V" }),
                 tool_use_id: "toolu-shell".to_string(),
                 hook_requires_approval: false,
+                audit_ref: None,
             }),
             governed(AgentEvent::ToolOutputDelta {
                 run_id: "run-1".to_string(),
@@ -2129,7 +2136,7 @@ fn shell_handoff_activity_marks_user_interrupt_status() {
     state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("emit pending handoff");
     let block = CommandBlock {
         id: "cmd-1".to_string(),
@@ -2148,6 +2155,7 @@ fn shell_handoff_activity_marks_user_interrupt_status() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
 
     let ids = record_approved_shell_handoff_blocks(&mut state, &[block]);
@@ -2190,7 +2198,7 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
     state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(0)
         .expect("emit pending handoff");
     let stale_block = CommandBlock {
         id: "cmd-stale".to_string(),
@@ -2209,6 +2217,7 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
 
     let ids = record_approved_shell_handoff_blocks(&mut state, &[stale_block]);
@@ -2216,6 +2225,360 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
     assert!(ids.is_empty(), "{ids:?}");
     assert!(state.activity.rows.is_empty(), "{:?}", state.activity.rows);
     assert!(state.control.shell_handoff().pending_front().is_some());
+}
+
+fn untracked_test_event(kind: ShellEventKind, command_id: Option<&str>) -> ShellEvent {
+    ShellEvent {
+        kind,
+        session_id: "session-1".to_string(),
+        command_id: command_id.map(str::to_string),
+        command: None,
+        cwd: Some("/tmp".to_string()),
+        end_cwd: None,
+        exit_code: None,
+        started_at_ms: Some(1),
+        ended_at_ms: None,
+        duration_ms: None,
+        terminal_output_ref: None,
+        terminal_output_bytes: None,
+        input: None,
+        component: None,
+        message: None,
+        command_origin: None,
+        shell_environment_generation: None,
+        audit_identity: None,
+        routing: None,
+        capture: None,
+    }
+}
+
+fn untracked_test_handoff_state(emitted_at_event_index: usize) -> InlineState {
+    let mut state = InlineState::default();
+    let request = ShellHandoffRequest::new(
+        "ls -la /root/",
+        "$ ls -la /root/",
+        "approved_provider_shell_tool",
+        "user",
+        "req-untracked",
+        "run-untracked",
+        0,
+    )
+    .expect("handoff request");
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(emitted_at_event_index)
+        .expect("emit pending handoff");
+    state
+}
+
+#[test]
+fn untracked_shell_handoff_closes_on_shell_ready_after_emit() {
+    let mut state = untracked_test_handoff_state(2);
+    let events = vec![
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+    ];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(ids, vec!["handoff-1"]);
+    assert!(state.control.shell_handoff().pending_front().is_none());
+    let evidence = state
+        .evidence
+        .latest_shell_command_completed()
+        .expect("degraded evidence");
+    assert_eq!(evidence.status, "completed_untracked");
+    // Decision: the degraded path never reports a real exit code or output.
+    assert_eq!(evidence.exit_code, -1);
+    assert!(evidence.terminal_output_ref.is_none());
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == "handoff-1")
+        .expect("handoff row");
+    assert_eq!(row.status, "completed_untracked");
+    assert!(
+        row.detail.contains("preexec_marker_missing"),
+        "{}",
+        row.detail
+    );
+    assert!(
+        row.detail.contains("exit_code: unavailable"),
+        "{}",
+        row.detail
+    );
+    assert!(row.detail.contains("output_id: <none>"), "{}", row.detail);
+    // The degraded evidence must feed the existing continuation recovery.
+    assert_eq!(
+        state
+            .evidence
+            .claim_pending_shell_handoff_continuations()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn untracked_shell_handoff_ignores_shell_ready_before_emit() {
+    let mut state = untracked_test_handoff_state(2);
+    let events = vec![
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+    ];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert!(ids.is_empty(), "{ids:?}");
+    assert!(state.control.shell_handoff().pending_front().is_some());
+    assert!(state.evidence.latest_shell_command_completed().is_none());
+}
+
+#[test]
+fn untracked_shell_handoff_defers_to_tracked_command_path() {
+    let mut state = untracked_test_handoff_state(0);
+    let events = vec![
+        untracked_test_event(ShellEventKind::CommandStarted, Some("cmd-1")),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+    ];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert!(ids.is_empty(), "{ids:?}");
+    assert!(state.control.shell_handoff().pending_front().is_some());
+}
+
+#[test]
+fn untracked_shell_handoff_survives_command_after_prompt_boundary() {
+    // Regression: the event list is cumulative, so a command that starts
+    // after the handoff's prompt boundary was already reached must not
+    // veto that boundary; the first relevant boundary decides ownership.
+    let mut state = untracked_test_handoff_state(0);
+    let events = vec![
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::CommandStarted, Some("cmd-later")),
+    ];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(ids, vec!["handoff-1"]);
+    assert!(state.control.shell_handoff().pending_front().is_none());
+    let evidence = state
+        .evidence
+        .latest_shell_command_completed()
+        .expect("degraded evidence");
+    assert_eq!(evidence.status, "completed_untracked");
+}
+
+#[test]
+fn untracked_shell_handoff_closure_is_idempotent_on_cumulative_events() {
+    // Regression: replaying the same cumulative event list after closure
+    // must not produce duplicate rows, evidence, or continuations.
+    let mut state = untracked_test_handoff_state(0);
+    let events = vec![
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::CommandStarted, Some("cmd-later")),
+    ];
+
+    let first = close_untracked_shell_handoffs(&mut state, &events);
+    assert_eq!(first, vec!["handoff-1"]);
+    let continuations = state.evidence.claim_pending_shell_handoff_continuations();
+    assert_eq!(continuations.len(), 1);
+
+    let second = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert!(second.is_empty(), "{second:?}");
+    assert_eq!(
+        state
+            .activity
+            .rows
+            .iter()
+            .filter(|row| row.id == "handoff-1")
+            .count(),
+        1
+    );
+    assert!(state
+        .evidence
+        .claim_pending_shell_handoff_continuations()
+        .is_empty());
+}
+
+#[test]
+fn untracked_shell_handoff_noop_without_prompt_boundary() {
+    let mut state = untracked_test_handoff_state(0);
+    let events: Vec<ShellEvent> = Vec::new();
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert!(ids.is_empty(), "{ids:?}");
+    assert!(state.control.shell_handoff().pending_front().is_some());
+}
+
+#[test]
+fn untracked_shell_handoff_closure_leaves_interactive_handoffs_untouched() {
+    // Boundary: the untracked fallback only operates on the emitted
+    // shell-handoff queue; interactive shell handoffs (user-executed
+    // suggestions) live in a separate store and may legitimately stay
+    // pending across many prompt boundaries.
+    let mut state = untracked_test_handoff_state(0);
+    record_activity_rows_with_policy(
+        &mut state,
+        &[
+            governed(AgentEvent::ToolCall {
+                run_id: "run-untracked".to_string(),
+                tool_id: Some("tool-use-1".to_string()),
+                name: "Bash".to_string(),
+                input: serde_json::json!({ "command": "sudo systemctl status sshd" }).to_string(),
+            }),
+            governed(AgentEvent::ToolOutputDelta {
+                run_id: "run-untracked".to_string(),
+                tool_id: "tool-use-1".to_string(),
+                stream: "stderr".to_string(),
+                text: "sudo: a terminal is required\n".to_string(),
+            }),
+            governed(AgentEvent::ToolCompleted {
+                run_id: "run-untracked".to_string(),
+                tool_id: "tool-use-1".to_string(),
+                status: "error".to_string(),
+            }),
+        ],
+        ActivityRecordPolicy::default(),
+    );
+    let interactive_before = state
+        .control
+        .interactive_shell_handoff_ids()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(!interactive_before.is_empty());
+    let events = vec![untracked_test_event(ShellEventKind::ShellReady, None)];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    assert!(state.control.shell_handoff().pending_front().is_none());
+    let interactive_after = state
+        .control
+        .interactive_shell_handoff_ids()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(interactive_after, interactive_before);
+}
+
+#[test]
+fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
+    // Boundary contract: handoffs emitted within the same prompt cycle (no
+    // ShellReady between their emission points) legitimately share the next
+    // ShellReady as their closure boundary. Forcing a distinct boundary per
+    // handoff would pin later handoffs to unrelated future prompts and
+    // misreport the evidence timeline.
+    let mut state = InlineState::default();
+    for (command, approval_id) in [("ls -la /root/", "req-a"), ("df -h", "req-b")] {
+        let request = ShellHandoffRequest::new(
+            command,
+            format!("$ {command}"),
+            "approved_provider_shell_tool",
+            "user",
+            approval_id,
+            "run-untracked",
+            0,
+        )
+        .expect("handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request);
+    }
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(2)
+        .expect("emit first handoff");
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(2)
+        .expect("emit second handoff");
+    let events = vec![
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+    ];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(ids, vec!["handoff-1", "handoff-2"]);
+    assert!(state.control.shell_handoff().pending_front().is_none());
+    for id in ["handoff-1", "handoff-2"] {
+        let row = state
+            .activity
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .expect("handoff row");
+        assert_eq!(row.status, "completed_untracked");
+    }
+    assert_eq!(
+        state
+            .evidence
+            .claim_pending_shell_handoff_continuations()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn untracked_shell_handoff_emitted_after_boundary_stays_pending() {
+    // A handoff emitted strictly after the latest prompt boundary must not
+    // be closed by an earlier ShellReady: that boundary belongs to the
+    // previous prompt cycle and says nothing about the new handoff.
+    let mut state = InlineState::default();
+    for (command, approval_id) in [("ls -la /root/", "req-a"), ("df -h", "req-b")] {
+        let request = ShellHandoffRequest::new(
+            command,
+            format!("$ {command}"),
+            "approved_provider_shell_tool",
+            "user",
+            approval_id,
+            "run-untracked",
+            0,
+        )
+        .expect("handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request);
+    }
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(1)
+        .expect("emit first handoff");
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(3)
+        .expect("emit second handoff");
+    let events = vec![
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+        untracked_test_event(ShellEventKind::ShellReady, None),
+    ];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(ids, vec!["handoff-1"]);
+    let pending = state
+        .control
+        .shell_handoff()
+        .pending_front()
+        .expect("second handoff stays pending");
+    assert_eq!(pending.request().approval_id, "req-b");
 }
 
 #[test]

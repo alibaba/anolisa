@@ -1,11 +1,13 @@
 pub(crate) mod builder;
 pub(crate) mod collectors;
 pub(crate) mod context;
+pub(crate) mod env_collectors;
 pub(crate) mod model;
 mod prompt_selection;
 pub(crate) mod recommendation;
 pub(crate) mod rules;
 pub(crate) mod runtime;
+pub(crate) mod status;
 pub(crate) mod suppression;
 
 pub(crate) use builder::{health_scan_id, HealthReportBuilder};
@@ -17,6 +19,7 @@ pub(crate) use collectors::{
     HealthCommandError, HealthCommandOutput, KernelSignalFacts, MemoryFacts, ServiceStatusFact,
 };
 pub(crate) use context::health_context_hint;
+pub(crate) use env_collectors::run_env_collectors;
 pub(crate) use model::{
     HealthCollector, HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue,
     HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport, HealthSeverity,
@@ -30,6 +33,7 @@ pub(crate) use runtime::{
     run_health_scan_with_options, spawn_startup_health_scan, startup_health_scan_enabled_for_env,
     HealthScanMode, HealthScanOptions,
 };
+pub(crate) use status::{doctor_status, finding_remediation, report_exit_code, DoctorStatus};
 pub(crate) use suppression::{
     current_time_ms, health_suppression_store_path, health_suppression_store_path_in_dir,
     host_id_for_report, HealthSuppressionEntry, HealthSuppressionStore, SuppressionDecision,

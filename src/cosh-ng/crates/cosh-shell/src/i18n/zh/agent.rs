@@ -27,11 +27,19 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentStatusWaitingUserAnswer => "正在等待用户回答: {question}",
         MessageId::AgentStatusWaitingApprovalCommand => "正在等待审批: {command}",
         MessageId::AgentStatusTool => "tool",
+        MessageId::AgentStatusToolArguments => "工具参数",
+        MessageId::AgentStatusGeneratingToolArguments => "正在生成 {tool} 参数...",
         MessageId::AgentStatusCapturingToolOutput => "正在捕获 {tool_id} 的输出",
         MessageId::AgentStatusToolCompleted => "{tool_id} 已完成，状态 {status}",
         MessageId::AgentStatusCompleted => "已完成",
         MessageId::AgentStatusFailed => "已失败",
         MessageId::AgentStatusCancelled => "已取消",
+        MessageId::AgentQuestionUnavailableTitle => "Agent 问题不可用",
+        MessageId::AgentQuestionUnavailableBody => "Agent 返回的问题不完整，请重试。",
+        MessageId::AgentAnswerDeliveryUnknownTitle => "Agent 回答送达状态未知",
+        MessageId::AgentAnswerDeliveryUnknownBody => {
+            "发送回答时 Agent 连接已关闭，无法确认是否送达。"
+        }
         MessageId::AgentStatusRunningApprovedProviderTool => "正在运行已批准的 provider tool",
         MessageId::AgentProviderTimeoutDroppedQueuedBody => {
             "provider 超时后已跳过 {dropped} 个排队请求"
@@ -69,6 +77,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentQueuedBodyCommand => "已捕获失败命令: {command}",
         MessageId::AgentQueuedBodyActive => "当前 Agent 运行仍在流式输出。",
         MessageId::AgentQueuedFooter => "当前 Agent 完成后会分析这次失败。",
+        MessageId::AgentQueueFullTitle => "智能体队列已满",
+        MessageId::AgentControlQueueFullBody => {
+            "当前排队请求过多，暂时无法接受该响应。卡片仍保持待处理，请稍后重试。"
+        }
         _ => return None,
     })
 }

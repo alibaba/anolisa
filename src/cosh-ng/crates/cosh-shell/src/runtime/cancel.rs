@@ -26,6 +26,12 @@ pub(crate) fn cancel_ownership_for_event(
     if foreground_command_active && is_control_cancel_event(event) {
         return CancelOwnership::ForegroundCommand;
     }
+    if is_control_esc_event(event) {
+        if state.agent_run.active.is_some() {
+            return CancelOwnership::ActiveAgentTurn;
+        }
+        return CancelOwnership::NotCancel;
+    }
     if is_approval_card_cancel_event(event) {
         return CancelOwnership::ActiveApprovalCard;
     }
@@ -110,9 +116,12 @@ fn cancel_active_agent_run<W: Write>(
     let Some(mut active_run) = state.agent_run.active.take() else {
         return Ok(());
     };
+    // Turn-scope batch consent never outlives its run (issue #1773).
+    state.control.trust.clear_run_batch_consent();
 
     let cancellation_details_id = state.provider_cancellation_artifacts.record_cancelled_run(
         active_run.request.id.clone(),
+        None,
         active_run.provider_name,
         active_run.handle.pending_provider_session_id(),
         active_run.handle.cancellation_artifact_store(),
@@ -168,6 +177,10 @@ fn clear_active_run_request_buffers(active_run: &mut crate::agent::run::ActiveAg
 }
 
 fn suppress_pending_work_after_agent_cancel(state: &mut InlineState) {
+    // Explicit user cancellation authorizes discarding the ENTIRE pending
+    // queue — including control responses. This is a deliberate, user-driven
+    // reset of the conversation, not an accidental loss: the user asked to
+    // stop everything the Agent had in flight.
     state.agent_run.queued_requests.clear();
     state.hooks.pending_consultation = None;
     state.hooks.pending_consultation_queue.clear();
@@ -195,6 +208,12 @@ fn is_control_cancel_event(event: &ShellEvent) -> bool {
         && event.input.as_deref() == Some("ctrl_c")
 }
 
+fn is_control_esc_event(event: &ShellEvent) -> bool {
+    event.kind == ShellEventKind::UserInputIntercepted
+        && event.component.as_deref() == Some("control")
+        && event.input.as_deref() == Some("esc")
+}
+
 fn is_approval_card_cancel_event(event: &ShellEvent) -> bool {
     event.component.as_deref() == Some("card")
         && event
@@ -204,9 +223,14 @@ fn is_approval_card_cancel_event(event: &ShellEvent) -> bool {
         && event.message.as_deref() == Some("cancel")
 }
 
+/// Both ways of abandoning a question prompt release the run's cancel ownership: ESC
+/// (`question_cancel`) and Ctrl+C (`question_abort`).
 fn is_question_card_cancel_event(event: &ShellEvent) -> bool {
     event.component.as_deref() == Some("card")
-        && event.message.as_deref() == Some("question_cancel")
+        && matches!(
+            event.message.as_deref(),
+            Some("question_cancel") | Some("question_abort")
+        )
 }
 
 fn is_evidence_card_cancel_event(event: &ShellEvent) -> bool {
@@ -232,6 +256,8 @@ mod tests {
             .push_back(PendingAgentRequest {
                 request: agent_request("queued"),
                 origin: AgentRunOrigin::Standard,
+                intent: crate::agent::run::AgentStartIntent::UserInitiated,
+                class: crate::agent::run::PendingRequestClass::Normal,
                 selectable_after_event_index: None,
                 before_held_text: false,
             });
@@ -296,6 +322,36 @@ mod tests {
     }
 
     #[test]
+    fn control_esc_cancels_active_agent_run() {
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run());
+        let mut output = Vec::new();
+
+        render_agent_cancel_actions(&[control_esc()], &[], &mut state, &mut output, 0)
+            .expect("render ESC agent cancel");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(state.agent_run.active.is_none());
+        assert!(
+            rendered.contains("Agent cancellation requested"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Details: provider-cancel-1"));
+    }
+
+    #[test]
+    fn control_esc_without_active_run_is_ignored() {
+        let mut state = InlineState::default();
+        let mut output = Vec::new();
+
+        render_agent_cancel_actions(&[control_esc()], &[], &mut state, &mut output, 0)
+            .expect("render ESC with no active run");
+
+        assert!(state.agent_run.active.is_none());
+        assert!(output.is_empty());
+    }
+
+    #[test]
     fn cancel_ownership_classifies_foreground_cards_agent_and_prompt() {
         let mut state = InlineState::default();
         assert_eq!(
@@ -340,6 +396,12 @@ mod tests {
 
     fn control_ctrl_c() -> ShellEvent {
         let mut event = ShellEvent::user_input_intercepted("session-1", "ctrl_c");
+        event.component = Some("control".to_string());
+        event
+    }
+
+    fn control_esc() -> ShellEvent {
+        let mut event = ShellEvent::user_input_intercepted("session-1", "esc");
         event.component = Some("control".to_string());
         event
     }
@@ -396,6 +458,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

@@ -7,6 +7,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HookAutoAnalyzedFooter => "Agent 分析正在启动。",
         MessageId::InsightLabel => "洞察：",
         MessageId::InsightCommandTypoSummary => "发现可能的命令拼写错误",
+        MessageId::InsightCommandNotFoundSummary => "刚才的输入未成功执行",
+        MessageId::InsightCommandNotFoundPrompt => "分析并处理刚才未成功执行的输入",
         MessageId::InsightPermissionDeniedSummary => "命令因权限不足被拒绝",
         MessageId::InsightBuildOrTestFailureSummary => "构建或测试失败",
         MessageId::InsightRuntimeExceptionSummary => "程序发生未捕获异常",

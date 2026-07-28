@@ -13,6 +13,7 @@
 //! reaches them fails loudly at the exact step rather than committing a
 //! record that lies.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,10 +21,11 @@ use anolisa_core::central_log::CentralLog;
 use anolisa_core::domain::{
     Installation, InstallationScope, LifecycleStatus, OwnedArtifact, ProviderBinding,
 };
+use anolisa_core::facts::JournalInventory;
 use anolisa_core::install_runner::{InstallRunner, InstalledFile, PreparedFileSet};
 use anolisa_core::lifecycle::prepare_backup;
 use anolisa_core::owned_executor::{OwnedOpError, OwnedOps, StepSuccess};
-use anolisa_core::path_safety::validate_owned_path;
+use anolisa_core::path_safety::{lexical_roots, validate_owned_path};
 use anolisa_core::planner::{HookKind, RecordWrite};
 use anolisa_core::state::{FileOwner, ObjectKind, OwnedFile, OwnedFileKind, ServiceRef};
 use anolisa_core::state_store::StateStore;
@@ -43,7 +45,9 @@ use super::io_util::{
     service_cleanup_suffix, write_installed_component_manifest,
 };
 use super::provision::{retained_packages_note, run_provision};
-use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
+use super::raw::{
+    InstallHooks, prepare_raw_execution, resolve_install_hooks, resolve_manifest_capabilities,
+};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
@@ -51,6 +55,9 @@ struct ReplayBackup {
     source: PathBuf,
     dest: PathBuf,
     sha256: Option<String>,
+    /// Permission bits `dest` carried before the replay, so restore puts
+    /// the file back executable if it was executable.
+    mode: Option<u32>,
 }
 
 /// Raw-backend [`OwnedOps`] for one replay operation.
@@ -170,6 +177,100 @@ impl<'a> RawReplayOps<'a> {
             .collect()
     }
 
+    /// Re-apply the file capabilities the *prior* contract declared, after
+    /// the backup has been put back.
+    ///
+    /// Restoring a file writes a new inode, and a new inode carries no
+    /// `security.capability` xattr — so a rollback silently strips the
+    /// capabilities the installed version was running with, the same way it
+    /// used to strip the executable bit. Ownership of that repair belongs
+    /// here rather than in a compensation of its own: capabilities attach to
+    /// the file, so they can only be re-applied once the file is back, and
+    /// `restore_backup` is the last compensation the executor replays.
+    ///
+    /// The prior contract is read from the restored manifest snapshot, not
+    /// from `self.prepared` — the new version's capability set is exactly
+    /// what rollback must *not* leave behind.
+    fn reapply_prior_capabilities(&self) -> Vec<String> {
+        let manifest_path = match crate::commands::common::installed_component_manifest_path(
+            self.layout,
+            &self.component,
+            super::COMMAND,
+        ) {
+            Ok(path) => path,
+            Err(err) => return vec![format!("cannot locate the restored manifest: {err}")],
+        };
+        if !manifest_path.exists() {
+            // Two very different situations reach here. If the record owned
+            // the snapshot, restore was supposed to put it back and did not,
+            // so the prior contract is unreadable and any capabilities it
+            // declared are silently gone — say so. If the record never owned
+            // one, this predates manifest snapshots: nothing was knowable to
+            // begin with, and warning on every such rollback would be noise.
+            if self.prior.files.iter().any(|f| f.path == manifest_path) {
+                return vec![format!(
+                    "restored files but {} is missing, so any file capabilities the previous \
+                     version declared could not be re-applied",
+                    manifest_path.display()
+                )];
+            }
+            return Vec::new();
+        }
+        let toml = match fs::read_to_string(&manifest_path) {
+            Ok(toml) => toml,
+            Err(err) => {
+                return vec![format!(
+                    "restored files but could not read {} to re-apply file capabilities: {err}",
+                    manifest_path.display()
+                )];
+            }
+        };
+        let manifest = match anolisa_core::ComponentManifest::from_toml_str(&toml) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                return vec![format!(
+                    "restored files but could not parse {} to re-apply file capabilities: {err}",
+                    manifest_path.display()
+                )];
+            }
+        };
+        let requests = match resolve_manifest_capabilities(&manifest, self.layout, &self.component)
+        {
+            Ok(requests) => requests,
+            Err(err) => {
+                return vec![format!(
+                    "restored files but could not resolve the file capabilities {} declares: {}",
+                    manifest_path.display(),
+                    err.reason()
+                )];
+            }
+        };
+        if requests.is_empty() {
+            return Vec::new();
+        }
+
+        let manager = capability_for_install_mode(self.ctx.install_mode.as_str(), &self.env);
+        let outcome = apply_capabilities(
+            manager.as_ref(),
+            &requests,
+            Some(&self.log),
+            &self.component,
+            &self.operation_id,
+            "cli",
+            self.ctx.install_mode.as_str(),
+        );
+        let mut warnings = outcome.warnings;
+        // A required capability that would not apply aborts the *install*
+        // path; during rollback there is nothing left to abort, so it
+        // downgrades to a warning naming what the restored file lost.
+        if let Some(reason) = outcome.aborted {
+            warnings.push(format!(
+                "restored files but could not re-apply their file capabilities: {reason}"
+            ));
+        }
+        warnings
+    }
+
     fn not_wired(what: &str) -> Result<StepSuccess, OwnedOpError> {
         Err(OwnedOpError(format!(
             "{what} is not wired for owned replay yet"
@@ -228,6 +329,7 @@ impl OwnedOps for RawReplayOps<'_> {
                 Ok(Some(artifact)) => self.backups.push(ReplayBackup {
                     source: backup_path,
                     dest: file.path.clone(),
+                    mode: artifact.mode(),
                     sha256: artifact.into_sha256(),
                 }),
                 // Already gone from disk — nothing to preserve; placement
@@ -420,14 +522,23 @@ impl OwnedOps for RawReplayOps<'_> {
     fn restore_backup(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
         for backup in &self.backups {
-            if let Err(err) =
-                restore_backup_file(&backup.source, &backup.dest, backup.sha256.as_deref())
-            {
-                warnings.push(format!(
+            match restore_backup_file(
+                &backup.source,
+                &backup.dest,
+                backup.sha256.as_deref(),
+                backup.mode,
+            ) {
+                Ok(restore_warnings) => warnings.extend(restore_warnings),
+                Err(err) => warnings.push(format!(
                     "failed to restore {} from its backup: {err}",
                     backup.dest.display()
-                ));
+                )),
             }
+        }
+        // The restored inodes carry no capability xattrs; put the prior
+        // contract's back before the executor calls the rollback done.
+        if !self.backups.is_empty() {
+            warnings.extend(self.reapply_prior_capabilities());
         }
         warnings
     }
@@ -588,6 +699,7 @@ impl OwnedOps for RawTeardownOps<'_> {
     /// on the legitimate files.
     fn remove_owned_files(&mut self) -> Result<StepSuccess, OwnedOpError> {
         let mut warnings = Vec::new();
+        let mut removed_parents: Vec<PathBuf> = Vec::new();
         for file in &self.prior.files {
             if let Err(boundary) = validate_owned_path(self.layout, &file.path) {
                 warnings.push(format!(
@@ -606,7 +718,11 @@ impl OwnedOps for RawTeardownOps<'_> {
                     )));
                 }
             }
+            if let Some(parent) = file.path.parent() {
+                removed_parents.push(parent.to_path_buf());
+            }
         }
+        prune_emptied_dirs(self.layout, removed_parents);
         Ok(StepSuccess::with_warnings(warnings))
     }
 
@@ -650,6 +766,51 @@ impl OwnedOps for RawTeardownOps<'_> {
 
     fn restore_backup(&mut self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+/// Best-effort removal of directories a file teardown emptied, walking
+/// each start directory upward. Without this, an uninstall leaves a bare
+/// directory skeleton behind, and a skeleton under one scope's datadir
+/// (e.g. `/usr/local/share/anolisa/extensions/<component>/`) can shadow
+/// adapter source probing for the same component in another scope.
+///
+/// Safety: `fs::remove_dir` refuses non-empty directories, and the climb
+/// stops at the *deepest* owned root containing the start path. The
+/// boundary must be per-path, not "parent is owned": owned roots can nest
+/// (user mode places `libexec_dir` inside `lib_dir`), so a parent check
+/// alone would delete the inner root itself. Errors are swallowed:
+/// pruning is cosmetic and must never fail an otherwise-successful
+/// teardown.
+fn prune_emptied_dirs(layout: &FsLayout, start_dirs: Vec<PathBuf>) {
+    let roots = lexical_roots(layout);
+    for start in start_dirs {
+        // Deepest owned root containing this path — the hard boundary
+        // that must survive the climb.
+        let Some(boundary) = roots
+            .iter()
+            .filter(|root| start.starts_with(root))
+            .max_by_key(|root| root.components().count())
+        else {
+            continue;
+        };
+        let mut dir = start;
+        while dir != **boundary {
+            if validate_owned_path(layout, &dir).is_err() {
+                break;
+            }
+            match fs::remove_dir(&dir) {
+                Ok(()) => {}
+                // Already pruned via another file's parent chain — keep
+                // climbing so shared ancestors are still considered.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                // Non-empty or unremovable: everything above is also
+                // non-empty, stop here.
+                Err(_) => break,
+            }
+            let Some(parent) = dir.parent() else { break };
+            dir = parent.to_path_buf();
+        }
     }
 }
 
@@ -824,12 +985,7 @@ pub(crate) fn validate_owned_install(
             command: command.to_string(),
             reason: format!("failed to parse component manifest: {err}"),
         })?;
-    if let Some(reason) = component_conflict(&manifest, store) {
-        return Err(CliError::InvalidArgument {
-            command: command.to_string(),
-            reason,
-        });
-    }
+    validate_component_conflict(&manifest, store, &HashSet::new(), command)?;
     let hooks = resolve_install_hooks(&manifest, layout, &component)?;
     let prepared_files = InstallRunner::new(layout)
         .prepare_files(
@@ -847,6 +1003,34 @@ pub(crate) fn validate_owned_install(
         manifest,
         hooks,
     })
+}
+
+/// Reject an incoming component whose manifest conflicts with active state
+/// or an earlier successful member of the same dry-run batch.
+pub(crate) fn validate_component_conflict(
+    manifest: &anolisa_core::ComponentManifest,
+    store: &StateStore,
+    planned_components: &HashSet<String>,
+    command: &str,
+) -> Result<(), CliError> {
+    if let Some(reason) = component_conflict(manifest, store) {
+        return Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason,
+        });
+    }
+    for conflict in &manifest.component.conflicts {
+        if planned_components.contains(conflict) {
+            return Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "component '{}' conflicts with component '{}' planned earlier in this batch — remove one component from the batch, then retry",
+                    manifest.component.name, conflict
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Component-level mutual exclusion (the raw equivalent of RPM's
@@ -898,6 +1082,9 @@ pub(crate) struct RawInstallOps<'a> {
     /// System packages auto-installed by `provision_runtime_deps`.
     /// Intentionally never rolled back.
     provisioned_packages: Vec<String>,
+    /// Journal inventory validated under the install lock; provisioning
+    /// refuses packages a pending RPM install journal reserves.
+    journals: &'a JournalInventory,
     /// Files this run placed, set by `place_files`.
     placed: Vec<InstalledFile>,
     /// Manifest snapshot this run wrote, set by `place_files`.
@@ -920,6 +1107,7 @@ impl<'a> RawInstallOps<'a> {
         validated: ValidatedInstall,
         store: &'a mut StateStore,
         state_path: &'a Path,
+        journals: &'a JournalInventory,
     ) -> Self {
         let ValidatedInstall {
             prepared,
@@ -940,6 +1128,7 @@ impl<'a> RawInstallOps<'a> {
             manifest: Some(manifest),
             hooks: Some(hooks),
             provisioned_packages: Vec::new(),
+            journals,
             placed: Vec::new(),
             manifest_path: None,
             service_run: None,
@@ -1008,9 +1197,16 @@ impl OwnedOps for RawInstallOps<'_> {
             OwnedOpError("internal: provisioning ran before the download-verify step".to_string())
         })?;
         let mut warnings = Vec::new();
-        self.provisioned_packages =
-            run_provision(manifest, &self.env, self.ctx, super::COMMAND, &mut warnings)
-                .map_err(|err| OwnedOpError(err.reason()))?;
+        self.provisioned_packages = run_provision(
+            manifest,
+            &self.env,
+            self.ctx,
+            super::COMMAND,
+            &mut warnings,
+            self.journals,
+            self.layout,
+        )
+        .map_err(|err| OwnedOpError(err.reason()))?;
         Ok(StepSuccess::with_warnings(warnings))
     }
 
@@ -1307,4 +1503,92 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
         s
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Teardown pruning must remove the directory chain the file removal
+    /// emptied (so no skeleton is left to shadow adapter source probing in
+    /// another scope), while keeping the ANOLISA-owned roots and any
+    /// directory that still has contents.
+    #[test]
+    fn prune_emptied_dirs_removes_skeleton_but_keeps_roots_and_nonempty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let datadir = layout.datadir.clone();
+
+        // Emptied chain: datadir/extensions/tokenless/hooks (files removed).
+        let emptied = datadir.join("extensions").join("tokenless").join("hooks");
+        fs::create_dir_all(&emptied).expect("emptied chain");
+        // Sibling that must survive because it still holds a file.
+        let kept = datadir.join("extensions").join("other");
+        fs::create_dir_all(&kept).expect("kept dir");
+        fs::write(kept.join("keep.txt"), b"keep").expect("keep file");
+
+        prune_emptied_dirs(&layout, vec![emptied.clone()]);
+
+        assert!(!emptied.exists(), "emptied chain must be pruned");
+        assert!(
+            !datadir.join("extensions").join("tokenless").exists(),
+            "emptied parent must be pruned"
+        );
+        assert!(
+            datadir.join("extensions").exists(),
+            "shared ancestor with surviving content must stay"
+        );
+        assert!(
+            kept.join("keep.txt").is_file(),
+            "unrelated content must stay"
+        );
+        assert!(datadir.exists(), "the owned datadir root itself must stay");
+    }
+
+    /// The owned root itself is never pruned, even when the teardown
+    /// emptied it completely: it is the per-path climb boundary.
+    #[test]
+    fn prune_emptied_dirs_never_removes_owned_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let datadir = layout.datadir.clone();
+        let only = datadir.join("components").join("tokenless");
+        fs::create_dir_all(&only).expect("chain");
+
+        prune_emptied_dirs(&layout, vec![only]);
+
+        assert!(
+            datadir.exists(),
+            "datadir root must survive even when fully emptied"
+        );
+        assert!(!datadir.join("components").exists(), "chain below pruned");
+    }
+
+    /// Owned roots can nest: the user layout places `libexec_dir` inside
+    /// `lib_dir`. Pruning the last libexec component must stop at
+    /// `libexec_dir` itself — a parent-is-owned check alone would climb
+    /// through it because `lib_dir` is also owned.
+    #[test]
+    fn prune_emptied_dirs_keeps_nested_user_mode_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).expect("home");
+        let layout = FsLayout::user(home);
+        assert!(
+            layout.libexec_dir.starts_with(&layout.lib_dir),
+            "precondition: user-mode libexec nests inside lib"
+        );
+
+        let emptied = layout.libexec_dir.join("tokenless");
+        fs::create_dir_all(&emptied).expect("chain");
+
+        prune_emptied_dirs(&layout, vec![emptied.clone()]);
+
+        assert!(!emptied.exists(), "component dir must be pruned");
+        assert!(
+            layout.libexec_dir.exists(),
+            "nested libexec root must survive the climb"
+        );
+        assert!(layout.lib_dir.exists(), "outer lib root must survive");
+    }
 }

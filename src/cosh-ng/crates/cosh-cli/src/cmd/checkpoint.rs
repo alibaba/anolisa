@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Instant;
 
 use clap::Subcommand;
@@ -5,6 +6,7 @@ use clap::Subcommand;
 use cosh_platform::checkpoint::CkptClient;
 use cosh_platform::detect::Distro;
 use cosh_types::checkpoint::DEFAULT_SOCKET_PATH;
+use cosh_types::error::{CoshError, ErrorCode};
 
 use crate::{build_meta, print_failure, print_success};
 
@@ -122,11 +124,34 @@ pub enum CheckpointCommands {
     },
 }
 
+/// Validate that the workspace path exists on the local filesystem.
+/// Returns a CheckpointNotFound error if the path does not exist.
+fn validate_workspace_exists(workspace: &str) -> Result<(), CoshError> {
+    if !Path::new(workspace).exists() {
+        return Err(CoshError::new(
+            ErrorCode::CheckpointNotFound,
+            format!(
+                "workspace '{}' does not exist on local filesystem",
+                workspace
+            ),
+            "checkpoint",
+        )
+        .with_hint(
+            "check workspace path or run 'cosh-cli checkpoint init --workspace <path>' first",
+        )
+        .recoverable(false));
+    }
+    Ok(())
+}
+
 pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
     let dry_run = false;
 
     match action {
         CheckpointCommands::Init { workspace, socket } => {
+            if let Err(e) = validate_workspace_exists(&workspace) {
+                return print_failure(e, build_meta("checkpoint", distro, start, dry_run));
+            }
             let client = CkptClient::new(&socket);
             match client.init(&workspace) {
                 Ok(result) => {
@@ -136,6 +161,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             }
         }
         CheckpointCommands::Recover { workspace, socket } => {
+            if let Err(e) = validate_workspace_exists(&workspace) {
+                return print_failure(e, build_meta("checkpoint", distro, start, dry_run));
+            }
             let client = CkptClient::new(&socket);
             match client.recover(&workspace) {
                 Ok(result) => {
@@ -152,6 +180,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             pin,
             socket,
         } => {
+            if let Err(e) = validate_workspace_exists(&workspace) {
+                return print_failure(e, build_meta("checkpoint", distro, start, dry_run));
+            }
             let client = CkptClient::new(&socket);
             match client.create(
                 &workspace,
@@ -180,6 +211,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             workspace,
             socket,
         } => {
+            if let Err(e) = validate_workspace_exists(&workspace) {
+                return print_failure(e, build_meta("checkpoint", distro, start, dry_run));
+            }
             let client = CkptClient::new(&socket);
             match client.restore(&workspace, &id) {
                 Ok(result) => {
@@ -217,6 +251,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             to,
             socket,
         } => {
+            if let Err(e) = validate_workspace_exists(&workspace) {
+                return print_failure(e, build_meta("checkpoint", distro, start, dry_run));
+            }
             let client = CkptClient::new(&socket);
             match client.diff(&workspace, &from, &to) {
                 Ok(result) => {
@@ -230,6 +267,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             keep,
             socket,
         } => {
+            if let Err(e) = validate_workspace_exists(&workspace) {
+                return print_failure(e, build_meta("checkpoint", distro, start, dry_run));
+            }
             let client = CkptClient::new(&socket);
             match client.cleanup(&workspace, keep) {
                 Ok(result) => {

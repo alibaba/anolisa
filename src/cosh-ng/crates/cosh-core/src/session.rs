@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::compaction::CompactionState;
 use crate::provider::Message;
 
 mod io;
@@ -98,6 +99,20 @@ pub struct PersistedSession {
     pub generation: u64,
     /// Model-visible conversation history.
     pub messages: Vec<Message>,
+    /// Optional compaction projection over the transcript prefix.
+    ///
+    /// Absent for pre-compaction envelopes; ignoring it always yields the
+    /// complete transcript, so older readers remain correct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionState>,
+    /// Highest committed compaction revision, retained even when the active
+    /// projection is rejected during loading.
+    ///
+    /// This is a monotonic clock, not a property of the live projection: a
+    /// projection dropped by sanitization must not let the next commit reuse
+    /// a revision an earlier commit already published.
+    #[serde(default)]
+    pub compaction_revision: u64,
 }
 
 impl PersistedSession {
@@ -118,6 +133,8 @@ impl PersistedSession {
             model,
             generation: 0,
             messages,
+            compaction: None,
+            compaction_revision: 0,
         }
     }
 }

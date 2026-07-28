@@ -66,18 +66,68 @@ cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 cosh-cli audit check --action "rm -rf /var/log"
 # → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
 
+# 检查并导出统一生产审计时间线
+cosh-cli audit status
+cosh-cli audit events --since 2h --limit 100
+cosh-cli audit export --since 2h --output ./audit-incident
+
 # 在当前工作空间恢复 Agent 对话
 cosh-shell --resume              # 打开交互式会话选择器
 cosh-shell --resume <session-id> # 选择已知的 provider 会话
 ```
 
-在 cosh-shell 中，可使用 `/session` 浏览会话、`/session status`
-查看已选择和已激活的身份，并通过 `/session clear ...` 在确认后清理旧记录。
-会话恢复会还原模型可见的对话上下文，但不会伪装成已恢复历史终端证据。记录
-默认保存在 `~/.copilot-shell/cosh-core/sessions/`，可通过
-`session.persist_dir` 修改根目录。项目会话配置和相对存储路径均从
-cosh-shell 传给 Core 的工作空间解析。详见
-[会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)。
+在 cosh-shell 中，可使用 `/session` 浏览会话、`/session list` 复制完整会话
+ID，并通过 `/session status` 查看已选择和已激活的身份。`/session new`
+（或 `/new`）会与当前 provider 对话分离，使下一次 Agent 请求开启全新对话，
+而无需重启 Shell；`/session clear ...` 会在确认后清理旧记录。会话恢复会还原
+模型可见的对话上下文，但不会伪装成已恢复历史终端证据。`/session compact`
+会在后台摘要任意完整对话前缀，包括仅有一个已完成 Agent run 的会话，同时保留
+完整 transcript。自动压缩则同时等待模型窗口压力和安全的旧 run 边界。记录默认保存在
+`~/.copilot-shell/cosh-core/sessions/`，可通过 `session.persist_dir` 修改
+根目录。项目会话配置和相对存储路径均从 cosh-shell 传给 Core 的工作空间解析。
+详见
+[会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)
+和[会话压缩指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-compaction.md)。
+
+Core 和 Shell 还会把脱敏、版本化的审计时间线写入
+`$XDG_STATE_HOME/cosh/audit` 或 `~/.local/state/cosh/audit`。既有
+SLS/metrics 导出保持不变。配置、保留、追踪和事故导出方法见
+[审计运维指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/audit.md)。
+
+## cosh-shell 扩展
+
+扩展管理只通过 `cosh-shell` 内的 `/extensions` slash 命令暴露。`cosh`
+启动器继续保持薄 wrapper，`cosh-cli` 不增加扩展生命周期命令。
+
+```text
+/extensions list
+/extensions info example.ops
+/extensions new ./example.ops --template mcp
+/extensions install ./example.ops
+/extensions install https://example.com/example.ops.git --ref main
+/extensions link ./example.ops
+/extensions update example.ops
+/extensions update --all
+/extensions enable example.ops
+/extensions disable example.ops
+/extensions settings set example.ops region cn-hangzhou --scope user
+/extensions settings list example.ops
+/extensions doctor
+/extensions reload
+```
+
+install、link 和能力发生变化的 update 会先生成 preflight operation，并要求显式运行
+`/extensions consent <operation-id>`。敏感 setting 只保存到操作系统 secret store，
+展示时始终为 `[redacted]`；workspace setting 只对已信任项目生效。扩展 context
+有明确大小边界，并位于 project context 之后。local stdio MCP tool 使用完整
+`<extension>/mcp/<server>/<tool>` namespace，并经过正常 tool approval。
+钩子可声明 `env`，仅注入该钩子自身的子进程——宿主进程永不被修改；由于这属于可执行
+能力，它会计入扩展 capability 指纹，因此声明或修改需要重新确认。
+Agent definition 会被严格校验和列出，但在统一 subagent executor 接入前明确报告
+`executable=false`。registry mutation 会构建 candidate generation。shell 会话复用
+同一个长生命周期 core process：空闲时 `/extensions reload` 立即切换健康 candidate；
+Agent run 忙碌时只排队一次 safe-point reload。当前 run 继续固定在原 generation，
+下一次 run 使用新 generation。
 
 ## 命令参考
 
@@ -99,6 +149,9 @@ cosh-shell 传给 Core 的工作空间解析。详见
 | `cosh-cli checkpoint diff` | `cosh-cli checkpoint diff --workspace /path --from a --to b` | ws-ckpt daemon |
 | `cosh-cli audit check` | `cosh-cli audit check --action "rm -rf /"` | 策略引擎 |
 | `cosh-cli audit log` | `cosh-cli audit log --session abc123` | 策略引擎 |
+| `cosh-cli audit status/events/trace` | `cosh-cli audit trace <id>` | 统一审计存储 |
+| `cosh-cli audit export` | `cosh-cli audit export --since 2h --output ./incident` | 脱敏事故包 |
+| `cosh-cli audit prune --dry-run` | `cosh-cli audit prune --dry-run` | 保留计划预览 |
 | `cosh-cli audit policy show` | `cosh-cli audit policy show` | 策略引擎 |
 
 ## 输出格式
@@ -124,6 +177,14 @@ Agent 关键字段：`ok`（是否成功？）、`error.recoverable`（值得重
 3. **可逆操作** — checkpoint → 执行 → 失败时回滚
 4. **分类错误** — `recoverable` 告诉 Agent 是否该重试
 5. **预演模式** — 所有写操作支持 `--dry-run`，执行前预览
+
+## MCP 工具
+
+`cosh-core --headless` 可以通过 stdio 或 Streamable HTTP 连接受信任的 MCP Server，在启动时发现其工具，
+并以 `mcp__<server>__<tool>` 暴露给 Agent。MCP Server 仅从用户或系统级配置加载；
+除 `trust` 模式外，其工具调用都需要审批。可使用 `cosh-core mcp list`、`inspect`、`refresh`、
+`connect` 和 `disconnect` 管理已配置的 Server；状态输出不会包含凭据。详见
+[MCP 配置说明](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#mcp-server)。
 
 ## 日志
 

@@ -39,13 +39,44 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
             continue;
         }
 
+        // Before handling this input, drive the background-compaction poll at
+        // this safe boundary: harvest a finished compactor, render its
+        // completion notice, and resume any user request that was held back
+        // for the compaction. This keeps FIFO order — the pre-compaction user
+        // queue starts (and becomes `agent_run.active`) before this fresh
+        // input, so the new input queues behind it rather than jumping ahead —
+        // and stops a just-finished compaction from making the user's first
+        // input believe the Agent is still paused. It never blocks waiting on
+        // the compactor; only already-finished results are processed.
+        crate::slash::session::poll_background_compaction(state, output, adapter, false)?;
+
+        // Reserve a control-queue slot BEFORE the pending question is
+        // consumed below — but only when one is actually needed. This path
+        // always stops the active run before starting the answer
+        // continuation, so the continuation queues only while a compaction is
+        // pending or running; an ordinary busy Agent delivers/starts without
+        // consuming queue capacity and must not be blocked. (When the total
+        // cap is hit, plain input is rejected by the same admission rule, so
+        // skipping this event is consistent.)
+        if state.questions.pending_id.is_some()
+            && crate::slash::session::compaction_pending_or_active(state)
+            && !control_queue_has_capacity(state)
+        {
+            crate::slash::session::render_control_queue_full_notice(state, output)?;
+            output.flush()?;
+            continue;
+        }
+
         if let Some(answer_run) =
             agent_request_from_pending_question_answer(event, event_index, state)
         {
             render_question_answer_notice(state, &answer_run, output)?;
             stop_active_agent_run_without_rendering(state, output)?;
             state.agent_run.needs_prompt_after_run = event.cwd.is_none();
-            start_agent_run_with_origin(
+            // The pending question is consumed here; this control-protocol
+            // response is guaranteed a queue slot so it cannot be lost to a
+            // full queue (it would be unrecoverable for the user).
+            start_agent_run_control_response(
                 &answer_run.request,
                 answer_run.origin,
                 adapter,
@@ -76,14 +107,11 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
                 }
             }
             state.agent_run.needs_prompt_after_run = event.cwd.is_none();
-            start_agent_run_with_origin(
-                &request,
-                origin,
-                adapter,
-                state,
-                output,
-                Some(event_index),
-            )?;
+            // Natural-language input and user-chosen prompt ghosts are both
+            // explicit user requests: they always go through the central gate,
+            // which queues them (FIFO) while a compaction is pending/active
+            // rather than starting a model or routing to the shell.
+            dispatch_user_intercept_request(&request, origin, adapter, state, output, event_index)?;
             if let Some(input) = user_input.as_deref() {
                 record_user_intent(state, input);
             }
@@ -98,6 +126,47 @@ fn is_prompt_ghost_feedback_event(event: &ShellEvent) -> bool {
     event.kind == ShellEventKind::UserInputIntercepted
         && prompt_ghost_suggestion_id(event).is_some()
         && matches!(event.message.as_deref(), Some("accepted" | "dismissed"))
+}
+
+/// Routes an explicit user intercept request through the central Agent gate
+/// and renders the appropriate notice for its disposition.
+///
+/// The natural-language and prompt-ghost paths never bypass the queue policy:
+/// during a background compaction the gate queues the request (paused notice),
+/// and when the pending queue is full it is rejected with a visible notice —
+/// the input is never started as a model run or leaked to the shell here.
+fn dispatch_user_intercept_request<W: Write>(
+    request: &AgentRequest,
+    origin: AgentRunOrigin,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+    event_index: usize,
+) -> std::io::Result<()> {
+    let paused_by_compaction = crate::slash::session::compaction_pending_or_active(state);
+    let disposition = start_agent_run_with_origin_disposition(
+        request,
+        origin,
+        AgentStartIntent::UserInitiated,
+        adapter,
+        state,
+        output,
+        Some(event_index),
+    )?;
+    match disposition {
+        AgentStartDisposition::QueueFull => {
+            crate::slash::session::render_agent_queue_full_notice(state, output)?;
+            crate::slash::prompt::write_shell_prompt(state, output)?;
+            output.flush()?;
+        }
+        AgentStartDisposition::Queued if paused_by_compaction => {
+            crate::slash::session::render_compaction_paused_notice(state, output)?;
+            crate::slash::prompt::write_shell_prompt(state, output)?;
+            output.flush()?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn attach_bound_insight_evidence(request: &mut AgentRequest, state: &mut InlineState) {

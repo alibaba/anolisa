@@ -116,8 +116,7 @@ fn disabled_auto_persist_marks_session_non_resumable() {
 }
 
 fn run_prompt(home: &Path, workspace: &Path, args: &[&str]) -> Output {
-    Command::new(binary_path())
-        .env("HOME", home)
+    isolated_command(home)
         .args(["--headless", "--workspace"])
         .arg(workspace)
         .args(args)
@@ -126,8 +125,7 @@ fn run_prompt(home: &Path, workspace: &Path, args: &[&str]) -> Output {
 }
 
 fn run_protocol(home: &Path, workspace: &Path, args: &[&str], messages: &[Value]) -> Output {
-    let mut child = Command::new(binary_path())
-        .env("HOME", home)
+    let mut child = isolated_command(home)
         .args(["--headless", "--workspace"])
         .arg(workspace)
         .args(args)
@@ -143,6 +141,25 @@ fn run_protocol(home: &Path, workspace: &Path, args: &[&str], messages: &[Value]
         }
     }
     child.wait_with_output().expect("wait for cosh-core")
+}
+
+fn isolated_command(home: &Path) -> Command {
+    let mut command = Command::new(binary_path());
+    command
+        .env("HOME", home)
+        .env_remove("COSH_MODEL")
+        .env_remove("COSH_AI_PROVIDER");
+    for variable in [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "DASHSCOPE_API_KEY",
+        "ALIBABA_CLOUD_ACCESS_KEY_ID",
+        "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+        "ALIBABA_CLOUD_SECURITY_TOKEN",
+    ] {
+        command.env_remove(variable);
+    }
+    command
 }
 
 fn json_lines(output: &Output) -> Vec<Value> {

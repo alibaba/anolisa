@@ -197,6 +197,46 @@ With SkillFS enabled, the runtime entry point of Skill Ledger is handled by the 
 3. The daemon refreshes `.skill-meta/activation.json` based on the signed manifest, current file state, user decisions, and the activation policy, and writes xattr on a best-effort basis.
 4. If the current risky version cannot be activated directly, the activation metadata points to the previous trusted `pass` / `warn` snapshot; if no trusted fallback exists, it points to a safe pending-review stub; `target: null` is written only for user `block` decisions or fail-safe scenarios.
 
+**Version requirement: SkillFS must be 0.4.0 or newer.**
+
+Since 0.4.0, the `skill_ledger.skillfs_notify_change` call in step 2 uses
+**notify v2**, whose business payload carries exactly four fields:
+`canonicalSkillDir`, `skillId`, `eventKind`, and `paths`. This is a **breaking
+upgrade with no fallback path** — the daemon rejects any request whose
+`schemaVersion` is not `2`, and SkillFS performs no version negotiation. The two
+components must therefore be upgraded together:
+
+- SkillFS older than 0.4.0 sends notify v1 only, which the current daemon rejects
+  request by request;
+- a failed notify delivery is only a warning on the SkillFS side and never stops
+  the FUSE service.
+
+A version mismatch therefore fails **silently**: newly installed Skills stay
+hidden and neither side reports an obvious error. When diagnosing, first confirm
+that `skillfs --version` is 0.4.0 or newer.
+
+**Two sockets, opposite directions.** Most joint-deployment wiring mistakes come
+from conflating them:
+
+| Socket | Listener | Default path | Purpose |
+|---|---|---|---|
+| daemon socket | agent-sec-core daemon | `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` (override with `AGENT_SEC_DAEMON_SOCKET`) | SkillFS points `--notify-socket` here to send change notifications |
+| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock` | The daemon queries `skill.resolveLiveSource` back through it and writes activation metadata |
+
+Do **not** customize the control socket path. The Ledger resolver client only
+probes the default path above; no configuration key makes it follow a path given
+to `--control-socket`, and changing it makes Ledger silently fall back to host
+mode. SkillFS and the daemon must also run under the same effective UID.
+
+Under the Hermes layout the activation flow carries nested identities
+(`category/skill`) rather than flat skill names, and `skillId` keeps both
+components.
+
+For the full protocol definition, canonical path semantics, and deployment
+boundaries, see
+[Skill Ledger's SkillFS integration design](../../../../../src/agent-sec-core/docs/design/SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md)
+(Chinese only) and the [SkillFS user guide](../../runtime/skillfs.md).
+
 ### Compatibility Path: Hook / Capability Policy
 
 When the Agent loads a Skill, the OpenClaw, Hermes, and copilot-shell hooks resolve the Skill directory, run `agent-sec-cli skill-ledger show <skill_dir>`, and let the unified `policy` control the user-visible behavior. These hooks consume only the `message` in the summary:

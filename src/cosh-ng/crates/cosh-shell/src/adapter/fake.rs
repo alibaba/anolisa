@@ -21,6 +21,33 @@ mod stream_markdown;
 mod stream_state;
 mod stream_tool_approval;
 
+/// Pacing delay between streamed fake events. Defaults to zero so the fake
+/// provider settles as fast as the runtime consumes events; set
+/// `COSH_FAKE_STREAM_PACING_MS` to restore a human-visible streaming rhythm
+/// (for demos or manual TTY runs). Values are clamped to one second so a
+/// stray setting cannot silently stall every streaming test. Semantic delays
+/// that create deliberate cancellation/approval race windows do NOT go
+/// through this helper.
+fn fake_stream_pacing() -> std::time::Duration {
+    use std::sync::OnceLock;
+    const MAX_PACING_MS: u64 = 1_000;
+    static PACING: OnceLock<std::time::Duration> = OnceLock::new();
+    *PACING.get_or_init(|| {
+        let millis = std::env::var("COSH_FAKE_STREAM_PACING_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        std::time::Duration::from_millis(millis.min(MAX_PACING_MS))
+    })
+}
+
+fn fake_stream_pacing_sleep() {
+    let pacing = fake_stream_pacing();
+    if !pacing.is_zero() {
+        std::thread::sleep(pacing);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct FakeAgentAdapter;
 
@@ -485,6 +512,7 @@ impl AgentAdapter for FakeAgentAdapter {
                         tool_input: serde_json::json!({ "command": "git status" }),
                         tool_use_id: "toolu-1".to_string(),
                         hook_requires_approval: false,
+                        audit_ref: None,
                     },
                     AgentEvent::ToolOutputDelta {
                         run_id: run_id.clone(),

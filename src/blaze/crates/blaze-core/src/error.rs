@@ -49,6 +49,9 @@ pub enum BlazeError {
 
     #[error("backend error: {msg}")]
     BackendError { msg: String },
+
+    #[error("storage error: {msg}")]
+    StorageError { msg: String },
 }
 
 /// Internal wrapper that lets [`BlazeError::ConfigError`] carry either a

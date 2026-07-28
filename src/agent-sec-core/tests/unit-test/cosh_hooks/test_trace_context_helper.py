@@ -1,13 +1,17 @@
 """Unit tests for cosh-extension/hooks/trace_context.py."""
 
 import json
-import sys
 from pathlib import Path
 
-_HOOKS_DIR = Path(__file__).resolve().parents[2] / ".." / "cosh-extension" / "hooks"
-sys.path.insert(0, str(_HOOKS_DIR))
+from standalone_hook_test_loader import load_module_from_path
 
-from trace_context import trace_context, with_trace_context  # noqa: E402
+_HOOKS_DIR = Path(__file__).resolve().parents[2] / ".." / "cosh-extension" / "hooks"
+trace_context_helper = load_module_from_path(
+    "cosh_trace_context_helper",
+    _HOOKS_DIR / "trace_context.py",
+)
+trace_context = trace_context_helper.trace_context
+with_trace_context = trace_context_helper.with_trace_context
 
 
 def test_trace_context_uses_fixed_cosh_hook_input_fields():

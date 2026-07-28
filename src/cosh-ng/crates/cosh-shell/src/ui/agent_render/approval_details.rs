@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::{
-    approval::{approval_content_width, wrapped_preview_rows},
+    approval::{approval_content_width, audit_ref_line, audit_ref_rows, wrapped_preview_rows},
     buffer_to_lines, buffer_to_styled_lines, RatatuiInlineRenderer,
 };
 
@@ -30,6 +30,9 @@ pub struct ApprovalDetailsPanelModel<'a> {
     pub command_block_id: Option<&'a str>,
     pub redaction_status: Option<&'a str>,
     pub assessment: Option<CommandAssessmentSummaryModel<'a>>,
+    /// Audit event ID linked to this approval projection. Rendered only when
+    /// present so the pull-based audit log never adds a placeholder row.
+    pub audit_ref: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,7 +91,7 @@ impl RatatuiInlineRenderer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_approval_details_panel(model, area, &mut buffer, &i18n);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -165,6 +168,9 @@ impl RatatuiInlineRenderer {
         if let Some(assessment) = model.assessment {
             lines.insert(6, assessment_summary_line(&i18n, assessment));
         }
+        if let Some(audit_ref) = model.audit_ref {
+            lines.insert(6, audit_ref_line(audit_ref));
+        }
         lines
     }
 }
@@ -182,7 +188,8 @@ fn approval_details_panel_height(
         .assessment
         .map(|assessment| assessment_summary_rows(i18n, assessment, content_width).len() as u16)
         .unwrap_or(0);
-    11 + preview_rows + assessment_rows
+    let audit_rows = audit_ref_rows(model.audit_ref, content_width).len() as u16;
+    11 + preview_rows + assessment_rows + audit_rows
 }
 
 fn render_approval_details_panel(
@@ -217,6 +224,9 @@ fn render_approval_details_panel(
             assessment_summary_rows(i18n, assessment, inner.width.saturating_sub(2) as usize)
         })
         .unwrap_or_default();
+    // Same content width as `approval_details_panel_height`, so a wrapped
+    // reference can never exceed its allocated rows.
+    let audit_rows = audit_ref_rows(model.audit_ref, inner.width as usize);
     let risk = i18n.format(
         crate::MessageId::ApprovalRiskSuffix,
         &[("risk", model.risk)],
@@ -227,6 +237,7 @@ fn render_approval_details_panel(
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(audit_rows.len() as u16),
         Constraint::Length(assessment_rows.len() as u16),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -334,6 +345,15 @@ fn render_approval_details_panel(
         ),
     ]))
     .render(chunks[4], buffer);
+    if !audit_rows.is_empty() {
+        Paragraph::new(Text::from(
+            audit_rows
+                .into_iter()
+                .map(|line| Line::from(Span::raw(line)))
+                .collect::<Vec<_>>(),
+        ))
+        .render(chunks[5], buffer);
+    }
     if !assessment_rows.is_empty() {
         Paragraph::new(Text::from(
             assessment_rows
@@ -341,10 +361,10 @@ fn render_approval_details_panel(
                 .map(|line| Line::from(Span::raw(line)))
                 .collect::<Vec<_>>(),
         ))
-        .render(chunks[5], buffer);
+        .render(chunks[6], buffer);
     }
     Paragraph::new(i18n.t(crate::MessageId::ApprovalDetailsDefaultDenyLine))
-        .render(chunks[6], buffer);
+        .render(chunks[7], buffer);
     Paragraph::new(Line::from(vec![
         Span::styled(
             format!(
@@ -355,24 +375,24 @@ fn render_approval_details_panel(
         ),
         Span::raw(user_facing_subject(i18n, model.subject)),
     ]))
-    .render(chunks[7], buffer);
+    .render(chunks[8], buffer);
     Paragraph::new(Line::from(Span::styled(
         format!("{}:", user_facing_preview_label(i18n, &model)),
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     )))
-    .render(chunks[8], buffer);
+    .render(chunks[9], buffer);
     Paragraph::new(Text::from(
         preview_rows
             .into_iter()
             .map(|line| Line::from(Span::raw(line)))
             .collect::<Vec<_>>(),
     ))
-    .render(chunks[9], buffer);
+    .render(chunks[10], buffer);
     Paragraph::new(i18n.t(crate::MessageId::ApprovalExecutableToolPolicy))
         .wrap(Wrap { trim: true })
-        .render(chunks[10], buffer);
+        .render(chunks[11], buffer);
 }
 
 fn assessment_summary_line(

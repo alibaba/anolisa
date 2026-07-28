@@ -101,6 +101,11 @@ fn collector_label(collector: HealthCollector) -> &'static str {
         HealthCollector::Disk => "disk",
         HealthCollector::KernelSignal => "kernel_signal",
         HealthCollector::ConfiguredService => "configured_service",
+        HealthCollector::Provider => "provider",
+        HealthCollector::Config => "config",
+        HealthCollector::Hooks => "hooks",
+        HealthCollector::Pty => "pty",
+        HealthCollector::Permissions => "permissions",
     }
 }
 

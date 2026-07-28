@@ -26,19 +26,23 @@ use tar::{Builder, Header};
 use tempfile::tempdir;
 
 pub fn ctx_with_prefix(json: bool, prefix: Option<PathBuf>) -> CliContext {
-    CliContext {
-        install_mode: if prefix.is_some() {
-            InstallMode::System
-        } else {
-            InstallMode::User
+    let root = prefix
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("/tmp/anolisa-install-validation"));
+    let install_mode = if prefix.is_some() {
+        InstallMode::System
+    } else {
+        InstallMode::User
+    };
+    crate::test_support::context_for_root(
+        root,
+        install_mode,
+        prefix.clone(),
+        crate::test_support::TestContextOptions {
+            json,
+            ..Default::default()
         },
-        prefix,
-        json,
-        dry_run: false,
-        verbose: false,
-        quiet: true, // suppress stdout during tests
-        no_color: true,
-    }
+    )
 }
 
 pub fn args(component: &str) -> InstallArgs {
@@ -176,6 +180,48 @@ publisher = "test"
 
 pub fn write_local_repo(root: &Path) -> String {
     write_local_repo_component(root, "agentsight", "0.2.0", &["system"])
+}
+
+/// Local file:// repo publishing several versions of one component, so a
+/// version-pinned install can select a non-latest entry.
+pub fn write_local_repo_component_versions(
+    root: &Path,
+    component: &str,
+    versions: &[&str],
+    modes: &[&str],
+) -> String {
+    let v1 = root.join("v1");
+    std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+    let env = anolisa_env::EnvService::detect();
+    let modes_arr = toml_string_array(modes);
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
+    for version in versions {
+        let artifact = build_component_artifact(component, version, modes);
+        let artifact_name = format!("{component}-{version}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        index.push_str(&format!(
+            r#"
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_arr}
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ));
+    }
+    std::fs::write(v1.join("index.toml"), index).expect("write index");
+    format!("file://{}", v1.display())
 }
 
 pub fn write_local_repo_component(
@@ -631,6 +677,12 @@ pub struct FakeInstaller {
     pub install_succeeds: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
+    /// Package spec(s) each `install` call received, joined per call, so tests
+    /// can pin the exact NEVRA a version-pinned install hands to dnf.
+    pub install_specs: RefCell<Vec<String>>,
+    /// Expected `install` argument (comma-joined). When `None`, the fake
+    /// asserts the bare package name; a pinned test sets the expected NEVRA.
+    pub expected_install: Option<String>,
     /// Optional lock path probed from inside `install`.
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
@@ -651,6 +703,8 @@ impl FakeInstaller {
             install_succeeds: true,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
+            install_specs: RefCell::new(Vec::new()),
+            expected_install: None,
             lock_probe: None,
             lock_was_held: Cell::new(false),
             package_appears_under_lock_path: None,
@@ -661,6 +715,18 @@ impl FakeInstaller {
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
         self.origin = Some(repo.to_string());
+        self
+    }
+    /// Repository candidates `query_available` returns for the package, so a
+    /// version-pinned install can resolve a concrete NEVRA.
+    pub fn with_available(mut self, available: Vec<PackageInfo>) -> Self {
+        self.available = available;
+        self
+    }
+    /// Assert `install` receives this exact spec (e.g. a pinned NEVRA) instead
+    /// of the bare package name.
+    pub fn expecting_install(mut self, spec: &str) -> Self {
+        self.expected_install = Some(spec.to_string());
         self
     }
     pub fn failing_install(mut self) -> Self {
@@ -781,10 +847,15 @@ impl PackageQuery for FakeInstaller {
 impl PackageTransaction for FakeInstaller {
     fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.install_calls.set(self.install_calls.get() + 1);
+        self.install_specs.borrow_mut().push(packages.join(","));
+        let expected = self
+            .expected_install
+            .clone()
+            .unwrap_or_else(|| self.package.clone());
         assert_eq!(
-            packages,
-            [self.package.as_str()],
-            "install targeted the wrong package"
+            packages.join(","),
+            expected,
+            "install targeted the wrong package/spec"
         );
         if let Some(path) = &self.lock_probe {
             self.lock_was_held.set(matches!(
@@ -963,6 +1034,35 @@ pub fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) ->
         },
         arch: arch.to_string(),
         origin: None,
+    }
+}
+
+/// Host architecture the install pipeline resolves against, so version-pinned
+/// tests build candidates the running host actually accepts (aarch64 on this
+/// CI, x86_64 elsewhere) instead of hard-coding one arch.
+pub fn host_arch() -> String {
+    anolisa_env::EnvService::detect().arch
+}
+
+/// A repository candidate for a version-pinned availability query, carrying an
+/// origin (source repo) so the resolved-candidate reporting has a value.
+pub fn available_candidate(
+    name: &str,
+    epoch: Option<&str>,
+    version: &str,
+    release: &str,
+    arch: &str,
+    origin: &str,
+) -> PackageInfo {
+    PackageInfo {
+        name: name.to_string(),
+        version: PackageVersion {
+            epoch: epoch.map(str::to_string),
+            version: version.to_string(),
+            release: Some(release.to_string()),
+        },
+        arch: arch.to_string(),
+        origin: Some(origin.to_string()),
     }
 }
 

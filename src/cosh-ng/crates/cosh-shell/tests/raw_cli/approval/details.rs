@@ -38,15 +38,18 @@ fn raw_cli_details_approvals_renders_decision_journal_panel() {
 
 #[test]
 fn raw_cli_details_approvals_records_denied_not_executed() {
-    let output = run_raw_cli_ask_with_delayed_input(vec![
-        (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
-        (b"\x1b[C\x1b[C\n".to_vec(), Duration::from_millis(800)),
-        (
-            b"/details approvals\n".to_vec(),
-            Duration::from_millis(1_000),
-        ),
-        (b"exit\n".to_vec(), Duration::from_millis(500)),
-    ]);
+    let output = run_raw_cli_ask_with_args_and_marker_input(
+        &[],
+        &[
+            ("cosh-osc$", b"?? stream tool approval\n"),
+            ("Approval req-1", b"\x1b[C\x1b[C\n"),
+            (
+                "Command was not executed for req-1",
+                b"/details approvals\n",
+            ),
+            ("Approval journal", b"exit\n"),
+        ],
+    );
 
     assert!(output.contains("Denied req-1"), "{output}");
     assert!(output.contains("Approval journal"), "{output}");
@@ -186,7 +189,8 @@ fn raw_cli_details_for_approval_uses_zh_language_env() {
 
     assert_zh_approval_prompt_visible(&output);
     assert!(output.contains("已取消 req-1"), "{output}");
-    assert!(output.contains("风险 medium"), "{output}");
+    assert!(output.contains("Bash · 中风险"), "{output}");
+    assert!(!output.contains("风险 medium"), "{output}");
     assert!(
         output.contains("策略: 可执行 tool 请求必须先经过用户审批。"),
         "{output}"

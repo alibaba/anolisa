@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use crate::activity::runtime::{record_approved_shell_handoff_blocks, render_activity_rows};
+use crate::activity::runtime::{
+    close_untracked_shell_handoffs, record_approved_shell_handoff_blocks, render_activity_rows,
+};
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
     block_end_event_index, collect_failed_command_insights, failed_command_candidate,
@@ -9,8 +11,11 @@ use crate::agent::failed_command::{
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
-use crate::agent::run::{start_agent_run_with_origin, stop_active_agent_run_without_rendering};
+use crate::agent::run::{
+    start_agent_run_with_origin, stop_active_agent_run_without_rendering, AgentStartIntent,
+};
 use crate::approval::runtime::render_approval_actions;
+use crate::i18n::MessageId;
 use crate::insight::model::InterventionDecision;
 use crate::insight::policy::InterventionGates;
 use crate::question::runtime::{
@@ -34,6 +39,7 @@ use crate::runtime::prelude::{
 };
 use crate::runtime::state::InlineState;
 use crate::slash::runtime::render_slash_actions;
+use crate::slash::session::poll_background_compaction;
 
 use super::controller::{pending_card_capture, shell_has_active_foreground_command};
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
@@ -171,6 +177,9 @@ fn render_inline_guidance_from_batch<W: Write>(
             event_index_base,
         )?;
         poll_active_agent_run_deferred(state, output, adapter)?;
+        // Foreground output is active: harvest compactor results but defer
+        // completion rendering to the next safe prompt boundary.
+        poll_background_compaction(state, output, adapter, true)?;
         return Ok(());
     }
 
@@ -178,6 +187,8 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_startup_health_banner(state, output)?;
     render_pending_recommendation_notice(state, output)?;
     update_personal_shell_input_state(action_events, state);
+    update_soft_newline_tip_state(action_events, state);
+    crate::runtime::prompt_draft::handle_prompt_draft_events(action_events, state, output)?;
     let personal_idle = state.agent_run.active.is_none()
         && !state.personalization.shell_input_active
         && !action_events
@@ -201,8 +212,14 @@ fn render_inline_guidance_from_batch<W: Write>(
         event_index_base,
     )?;
     let card_capture_pending = pending_card_capture(state).is_some();
-    let activity_actions =
-        ActivityConsumer::consume(&ledger.blocks, adapter, state, output, card_capture_pending)?;
+    let activity_actions = ActivityConsumer::consume(
+        events,
+        &ledger.blocks,
+        adapter,
+        state,
+        output,
+        card_capture_pending,
+    )?;
     RuntimeDispatcher::apply_actions(activity_actions, state);
     let findings = findings_from_blocks(&ledger.blocks);
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
@@ -316,6 +333,8 @@ fn render_inline_guidance_from_batch<W: Write>(
         poll_active_agent_run(state, output, adapter)?;
     }
     flush_held_agent_events(state, output)?;
+    poll_background_compaction(state, output, adapter, false)?;
+    render_soft_newline_tip(events, state, output)?;
     render_owned_shell_prompt(state, output)?;
 
     Ok(())
@@ -337,6 +356,50 @@ fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineSt
             _ => {}
         }
     }
+}
+
+fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState) {
+    if state.shown_soft_newline_tip {
+        return;
+    }
+    let observed = events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("soft_newline_shortcut")
+    });
+    if observed {
+        state.pending_soft_newline_tip = true;
+    }
+}
+
+/// One-time discoverability tip (#1721 T-c): a soft-newline shortcut was
+/// pressed on the bash-owned input path where it cannot take effect. Rendered
+/// only at a prompt-ready boundary; output-side only, never touches input
+/// relaying or marker timing.
+fn render_soft_newline_tip<W: Write>(
+    events: &[ShellEvent],
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if !state.pending_soft_newline_tip || state.shown_soft_newline_tip {
+        return Ok(());
+    }
+    if !events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::ShellReady)
+    {
+        return Ok(());
+    }
+    // D12: never interleave the tip with an in-progress draft; only render
+    // at a quiet prompt boundary.
+    if state.personalization.shell_input_active {
+        return Ok(());
+    }
+    let tip = state.i18n().t(MessageId::PromptSoftNewlineTip);
+    write!(output, "\x1b[2m{tip}\x1b[0m\r\n")?;
+    output.flush()?;
+    state.pending_soft_newline_tip = false;
+    state.shown_soft_newline_tip = true;
+    Ok(())
 }
 
 fn render_owned_shell_prompt<W: Write>(
@@ -433,17 +496,31 @@ impl EvidenceRequestConsumer {
 
 impl ActivityConsumer {
     pub(crate) fn consume<W: Write>(
+        events: &[ShellEvent],
         blocks: &[CommandBlock],
         adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         card_capture_pending: bool,
     ) -> std::io::Result<Vec<RuntimeAction>> {
-        let handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
+        let mut handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
+        // Fallback: close emitted handoffs that reached a prompt boundary
+        // without ever producing command tracking (lost preexec marker).
+        handoff_activity_ids.extend(close_untracked_shell_handoffs(state, events));
         render_activity_rows(state, &handoff_activity_ids, output)?;
         if !card_capture_pending && state.agent_run.active.is_none() {
             for (request, origin) in shell_handoff_continuation_requests(state) {
-                start_agent_run_with_origin(&request, origin, adapter, state, output, None)?;
+                // Shell-handoff continuations are automatic conversation
+                // resumptions, not fresh user requests.
+                start_agent_run_with_origin(
+                    &request,
+                    origin,
+                    AgentStartIntent::InternalBestEffort,
+                    adapter,
+                    state,
+                    output,
+                    None,
+                )?;
             }
         }
         Ok(Vec::new())

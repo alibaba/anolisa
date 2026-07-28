@@ -2,7 +2,9 @@
 # install.sh — Install tokenless plugin for Qoder CLI.
 #
 # Responsibility boundary:
-#   - Register the plugin with qodercli (`qodercli plugins install`).
+#   - Register the plugin with qodercli (`qodercli plugins install`),
+#     staging a copy whose hooks.json has ${QODER_TOKENLESS_HOOKS} expanded
+#     to the absolute hooks path first (see staging comment below).
 #   - Merge our hook commands into ~/.qoder/settings.json under .hooks,
 #     dedup by command string so re-installs are idempotent.
 #   - Hook scripts themselves live in adapters/tokenless/common/hooks/
@@ -66,29 +68,33 @@ fi
 echo "[${COMPONENT}] Installing ${AGENT} plugin v${VERSION}..."
 
 # Register plugin via qodercli standard command.
-# qodercli derives plugin name from the directory name, so expose the adapter
+# qodercli derives plugin name from the directory name, so stage the adapter
 # under a name matching plugin.json's "name" field via a private tempdir.
 # (A predictable /tmp/tokenless would collide across users on shared hosts and
 # race with concurrent installs.)
+# Stage a real copy, not a symlink: qodercli copies the plugin into its cache
+# verbatim, and consumers that load the cached hooks.json directly (e.g. the
+# Qoder IDE, which shares ~/.qoder with qodercli) do NOT expand
+# ${QODER_TOKENLESS_HOOKS}. Registering the raw file leaves them with broken
+# commands like `python3 /rewrite_hook.py`, whose non-zero exit is treated as
+# a tool-call block — the hook's own fail-open never gets a chance to run.
 echo "[${COMPONENT}] Registering plugin with qodercli..."
 TEMP_DIR="$(mktemp -d -t tokenless-qoder-install.XXXXXX)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
-# Copy the plugin bundle (not a symlink) so we can expand the
-# ${QODER_TOKENLESS_HOOKS} placeholder before qodercli caches it
-# verbatim. Qoder IDE loads hooks.json from the cache directly
-# without variable expansion, so the placeholder must be resolved
-# at install time.
-cp -a "$PLUGIN_DIR" "$TEMP_DIR/tokenless"
-# Expand ${QODER_TOKENLESS_HOOKS} to the absolute hooks directory
-# in the staged copy so qodercli's plugin cache gets resolved paths.
-sed -i "s|\${QODER_TOKENLESS_HOOKS}|${HOOKS_DIR}|g" "$TEMP_DIR/tokenless/hooks.json"
-# Verify the placeholder was fully expanded; fail loudly rather than
-# installing a broken hooks.json that Qoder IDE will silently misload.
-if grep -q 'QODER_TOKENLESS_HOOKS' "$TEMP_DIR/tokenless/hooks.json"; then
-    echo "[${COMPONENT}] ERROR: hooks.json still contains unexpanded \${QODER_TOKENLESS_HOOKS} placeholder" >&2
-    echo "    HOOKS_DIR='${HOOKS_DIR}'" >&2
-    exit 1
-fi
+mkdir -p "$TEMP_DIR/tokenless"
+cp -R "$PLUGIN_DIR"/. "$TEMP_DIR/tokenless/"
+# python3 is guaranteed present (checked above); use it instead of sed for
+# portable in-place expansion (macOS and Linux sed -i syntax differ).
+HOOKS_DIR="$HOOKS_DIR" STAGED_HOOKS_JSON="$TEMP_DIR/tokenless/hooks.json" python3 - <<'PYEOF'
+import os
+
+hooks_dir = os.environ['HOOKS_DIR']
+path = os.environ['STAGED_HOOKS_JSON']
+with open(path) as f:
+    content = f.read()
+with open(path, 'w') as f:
+    f.write(content.replace('${QODER_TOKENLESS_HOOKS}', hooks_dir))
+PYEOF
 # Use `if !` so the failure branch survives `set -e`: a bare
 # `OUT=$(...)` assignment would otherwise abort the script before $?
 # is captured, and qodercli's stderr (now redirected into the var)

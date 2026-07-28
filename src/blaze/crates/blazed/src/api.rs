@@ -70,7 +70,7 @@ async fn dispatch(
     let m = method.as_str();
 
     match (m, parts.as_slice()) {
-        ("GET", ["v1", "health"]) => health(),
+        ("GET", ["v1", "health"]) => health(state),
         ("GET", ["v1", "instances"]) => list_instances(state),
         ("POST", ["v1", "instances"]) => create_instance(state, &body).await,
         ("GET", ["v1", "instances", id]) => get_instance(state, id),
@@ -98,10 +98,12 @@ async fn dispatch(
 // Health / metrics / admin
 // ---------------------------------------------------------------------------
 
-fn health() -> Result<Response<Full<Bytes>>> {
+fn health(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
+    let pool_status = state.storage.pool_status();
     json_ok(&json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "storage_pool": pool_status,
     }))
 }
 
@@ -739,6 +741,7 @@ mod tests {
     use blaze_core::pool::PoolManager;
     use blaze_core::template::TemplateRegistry;
 
+    use crate::file_provider::FileStorageProvider;
     use crate::spawner::MockSpawner;
     use crate::state::ServerState;
 
@@ -793,6 +796,10 @@ mod tests {
         // Build state with active_backend = Firecracker (simulating probe
         // selected FC at boot) but using MockSpawner for test portability.
         let spawner: crate::spawner::DynSpawner = Arc::new(MockSpawner);
+        let storage_dir = tmp.join("storage");
+        let _ = std::fs::create_dir_all(&storage_dir);
+        let storage: Arc<dyn blaze_core::storage::StorageProvider> =
+            Arc::new(FileStorageProvider::new(storage_dir));
         let state = Arc::new(ServerState::build(
             config,
             engine,
@@ -801,6 +808,7 @@ mod tests {
             HookRegistry::new(),
             spawner,
             BackendKind::Firecracker,
+            storage,
         ));
 
         // Create instance request for AgentRl workload.

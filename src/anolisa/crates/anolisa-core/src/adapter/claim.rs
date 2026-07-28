@@ -5,9 +5,11 @@
 //! over on behalf of one component, so [`status`](super::manager) and
 //! [`disable`](super::manager) can run later without re-reading the
 //! resource directory and without trusting any executable instruction
-//! from disk. Receipts never carry argv, shell strings, script paths, or
-//! reverse commands — the framework CLI invocation is constructed by the
-//! built-in driver, not read back from the receipt.
+//! from disk. Receipts never carry executable argv, script paths, or reverse
+//! commands. [`AdapterNotice::command`](crate::manifest::AdapterNotice::command)
+//! is the sole command-like string: an inert display hint that must never be
+//! parsed into argv or executed. Framework CLI invocations are constructed by
+//! built-in drivers, not read back from receipts.
 //!
 //! Every value that `status`/`disable` would interpret as a path, a
 //! symlink, or a framework-registry entry must live in [`ClaimResource`],
@@ -83,6 +85,14 @@ pub struct AdapterClaim {
     pub driver_schema: u32,
     /// Lifecycle status of the receipt itself.
     pub status: ClaimStatus,
+    /// Static, display-only notices declared in the component manifest at
+    /// enable time. Persisted so `disable` can show `post_disable` notices
+    /// from the receipt alone, without depending on the manifest still
+    /// being present (same rationale as `adapter_type`). Inert text: never
+    /// shell-expanded, template-substituted, or executed. Declared after
+    /// the scalar fields so TOML emits it among the sub-tables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<crate::manifest::AdapterNotice>,
     /// Manager-validatable resource declarations — the receipt's security
     /// boundary. Re-validated before every `status`/`disable`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -883,6 +893,7 @@ mod tests {
             bundle_digest: Some("sha256:abc".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "openclaw_state_dir".to_string(),
@@ -1008,6 +1019,7 @@ mod tests {
             bundle_digest: Some("sha256:def".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "hermes_home".to_string(),
@@ -1121,6 +1133,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "state_dir".to_string(),
@@ -1213,6 +1226,7 @@ mod tests {
             bundle_digest: Some("sha256:c0de".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "codex_marketplace_dir".to_string(),
@@ -1301,6 +1315,7 @@ mod tests {
             bundle_digest: Some("sha256:c05h".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![ClaimResource {
                 id: "cosh_extension_dir".to_string(),
                 purpose: "cosh_extension_dir".to_string(),
@@ -1336,6 +1351,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "cc_marketplace".to_string(),
@@ -1376,6 +1392,7 @@ mod tests {
             bundle_digest: Some("sha256:90de".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "qoder_plugin".to_string(),
@@ -1452,6 +1469,7 @@ mod tests {
             bundle_digest: Some("sha256:0wen".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "qwencode_extension_dir".to_string(),

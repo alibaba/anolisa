@@ -127,21 +127,25 @@ fn spawn_error_is_text_file_busy(error: &std::io::Error) -> bool {
     }
 }
 
+/// Bounded, thread-safe capture of a child's trailing stderr bytes.
+///
+/// Shared with the background compactor so every subprocess owner reuses the
+/// same tail-retention semantics instead of growing stderr without bound.
 #[derive(Clone, Debug)]
-struct StderrTail {
+pub(crate) struct StderrTail {
     inner: Arc<Mutex<Vec<u8>>>,
     limit: usize,
 }
 
 impl StderrTail {
-    fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Vec::new())),
             limit,
         }
     }
 
-    fn push(&self, bytes: &[u8]) {
+    pub(crate) fn push(&self, bytes: &[u8]) {
         let Ok(mut tail) = self.inner.lock() else {
             return;
         };
@@ -152,11 +156,29 @@ impl StderrTail {
         }
     }
 
-    fn snapshot(&self) -> String {
+    pub(crate) fn snapshot(&self) -> String {
         self.inner
             .lock()
             .map(|tail| String::from_utf8_lossy(&tail).to_string())
             .unwrap_or_default()
+    }
+
+    /// Spawns a detached drain thread that owns `stderr` until EOF.
+    ///
+    /// Draining continuously (instead of reading after exit) keeps the pipe
+    /// from filling up and deadlocking a chatty child, while retention stays
+    /// bounded to the tail limit.
+    pub(crate) fn drain_in_background(&self, mut stderr: impl Read + Send + 'static) {
+        let tail = self.clone();
+        thread::spawn(move || {
+            let mut buffer = [0u8; 1024];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => tail.push(&buffer[..read]),
+                }
+            }
+        });
     }
 }
 

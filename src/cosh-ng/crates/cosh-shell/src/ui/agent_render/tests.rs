@@ -2,9 +2,9 @@ use super::{
     strip_ansi_escape, ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel,
     ActivityToolRowModel, ApprovalDetailsPanelModel, ApprovalJournalEntryModel,
     ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
-    HealthBannerModel, NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel,
-    RatatuiInlineRenderer, RecommendationActionPanelModel, RecommendationPanelModel,
-    ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
+    HealthBannerModel, NoticePanelModel, QuestionAnswerPanelModel, QuestionInputFeedback,
+    QuestionPanelModel, RatatuiInlineRenderer, RecommendationActionPanelModel,
+    RecommendationPanelModel, ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
 };
 use crate::diagnostics::health::{
     HealthCollector, HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue,
@@ -864,6 +864,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 next_label: None,
                 selected_action: ApprovalPanelAction::Approve,
                 expanded: true,
+                turn_consent: false,
                 hook_warnings: Vec::new(),
             })
             .join("\n");
@@ -883,6 +884,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 custom_answer: "",
                 allow_free_text: true,
                 selection_mode: QuestionSelectionMode::Single,
+                input_feedback: QuestionInputFeedback::None,
             })
             .join("\n");
         assert!(question.contains("Agent 问题"), "{question}");
@@ -1250,7 +1252,7 @@ fn health_banner_snapshot_matrix_keeps_rich_output_compact() {
     for width in [40, 80, 120] {
         let renderer = RatatuiInlineRenderer::with_width(width);
         let text = renderer
-            .health_banner_lines(HealthBannerModel { report: &report })
+            .health_banner_lines(HealthBannerModel::new(&report))
             .join("\n");
 
         assert!(text.lines().count() <= 14, "{text}");
@@ -1318,7 +1320,7 @@ fn health_banner_matches_standard_panel_width_and_padding() {
     let report = warning_health_report();
     let renderer = RatatuiInlineRenderer::with_width(160);
     let health = renderer
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     let mut agent_output = Vec::new();
@@ -1347,7 +1349,7 @@ fn health_banner_uses_zh_catalog_without_translating_commands() {
         let renderer =
             RatatuiInlineRenderer::with_width(width).with_language(crate::Language::ZhCn);
         let text = renderer
-            .health_banner_lines(HealthBannerModel { report: &report })
+            .health_banner_lines(HealthBannerModel::new(&report))
             .join("\n");
 
         assert!(text.lines().count() <= 14, "{text}");
@@ -1417,7 +1419,7 @@ fn health_banner_long_mount_ellipsis_and_gauge_semantics() {
     }
 
     let text = RatatuiInlineRenderer::with_width(120)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert_rendered_width(&text, 120);
@@ -1438,7 +1440,7 @@ fn health_banner_hides_riskiest_disk_metric_without_disk_finding() {
     report.recompute_overall_severity();
 
     let text = RatatuiInlineRenderer::with_width(120)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert!(text.contains("Disk / used 41%"), "{text}");
@@ -1451,7 +1453,7 @@ fn health_banner_wraps_prompt_suggestions_without_ellipsis_truncation() {
     let report = warning_health_report();
 
     let text = RatatuiInlineRenderer::with_width(40)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     let compact = compact_without_box_chars(&text);
 
@@ -1473,7 +1475,7 @@ fn health_banner_oom_prompt_wraps_fully_at_narrow_width() {
     let report = oom_health_report();
 
     let text = RatatuiInlineRenderer::with_width(40)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     let compact = compact_without_box_chars(&text);
 
@@ -1487,9 +1489,7 @@ fn health_banner_oom_prompt_wraps_fully_at_narrow_width() {
 #[test]
 fn health_banner_shows_cpu_used_only_when_utilization_fact_exists() {
     let without_cpu_used = RatatuiInlineRenderer::with_width(120)
-        .health_banner_lines(HealthBannerModel {
-            report: &warning_health_report(),
-        })
+        .health_banner_lines(HealthBannerModel::new(&warning_health_report()))
         .join("\n");
     assert!(!without_cpu_used.contains("CPU used"), "{without_cpu_used}");
     assert!(!without_cpu_used.contains("CPU 已用"), "{without_cpu_used}");
@@ -1500,7 +1500,7 @@ fn health_banner_shows_cpu_used_only_when_utilization_fact_exists() {
         .push(health_float_fact("cpu.utilization_ratio", 0.37));
 
     let text = RatatuiInlineRenderer::with_width(120)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     assert!(text.contains("CPU used 37% ▕███░░░░░▏"), "{text}");
     assert!(text.contains("1m 10.4 / 4 cores (2.6x)"), "{text}");
@@ -1508,7 +1508,7 @@ fn health_banner_shows_cpu_used_only_when_utilization_fact_exists() {
 
     let zh_text = RatatuiInlineRenderer::with_width(120)
         .with_language(crate::Language::ZhCn)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     assert!(zh_text.contains("CPU 已用 37% ▕███░░░░░▏"), "{zh_text}");
     assert!(zh_text.contains("1分钟 10.4 / 4核（2.6倍）"), "{zh_text}");
@@ -1521,7 +1521,7 @@ fn health_banner_recent_oom_uses_compact_evidence_without_raw_fact_dump() {
 
     let text = RatatuiInlineRenderer::with_width(120)
         .with_language(crate::Language::ZhCn)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert_rendered_width(&text, 120);
@@ -1561,7 +1561,7 @@ fn health_banner_recent_oom_scope_label_id_wins_over_raw_constraint() {
 
     let text = RatatuiInlineRenderer::with_width(120)
         .with_language(crate::Language::ZhCn)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert!(text.contains("cgroup 内存限制触发"), "{text}");
@@ -1581,7 +1581,7 @@ fn health_banner_styled_output_keeps_finding_body_primary() {
     let mut output = Vec::new();
 
     renderer
-        .write_health_banner(&mut output, HealthBannerModel { report: &report })
+        .write_health_banner(&mut output, HealthBannerModel::new(&report))
         .expect("render styled health banner");
 
     let text = String::from_utf8(output).expect("utf8 health banner");
@@ -1611,7 +1611,7 @@ fn health_banner_styled_labels_are_readable_not_dim_only() {
     let mut output = Vec::new();
 
     renderer
-        .write_health_banner(&mut output, HealthBannerModel { report: &report })
+        .write_health_banner(&mut output, HealthBannerModel::new(&report))
         .expect("render styled health banner");
 
     let text = String::from_utf8(output).expect("utf8 health banner");
@@ -1654,7 +1654,7 @@ fn health_banner_oom_prompts_are_cause_oriented_in_both_languages() {
 
     let zh_text = RatatuiInlineRenderer::with_width(120)
         .with_language(crate::Language::ZhCn)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     assert!(
         zh_text.contains("帮我分析最近一次 OOM 为什么杀掉 python3"),
@@ -1666,7 +1666,7 @@ fn health_banner_oom_prompts_are_cause_oriented_in_both_languages() {
 
     let en_text = RatatuiInlineRenderer::with_width(120)
         .with_language(crate::Language::EnUs)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     let en_compact = compact_words(&en_text);
     assert!(
@@ -1690,7 +1690,7 @@ fn health_banner_plain_fallback_keeps_content_without_box_art() {
     let renderer = RatatuiInlineRenderer::plain_with_width(50);
 
     let text = renderer
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert!(text.contains("Health check:"), "{text}");
@@ -1727,7 +1727,7 @@ fn health_banner_compresses_healthy_report() {
     report.recompute_overall_severity();
 
     let text = RatatuiInlineRenderer::with_width(80)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert!(text.lines().count() <= 2, "{text}");
@@ -1756,7 +1756,7 @@ fn health_banner_caps_try_lines_and_hides_suppressed_try_items() {
     report.overall_severity = HealthSeverity::Warning;
 
     let text = RatatuiInlineRenderer::with_width(80)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     assert_eq!(
         text.matches("You can type these prompts to the agent:")
@@ -1773,7 +1773,7 @@ fn health_banner_caps_try_lines_and_hides_suppressed_try_items() {
     )];
     report.try_items.clear();
     let suppressed_text = RatatuiInlineRenderer::with_width(80)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     assert!(suppressed_text.contains("warning"), "{suppressed_text}");
     assert!(
@@ -1805,7 +1805,7 @@ fn health_banner_filters_prompts_for_hidden_findings() {
     report.recompute_overall_severity();
 
     let text = RatatuiInlineRenderer::with_width(120)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert!(text.contains("Findings"), "{text}");
@@ -1859,7 +1859,7 @@ fn health_banner_service_only_prompt_aligns_with_service_finding() {
     report.recompute_overall_severity();
 
     let text = RatatuiInlineRenderer::with_width(120)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert!(text.contains("service unit redis.service"), "{text}");
@@ -1872,7 +1872,7 @@ fn health_banner_service_only_prompt_aligns_with_service_finding() {
 
     let zh_text = RatatuiInlineRenderer::with_width(120)
         .with_language(crate::Language::ZhCn)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
     assert!(zh_text.contains("服务单元 redis.service"), "{zh_text}");
     assert!(zh_text.contains("当前 failed，预期 active"), "{zh_text}");
@@ -1892,7 +1892,7 @@ fn health_banner_merges_degraded_unavailable_checks() {
     report.recompute_overall_severity();
 
     let text = RatatuiInlineRenderer::with_width(80)
-        .health_banner_lines(HealthBannerModel { report: &report })
+        .health_banner_lines(HealthBannerModel::new(&report))
         .join("\n");
 
     assert!(text.contains("degraded"), "{text}");
