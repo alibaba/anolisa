@@ -233,6 +233,36 @@ async fn project_context_reaches_the_provider_boundary() {
         .contains("## Project Context\nprovider-visible marker"));
 }
 
+#[tokio::test]
+async fn user_provided_secret_reaches_the_provider_boundary() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+    let secret = "sk-user-provided-secret-value";
+
+    core.handle_user_message(
+        &format!("write api_key={secret} to the config"),
+        &mut reader,
+        &mut output,
+    )
+    .await
+    .unwrap();
+
+    let messages = captured.lock().unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("provider user message");
+    assert!(user_message.content.as_text().contains(secret));
+}
+
 fn find_declaration<'a>(
     declarations: &'a [crate::provider::ToolDeclaration],
     name: &str,

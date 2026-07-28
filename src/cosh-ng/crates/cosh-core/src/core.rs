@@ -196,8 +196,6 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
-        let content = crate::redaction::redact_text(content);
-
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
@@ -208,7 +206,7 @@ impl CoshCore {
         let cwd_str = self.cwd().to_string_lossy().to_string();
         let prompt_result = self
             .hook_system
-            .fire_user_prompt_submit(&self.session_id, &cwd_str, &content)
+            .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
             .await;
         self.audit.record_hook_decision(
             CoreAuditScope::run(&run_id),
@@ -315,7 +313,7 @@ impl CoshCore {
             self.emit_hook_notifications(writer, &prompt_result.notifications, None);
         }
 
-        self.messages.push(Message::user(&content));
+        self.messages.push(Message::user(content));
 
         // Inject additional context from hooks
         if let Some(ref ctx) = prompt_result.additional_context {
@@ -376,8 +374,8 @@ impl CoshCore {
             let turn_id = uuid::Uuid::new_v4().to_string();
             let turn_scope = CoreAuditScope::turn(&run_id, &turn_id);
             self.audit.record_turn_started(turn_scope);
-            let mut provider_messages = self.compaction.effective_messages(&self.messages);
-            crate::redaction::redact_messages(&mut provider_messages);
+            // Runtime context stays lossless; observers and stores redact their own copies.
+            let provider_messages = self.compaction.effective_messages(&self.messages);
 
             // ─── Hook: BeforeModel ───
             let before_model_result = self

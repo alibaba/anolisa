@@ -21,10 +21,14 @@ pub fn prompt_from_request_with_evidence_policy(
     allow_output_requests: bool,
 ) -> String {
     let trigger = trigger_evidence_prompt(request, access, allow_output_requests);
-    let runtime = runtime_frame_prompt(request, access, allow_output_requests);
-    let hook = hook_finding_prompt(request);
-    let prompt = bound_provider_context(trigger, runtime, hook, request);
-    redact_sensitive_text(&prompt).0
+    let runtime = redact_sensitive_text(&runtime_frame_prompt(
+        request,
+        access,
+        allow_output_requests,
+    ))
+    .0;
+    let hook = redact_sensitive_text(&hook_finding_prompt(request)).0;
+    bound_provider_context(trigger, runtime, hook, request)
 }
 
 fn bound_provider_context(
