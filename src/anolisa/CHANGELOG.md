@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-07-28
+
+### Added
+
+- The `@anolisa/cli` npm package now supports macOS arm64 and selects the
+  matching native binary during installation.
+- Tokenless adapters now support Qwencode while keeping the Cosh extension
+  independent from shared hook assets.
+
+### Fixed
+
+- Raw installs now refuse to provision a system package reserved by another
+  pending RPM install and direct the user to `anolisa repair`, preventing
+  components from claiming or later removing each other's dependencies.
+- `cosh-ng` RPM installations now retain the `cosh-ng` component identity.
+  Unambiguous legacy records and recovery journals stored as `cosh` are
+  repaired so lifecycle commands target the correct component.
+- Failed raw updates and repairs now restore file permissions and capabilities
+  during rollback, keeping restored binaries executable.
+- Enabling the Tokenless Qoder adapter now resolves shared hook paths in the
+  cached plugin, preventing matching tool calls from failing because of broken
+  hook commands.
+
 ## [0.2.12] - 2026-07-27
 
 ### Changed
@@ -685,6 +708,22 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.13] - 2026-07-28
+
+### 新增
+
+- `@anolisa/cli` npm 软件包现支持 macOS arm64，并在安装时选择匹配的原生二进制。
+- Tokenless adapter 现支持 Qwencode，同时保持 Cosh extension 与共享 hook 资源相互独立。
+
+### 修复
+
+- raw 安装现拒绝 provision 被另一个 pending RPM 安装占用的系统软件包，并引导用户运行
+  `anolisa repair`，避免组件相互占用或在后续移除对方的依赖。
+- `cosh-ng` RPM 安装现保留 `cosh-ng` 组件身份。以 `cosh` 保存且可明确识别的旧记录和
+  recovery journal 会被修复，使 lifecycle 命令操作正确的组件。
+- raw 更新和修复失败后的回滚现会恢复文件权限和 capability，确保恢复的二进制仍可执行。
+- 启用 Tokenless Qoder adapter 时，现会解析缓存 plugin 中的共享 hook 路径，避免匹配的 tool call 因 hook 命令路径错误而失败。
 
 ## [0.2.12] - 2026-07-27
 

@@ -143,7 +143,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Mon Jul 27 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Tue Jul 28 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Raw installs now protect packages reserved by pending RPM operations.
+- `cosh-ng` RPM installations now keep their stable component identity.
+- Raw rollback now restores file permissions and capabilities.
+- Tokenless adapters now support Qwencode and resolve Qoder hook paths.
+- The npm distribution now supports macOS arm64.
+
+* Mon Jul 27 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.12-1
 - Missing installed components now report `NOT_INSTALLED` in structured output.
 - Adapter status now ignores stale source directories and reports missing bundles as degraded.
 - Raw install dry-runs now validate component conflicts before execution.
