@@ -1858,3 +1858,160 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
         .count();
     assert_eq!(intercepts, 2, "{:?}", output.events);
 }
+
+// Issue #1919: a natural-language prompt whose IFS first token contains a
+// slash never reaches command_not_found_handle (bash executes the token as
+// a path), so the DEBUG trap reclassifies it with the missing-path context
+// and intercepts before execution.
+#[test]
+fn shell_host_bash_missing_path_natural_language_intercepts() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    // Pin a UTF-8 locale: a real terminal typing Chinese is UTF-8, while CI
+    // runners default to C, where readline mangles multi-byte input bytes
+    // before they ever reach the DEBUG trap (same precedent as
+    // governance.rs raw-hook-test).
+    let mut config = ShellHostConfig::new("missing-path-nl", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1919-probe/SKILL.md";
+    let output =
+        run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
+
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "missing-path natural-language intercept: {:?}",
+                output.events
+            )
+        });
+    // Pre-execution intercepts are shaped like slash/agent-marker intercepts
+    // (no top_level_missing correlation: the command never started, so there
+    // is no in-flight attempt to correlate with).
+    assert!(intercept.routing.is_none(), "{:?}", output.events);
+    // Interception must prevent execution: no command block and no native
+    // bash path error may appear for the prompt (I4).
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        !terminal.contains("No such file or directory"),
+        "{terminal}"
+    );
+}
+
+// Issue #1919 fail-closed counterproofs: the missing-path branch must never
+// fire for existing paths (I1/D6), plain-English typo paths (I2/D3), or
+// secret-bearing input (I3) — bash native behavior stays byte-identical.
+#[test]
+fn shell_host_bash_missing_path_counterproofs_stay_native() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-native-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    // I1: existing executable script keeps running natively.
+    let probe_path = work_dir.join("probe-1919.sh");
+    let executed_path = work_dir.join("probe-1919-executed");
+    std::fs::write(
+        &probe_path,
+        format!("#!/bin/sh\ntouch {}\n", executed_path.display()),
+    )
+    .expect("probe script");
+    make_executable(&probe_path);
+    // D6: existing but non-executable file as first word stays native.
+    let data_path = work_dir.join("data-1919.txt");
+    std::fs::write(&data_path, "plain data\n").expect("data file");
+    // Review counterproofs: dangling symlink and permission-opaque paths
+    // are not provably ENOENT, so the missing-path branch must stand down
+    // and leave the native 126/127 outcome untouched.
+    let dangling_path = work_dir.join("dangling-1919");
+    std::os::unix::fs::symlink(work_dir.join("no-such-target"), &dangling_path)
+        .expect("dangling symlink");
+    let opaque_dir = work_dir.join("opaque-1919");
+    std::fs::create_dir_all(&opaque_dir).expect("opaque dir");
+    let opaque_file = opaque_dir.join("real-file");
+    std::fs::write(&opaque_file, "x\n").expect("opaque file");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod opaque");
+    }
+
+    // UTF-8 locale for the same readline multi-byte reason as the positive
+    // intercept case above.
+    let mut config = ShellHostConfig::new("missing-path-native", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+    let existing_exec = probe_path.display().to_string();
+    let existing_data = format!("{} 帮我读一下", data_path.display());
+    let dangling_input = format!("{} 帮我读一下", dangling_path.display());
+    let opaque_input = format!("{} 帮我读一下", opaque_file.display());
+    let secret_input = "打开./conf-1919.toml password=secretvalue";
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(existing_exec.clone()),
+            ScriptedInput::user_line("/usr/bin/nonexistent-cosh-1919-probe"),
+            ScriptedInput::user_line(secret_input),
+            ScriptedInput::user_line(existing_data.clone()),
+            ScriptedInput::user_line(dangling_input.clone()),
+            ScriptedInput::user_line(opaque_input.clone()),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    // I1: the existing script actually executed.
+    assert!(
+        executed_path.exists(),
+        "existing script must run natively: {:?}",
+        output.events
+    );
+    // No missing-path input may surface as a natural-language intercept.
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // I2: the plain-English typo path keeps the native bash error.
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("No such file or directory"), "{terminal}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore opaque");
+    }
+}

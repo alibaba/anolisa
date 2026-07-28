@@ -241,6 +241,24 @@ _cosh_is_slash_control_candidate() {
   esac
   return 1
 }
+# bash executes slash-bearing command words as paths without consulting
+# command_not_found_handle, so the natural-language classifier never sees
+# them (#1919). Reclassify here with the missing-path context; only a
+# natural_language verdict on a provably-ENOENT path intercepts (dangling
+# symlinks and permission-opaque paths keep their native 126/127 errors),
+# everything else keeps the native bash error byte-identical to the
+# pre-fix behavior.
+_cosh_should_intercept_missing_path() {
+  local first_word="$1"
+  local command="$2"
+  [[ "$first_word" == */* ]] || return 1
+  [[ "${_COSH_AI_ENABLED:-1}" == 1 ]] || return 1
+  ! _cosh_command_has_secret "$command" || return 1
+  _cosh_path_provably_missing "$first_word" || return 1
+  local intent
+  intent="$(_cosh_classify_missing "$command" "$first_word" missing_path)"
+  [[ "$intent" == "natural_language" ]]
+}
 _COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '
 _cosh_is_handoff_wrapper() {
   case "$1" in
@@ -533,6 +551,12 @@ _cosh_preexec_marker() {
         eval "$active_debug_trap" 2>/dev/null || true
         return 1
       fi
+      if _cosh_should_intercept_missing_path "$fallback_first_word" "$fallback_command"; then
+        _cosh_emit_intercept_marker "$fallback_command" "natural_language"
+        _COSH_AT_PROMPT=0
+        eval "$active_debug_trap" 2>/dev/null || true
+        return 1
+      fi
       eval "$active_debug_trap" 2>/dev/null || true
       return 0
     fi
@@ -560,6 +584,12 @@ _cosh_preexec_marker() {
         local reason
         if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
           _cosh_emit_intercept_marker "$command" "$reason"
+          _COSH_AT_PROMPT=0
+          eval "$active_debug_trap" 2>/dev/null || true
+          return 1
+        fi
+        if _cosh_should_intercept_missing_path "$first_word" "$command"; then
+          _cosh_emit_intercept_marker "$command" "natural_language"
           _COSH_AT_PROMPT=0
           eval "$active_debug_trap" 2>/dev/null || true
           return 1
