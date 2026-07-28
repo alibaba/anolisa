@@ -327,7 +327,7 @@ test_tool_ready() {
         "/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
         "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
         "$HOME/.tokenless/tokenless-env-fix.sh"; do
-        if [ -f "$p" ] && [ -x "$p" ]; then FIX_SCRIPT="$p"; break; fi
+        if [ -f "$p" ] && [ -r "$p" ]; then FIX_SCRIPT="$p"; break; fi
     done
     local HOOK_DIR=""
     for d in \
@@ -351,10 +351,14 @@ test_tool_ready() {
     # ==========================================
     # 6.1 Installation & file existence
     # ==========================================
-    log_info "Test 6.1: RPM installation files"
+    log_info "Test 6.1: Installed Tool Ready files"
     [ -f "$SPEC_FILE" ] && log_pass "tool-ready-spec.json exists" || log_fail "tool-ready-spec.json missing"
-    [ -f "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ] && log_pass "tokenless-env-fix.sh exists+executable" || log_fail "tokenless-env-fix.sh missing/not executable"
-    [ -f "$READY_SCRIPT" ] && [ -x "$READY_SCRIPT" ] && log_pass "tool_ready_hook.sh exists+executable" || log_fail "tool_ready_hook.sh missing/not executable"
+    [ -f "$FIX_SCRIPT" ] && [ -r "$FIX_SCRIPT" ] && bash "$FIX_SCRIPT" check >/dev/null 2>&1 \
+        && log_pass "tokenless-env-fix.sh is readable and runs through bash" \
+        || log_fail "tokenless-env-fix.sh missing/unreadable or bash invocation failed"
+    [ -f "$READY_SCRIPT" ] && [ -r "$READY_SCRIPT" ] && bash -n "$READY_SCRIPT" \
+        && log_pass "tool_ready_hook.sh is readable and parses through bash" \
+        || log_fail "tool_ready_hook.sh missing/unreadable or bash parse failed"
 
     # ==========================================
     # 6.2 All 4 spec categories produce valid status
@@ -541,20 +545,36 @@ test_tool_ready() {
     log_info "Test 6.22: tool-ready hook — NOT_READY"
     local tmp_dir
     local tmp_spec
+    local tmp_fixer
+    local fix_marker
     if ! tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tokenless-tool-ready.XXXXXX"); then
         log_fail "unable to create private temporary directory"
         return
     fi
     chmod 0700 "$tmp_dir"
     tmp_spec="$tmp_dir/tool-ready-spec.json"
+    tmp_fixer="$tmp_dir/tokenless-env-fix.sh"
+    fix_marker="$tmp_dir/fixer-called"
     cat > "$tmp_spec" << 'EOF'
 {"TestMissing":{"required":[{"binary":"fakebin99","package":"fakebin99","manager":"rpm"}],"recommended":[],"permissions":[],"network":[]}}
 EOF
-    local not_ready_out=$(echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' | TOKENLESS_TOOL_READY_SPEC="$tmp_spec" bash "$READY_SCRIPT" 2>&1)
+    cat > "$tmp_fixer" << 'EOF'
+#!/usr/bin/env bash
+touch "$TOKENLESS_FIX_MARKER"
+EOF
+    chmod 0644 "$tmp_fixer"
+    local not_ready_out
+    not_ready_out=$(echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' \
+        | TOKENLESS_TOOL_READY_SPEC="$tmp_spec" \
+          TOKENLESS_ENV_FIX_SCRIPT="$tmp_fixer" \
+          TOKENLESS_FIX_MARKER="$fix_marker" \
+          bash "$READY_SCRIPT" 2>&1)
+    [ -f "$fix_marker" ] \
+        && log_pass "tool-ready invokes a non-executable fixer through bash" \
+        || log_fail "tool-ready skipped the readable 0644 fixer"
     assert_contains "$not_ready_out" "NOT_READY" "hook outputs NOT_READY"
     assert_contains "$not_ready_out" "Skip retry" "hook includes Skip retry guidance"
-    rm -f "$tmp_spec"
-    rmdir "$tmp_dir"
+    rm -rf "$tmp_dir"
 
     # ==========================================
     # 6.23 Attribution: ENV_DEPENDENCY_MISSING

@@ -191,6 +191,7 @@ test-tokenless:
 
 test-hooks:
 	@echo "==> Testing copilot-shell hooks..."
+	bash tests/test-tool-ready-readable-fixer.sh
 	bash tests/run-all-tests.sh
 
 test-integration:

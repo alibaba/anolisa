@@ -117,6 +117,8 @@ for candidate in \
 done
 
 FIX_SCRIPT=""
+# Fixers are installed as non-executable resources and always invoked through
+# bash, so trust and readability—not an execute bit—define usability.
 for candidate in \
     "${TOKENLESS_ENV_FIX_SCRIPT:-}" \
     "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tokenless-env-fix.sh}" \
@@ -125,7 +127,7 @@ for candidate in \
     "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
     "${USER_HOME:+$USER_HOME/.tokenless/tokenless-env-fix.sh}" \
     "${SCRIPT_DIR}/../tokenless-env-fix.sh"; do
-    if [ -n "$candidate" ] && [ -x "$candidate" ] && is_trusted_file "$candidate"; then
+    if [ -n "$candidate" ] && [ -r "$candidate" ] && is_trusted_file "$candidate"; then
         FIX_SCRIPT="$candidate"
         break
     fi
@@ -444,7 +446,10 @@ missing_count=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
 
 log_v "Phase 3 FIX: $missing_count missing deps, fix_script=$FIX_SCRIPT"
 
-if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; then
+if [ "$missing_count" -gt 0 ] \
+    && [ -n "$FIX_SCRIPT" ] \
+    && [ -r "$FIX_SCRIPT" ] \
+    && is_trusted_file "$FIX_SCRIPT"; then
     echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true
     hash -r 2>/dev/null || true
 

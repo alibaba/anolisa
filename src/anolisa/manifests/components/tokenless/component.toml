@@ -67,67 +67,11 @@ source = "{libexecdir}/tokenless/toon"
 target = "{bindir}/toon"
 type = "symlink"
 
-# Shared assets use explicit rows because the archive mixes executable hooks
-# and data files; a directory-wide mode would either break hooks or overgrant
-# execute permission. Cosh uses its separately staged extension bundle.
+# Shared hooks are interpreter-loaded resources, so the common tree stays
+# non-executable. Cosh uses its separately staged extension bundle.
 [[component.layout.files]]
-source = "adapters/common/commands/tokenless-stats.toml"
-target = "{datadir}/adapters/{component}/common/commands/tokenless-stats.toml"
-mode = "0644"
-
-[[component.layout.files]]
-source = "adapters/common/cosh-extension.json"
-target = "{datadir}/adapters/{component}/common/cosh-extension.json"
-mode = "0644"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/compress_response_hook.py"
-target = "{datadir}/adapters/{component}/common/hooks/compress_response_hook.py"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/compress_schema_hook.py"
-target = "{datadir}/adapters/{component}/common/hooks/compress_schema_hook.py"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/compress_toon_hook.py"
-target = "{datadir}/adapters/{component}/common/hooks/compress_toon_hook.py"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/hook_utils.py"
-target = "{datadir}/adapters/{component}/common/hooks/hook_utils.py"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/rewrite_hook.py"
-target = "{datadir}/adapters/{component}/common/hooks/rewrite_hook.py"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/run-hook.sh"
-target = "{datadir}/adapters/{component}/common/hooks/run-hook.sh"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/tool_categories.json"
-target = "{datadir}/adapters/{component}/common/hooks/tool_categories.json"
-mode = "0644"
-
-[[component.layout.files]]
-source = "adapters/common/hooks/tool_ready_hook.sh"
-target = "{datadir}/adapters/{component}/common/hooks/tool_ready_hook.sh"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/tokenless-env-fix.sh"
-target = "{datadir}/adapters/{component}/common/tokenless-env-fix.sh"
-mode = "0755"
-
-[[component.layout.files]]
-source = "adapters/common/tool-ready-spec.json"
-target = "{datadir}/adapters/{component}/common/tool-ready-spec.json"
+source = "adapters/common/"
+target = "{datadir}/adapters/{component}/common/"
 mode = "0644"
 
 [component.health_check]
