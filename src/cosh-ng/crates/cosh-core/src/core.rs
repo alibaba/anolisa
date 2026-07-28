@@ -205,7 +205,7 @@ impl CoshCore {
         let cwd_str = self.cwd().to_string_lossy().to_string();
         let prompt_result = self
             .hook_system
-            .fire_user_prompt_submit(&self.session_id, &cwd_str, &content)
+            .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
             .await;
         self.audit.record_hook_decision(
             CoreAuditScope::run(&run_id),
@@ -312,7 +312,7 @@ impl CoshCore {
             self.emit_hook_notifications(writer, &prompt_result.notifications, None);
         }
 
-        self.messages.push(Message::user(&content));
+        self.messages.push(Message::user(content));
 
         // Inject additional context from hooks
         if let Some(ref ctx) = prompt_result.additional_context {
