@@ -532,7 +532,10 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
                 format!("/usr/local/libexec/anolisa/tokenless/{}", dep.binary),
                 format!("{}/.local/bin/{}", home, dep.binary),
                 format!("{}/.local/libexec/anolisa/tokenless/{}", home, dep.binary),
-                format!("{}/.local/lib/anolisa/libexec/tokenless/{}", home, dep.binary),
+                format!(
+                    "{}/.local/lib/anolisa/libexec/tokenless/{}",
+                    home, dep.binary
+                ),
                 format!("{}/.local/lib/anolisa/tokenless/{}", home, dep.binary),
             ];
             candidates
