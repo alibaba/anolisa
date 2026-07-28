@@ -533,6 +533,17 @@ _cosh_preexec_marker() {
         eval "$active_debug_trap" 2>/dev/null || true
         return 1
       fi
+      # Natural language intercept for path-like tokens in fallback path
+      if [[ "$fallback_first_word" == */* ]] && [[ ! -x "$fallback_first_word" ]]; then
+        local fb_nl_intent
+        fb_nl_intent="$(_cosh_classify_missing "$fallback_command" "$fallback_first_word")"
+        if [[ "$fb_nl_intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
+          _cosh_emit_intercept_marker "$fallback_command" "natural_language" true
+          _COSH_AT_PROMPT=0
+          eval "$active_debug_trap" 2>/dev/null || true
+          return 1
+        fi
+      fi
       eval "$active_debug_trap" 2>/dev/null || true
       return 0
     fi
@@ -563,6 +574,21 @@ _cosh_preexec_marker() {
           _COSH_AT_PROMPT=0
           eval "$active_debug_trap" 2>/dev/null || true
           return 1
+        fi
+        # Natural language intercept for commands containing / that bash
+        # treats as path execution. bash skips command_not_found_handle
+        # for tokens with /, so _cosh_classify_missing never runs via
+        # the normal fallback path. Do the classification here in the
+        # DEBUG trap instead (issue #1919).
+        if [[ "$first_word" == */* ]] && [[ ! -x "$first_word" ]]; then
+          local nl_intent
+          nl_intent="$(_cosh_classify_missing "$command" "$first_word")"
+          if [[ "$nl_intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
+            _cosh_emit_intercept_marker "$command" "natural_language" true
+            _COSH_AT_PROMPT=0
+            eval "$active_debug_trap" 2>/dev/null || true
+            return 1
+          fi
         fi
         _cosh_begin_attempt "$command" "$first_word"
       fi
