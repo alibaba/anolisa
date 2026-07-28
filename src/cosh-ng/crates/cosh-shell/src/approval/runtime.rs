@@ -435,6 +435,9 @@ pub(crate) fn render_approval_resolution<W: Write>(
     title: MessageId,
     output: &mut W,
 ) -> std::io::Result<()> {
+    if let Some(active_run) = state.agent_run.active.as_mut() {
+        active_run.status_animation.clear(output)?;
+    }
     clear_active_approval_panel(state, output)?;
     write_approval_receipt(state.language, request, state.i18n().t(title), output)
 }
