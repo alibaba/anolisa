@@ -23,9 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from hook_utils import (
-    _TOKENLESS_FALLBACK,
-    _TOKENLESS_LOCAL_LIB,
-    _TOKENLESS_LOCAL_SHARE,
+    TOKENLESS_CANDIDATES,
     CONTENT_RETRIEVAL_TOOLS,
     is_skill_file,
     resolve_agent_id,
@@ -49,9 +47,7 @@ def main() -> None:
     # 1. Resolve binaries
     tokenless_bin = resolve_binary(
         "tokenless",
-        _TOKENLESS_FALLBACK,
-        _TOKENLESS_LOCAL_SHARE,
-        _TOKENLESS_LOCAL_LIB,
+        *TOKENLESS_CANDIDATES,
     )
     if not tokenless_bin:
         warn("tokenless is not installed. TOON compression hook disabled.")

@@ -20,12 +20,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from hook_utils import (
-    _RTK_FALLBACK,
-    _RTK_LOCAL_LIB,
-    _RTK_LOCAL_SHARE,
-    _TOKENLESS_FALLBACK,
-    _TOKENLESS_LOCAL_LIB,
-    _TOKENLESS_LOCAL_SHARE,
+    RTK_CANDIDATES,
+    TOKENLESS_CANDIDATES,
     forward_stderr,
     parse_version,
     resolve_agent_id,
@@ -48,7 +44,7 @@ _AGENT_ID = resolve_agent_id()
 def main() -> None:
     # 1. Resolve rtk binary
     rtk_bin = resolve_binary(
-        "rtk", _RTK_FALLBACK, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB
+        "rtk", *RTK_CANDIDATES
     )
     if not rtk_bin:
         warn("rtk is not installed or not in PATH. Hook disabled.")
@@ -72,9 +68,7 @@ def main() -> None:
     # 3. Check tokenless binary (for stats)
     if not resolve_binary(
         "tokenless",
-        _TOKENLESS_FALLBACK,
-        _TOKENLESS_LOCAL_SHARE,
-        _TOKENLESS_LOCAL_LIB,
+        *TOKENLESS_CANDIDATES,
     ):
         warn("tokenless is not installed. Hook disabled.")
         skip()

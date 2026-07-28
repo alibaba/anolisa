@@ -46,6 +46,7 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
         || path.starts_with("/usr/libexec")
         || path.starts_with("/usr/lib/anolisa")
         || path.starts_with("/usr/local/share")
+        || path.starts_with("/usr/local/libexec")
     {
         return true;
     }
@@ -63,6 +64,7 @@ fn is_trusted_path(path: &std::path::Path) -> bool {
                     || resolved.starts_with("/usr/libexec")
                     || resolved.starts_with("/usr/lib/anolisa")
                     || resolved.starts_with("/usr/local/share")
+                    || resolved.starts_with("/usr/local/libexec")
                 {
                     return true;
                 }
@@ -511,17 +513,26 @@ fn check_dep(dep: &DepEntry) -> DepStatus {
             Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
         }
         _ => {
-            // PATH lookup failed — try known install paths. Each candidate
-            // must clear is_trusted_path() before we report it as available:
-            // otherwise a spoofed $HOME / world-writable directory could let
-            // an attacker drop a malicious binary that we'd then exec when
-            // we run `--version` or any later invocation.
+            // PATH lookup failed — try known install paths covering all
+            // supported installation methods:
+            //   1. System RPM/package:        /usr/libexec/anolisa/tokenless/
+            //   2. System legacy:             /usr/lib/anolisa/tokenless/
+            //   3. System Anolisa CLI:        /usr/local/libexec/anolisa/tokenless/
+            //   4. User bindir (Anolisa CLI): ~/.local/bin/
+            //   5. Makefile user-install:     ~/.local/libexec/anolisa/tokenless/
+            //   6. Anolisa CLI user-mode:     ~/.local/lib/anolisa/libexec/tokenless/
+            //      (FsLayout places libexec as lib_dir/libexec per file-hierarchy(7))
+            //   7. Legacy user lib:           ~/.local/lib/anolisa/tokenless/
+            // Each candidate must clear is_trusted_path() before we report it
+            // as available.
             let home = crate::get_home_dir();
             let candidates = [
                 format!("/usr/libexec/anolisa/tokenless/{}", dep.binary),
                 format!("/usr/lib/anolisa/tokenless/{}", dep.binary),
+                format!("/usr/local/libexec/anolisa/tokenless/{}", dep.binary),
                 format!("{}/.local/bin/{}", home, dep.binary),
                 format!("{}/.local/libexec/anolisa/tokenless/{}", home, dep.binary),
+                format!("{}/.local/lib/anolisa/libexec/tokenless/{}", home, dep.binary),
                 format!("{}/.local/lib/anolisa/tokenless/{}", home, dep.binary),
             ];
             candidates

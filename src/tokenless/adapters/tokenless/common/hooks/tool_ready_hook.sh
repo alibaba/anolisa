@@ -31,7 +31,7 @@ is_trusted_file() {
   local f="$1"
   [ -f "$f" ] || return 1
   # System paths are always trusted
-  case "$f" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*) return 0 ;; esac
+  case "$f" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*|/usr/local/libexec/*) return 0 ;; esac
   # Resolve symlink target before owner/perm checks
   local check_path="$f"
   local symlink_parent=""
@@ -39,7 +39,7 @@ is_trusted_file() {
     local target
     target=$(readlink -f "$f" 2>/dev/null || realpath "$f" 2>/dev/null || echo "")
     # System targets are always trusted
-    case "$target" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*) return 0 ;; esac
+    case "$target" in /usr/share/*|/usr/libexec/*|/usr/lib/anolisa/*|/usr/local/share/*|/usr/local/libexec/*) return 0 ;; esac
     [ -z "$target" ] && return 1
     check_path="$target"
     # Also check the symlink's own parent directory — if the symlink sits
@@ -264,7 +264,7 @@ resolve_binary() {
   local found
   found=$(command -v "$name" 2>/dev/null || true)
   if [ -n "$found" ]; then echo "$found"; return 0; fi
-  for candidate in "$HOME/.local/bin/$name" "$HOME/.local/libexec/anolisa/tokenless/$name" "$HOME/.local/lib/anolisa/tokenless/$name"; do
+  for candidate in "$HOME/.local/bin/$name" "$HOME/.local/libexec/anolisa/tokenless/$name" "$HOME/.local/lib/anolisa/libexec/tokenless/$name" "$HOME/.local/lib/anolisa/tokenless/$name"; do
     if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
   done
   return 1

@@ -8,21 +8,74 @@ import subprocess
 import sys
 
 # -- FHS fallback paths (ANOLISA spec) ----------------------------------------
+#
+# Complete set of candidate paths for helper binaries, covering all known
+# installation methods:
+#   1. System RPM / package:  /usr/bin, /usr/libexec/anolisa/tokenless/
+#   2. Makefile user-install: ~/.local/libexec/anolisa/tokenless/
+#   3. Anolisa CLI user-mode: ~/.local/bin/ (bindir), ~/.local/lib/anolisa/libexec/tokenless/ (libexec)
+#   4. Anolisa CLI system:    /usr/local/libexec/anolisa/tokenless/
+#   5. Legacy user paths:     ~/.local/share/anolisa/tokenless/, ~/.local/lib/anolisa/tokenless/
+#
+# The Anolisa CLI FsLayout places libexec as a subdirectory of lib_dir
+# (~/.local/lib/anolisa/libexec/) rather than at ~/.local/libexec/, so both
+# layouts must be checked. See fs_layout.rs (fh_user::LIBEXEC_SUB).
+
+_HOME = os.path.expanduser("~")
 
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
 _TOKENLESS_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless"
+    _HOME, ".local", "share", "anolisa", "tokenless", "tokenless"
 )
 _TOKENLESS_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "libexec", "anolisa", "tokenless", "tokenless"
+    _HOME, ".local", "libexec", "anolisa", "tokenless", "tokenless"
 )
+_TOKENLESS_LOCAL_LIB_LEGACY = os.path.join(
+    _HOME, ".local", "lib", "anolisa", "tokenless", "tokenless"
+)
+_TOKENLESS_LOCAL_BIN = os.path.join(
+    _HOME, ".local", "bin", "tokenless"
+)
+_TOKENLESS_ANOLISA_LIBEXEC = os.path.join(
+    _HOME, ".local", "lib", "anolisa", "libexec", "tokenless", "tokenless"
+)
+
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
 _RTK_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk"
+    _HOME, ".local", "share", "anolisa", "tokenless", "rtk"
 )
 _RTK_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "libexec", "anolisa", "tokenless", "rtk"
+    _HOME, ".local", "libexec", "anolisa", "tokenless", "rtk"
 )
+_RTK_LOCAL_LIB_LEGACY = os.path.join(
+    _HOME, ".local", "lib", "anolisa", "tokenless", "rtk"
+)
+_RTK_LOCAL_BIN = os.path.join(
+    _HOME, ".local", "bin", "rtk"
+)
+_RTK_ANOLISA_LIBEXEC = os.path.join(
+    _HOME, ".local", "lib", "anolisa", "libexec", "tokenless", "rtk"
+)
+
+# Ordered candidate lists — tried in order after `command -v` / shutil.which.
+# Priority: system RPM → Anolisa CLI bindir → Makefile libexec → Anolisa CLI
+# libexec → legacy paths.
+TOKENLESS_CANDIDATES = [
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_BIN,
+    _TOKENLESS_LOCAL_LIB,
+    _TOKENLESS_ANOLISA_LIBEXEC,
+    _TOKENLESS_LOCAL_SHARE,
+    _TOKENLESS_LOCAL_LIB_LEGACY,
+]
+RTK_CANDIDATES = [
+    _RTK_FALLBACK,
+    _RTK_LOCAL_BIN,
+    _RTK_LOCAL_LIB,
+    _RTK_ANOLISA_LIBEXEC,
+    _RTK_LOCAL_SHARE,
+    _RTK_LOCAL_LIB_LEGACY,
+]
 
 # -- Unified tool categorization ----------------------------------------------
 
