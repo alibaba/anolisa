@@ -365,9 +365,9 @@ fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState)
         event.kind == ShellEventKind::UserInputIntercepted
             && event.component.as_deref() == Some("multiline_paste")
     }) {
-        state.multiline_paste_observed = true;
+        state.prompt_entry_hints.multiline_paste_observed = true;
     }
-    if state.shown_soft_newline_tip {
+    if state.prompt_entry_hints.shown_soft_newline_tip {
         return;
     }
     let observed = events.iter().any(|event| {
@@ -375,7 +375,7 @@ fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState)
             && event.component.as_deref() == Some("soft_newline_shortcut")
     });
     if observed {
-        state.pending_soft_newline_tip = true;
+        state.prompt_entry_hints.pending_soft_newline_tip = true;
     }
 }
 
@@ -388,7 +388,9 @@ fn render_soft_newline_tip<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if !state.pending_soft_newline_tip || state.shown_soft_newline_tip {
+    if !state.prompt_entry_hints.pending_soft_newline_tip
+        || state.prompt_entry_hints.shown_soft_newline_tip
+    {
         return Ok(());
     }
     if !events
@@ -409,8 +411,8 @@ fn render_soft_newline_tip<W: Write>(
     write!(output, "\r\n\x1b[2m{tip}\x1b[0m\r\n")?;
     output.flush()?;
     state.trigger_pty_prompt = true;
-    state.pending_soft_newline_tip = false;
-    state.shown_soft_newline_tip = true;
+    state.prompt_entry_hints.pending_soft_newline_tip = false;
+    state.prompt_entry_hints.shown_soft_newline_tip = true;
     Ok(())
 }
 

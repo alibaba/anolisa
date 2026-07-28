@@ -108,17 +108,8 @@ pub(crate) struct InlineState {
     pub(crate) pending_prompt_suggestion_bindings: HashMap<String, PendingInputGhostBinding>,
     pub(crate) shown_shell_rewrite_guidance: bool,
     pub(crate) shown_agent_prompt_guidance: bool,
-    /// #1721 T-c: a soft-newline shortcut was observed on the bash-owned
-    /// passthrough path; surface a one-time discoverability tip at the next
-    /// prompt-ready boundary.
-    pub(crate) pending_soft_newline_tip: bool,
-    pub(crate) shown_soft_newline_tip: bool,
-    /// A multi-line bracketed paste was relayed straight to bash this
-    /// prompt cycle (#1932): arms the failure-insight multi-line entry hint.
-    pub(crate) multiline_paste_observed: bool,
-    /// Session-scoped cap for the multi-line entry hint (#1932): at most
-    /// two nudges per session to avoid nagging.
-    pub(crate) multiline_entry_hint_count: u8,
+    /// Multi-line prompt entry discoverability (#1721 tip, #1932 hint).
+    pub(crate) prompt_entry_hints: crate::runtime::prompt_draft::PromptEntryHints,
     /// #1721 D13: active multi-line prompt draft card, if any.
     pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
     pub(crate) prompt_draft_seq: u64,

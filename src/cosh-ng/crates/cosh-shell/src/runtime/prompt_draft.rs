@@ -29,6 +29,21 @@ pub(crate) struct PromptDraftCardState {
     pub(crate) line_break_before: bool,
 }
 
+/// Discoverability state for the multi-line prompt entries: the one-time
+/// soft-newline tip (#1721 T-c) and the failure-insight entry hint (#1932).
+#[derive(Default)]
+pub(crate) struct PromptEntryHints {
+    /// A soft-newline shortcut was observed on the bash-owned passthrough
+    /// path; surface a one-time tip at the next prompt-ready boundary.
+    pub(crate) pending_soft_newline_tip: bool,
+    pub(crate) shown_soft_newline_tip: bool,
+    /// A multi-line bracketed paste was relayed straight to bash this
+    /// prompt cycle: arms the failure-insight multi-line entry hint.
+    pub(crate) multiline_paste_observed: bool,
+    /// Session-scoped cap: at most two nudges per session.
+    pub(crate) multiline_entry_hint_count: u8,
+}
+
 /// Panel width aligned with every other card: the renderer's standard
 /// width follows the terminal (clamped), same as approval/question panels.
 fn card_width() -> usize {

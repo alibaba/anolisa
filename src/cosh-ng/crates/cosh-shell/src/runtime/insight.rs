@@ -79,15 +79,15 @@ pub(crate) fn render_pending_command_insight<W: Write>(
     // this failure insight; nudge the terminal-agnostic entry, capped at
     // two per session. Best-effort: the flag clears with this insight.
     if matches!(candidate.topic, SuppressionTopic::CommandNotFound)
-        && state.multiline_paste_observed
-        && state.multiline_entry_hint_count < 2
+        && state.prompt_entry_hints.multiline_paste_observed
+        && state.prompt_entry_hints.multiline_entry_hint_count < 2
     {
         let hint = state.i18n().t(MessageId::PromptMultilineEntryHint);
         write!(output, "\x1b[2m{hint}\x1b[0m\r\n")?;
         output.flush()?;
-        state.multiline_entry_hint_count += 1;
+        state.prompt_entry_hints.multiline_entry_hint_count += 1;
     }
-    state.multiline_paste_observed = false;
+    state.prompt_entry_hints.multiline_paste_observed = false;
     Ok(())
 }
 
