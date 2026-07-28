@@ -78,7 +78,7 @@ impl Message {
     pub fn user(content: &str) -> Self {
         Self {
             role: "user".to_string(),
-            content: MessageContent::Text(crate::redaction::redact_text(content)),
+            content: MessageContent::Text(content.to_string()),
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -88,21 +88,17 @@ impl Message {
     pub fn assistant(content: &str) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: MessageContent::Text(crate::redaction::redact_text(content)),
+            content: MessageContent::Text(content.to_string()),
             tool_call_id: None,
             name: None,
             tool_calls: None,
         }
     }
 
-    pub fn assistant_with_tool_calls(content: &str, mut tool_calls: Vec<ToolCallInfo>) -> Self {
-        for tool_call in &mut tool_calls {
-            tool_call.function.arguments =
-                crate::redaction::redact_json_or_text(&tool_call.function.arguments);
-        }
+    pub fn assistant_with_tool_calls(content: &str, tool_calls: Vec<ToolCallInfo>) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: MessageContent::Text(crate::redaction::redact_text(content)),
+            content: MessageContent::Text(content.to_string()),
             tool_call_id: None,
             name: None,
             tool_calls: if tool_calls.is_empty() {
@@ -116,7 +112,7 @@ impl Message {
     pub fn system(content: &str) -> Self {
         Self {
             role: "system".to_string(),
-            content: MessageContent::Text(crate::redaction::redact_text(content)),
+            content: MessageContent::Text(content.to_string()),
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -126,7 +122,7 @@ impl Message {
     pub fn tool_result(tool_call_id: &str, content: &str, _is_error: bool) -> Self {
         Self {
             role: "tool".to_string(),
-            content: MessageContent::Text(crate::redaction::redact_text(content)),
+            content: MessageContent::Text(content.to_string()),
             tool_call_id: Some(tool_call_id.to_string()),
             name: None,
             tool_calls: None,

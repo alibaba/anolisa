@@ -220,6 +220,26 @@ mod tests {
         );
     }
 
+
+    #[tokio::test]
+    async fn write_your_api_key_placeholder_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool;
+        let path = dir.path().join("config.env");
+        let content = "API_KEY=YOUR_API_KEY\n";
+
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": path, "content": content}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("YOUR_*_KEY/TOKEN/SECRET"));
+        assert!(!path.exists());
+    }
     #[test]
     fn detects_supported_placeholder_markers() {
         let markers = placeholder_markers(
