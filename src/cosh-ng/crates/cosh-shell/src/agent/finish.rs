@@ -65,6 +65,14 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         }
         render_recovery_context_before_notice(state, &active_run, output, adapter)?;
         render_fallback_recovery_notice(state, &fallback, reason, output)?;
+        // #1940: the fallback abandons this run; sweep dropped control
+        // requests before starting its continuation so the ledger
+        // cannot grow across turns.
+        crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+            state,
+            &active_run.request.id,
+            &active_run.handle,
+        );
         // Failed provider resume escalates through the tier chain: a
         // same-session retry first, then one fresh fallback.
         start_agent_run_with_origin(
@@ -124,6 +132,16 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         output,
         adapter,
     )?;
+    // #1940 run-terminal sweep: the run is detached from InlineState here,
+    // so the batch drain in render_new_agent_structured_events no longer
+    // covers it; deny every registered control request that still has no
+    // home (e.g. trailing requests parked in deferred_events by the
+    // question-rejection path) and clear the run's ledger entries.
+    crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+        state,
+        &active_run.request.id,
+        &active_run.handle,
+    );
     record_selectable_recommendations(
         state,
         &active_run.governed_events,

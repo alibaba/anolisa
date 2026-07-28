@@ -7,7 +7,7 @@ pub(super) fn emit_fake_markdown_stream(
     request: &AgentRequest,
     sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
 ) -> Result<bool, AdapterError> {
-    let run_id = format!("fake-run-{}", request.command_block.id);
+    let run_id = request.id.clone();
     if input.contains("stream markdown table") {
         sink(AgentEvent::StatusChanged {
             run_id: run_id.clone(),

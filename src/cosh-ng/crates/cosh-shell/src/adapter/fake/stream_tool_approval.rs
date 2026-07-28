@@ -10,7 +10,7 @@ pub(super) fn emit_fake_tool_approval_stream(
     request: &AgentRequest,
     sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
 ) -> Result<bool, AdapterError> {
-    let run_id = format!("fake-run-{}", request.command_block.id);
+    let run_id = request.id.clone();
     if input.contains("stream batch tool approval") {
         // Multi-request turn for turn-scope batch consent (issue #1773):
         // three distinct diagnostic commands queued in one run.

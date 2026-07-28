@@ -71,7 +71,7 @@ impl AgentAdapter for FakeAgentAdapter {
     fn run(&self, request: &AgentRequest) -> Result<Vec<AgentEvent>, AdapterError> {
         let language = crate::language_config_status().effective;
         if let Some(input) = &request.user_input {
-            let run_id = format!("fake-run-{}", request.command_block.id);
+            let run_id = request.id.clone();
             if let Some(answer) = extract_fake_pending_answer(input) {
                 return Ok(vec![
                     AgentEvent::StatusChanged {
@@ -831,7 +831,7 @@ impl AgentAdapter for FakeAgentAdapter {
             ]);
         }
 
-        let run_id = format!("fake-run-{}", request.command_block.id);
+        let run_id = request.id.clone();
         Ok(vec![
             AgentEvent::StatusChanged {
                 run_id: run_id.clone(),

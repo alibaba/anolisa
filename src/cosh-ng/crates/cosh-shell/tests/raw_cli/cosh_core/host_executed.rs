@@ -16,7 +16,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-shell*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-1"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*bounded_output_summary*'df -h'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed","message":{"content":[{"type":"text","text":"Cosh-core host-executed shell result received in same provider turn."}]}}'
@@ -126,7 +133,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-auto-safe-shell*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-auto-safe","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-auto-safe"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'df -h'*'Filesystem'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-auto-safe","message":{"content":[{"type":"text","text":"AUTO SAFE HOSTEXEC RECEIVED"}]}}'
@@ -187,7 +201,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-sysctl-non-ascii-shell*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-sysctl-non-ascii","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sysctl -n kernel.ostype 2>/dev/null || printf sysctl-fallback; printf '\'' 内存总计\\n'\''"},"tool_use_id":"toolu-sysctl-non-ascii"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'sysctl-fallback'*'内存总计'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-sysctl-non-ascii","message":{"content":[{"type":"text","text":"SYSCTL NON ASCII HOSTEXEC RECEIVED"}]}}'
@@ -251,7 +272,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-trust-confirm-shell*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-trust-confirm","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf trust-confirm-hostexec"},"tool_use_id":"toolu-trust-confirm"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'printf trust-confirm-hostexec'*'trust-confirm-hostexec'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-trust-confirm","message":{"content":[{"type":"text","text":"TRUST CONFIRM HOSTEXEC RECEIVED"}]}}'
@@ -318,13 +346,25 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-duplicate*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-dup","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-dup"}}'
-    IFS= read -r response1 || exit 2
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response1; do
+      case "$response1" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
     case "$response1" in
       *'"behavior":"host_executed_shell"'*'df -h'*) ;;
       *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-duplicate","is_error":true,"result":"missing first host result"}'; exit 1 ;;
     esac
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-dup","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-dup"}}'
-    IFS= read -r response2 || exit 2
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response2; do
+      case "$response2" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
     case "$response2" in
       *'"behavior":"deny"'*'Duplicate shell tool request was already completed'*)
         printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-duplicate","message":{"content":[{"type":"text","text":"Duplicate host-executed shell request denied without second execution."}]}}'
@@ -401,7 +441,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-nonzero*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-nonzero","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"false"},"tool_use_id":"toolu-cosh-core-nonzero"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'"exit_code":1'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-nonzero","message":{"content":[{"type":"text","text":"Cosh-core nonzero host-executed result received as normal tool result."}]}}'
@@ -475,7 +522,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-long*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-long","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sleep 1; echo hostexec-done"},"tool_use_id":"toolu-cosh-core-long"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'sleep 1; echo hostexec-done'*'hostexec-done'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-long","message":{"content":[{"type":"text","text":"Cosh-core long host-executed command continued in same provider turn."}]}}'
@@ -545,7 +599,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-large*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-large","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf \"%b\" \"\\110\\105\\101\\104\\137\\123\\105\\116\\124\\111\\116\\105\\114\"; printf %08000d 0; printf \"%b\" \"\\124\\101\\111\\114\\137\\123\\105\\116\\124\\111\\116\\105\\114\""},"tool_use_id":"toolu-cosh-core-large"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       response_len=${#response}
       case "$response" in
         *'"behavior":"host_executed_shell"'*'bounded_output_summary'*)
@@ -643,14 +704,26 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-multi-tool*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-multi-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-multi-1"}}'
-    IFS= read -r response1 || exit 2
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response1; do
+      case "$response1" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
     case "$response1" in
       *'"behavior":"host_executed_shell"'*'df -h'*) ;;
       *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-multi","is_error":true,"result":"missing first cosh-core host result"}'; exit 1 ;;
     esac
     printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-multi","message":{"content":[{"type":"text","text":"FIRST COSH-CORE TOOL ANALYSIS TEXT"}]}}'
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-multi-2","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"du -sh ."},"tool_use_id":"toolu-cosh-core-multi-2"}}'
-    IFS= read -r response2 || exit 2
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response2; do
+      case "$response2" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
     case "$response2" in
       *'"behavior":"host_executed_shell"'*'du -sh .'*) ;;
       *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-multi","is_error":true,"result":"missing second cosh-core host result"}'; exit 1 ;;

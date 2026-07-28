@@ -16,7 +16,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-manual-host-executed-echo*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-manual-echo","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sudo -V"},"tool_use_id":"toolu-cosh-core-manual-echo"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*bounded_output_summary*'sudo -V'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-manual-host-executed-echo","message":{"content":[{"type":"text","text":"Manual host-executed result accepted."},{"type":"tool_use","id":"toolu-cosh-core-manual-echo-provider","name":"shell","input":{"command":"sudo -V"}}]}}'
@@ -228,7 +235,13 @@ case "$user_message" in
   *cosh-core-control-snapshot-dup*)
     printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-control-snapshot","message":{"content":[{"type":"tool_use","id":"toolu-cosh-core-dup","name":"shell","input":{"command":"df -h"}}]}}'
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-dup","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-dup"}}'
-    IFS= read -r response || exit 2
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
     case "$response" in
       *'"behavior":"host_executed_shell"'*'df -h'*)
         printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-control-snapshot","message":{"content":[{"type":"text","text":"COSH CORE CONTROL SNAPSHOT FINAL"}]}}'

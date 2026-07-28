@@ -631,6 +631,50 @@ fn control_shell_permission_missing_command_blocks_as_unsafe_binding() {
 }
 
 #[test]
+fn foreign_run_control_permission_never_surfaces_as_a_request() {
+    // #1940: a ToolPermissionRequest whose run id does not match the active
+    // run was already denied at the registration door (agent/poll.rs). The
+    // downstream request pipeline must never resurface it — as a pending
+    // card or an auto-approval — because either path would send a second,
+    // contradictory response for an already-terminated request.
+    let (mut state, _approval_rx) = state_with_active_control_run("run-1");
+    let mut foreign = governed_provider_tool_permission("ctrl-foreign", "toolu-foreign");
+    let AgentEvent::ToolPermissionRequest {
+        run_id: ref mut foreign_run_id,
+        ..
+    } = foreign.event
+    else {
+        panic!("expected tool permission request");
+    };
+    *foreign_run_id = "foreign-run".to_string();
+
+    assert!(
+        approval_request_from_governed_event(
+            &state,
+            &foreign,
+            None,
+            AgentRunOrigin::Standard,
+            false,
+        )
+        .is_none(),
+        "a foreign-run control approval must not become a request"
+    );
+
+    let ids = record_approval_requests(
+        &mut state,
+        &[foreign],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+    assert!(ids.is_empty());
+    assert!(
+        state.approvals.requests.is_empty(),
+        "no pending card may be created for a foreign-run request"
+    );
+}
+
+#[test]
 fn non_shell_provider_permission_approval_stays_provider_owned() {
     let mut state = InlineState::default();
     state.approvals.requests.push(provider_tool_request(
@@ -1030,6 +1074,19 @@ exit 1
     panic!("mock provider did not emit tool permission");
 }
 
+fn state_with_active_control_run(
+    run_id: &str,
+) -> (
+    InlineState,
+    std::sync::mpsc::Receiver<crate::adapter::ApprovalChannelMessage>,
+) {
+    let (active_run, approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id(run_id);
+    let mut state = InlineState::default();
+    state.agent_run.active = Some(active_run);
+    (state, approval_rx)
+}
+
 fn governed_provider_tool_permission(request_id: &str, tool_use_id: &str) -> GovernedEvent {
     GovernedEvent {
         policy_decision: GovernancePolicyDecision::NeedsUserApproval,
@@ -1365,4 +1422,65 @@ fn approval_action_set_matrix() {
         approval_action_set_for(&hooked, &queued),
         ApprovalActionSet::Hook
     );
+}
+
+#[test]
+fn batch_drain_writes_drop_audit_before_responding() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-approval-drop-audit-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("create audit root");
+    #[cfg(unix)]
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("private audit root");
+    let root = root.canonicalize().expect("canonical audit root");
+
+    let (active_run, approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("request-1");
+
+    let mut state = InlineState::default();
+    state.agent_run.active = Some(active_run);
+    state.audit = Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+        &root,
+    ));
+    state
+        .control
+        .approval_ledger_mut()
+        .register("request-1", "ctrl-drop");
+
+    crate::approval::runtime::drain_unhomed_control_requests(&mut state);
+
+    // The terminal deny still goes out on the approval channel.
+    let responses: Vec<_> = approval_rx
+        .try_iter()
+        .filter_map(|message| match message {
+            crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+            crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+        })
+        .collect();
+    assert_eq!(responses.len(), 1, "{responses:?}");
+    assert!(matches!(
+        responses[0].decision,
+        ApprovalDecision::Deny { .. }
+    ));
+
+    // And the drop is auditable with its drop site attached.
+    drop(state);
+    let mut content = String::new();
+    for date in std::fs::read_dir(root.join("v1/segments")).expect("segments dir") {
+        for file in std::fs::read_dir(date.expect("date dir").path()).expect("segment files") {
+            content.push_str(
+                &std::fs::read_to_string(file.expect("segment file").path()).expect("segment text"),
+            );
+        }
+    }
+    assert!(content.contains("\"approval.dropped\""), "{content}");
+    assert!(content.contains("\"batch_drain\""), "{content}");
+    assert!(content.contains("\"ctrl-drop\""), "{content}");
+    let _ = std::fs::remove_dir_all(&root);
 }

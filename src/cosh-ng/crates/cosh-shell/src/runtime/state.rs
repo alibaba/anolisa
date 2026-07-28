@@ -16,6 +16,7 @@ use crate::question::runtime::RuntimeUserQuestion;
 use crate::raw_input::PromptGhostRoute;
 use crate::recommendation::personal_feedback::FrozenPromptBinding;
 use crate::recommendation::personal_state::PersonalizationState;
+use crate::runtime::approval_ledger::ApprovalLifecycleLedger;
 use crate::runtime::approval_state::ApprovalState;
 use crate::runtime::events::ShellEventCursor;
 use crate::runtime::evidence_requests::EvidenceRequestState;
@@ -419,6 +420,7 @@ pub(crate) struct ControlState {
     handled_config_actions: HashSet<String>,
     session: SessionControlState,
     provider_tool: ProviderToolState,
+    approval_ledger: ApprovalLifecycleLedger,
     provider_shell_handoff_run_ids: HashSet<String>,
     interactive_shell_handoffs: Vec<PendingInteractiveShellHandoff>,
     shell_handoff: ShellHandoffState,
@@ -553,6 +555,12 @@ impl ControlState {
     }
     pub(crate) fn provider_tool_mut(&mut self) -> &mut ProviderToolState {
         &mut self.provider_tool
+    }
+    pub(crate) fn approval_ledger(&self) -> &ApprovalLifecycleLedger {
+        &self.approval_ledger
+    }
+    pub(crate) fn approval_ledger_mut(&mut self) -> &mut ApprovalLifecycleLedger {
+        &mut self.approval_ledger
     }
     pub(crate) fn provider_host_executed_shell_result_delivered(
         &self,

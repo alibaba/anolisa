@@ -130,6 +130,29 @@ fn required_owned_approval_resolution_fails_before_execution_boundary() {
 }
 
 #[test]
+fn approval_drop_audit_distinguishes_drain_from_user_denial() {
+    let root = private_root();
+    let mut recorder = ShellAuditRecorder::test_with_root(&root);
+
+    let event_id = recorder.record_approval_dropped("run-1", "ctrl-9", "batch_drain");
+    assert!(event_id.is_some());
+    drop(recorder);
+
+    let content = walk_segment_text(&root);
+    let event: serde_json::Value =
+        serde_json::from_str(content.lines().next().expect("audit record")).expect("audit json");
+    assert_eq!(event["event_type"], "approval.dropped");
+    assert_eq!(event["identity"]["shell_session_id"], "audit-test-session");
+    assert_eq!(event["identity"]["run_id"], "run-1");
+    assert_eq!(event["identity"]["request_id"], "ctrl-9");
+    assert_eq!(event["outcome"]["status"], "cancelled");
+    assert_eq!(event["subject"]["kind"], "approval");
+    assert_eq!(event["data"]["decision"], "dropped");
+    assert_eq!(event["data"]["reason_code"], "batch_drain");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn required_core_host_execution_fails_before_handoff_boundary() {
     let mut recorder = ShellAuditRecorder {
         writer: None,

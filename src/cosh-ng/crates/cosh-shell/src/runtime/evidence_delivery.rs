@@ -262,6 +262,13 @@ fn deliver_shell_result_for_request(
             .control
             .provider_tool_mut()
             .release_host_executed_shell_result(claim);
+    } else {
+        // #1940: a delivered host-executed result is the terminal response
+        // for this control request; settle the lifecycle ledger.
+        state
+            .control
+            .approval_ledger_mut()
+            .mark_responded(run_id, request_id);
     }
     if delivered {
         ShellEvidenceDelivery {

@@ -10,6 +10,7 @@ mod auth;
 mod serialization;
 
 use auth::parse_auth_provider;
+pub(crate) use serialization::serialize_approval_receipt;
 pub use serialization::{
     serialize_answer, serialize_auth_response, serialize_claude_allow, serialize_co_allow,
     serialize_deny, serialize_host_executed_shell_result, serialize_initialize,
@@ -129,12 +130,35 @@ pub struct AuthResponse {
     pub persist: bool,
 }
 
+/// Non-exhaustive: capability flags grow with the control protocol (e.g. the
+/// #1940 `can_handle_approval_receipt`), and out-of-crate code must stay
+/// source-compatible across those additions — construct via `default()` and
+/// set fields, or read them; only this crate builds it exhaustively.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ControlProtocolCapabilities {
     pub provider_initialize_seen: bool,
     pub can_handle_can_use_tool: bool,
     pub can_handle_host_executed_shell_tool_result: bool,
     pub can_handle_shell_evidence_tool: bool,
+    /// #1940 receipt protocol: only a provider that announces this capability
+    /// receives `approval_receipt` lines. Without it the receipt is skipped —
+    /// a provider that does not understand receipts would misread the line as
+    /// an ordinary response, and losing the receipt only means the core keeps
+    /// its last-resort approval guard armed (the designed degradation).
+    pub can_handle_approval_receipt: bool,
+}
+
+/// Shared writer-thread check for the #1940 receipt gate: a poisoned or
+/// unparsed capability set reads as "not capable", so the receipt is skipped
+/// rather than risking an unintelligible line on the provider's stdin.
+pub(crate) fn receipt_capable(
+    capabilities: &std::sync::Arc<std::sync::Mutex<ControlProtocolCapabilities>>,
+) -> bool {
+    capabilities
+        .lock()
+        .map(|caps| caps.can_handle_approval_receipt)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Default)]
@@ -573,6 +597,7 @@ pub fn parse_initialize_capabilities(line: &str) -> Option<ControlProtocolCapabi
             capabilities,
             "can_handle_shell_evidence_tool",
         ),
+        can_handle_approval_receipt: bool_capability(capabilities, "can_handle_approval_receipt"),
     })
 }
 
@@ -589,6 +614,16 @@ pub struct ApprovalResponse {
     pub tool_use_id: Option<String>,
     pub tool_input: Option<Value>,
     pub decision: ApprovalDecision,
+}
+
+/// #1940 receipt protocol: everything the shell can send over the approval
+/// channel. A `Response` is terminal for its request; a `Receipt` only
+/// proves the request reached the shell main thread (so the core can
+/// disarm its residual timeout) and never resolves anything.
+#[derive(Debug, Clone)]
+pub(crate) enum ApprovalChannelMessage {
+    Response(ApprovalResponse),
+    Receipt { request_id: String },
 }
 
 #[derive(Debug, Clone)]

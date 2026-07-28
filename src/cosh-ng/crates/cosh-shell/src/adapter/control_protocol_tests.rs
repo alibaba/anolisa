@@ -304,12 +304,13 @@ fn parse_non_control_request_returns_none() {
 
 #[test]
 fn parse_initialize_capabilities_from_success_response() {
-    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true}}}}"#;
+    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true,"can_handle_approval_receipt":true}}}}"#;
     let capabilities = parse_initialize_capabilities(line).expect("capabilities");
     assert!(capabilities.provider_initialize_seen);
     assert!(capabilities.can_handle_can_use_tool);
     assert!(capabilities.can_handle_host_executed_shell_tool_result);
     assert!(capabilities.can_handle_shell_evidence_tool);
+    assert!(capabilities.can_handle_approval_receipt);
 }
 
 #[test]
@@ -320,6 +321,16 @@ fn parse_initialize_capabilities_defaults_missing_flags_to_false() {
     assert!(!capabilities.can_handle_can_use_tool);
     assert!(!capabilities.can_handle_host_executed_shell_tool_result);
     assert!(!capabilities.can_handle_shell_evidence_tool);
+    assert!(!capabilities.can_handle_approval_receipt);
+}
+
+#[test]
+fn receipt_capable_requires_the_announced_capability() {
+    use std::sync::{Arc, Mutex};
+    let capabilities = Arc::new(Mutex::new(ControlProtocolCapabilities::default()));
+    assert!(!receipt_capable(&capabilities));
+    capabilities.lock().unwrap().can_handle_approval_receipt = true;
+    assert!(receipt_capable(&capabilities));
 }
 
 #[test]

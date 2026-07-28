@@ -106,3 +106,25 @@ Reasons:
 Removal condition: when a second cross-owner approval workflow needs the same
 lifecycle, introduce runtime domain commands and events for approval outcomes,
 move orchestration into that coordinator, and delete this exception.
+
+## D17: ApprovalLifecycleLedger lives in runtime/approval_ledger.rs (owner note)
+
+`ApprovalLifecycleLedger` (#1940) is a pure accounting index keyed by
+the #1939 identity contract (`run_id` + `request_id`): registered on
+first sight, marked on response, swept per run. It lives in `runtime/`
+because its owner is the run lifecycle, not approval policy — the
+ledger is held by `ControlState` (`runtime/state.rs`), and its two
+sweep triggers are runtime lifecycle events (`runtime/cancel.rs`,
+`runtime/evidence_delivery.rs`). It depends only on std and holds no
+policy: what a dropped request is denied *with* (message, audit
+drop-site, terminal deny) is decided by `approval/runtime.rs`, which
+consumes the ledger the same way it already consumes other
+`ControlState` accounting. Splitting the data structure from its
+`ControlState` host would recreate the cross-owner reach the note is
+about; the maintenance contract (every `control_response` exit must
+`mark_responded`) is documented in the module docs.
+
+Revisit trigger: if a second consumer beyond approval drain/sweep needs
+lifecycle bookkeeping, or the per-domain `ControlState` split lands,
+move the ledger into that extracted state module together with its
+host field.

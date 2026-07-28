@@ -340,12 +340,25 @@ fn poll_active_agent_run_with_policy<W: Write>(
                 | AgentEvent::Action { .. }
                 | AgentEvent::ToolPermissionRequest { .. }
         );
-        let deny_reentrant_shell_request = deny_shell_during_recovery;
-        deny_reentrant_shell_request_after_foreground_evidence(
+        register_control_approval_on_first_sight(
             active_run,
+            state.control.approval_ledger_mut(),
+            state.audit.as_mut(),
             &event,
-            deny_reentrant_shell_request,
         );
+        let deny_reentrant_shell_request = deny_shell_during_recovery;
+        if let Some((denied_run_id, denied_request_id)) =
+            deny_reentrant_shell_request_after_foreground_evidence(
+                active_run,
+                &event,
+                deny_reentrant_shell_request,
+            )
+        {
+            state
+                .control
+                .approval_ledger_mut()
+                .mark_responded(&denied_run_id, &denied_request_id);
+        }
         let provider_progress_observed = shell_evidence_provider_progress_observed(&event);
         let text_hold_reason = text_hold_reason_for_poll(TextHoldInputs {
             pending_interaction_before_poll,
@@ -390,6 +403,14 @@ fn poll_active_agent_run_with_policy<W: Write>(
 
     if let Some((fallback, origin, selectable_after_event_index)) = stalled_shell_recovery {
         if let Some(mut active_run) = state.agent_run.active.take() {
+            // #1940: fresh-turn recovery discards the run; sweep it first
+            // so dropped control requests still reach a terminal state
+            // and the ledger cannot grow across turns.
+            crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+                state,
+                &active_run.request.id,
+                &active_run.handle,
+            );
             active_run.handle.cancel();
             active_run.status_animation.clear(output)?;
         }
@@ -429,6 +450,56 @@ fn poll_active_agent_run_with_policy<W: Write>(
     }
 
     Ok(())
+}
+
+/// #1940: register every control approval owned by the active run on
+/// first sight so the batch drain and run-terminal sweeps can prove it
+/// reached a terminal state even if a later pipeline stage drops it, and
+/// send a receipt back to the core so its residual approval timeout
+/// disarms. A request under a foreign run id is a protocol violation the
+/// ledger could never sweep: it is denied at the door instead — no
+/// ledger entry, no receipt, exactly one terminal response.
+fn register_control_approval_on_first_sight(
+    active_run: &ActiveAgentRun,
+    ledger: &mut crate::runtime::approval_ledger::ApprovalLifecycleLedger,
+    audit: Option<&mut crate::journal::audit::ShellAuditRecorder>,
+    event: &AgentEvent,
+) {
+    let AgentEvent::ToolPermissionRequest {
+        run_id, request_id, ..
+    } = event
+    else {
+        return;
+    };
+    if run_id != &active_run.request.id {
+        // #1940 fail-closed: every drain and sweep is scoped to the owning
+        // run, so the shell can never take terminal ownership of a request
+        // registered under a foreign run id — registering or receipting it
+        // would disarm the core's last-resort guard and then wait forever.
+        // Reject at the door instead: deny so the core's wait reaches a
+        // terminal state, audit the protocol violation, and keep the
+        // request out of the ledger.
+        tracing::warn!(
+            event_run_id = %run_id,
+            active_run_id = %active_run.request.id,
+            request_id = %request_id,
+            "control approval arrived under a non-active run id; denying without registering"
+        );
+        if let Some(audit) = audit {
+            audit.record_approval_dropped(run_id, request_id, "foreign_run_rejected");
+        }
+        let _ = active_run.handle.respond_approval(
+            crate::approval::runtime::foreign_run_request_deny_response(request_id),
+        );
+        return;
+    }
+    ledger.register(run_id, request_id);
+    // #1940 receipt protocol: prove to the core that this request reached
+    // the shell main thread so it can disarm the residual approval
+    // timeout. Best-effort and idempotent: a lost receipt only means the
+    // core keeps its last-resort guard, and repeat receipts for the same
+    // request are harmless.
+    let _ = active_run.handle.send_approval_receipt(request_id);
 }
 
 fn foreground_model_from_event(event: &AgentEvent) -> Option<&str> {
@@ -534,11 +605,12 @@ fn deny_reentrant_shell_request_after_foreground_evidence(
     active_run: &ActiveAgentRun,
     event: &AgentEvent,
     deny_shell_after_foreground_evidence: bool,
-) {
+) -> Option<(String, String)> {
     if !deny_shell_after_foreground_evidence {
-        return;
+        return None;
     }
     let AgentEvent::ToolPermissionRequest {
+        run_id,
         request_id,
         tool_name,
         tool_input,
@@ -546,11 +618,20 @@ fn deny_reentrant_shell_request_after_foreground_evidence(
         ..
     } = event
     else {
-        return;
+        return None;
     };
-    if !is_shell_tool_name(tool_name) {
-        return;
+    // #1940: a foreign-run request was already denied at the registration
+    // door above; a second response here would contradict that terminal
+    // deny, and the ledger holds no entry to mark responded.
+    if run_id != &active_run.request.id {
+        return None;
     }
+    if !is_shell_tool_name(tool_name) {
+        return None;
+    }
+    // #1940: report the response either way so the ledger sweep does not
+    // double-deny this request; a failed send means the channel is gone
+    // and the sweep could not deliver a second response anyway.
     let _ = active_run.handle.respond_approval(provider_deny_response(
         ProviderResponseInput {
             request_id,
@@ -559,6 +640,7 @@ fn deny_reentrant_shell_request_after_foreground_evidence(
         },
         "The foreground shell command already completed and its output was injected. Summarize the existing shell evidence or ask the user to start a new request before running another shell command.".to_string(),
     ));
+    Some((run_id.clone(), request_id.clone()))
 }
 
 fn active_run_has_pending_provider_native_shell_result(
@@ -634,251 +716,4 @@ fn text_hold_reason_for_poll(inputs: TextHoldInputs) -> Option<TextHoldReason> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::*;
-
-    #[test]
-    fn foreground_model_tracks_initialization_and_runtime_switch() {
-        let initialized = AgentEvent::StatusChanged {
-            run_id: "run".to_string(),
-            phase: "initialized".to_string(),
-            message: "model initialized project-model".to_string(),
-        };
-        let switched = AgentEvent::StatusChanged {
-            run_id: "run".to_string(),
-            phase: "model_switched".to_string(),
-            message: "model status: model_switched:next-model".to_string(),
-        };
-
-        assert_eq!(
-            foreground_model_from_event(&initialized),
-            Some("project-model")
-        );
-        assert_eq!(foreground_model_from_event(&switched), Some("next-model"));
-    }
-
-    fn test_active_run() -> ActiveAgentRun {
-        let request = AgentRequest {
-            id: "request-1".to_string(),
-            session_id: "session-1".to_string(),
-            command_block: CommandBlock {
-                id: "cmd-1".to_string(),
-                session_id: "session-1".to_string(),
-                command: "df -h".to_string(),
-                origin: Default::default(),
-                cwd: "/tmp".to_string(),
-                end_cwd: "/tmp".to_string(),
-                started_at_ms: 1,
-                ended_at_ms: 2,
-                duration_ms: 1,
-                exit_code: 0,
-                status: CommandStatus::Completed,
-                output: OutputRefs {
-                    terminal_output_ref: None,
-                    terminal_output_bytes: 0,
-                },
-                shell_environment_generation: None,
-                audit_identity: None,
-            },
-            context_blocks: Vec::new(),
-            context_hints: Vec::new(),
-            user_input: Some("df -h".to_string()),
-            findings: Vec::new(),
-            mode: AgentMode::RecommendOnly,
-            user_confirmed: true,
-            hook_finding: None,
-            recommended_skill: None,
-        };
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Recommend);
-        let renderer = RatatuiInlineRenderer::for_terminal();
-        ActiveAgentRun {
-            request,
-            origin: AgentRunOrigin::Standard,
-            handle,
-            provider_name: "fake",
-            language: Language::EnUs,
-            renderer: renderer.clone(),
-            status_animation: renderer.status_animation(),
-            markdown_stream: renderer.stream_markdown_agent(),
-            governed_events: Vec::new(),
-            deferred_events: Vec::new(),
-            held_events: Vec::new(),
-            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
-            pending_cosh_requests: Vec::new(),
-            pending_cosh_request_audits: Vec::new(),
-            rendered_governed_event_count: 0,
-            selectable_after_event_index: None,
-            started_at: Instant::now(),
-            last_activity_at: Instant::now(),
-            last_heartbeat_at: Instant::now(),
-            current_phase: String::new(),
-            current_message: String::new(),
-            has_visible_text_delta: false,
-            completed: false,
-            host_completed_tool_ids: Vec::new(),
-            pending_hook_notifications: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn stalled_shell_evidence_delivery_uses_last_activity_idle_time() {
-        let mut active_run = test_active_run();
-        active_run.started_at = Instant::now() - Duration::from_secs(60);
-        active_run.last_activity_at = Instant::now();
-        active_run.has_visible_text_delta = true;
-
-        assert!(!active_run_has_stalled_shell_evidence_delivery(&active_run));
-
-        active_run.last_activity_at = Instant::now() - Duration::from_secs(16);
-
-        assert!(active_run_has_stalled_shell_evidence_delivery(&active_run));
-    }
-
-    #[test]
-    fn stalled_shell_fallback_waits_for_pending_interaction_to_close() {
-        assert!(!should_start_stalled_provider_shell_fallback(
-            StalledProviderShellFallbackInputs {
-                active_run_idle: true,
-                pending_interaction: true,
-                ..StalledProviderShellFallbackInputs::default()
-            }
-        ));
-        assert!(!should_start_stalled_provider_shell_fallback(
-            StalledProviderShellFallbackInputs {
-                active_run_idle: true,
-                unrendered_interaction: true,
-                ..StalledProviderShellFallbackInputs::default()
-            }
-        ));
-        assert!(!should_start_stalled_provider_shell_fallback(
-            StalledProviderShellFallbackInputs {
-                active_run_idle: true,
-                queued_before_held_text: true,
-                ..StalledProviderShellFallbackInputs::default()
-            }
-        ));
-    }
-
-    #[test]
-    fn stalled_shell_fallback_starts_only_when_idle_and_clear() {
-        assert!(!should_start_stalled_provider_shell_fallback(
-            StalledProviderShellFallbackInputs::default()
-        ));
-        assert!(!should_start_stalled_provider_shell_fallback(
-            StalledProviderShellFallbackInputs {
-                active_run_idle: true,
-                provider_shell_activity_pending: true,
-                ..StalledProviderShellFallbackInputs::default()
-            }
-        ));
-        assert!(should_start_stalled_provider_shell_fallback(
-            StalledProviderShellFallbackInputs {
-                active_run_idle: true,
-                ..StalledProviderShellFallbackInputs::default()
-            }
-        ));
-    }
-
-    #[test]
-    fn shell_evidence_progress_includes_tool_events() {
-        assert!(shell_evidence_provider_progress_observed(
-            &AgentEvent::ToolCall {
-                run_id: "run-1".to_string(),
-                tool_id: Some("tool-1".to_string()),
-                name: "run_shell_command".to_string(),
-                input: "df -h".to_string(),
-            }
-        ));
-        assert!(shell_evidence_provider_progress_observed(
-            &AgentEvent::ToolOutputDelta {
-                run_id: "run-1".to_string(),
-                tool_id: "tool-1".to_string(),
-                stream: "stdout".to_string(),
-                text: "output".to_string(),
-            }
-        ));
-        assert!(shell_evidence_provider_progress_observed(
-            &AgentEvent::ToolCompleted {
-                run_id: "run-1".to_string(),
-                tool_id: "tool-1".to_string(),
-                status: "success".to_string(),
-            }
-        ));
-    }
-
-    #[test]
-    fn shell_evidence_duplicate_signature_distinguishes_list_command_pages() {
-        let first =
-            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ListCommands {
-                limit: 20,
-                cursor: None,
-            });
-        let same_first =
-            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ListCommands {
-                limit: 20,
-                cursor: None,
-            });
-        let second_page =
-            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ListCommands {
-                limit: 20,
-                cursor: Some("cursor-2".to_string()),
-            });
-
-        assert_eq!(first, same_first);
-        assert_ne!(first, second_page);
-    }
-
-    #[test]
-    fn shell_evidence_duplicate_signature_ignores_read_output_bypass() {
-        let normal =
-            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ReadOutput {
-                output_id: "terminal-output://session-1/cmd-1".to_string(),
-                direction: crate::adapter::ShellOutputDirection::Tail,
-                lines: 120,
-                bypass_recent_filter: false,
-            });
-        let bypass =
-            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ReadOutput {
-                output_id: "terminal-output://session-1/cmd-1".to_string(),
-                direction: crate::adapter::ShellOutputDirection::Tail,
-                lines: 120,
-                bypass_recent_filter: true,
-            });
-
-        assert_eq!(normal, bypass);
-    }
-
-    #[test]
-    fn text_hold_reason_none_for_plain_text_streaming() {
-        assert_eq!(text_hold_reason_for_poll(TextHoldInputs::default()), None);
-    }
-
-    #[test]
-    fn text_hold_reason_separates_interaction_and_post_tool_holds() {
-        assert_eq!(
-            text_hold_reason_for_poll(TextHoldInputs {
-                pending_interaction_before_poll: true,
-                provider_native_shell_result_pending: true,
-                ..TextHoldInputs::default()
-            }),
-            Some(TextHoldReason::InteractionPending)
-        );
-        assert_eq!(
-            text_hold_reason_for_poll(TextHoldInputs {
-                provider_native_shell_result_pending: true,
-                ..TextHoldInputs::default()
-            }),
-            Some(TextHoldReason::PostToolShellResult)
-        );
-        assert_eq!(
-            text_hold_reason_for_poll(TextHoldInputs {
-                provider_native_shell_transcript_pending: true,
-                ..TextHoldInputs::default()
-            }),
-            Some(TextHoldReason::PostToolShellTranscript)
-        );
-    }
-}
+mod tests;

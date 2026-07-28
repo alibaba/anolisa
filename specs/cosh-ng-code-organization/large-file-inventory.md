@@ -28,13 +28,13 @@ new over-threshold file appears that is not listed here.
 |------:|------|-------|---------------------|
 | 1717 | `src/ui/agent_render/health.rs` | ui | Health banner rendering; pre-existing. Split per-severity renderers. |
 | 1628 | `src/diagnostics/health/collectors.rs` | diagnostics | Per-subsystem collectors; pre-existing. Split by collector family. |
-| 850 | `src/runtime/state.rs` | runtime | Central inline state; approval state extracted. Continue per-domain splits. |
+| 861 | `src/runtime/state.rs` | runtime | Central inline state; approval state extracted to `approval_state.rs` (main baseline 850, back under the 1000-line growth bar). The #1940 approval-terminal-state fix adds the `approval_ledger` field plus two accessors, which co-locate with their `ControlState` host. Continue per-domain splits. |
 | 912 | `src/evidence/output_policy.rs` | evidence | Output excerpt policy; pre-existing. Split bounding from classification. |
 | 906 | `src/adapter/fake.rs` | adapter | Test fake adapter; pre-existing. Split scripted-scenario builders. |
 | 944 | `src/ui/agent_render/approval.rs` | ui | Approval card rendering; action-row rendering extracted to `approval_actions.rs` (turn consent, #1773). Split per-card-kind renderers next. |
 | 943 | `src/auth/runtime.rs` | auth | Auth control-protocol runtime; prompt rendering extracted to `auth/prompt.rs`, ESC back-navigation to `auth/navigation.rs` (#1760 added dispatcher glue only). Extract provider-specific flows next. |
 | 769 | `src/activity/runtime.rs` | activity | Activity runtime; pre-existing. Shell handoff row builders (tracked and untracked) extracted to `activity/shell_handoff.rs`; extract remaining lifecycle from bookkeeping. |
-| 859 | `src/agent/poll.rs` | agent | Agent run polling loop; pre-existing debt (main baseline 839). The compaction feature added the `compaction_recommended_v1` status capture; split event routing from rendering. |
+| 712 | `src/agent/poll.rs` | agent | Agent run polling loop; pre-existing debt (main baseline 839). The compaction feature added the `compaction_recommended_v1` status capture; the #1940 approval-terminal-state fix extracted the inline test module to `agent/poll/tests.rs`, pulling the file back under the 1000-line growth bar. Split event routing from rendering next. |
 | 856 | `src/parser/mod.rs` | parser | Event parser (legacy `mod.rs`); pre-existing. Split per-event-kind parsers and rename off `mod.rs`. |
 | 855 | `src/activity/runtime_render.rs` | activity | Activity rendering; pre-existing. Split per-panel renderers. |
 | 853 | `src/i18n/en.rs` | i18n | English catalog; pre-existing. Partition by message domain. |
@@ -51,3 +51,4 @@ new over-threshold file appears that is not listed here.
 | 722 | `src/i18n/message_id.rs` | i18n | `MessageId` enum; near-threshold historical file (main baseline 699, zero headroom). The compaction feature added 23 required user-facing message ids, crossing the threshold. Split plan: partition `MessageId` into domain sub-enums (or macro-generate it) as a follow-up i18n refactor. |
 | 727 | `src/shell_host/marker/bash.rs` | shell_host | Embedded bash marker script; near-threshold historical file (main baseline 697, zero headroom after the extdebug prompt-hook fix). The #1919 missing-path natural-language interception added the DEBUG-trap gate helper and two mount points, crossing the threshold. Split plan: extract the embedded script body into a standalone `.sh` asset loaded via `include_str!`, mirroring the existing `shell_host/input_intent.sh` pattern (golden byte-identity tests keep the emitted script stable). |
 | 710 | `src/slash/hooks.rs` | slash | Slash hook command; pre-existing. Split subcommands. |
+| 700 | `src/adapter/control_protocol.rs` | adapter | Control-protocol wire surface; near-threshold historical file (main baseline 690). The #1940 approval-terminal-state fix added the `ApprovalChannelMessage` envelope and the receipt-serializer re-export, crossing the threshold. Split plan: move per-provider wire DTOs into `control_protocol/` submodules alongside `serialization.rs`, leaving only channel orchestration here. |

@@ -105,7 +105,7 @@ pub trait AgentAdapter {
 pub struct AgentRunHandle {
     receiver: mpsc::Receiver<Result<AgentEvent, AdapterError>>,
     cancel: Arc<dyn Fn() + Send + Sync>,
-    pub(crate) approval_sender: Option<mpsc::Sender<ApprovalResponse>>,
+    pub(crate) approval_sender: Option<mpsc::Sender<ApprovalChannelMessage>>,
     question_answer_confirmation: Option<mpsc::Receiver<Result<String, AdapterError>>>,
     pub(crate) auth_sender: Option<std::sync::mpsc::Sender<AuthResponse>>,
     control_capabilities: Arc<Mutex<ControlProtocolCapabilities>>,
@@ -166,7 +166,7 @@ pub enum AgentRunPoll {
 impl AgentRunHandle {
     #[cfg(test)]
     pub(crate) fn test_with_approval_sender(
-        approval_sender: mpsc::Sender<ApprovalResponse>,
+        approval_sender: mpsc::Sender<ApprovalChannelMessage>,
     ) -> Self {
         let (_sender, receiver) = mpsc::channel();
         Self {
@@ -183,7 +183,7 @@ impl AgentRunHandle {
 
     #[cfg(test)]
     pub(crate) fn test_with_question_answer_confirmation(
-        approval_sender: mpsc::Sender<ApprovalResponse>,
+        approval_sender: mpsc::Sender<ApprovalChannelMessage>,
         confirmation: mpsc::Receiver<Result<String, AdapterError>>,
     ) -> Self {
         let mut handle = Self::test_with_approval_sender(approval_sender);
@@ -210,7 +210,25 @@ impl AgentRunHandle {
             .ok_or_else(|| AdapterError {
                 message: "no approval channel (not in control protocol mode)".to_string(),
             })?
-            .send(response)
+            .send(ApprovalChannelMessage::Response(response))
+            .map_err(|_| AdapterError {
+                message: "approval channel closed".to_string(),
+            })
+    }
+
+    /// #1940 receipt protocol: notifies the core that a control approval
+    /// request reached the shell main thread, so the core can disarm its
+    /// residual timeout for exactly this request. Best-effort: a lost
+    /// receipt only means the core keeps its last-resort guard.
+    pub(crate) fn send_approval_receipt(&self, request_id: &str) -> Result<(), AdapterError> {
+        self.approval_sender
+            .as_ref()
+            .ok_or_else(|| AdapterError {
+                message: "no approval channel (not in control protocol mode)".to_string(),
+            })?
+            .send(ApprovalChannelMessage::Receipt {
+                request_id: request_id.to_string(),
+            })
             .map_err(|_| AdapterError {
                 message: "approval channel closed".to_string(),
             })
@@ -536,10 +554,13 @@ mod tests {
             confirmation_receiver,
         );
         thread::spawn(move || {
-            let response = approval_receiver.recv().expect("question answer");
+            let request_id = match approval_receiver.recv().expect("question answer") {
+                ApprovalChannelMessage::Response(response) => response.request_id,
+                other => panic!("expected approval response, got {other:?}"),
+            };
             confirmation_sender
                 .send(Err(AdapterError {
-                    message: format!("failed to write {}", response.request_id),
+                    message: format!("failed to write {request_id}"),
                 }))
                 .expect("confirmation");
         });

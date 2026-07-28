@@ -2,7 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::cosh_core::{CoshCoreAdapter, SessionRecoveryState, SessionRuntimeState};
-use super::{AdapterError, AgentAdapter, AgentRunHandle, AgentRunPoll, FreshSessionOutcome};
+use super::{
+    AdapterError, AgentAdapter, AgentRunHandle, AgentRunPoll, ApprovalDecision, ApprovalResponse,
+    FreshSessionOutcome,
+};
 use crate::types::{
     AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
 };
@@ -899,6 +902,97 @@ fn cancellable_runs_and_registry_share_one_persistent_core() {
     assert_eq!(first_info["pid"], second_info["pid"]);
     assert_eq!(first_info["turns"], 1);
     assert_eq!(second_info["turns"], 2);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// #1940 regression: the persistent process announces `initialize` capabilities
+// once, on the first turn. Later turns must inherit them from the process
+// record — otherwise the receipt gate reads the default "not capable" and
+// silently stops emitting `approval_receipt` from the second turn on, leaving
+// the core's residual approval timeout armed against legitimate pending cards.
+#[test]
+fn persistent_core_keeps_receipt_capability_across_turns() {
+    let (script, root) = persistent_mock_paths("receipt-capability");
+    let receipts = root.join("receipts");
+    let source = r#"#!/bin/sh
+turns=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_approval_receipt":true}}}}'
+      ;;
+    *'"type":"approval_receipt"'*)
+      printf '%s\n' "$line" >> "__RECEIPTS__"
+      ;;
+    *'"type":"user"'*)
+      turns=$((turns + 1))
+      printf '{"type":"control_request","request_id":"ctrl-%s","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"path":"/tmp/receipt-capability"},"tool_use_id":"toolu-%s"}}\n' "$turns" "$turns"
+      ;;
+    *'"behavior":"allow"'*)
+      printf '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done"}\n'
+      ;;
+    *'"subtype":"shutdown"'*) exit 0;;
+  esac
+done
+"#
+    .replace("__RECEIPTS__", &receipts.to_string_lossy());
+    std::fs::write(&script, source).expect("write receipt capability mock");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("receipt capability mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod receipt capability mock");
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    for turn in 1..=2u32 {
+        let mut request = test_request();
+        request.id = format!("test-{turn}");
+        let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let request_id = loop {
+            match handle
+                .poll_event_timeout(Duration::from_millis(100))
+                .expect("poll receipt capability run")
+            {
+                AgentRunPoll::Event(AgentEvent::ToolPermissionRequest { request_id, .. }) => {
+                    break request_id;
+                }
+                AgentRunPoll::Event(_) => {}
+                AgentRunPoll::Finished => {
+                    panic!("turn {turn} finished before its permission request")
+                }
+                AgentRunPoll::Timeout if Instant::now() < deadline => {}
+                AgentRunPoll::Timeout => panic!("no permission request on turn {turn}"),
+            }
+        };
+        assert_eq!(request_id, format!("ctrl-{turn}"));
+        handle
+            .send_approval_receipt(&request_id)
+            .expect("send approval receipt");
+        handle
+            .respond_approval(ApprovalResponse {
+                request_id: request_id.clone(),
+                tool_use_id: None,
+                tool_input: None,
+                decision: ApprovalDecision::Allow,
+            })
+            .expect("respond approval");
+        collect_cancellable_run(&handle);
+        let receipt_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let logged = std::fs::read_to_string(&receipts).unwrap_or_default();
+            if logged.contains(&format!("\"request_id\":\"ctrl-{turn}\"")) {
+                break;
+            }
+            assert!(
+                Instant::now() < receipt_deadline,
+                "turn {turn} receipt never reached the provider (logged: {logged:?})"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     drop(adapter);
     let _ = std::fs::remove_dir_all(root);
 }

@@ -63,6 +63,19 @@ pub fn serialize_co_allow(request_id: &str) -> String {
     .to_string()
 }
 
+/// #1940 receipt protocol: emitted as soon as a control approval request
+/// reaches the shell main thread. A core that announced
+/// `can_handle_approval_receipt` disarms its residual timeout for this
+/// request; writers skip the line entirely for providers without the
+/// capability, whose guard then stays armed.
+pub(crate) fn serialize_approval_receipt(request_id: &str) -> String {
+    json!({
+        "type": "approval_receipt",
+        "request_id": request_id
+    })
+    .to_string()
+}
+
 pub fn serialize_claude_allow(request_id: &str, updated_input: &Value) -> String {
     json!({
         "type": "control_response",

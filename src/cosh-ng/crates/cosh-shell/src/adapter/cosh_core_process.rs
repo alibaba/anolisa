@@ -23,7 +23,7 @@ use super::cosh_core::{
 use super::{
     agent_event_is_provider_progress, control_protocol, record_cancellation_pending_session,
     run_provider_process_loop, spawn_provider_child, AdapterError, AgentRunHandle,
-    ApprovalResponse, AuthResponse, ClaudeStreamParser, PreparedInvocation,
+    ApprovalChannelMessage, AuthResponse, ClaudeStreamParser, PreparedInvocation,
     ProviderCancellationArtifactStore, ProviderLineProgress, ProviderPromptArgMode,
     ProviderRunOutcome, ProviderStdinMode,
 };
@@ -200,7 +200,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
     resume_attempt: SessionResumeAttempt,
 ) -> AgentRunHandle {
     let (event_tx, event_rx) = mpsc::channel();
-    let (approval_tx, approval_rx) = mpsc::channel::<ApprovalResponse>();
+    let (approval_tx, approval_rx) = mpsc::channel::<ApprovalChannelMessage>();
     let (answer_confirmation_tx, answer_confirmation_rx) = mpsc::channel();
     let (auth_tx, auth_rx) = mpsc::channel::<AuthResponse>();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -279,6 +279,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
             done: Arc::clone(&writer_done),
             cancelled: Arc::clone(&cancelled),
             gate: Arc::clone(&question_gate),
+            capabilities: Arc::clone(&control_capabilities_for_thread),
             failure_tx: writer_failure_tx,
             answer_confirmation_tx,
         }
@@ -362,7 +363,8 @@ pub(super) fn start_control_protocol_cosh_core_process(
                                     &tool_use_id,
                                 )
                             {
-                                let _ = approval_tx_for_loop.send(response);
+                                let _ = approval_tx_for_loop
+                                    .send(ApprovalChannelMessage::Response(response));
                                 return Ok(ProviderLineProgress::AwaitingApproval);
                             }
                             send_agent_event(

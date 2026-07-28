@@ -145,7 +145,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-handoff-command-not-found*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-command-not-found","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"/help"},"tool_use_id":"toolu-handoff-command-not-found"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'/help'*'"exit_code":127'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-handoff-command-not-found","message":{"content":[{"type":"text","text":"HANDOFF COMMAND NOT FOUND HOSTEXEC RECEIVED"}]}}'
@@ -208,7 +215,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-handoff-bypass-marker*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-bypass-marker","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"?? should-run-as-shell"},"tool_use_id":"toolu-handoff-bypass-marker"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'?? should-run-as-shell'*'"exit_code":127'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-handoff-bypass-marker","message":{"content":[{"type":"text","text":"HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
@@ -276,7 +290,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-zsh-handoff-bypass-marker*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-zsh-handoff-bypass-marker","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"?? should-run-as-zsh-shell"},"tool_use_id":"toolu-zsh-handoff-bypass-marker"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'?? should-run-as-zsh-shell'*'"exit_code":127'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-zsh-handoff-bypass-marker","message":{"content":[{"type":"text","text":"ZSH HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
@@ -340,7 +361,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-handoff-wrapper-leak*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-wrapper-leak","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf wrapper-visible"},"tool_use_id":"toolu-handoff-wrapper-leak"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'printf wrapper-visible'*'wrapper-visible'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-handoff-wrapper-leak","message":{"content":[{"type":"text","text":"HANDOFF WRAPPER LEAK HOSTEXEC RECEIVED"}]}}'
