@@ -14,8 +14,9 @@
  *
  * Usage:
  *   node scripts/package-npm.js                     # current platform only
- *   node scripts/package-npm.js --all               # all supported targets
- *   node scripts/package-npm.js --target x86_64     # specific arch
+ *   node scripts/package-npm.js --all               # all targets for this OS
+ *   node scripts/package-npm.js --target linux-x64  # specific target
+ *   node scripts/package-npm.js --validate          # validate package templates
  *
  * Prerequisites:
  *   - Rust toolchain with the target installed (rustup target add ...)
@@ -23,9 +24,10 @@
  *
  * Output:
  *   npm/dist/
- *   ├── anolisa-cli-<version>.tgz              (root package)
- *   ├── anolisa-cli-linux-x64-<version>.tgz    (platform package)
- *   └── anolisa-cli-linux-arm64-<version>.tgz  (platform package)
+ *   ├── anolisa-cli-<version>.tgz                  (root package)
+ *   ├── anolisa-cli-linux-x64-<version>.tgz        (platform package)
+ *   ├── anolisa-cli-linux-arm64-<version>.tgz      (platform package)
+ *   └── anolisa-cli-darwin-arm64-<version>.tgz     (platform package)
  */
 
 import { execSync } from 'node:child_process';
@@ -39,6 +41,15 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { arch, platform } from 'node:os';
+import {
+  buildStrategyForTarget,
+  PLATFORM_MAP,
+  TARGETS,
+  platformPackageName,
+  targetForSelector,
+  targetsForHost,
+} from './platforms.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -55,60 +66,113 @@ if (!versionMatch) {
 }
 const version = versionMatch[1];
 
-const TARGETS = [
-  {
-    rust_target: 'x86_64-unknown-linux-gnu',
-    npm_os: 'linux',
-    npm_cpu: 'x64',
-    pkg_suffix: 'linux-x64',
-  },
-  {
-    rust_target: 'aarch64-unknown-linux-gnu',
-    npm_os: 'linux',
-    npm_cpu: 'arm64',
-    pkg_suffix: 'linux-arm64',
-  },
-];
+function packageTemplate(path, expectedName) {
+  if (!existsSync(path)) {
+    throw new Error(`npm package template not found: ${path}`);
+  }
+  const template = JSON.parse(readFileSync(path, 'utf8'));
+  if (
+    !template ||
+    typeof template !== 'object' ||
+    template.name !== expectedName
+  ) {
+    throw new Error(`npm package template has the wrong identity: ${path}`);
+  }
+  return template;
+}
 
-async function parseArgs() {
+function platformPackageTemplate(path, expectedName) {
+  const template = packageTemplate(path, expectedName);
+  if (
+    template.bin?.anolisa !== 'bin/anolisa' ||
+    !Array.isArray(template.files) ||
+    !template.files.includes('bin/') ||
+    template.preferUnplugged !== true
+  ) {
+    throw new Error(
+      `npm platform template must package the native binary without modification: ${path}`,
+    );
+  }
+  return template;
+}
+
+function rootPackageTemplate(path) {
+  const template = packageTemplate(path, '@anolisa/cli');
+  if (
+    template.type !== 'module' ||
+    template.bin?.anolisa !== 'bin/anolisa' ||
+    !Array.isArray(template.files) ||
+    !template.files.includes('bin/') ||
+    !template.files.includes('scripts/') ||
+    template.scripts?.postinstall !== 'node scripts/postinstall.js'
+  ) {
+    throw new Error(
+      `npm root template must package and run the ESM postinstall launcher: ${path}`,
+    );
+  }
+  return template;
+}
+
+function validatePackageTemplates() {
+  if (Object.keys(PLATFORM_MAP).length !== TARGETS.length) {
+    throw new Error('npm target list contains duplicate platform keys');
+  }
+  for (const target of TARGETS) {
+    platformPackageTemplate(
+      join(npmDir, 'platforms', target.pkg_suffix, 'package.json'),
+      platformPackageName(target.npm_os, target.npm_cpu),
+    );
+  }
+  rootPackageTemplate(join(npmDir, 'package.json'));
+}
+
+function parseArgs(hostPlatform, hostArch) {
   const args = process.argv.slice(2);
-  if (args.includes('--all')) return TARGETS;
+  if (args.includes('--all')) return targetsForHost(hostPlatform);
   const targetIdx = args.indexOf('--target');
   if (targetIdx !== -1 && args[targetIdx + 1]) {
-    const archArg = args[targetIdx + 1];
-    const matched = TARGETS.filter(
-      (t) => t.rust_target.includes(archArg) || t.npm_cpu === archArg || t.pkg_suffix.includes(archArg),
-    );
-    if (matched.length === 0) {
-      console.error(`Error: Unknown target "${archArg}". Available: ${TARGETS.map((t) => t.pkg_suffix).join(', ')}`);
+    try {
+      return [targetForSelector(args[targetIdx + 1])];
+    } catch (error) {
+      console.error(`Error: ${error.message}`);
       process.exit(1);
     }
-    return matched;
   }
-  // Default: detect current platform
-  const os = await import('node:os');
-  const currentPlatform = os.platform();
-  const currentArch = os.arch();
-  const current = TARGETS.find((t) => t.npm_os === currentPlatform && t.npm_cpu === currentArch);
+  const current = TARGETS.find(
+    (target) =>
+      target.npm_os === hostPlatform && target.npm_cpu === hostArch,
+  );
   if (!current) {
-    console.error(`Error: No target configuration for ${currentPlatform}-${currentArch}`);
+    console.error(
+      `Error: No target configuration for ${hostPlatform}-${hostArch}`,
+    );
     process.exit(1);
   }
   return [current];
 }
 
-function buildTarget(target) {
+function buildTarget(target, hostPlatform) {
   console.log(`\n🔨 Building for ${target.rust_target}...`);
-  const hostTarget = execSync('rustc -vV', { encoding: 'utf-8' }).match(/host: (.+)/)?.[1]?.trim();
-  const crossCompile = !hostTarget || target.rust_target !== hostTarget;
+  const hostTarget = execSync('rustc -vV', { encoding: 'utf-8' })
+    .match(/host: (.+)/)?.[1]
+    ?.trim();
+  if (!hostTarget) {
+    throw new Error('Could not determine the Rust host target');
+  }
+  const strategy = buildStrategyForTarget(
+    hostPlatform,
+    hostTarget,
+    target,
+  );
+  const targetArg = strategy.passTarget
+    ? ` --target ${target.rust_target}`
+    : '';
 
-  const buildCmd = crossCompile
-    ? `cross build --release --locked -p anolisa-cli --target ${target.rust_target}`
-    : `cargo build --release --locked -p anolisa-cli`;
+  const buildCmd = `${strategy.tool} build --release --locked -p anolisa-cli${targetArg}`;
 
   execSync(buildCmd, { stdio: 'inherit', cwd: workspaceRoot });
 
-  const binaryPath = crossCompile
+  const binaryPath = strategy.passTarget
     ? join(workspaceRoot, 'target', target.rust_target, 'release', 'anolisa')
     : join(workspaceRoot, 'target', 'release', 'anolisa');
 
@@ -121,7 +185,7 @@ function buildTarget(target) {
 }
 
 function packagePlatform(target, binaryPath) {
-  const pkgName = `@anolisa/cli-${target.pkg_suffix}`;
+  const pkgName = platformPackageName(target.npm_os, target.npm_cpu);
   const pkgDir = join(distDir, `cli-${target.pkg_suffix}`);
 
   console.log(`📦 Packaging ${pkgName}@${version}...`);
@@ -134,22 +198,15 @@ function packagePlatform(target, binaryPath) {
   copyFileSync(binaryPath, join(pkgDir, 'bin', 'anolisa'));
   execSync(`chmod 755 "${join(pkgDir, 'bin', 'anolisa')}"`, { stdio: 'pipe' });
 
-  // Write package.json
+  const template = platformPackageTemplate(
+    join(npmDir, 'platforms', target.pkg_suffix, 'package.json'),
+    pkgName,
+  );
   const pkgJson = {
-    name: pkgName,
+    ...template,
     version,
-    description: `ANOLISA CLI native binary for Linux ${target.npm_cpu === 'x64' ? 'x86_64' : 'aarch64'}`,
-    license: 'Apache-2.0',
-    repository: {
-      type: 'git',
-      url: 'git+https://github.com/alibaba/anolisa.git',
-      directory: 'src/anolisa',
-    },
     os: [target.npm_os],
     cpu: [target.npm_cpu],
-    bin: { anolisa: 'bin/anolisa' },
-    files: ['bin/'],
-    preferUnplugged: true,
   };
   writeFileSync(join(pkgDir, 'package.json'), JSON.stringify(pkgJson, null, 2) + '\n');
 
@@ -160,7 +217,7 @@ function packagePlatform(target, binaryPath) {
   return pkgDir;
 }
 
-function packageRoot(targets) {
+function packageRoot() {
   const rootPkgDir = join(distDir, 'cli');
   console.log(`\n📦 Packaging @anolisa/cli@${version} (root)...`);
 
@@ -176,11 +233,12 @@ process.exit(1);
   writeFileSync(join(rootPkgDir, 'bin', 'anolisa'), stubScript);
   execSync(`chmod 755 "${join(rootPkgDir, 'bin', 'anolisa')}"`, { stdio: 'pipe' });
 
-  // Copy postinstall script
-  copyFileSync(
-    join(npmDir, 'scripts', 'postinstall.js'),
-    join(rootPkgDir, 'scripts', 'postinstall.js'),
-  );
+  for (const script of ['platforms.js', 'postinstall.js']) {
+    copyFileSync(
+      join(npmDir, 'scripts', script),
+      join(rootPkgDir, 'scripts', script),
+    );
+  }
 
   // Copy README and LICENSE
   for (const file of ['README.md', 'LICENSE']) {
@@ -188,30 +246,18 @@ process.exit(1);
     if (existsSync(src)) copyFileSync(src, join(rootPkgDir, file));
   }
 
-  // Build optionalDependencies from target list
+  // The root package is platform-neutral even when this invocation builds a
+  // single native package, so its install metadata must cover every target.
   const optionalDeps = {};
-  for (const t of targets) {
-    optionalDeps[`@anolisa/cli-${t.pkg_suffix}`] = version;
+  for (const t of TARGETS) {
+    optionalDeps[platformPackageName(t.npm_os, t.npm_cpu)] = version;
   }
 
-  // Write root package.json
+  const template = rootPackageTemplate(join(npmDir, 'package.json'));
   const rootPkgJson = {
-    name: '@anolisa/cli',
+    ...template,
     version,
-    description: 'ANOLISA CLI — Agentic OS component lifecycle manager',
-    license: 'Apache-2.0',
-    repository: {
-      type: 'git',
-      url: 'git+https://github.com/alibaba/anolisa.git',
-      directory: 'src/anolisa',
-    },
-    homepage: 'https://github.com/alibaba/anolisa',
-    keywords: ['anolisa', 'agentic-os', 'cli', 'agent', 'ai'],
-    bin: { anolisa: 'bin/anolisa' },
-    files: ['bin/', 'scripts/', 'README.md', 'LICENSE'],
-    scripts: { postinstall: 'node scripts/postinstall.js' },
-    engines: { node: '>=16.0.0' },
-    os: ['linux'],
+    os: [...new Set(TARGETS.map((target) => target.npm_os))],
     optionalDependencies: optionalDeps,
   };
   writeFileSync(join(rootPkgDir, 'package.json'), JSON.stringify(rootPkgJson, null, 2) + '\n');
@@ -225,21 +271,28 @@ process.exit(1);
 async function main() {
   console.log(`\n🚀 ANOLISA CLI npm packaging (v${version})\n`);
 
+  if (process.argv.includes('--validate')) {
+    validatePackageTemplates();
+    console.log('✅ npm package templates are valid');
+    return;
+  }
+
   // Clean dist
   if (existsSync(distDir)) rmSync(distDir, { recursive: true });
   mkdirSync(distDir, { recursive: true });
 
-  const targets = await parseArgs();
+  const hostPlatform = platform();
+  const targets = parseArgs(hostPlatform, arch());
   console.log(`Targets: ${targets.map((t) => t.pkg_suffix).join(', ')}`);
 
   // Build and package each platform
   for (const target of targets) {
-    const binary = buildTarget(target);
+    const binary = buildTarget(target, hostPlatform);
     packagePlatform(target, binary);
   }
 
   // Package root
-  packageRoot(TARGETS);
+  packageRoot();
 
   console.log(`\n✅ All packages ready in: ${distDir}/`);
   console.log('\nTo publish:');

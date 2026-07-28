@@ -904,6 +904,16 @@ jobs:
         with:
           workspaces: src/anolisa
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate npm packaging
+        run: |
+          cd src/anolisa
+          node npm/tests/platforms.test.js
+          node npm/scripts/package-npm.js --validate
+
       - name: Check formatting
         run: |
           cd src/anolisa
