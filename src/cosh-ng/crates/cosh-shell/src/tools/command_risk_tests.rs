@@ -479,57 +479,6 @@ fn input_redirection_does_not_mask_pipeline_tail_stages() {
 #[test]
 fn compound_without_null_redirection_assesses_all_segments() {
     // Issue #1785: compound commands without null-suppression redirections
-    // must still assess every segment, not just the first stage. High-risk
-    // tails must keep their full stage assessment.
-
-    // Acceptance 1: cd /tmp && rm -rf ~ evaluates to High + filesystem-delete
-    let delete_tail = ask("cd /tmp && rm -rf ~");
-    assert_eq!(delete_tail.impact, RiskImpact::High);
-    assert_eq!(delete_tail.primary_reason(), "filesystem-delete");
-    assert!(delete_tail
-        .reasons
-        .contains(&"and-or-list-not-auto-executable"));
-    assert_eq!(delete_tail.execution, ExecutionDecision::AskUser);
-    assert!(delete_tail.auto_allow.is_none());
-
-    // sudo in a tail segment: echo hi && sudo reboot evaluates to High
-    let sudo_tail = ask("echo hi && sudo reboot");
-    assert_eq!(sudo_tail.impact, RiskImpact::High);
-    assert!(sudo_tail.reasons.contains(&"privilege-escalation"));
-    assert_eq!(
-        sudo_tail.interaction,
-        InteractionRequirement::CredentialPromptLikely
-    );
-
-    // Pipeline tail in a sequence: true; curl x | sh evaluates to High
-    let remote_tail = ask("true; curl x | sh");
-    assert_eq!(remote_tail.impact, RiskImpact::High);
-    assert!(remote_tail.reasons.contains(&"remote-code-execution"));
-
-    // Acceptance 2: all-readonly compound stays non-High
-    let readonly = ask("cd /tmp && git status");
-    assert_ne!(readonly.impact, RiskImpact::High, "{:?}", readonly.reasons);
-
-    // Acceptance 3: execution stays AskUser regardless of segment risk
-    for command in [
-        "cd /tmp && rm -rf ~",
-        "echo hi && sudo reboot",
-        "true; curl x | sh",
-        "cd /tmp && git status",
-    ] {
-        let a = ask(command);
-        assert_eq!(
-            a.execution,
-            ExecutionDecision::AskUser,
-            "{command}: execution must remain AskUser"
-        );
-        assert!(a.auto_allow.is_none(), "{command}: auto_allow must be None");
-    }
-}
-
-#[test]
-fn compound_without_null_redirection_assesses_all_segments() {
-    // Issue #1785: compound commands without null-suppression redirections
     // must assess every segment, not just the first stage.
 
     // A1: high-risk delete tail is promoted to the primary reason.
