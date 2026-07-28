@@ -3292,3 +3292,104 @@ fn native_dirty_line_shortcut_is_stripped() {
     assert!(events.contains(&RawInputEvent::SoftNewlineShortcutObserved));
     fs::remove_file(path).ok();
 }
+
+// Review regression (#1932): a multi-line bracketed paste keeps composing
+// inside readline's buffer, which the single-line mirror cannot express.
+// Shift+Enter must fail closed (strip, no upgrade) or the Ctrl-U would
+// wipe the user's pasted lines.
+#[test]
+fn native_multiline_paste_marks_mirror_dirty() {
+    let (path, mut master) = output_file("native-paste-dirty");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    // The paste wrapper and payload arrive in separate chunks, mirroring
+    // real PTY fragmentation; the shell-command shape keeps the multi-line
+    // paste on the native bash route (D13).
+    relay_passthrough_input(b"\x1b[200~", &mut relay).expect("paste opener chunk");
+    relay_passthrough_input(b"ls -l\rpwd", &mut relay).expect("paste payload chunk");
+    relay_passthrough_input(b"\x1b[201~", &mut relay).expect("paste closer chunk");
+    relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("shortcut after paste");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let written = fs::read(&path).expect("read test output");
+    assert!(
+        !written.windows(4).any(|window| window == b"13;2"),
+        "the sequence must be stripped, not leaked to bash: {written:?}"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftOpen { .. })),
+        "a poisoned mirror must never upgrade: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Review regression (#1932): Delete at the end of the line is a readline
+// no-op (the clean-mirror invariant keeps the cursor at EOL), so the
+// mirror must not shrink and the upgrade still carries the full line.
+#[test]
+fn native_delete_at_line_end_keeps_the_mirror() {
+    let (path, mut master) = output_file("native-delete-eol");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"Hello", &mut relay).expect("english prefix");
+    relay_passthrough_input(b"\x1b[3~", &mut relay).expect("delete at eol");
+    relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("shift+enter upgrade");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "Hello\n"
+        )),
+        "EOL Delete must not eat a mirrored char: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}

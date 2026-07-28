@@ -148,6 +148,19 @@ where
                 Ok(n) => {
                     last_pty_output = Some(Instant::now());
                     parser.feed(&buffer[..n])?;
+                    // Relay-side events sent before a PTY write (e.g. the
+                    // synthetic prompt-repaint arm) must land before the
+                    // display cuts produced by that write's echo are
+                    // handled: re-drain here, the top-of-loop drain alone
+                    // loses that ordering inside this read loop (#1932).
+                    drain_raw_input_events(
+                        input_events,
+                        parser,
+                        output,
+                        prompt,
+                        &mut native_candidate_echoed_len,
+                        &mut prompt_replay,
+                    )?;
                     for (cut, cut_kind) in parser.drain_intervention_display_cuts() {
                         let cut = cut.min(parser.display.len());
                         // Only a real prompt boundary (precmd) confirms the

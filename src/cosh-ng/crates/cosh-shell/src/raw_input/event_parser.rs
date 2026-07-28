@@ -245,6 +245,10 @@ pub(super) struct NativeLineState {
     /// cursor-moving sequences edit the line where we cannot see (#1932).
     /// Reset together with the line (CR / Ctrl-C / Ctrl-U).
     dirty: bool,
+    /// Inside a bracketed paste (the wrapper can span read chunks): pasted
+    /// newlines stay in readline's buffer without submitting, which the
+    /// single-line mirror cannot express, so they poison it (#1932).
+    in_paste: bool,
 }
 
 impl NativeLineState {
@@ -270,11 +274,27 @@ impl NativeLineState {
         let mut idx = 0;
         while idx < bytes.len() {
             if bytes[idx..].starts_with(BRACKETED_PASTE_START) {
+                self.in_paste = true;
                 idx += BRACKETED_PASTE_START.len();
                 continue;
             }
             if bytes[idx..].starts_with(BRACKETED_PASTE_END) {
+                self.in_paste = false;
                 idx += BRACKETED_PASTE_END.len();
+                continue;
+            }
+            if self.in_paste {
+                // Paste payload is inserted verbatim by readline. A pasted
+                // newline keeps composing inside readline's buffer, which
+                // this single-line mirror cannot express: poison it instead
+                // of collapsing the buffer to its last line (#1932).
+                match bytes[idx] {
+                    b'\n' | b'\r' => self.dirty = true,
+                    b'\t' => self.visible.push(b'\t'),
+                    byte if byte < 0x20 || byte == 0x7f => self.dirty = true,
+                    byte => self.visible.push(byte),
+                }
+                idx += 1;
                 continue;
             }
             match bytes[idx] {
@@ -290,7 +310,10 @@ impl NativeLineState {
                     && bytes.get(idx + 2) == Some(&b'3')
                     && bytes.get(idx + 3) == Some(&b'~') =>
                 {
-                    self.pop_visible_char();
+                    // Delete removes the char under the cursor. While the
+                    // mirror is clean the cursor sits at the end of the
+                    // line (any cursor movement poisons it), so Delete is
+                    // a readline no-op and the mirror must not shrink.
                     idx += 4;
                 }
                 b'\t' => {
@@ -315,6 +338,7 @@ impl NativeLineState {
     pub(super) fn clear(&mut self) {
         self.visible.clear();
         self.dirty = false;
+        self.in_paste = false;
     }
 
     fn pop_visible_char(&mut self) {

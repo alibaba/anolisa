@@ -64,6 +64,13 @@ pub(super) fn handle_prompt_line_soft_newline(
             // ??-Enter intercept path, so the post-turn RestorePrompt has a
             // prompt to release; with a bare Ctrl-U bash never repaints and
             // the prompt stays missing after the agent reply (#1932).
+            // Arm the blank-echo drop before the PTY write: the event then
+            // provably precedes the accept echo in channel order, and the
+            // output loop re-drains events after each PTY read, so the
+            // prompt boundary can never outrun the arm (review race).
+            let _ = relay
+                .input_events
+                .send(RawInputEvent::SyntheticPromptRepaint);
             write_user_bytes_to_pty(
                 relay.master,
                 relay.input_generation,
@@ -72,12 +79,6 @@ pub(super) fn handle_prompt_line_soft_newline(
                 relay.main_prompt_gate,
                 b"\x15\r",
             )?;
-            // The empty line's accept echo is visually blank; the output
-            // loop drops it at the prompt boundary so no stray blank line
-            // precedes the repainted PS1.
-            let _ = relay
-                .input_events
-                .send(RawInputEvent::SyntheticPromptRepaint);
             relay.native_line_state.clear();
             let _ = relay
                 .input_events
