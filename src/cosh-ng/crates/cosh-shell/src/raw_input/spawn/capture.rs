@@ -174,7 +174,7 @@ pub(super) fn relay_input_chunk(
     }
 }
 
-fn drain_capture_submission(
+pub(super) fn drain_capture_submission(
     result: CaptureConsumeResult,
     capture_owned_input: &mut CaptureOwnedInput,
     deferred_input: &mut Option<InputRead>,

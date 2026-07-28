@@ -8,8 +8,8 @@ use events::{
     is_removed_question_answer_slash_fragment, question_choice_count, releases_capture,
     selected_options_answer,
 };
-
-mod events;
+// capture_bridge shares events::releases_capture with the consume loop (#1932).
+pub(in crate::raw_input) mod events;
 mod navigation;
 mod prompt_draft;
 mod text;

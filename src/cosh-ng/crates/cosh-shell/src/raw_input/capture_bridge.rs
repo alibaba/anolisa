@@ -1,7 +1,7 @@
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use super::card_capture::CardInputState;
+use super::card_capture::{events::releases_capture, CardInputState};
 use super::mode::RawInputMode;
 use super::{RawInputCapture, RawInputEvent};
 
@@ -57,7 +57,7 @@ pub(super) fn consume_captured_input(
     }
     card_state.apply_capture(capture);
     let (events, remainder) = card_state.consume_split(capture, bytes);
-    let released = events.iter().any(releases_mode_capture);
+    let released = events.iter().any(releases_capture);
     let submitted_generation = released.then_some(generation);
     if released {
         *mode = RawInputMode::Submitted {
@@ -99,33 +99,6 @@ fn capture_target(capture: &RawInputCapture) -> (&'static str, &str) {
         RawInputCapture::Evidence { id } => ("evidence", id),
         RawInputCapture::PromptDraft { id, .. } => ("prompt_draft", id),
     }
-}
-
-fn releases_mode_capture(event: &RawInputEvent) -> bool {
-    matches!(
-        event,
-        RawInputEvent::CardApprove(_)
-            | RawInputEvent::CardApproveTurn(_)
-            | RawInputEvent::CardAlwaysTrust(_)
-            | RawInputEvent::CardDeny(_)
-            | RawInputEvent::CardCancel(_)
-            | RawInputEvent::CardAnswer(_)
-            | RawInputEvent::CardSecretAnswer(_)
-            | RawInputEvent::ModeSet(_, _)
-            | RawInputEvent::ModeCancel(_)
-            | RawInputEvent::ConfigSave(_)
-            | RawInputEvent::ConfigCancel(_)
-            | RawInputEvent::ConfigLanguageSet(_, _)
-            | RawInputEvent::ConfigLanguageCancel(_)
-            | RawInputEvent::SessionResume(_, _)
-            | RawInputEvent::SessionClearConfirm(_)
-            | RawInputEvent::SessionCancel(_)
-            | RawInputEvent::QuestionCancel(_)
-            | RawInputEvent::QuestionAbort(_)
-            | RawInputEvent::EvidenceSend(_)
-            | RawInputEvent::EvidenceIgnore(_)
-            | RawInputEvent::EvidenceCancel(_)
-    )
 }
 
 #[cfg(test)]
@@ -225,6 +198,69 @@ mod tests {
         assert!(matches!(
             &*input_mode.lock().expect("input mode"),
             RawInputMode::Submitted { generation: 7, .. }
+        ));
+    }
+
+    /// Esc-cancelling the prompt-draft card must release the relay-side
+    /// capture like every other card (#1932): a capture left armed decays
+    /// to Draining asynchronously and the late-input quarantine then
+    /// swallows the first keystroke typed after the cancel (e.g. Up).
+    #[test]
+    fn prompt_draft_cancel_releases_the_capture_mode() {
+        let capture = RawInputCapture::PromptDraft {
+            id: "draft-1".to_string(),
+            initial_text: String::new(),
+        };
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+            capture: capture.clone(),
+            generation: 7,
+            installed_at: std::time::Instant::now(),
+        }));
+        let (sender, receiver) = mpsc::channel();
+        let mut state = CardInputState::default();
+
+        let result =
+            consume_captured_input(&mut state, &capture, 7, b"\x1b\x1b", &sender, &input_mode);
+
+        assert!(!result.retry);
+        assert_eq!(result.generation, Some(7));
+        assert!(matches!(
+            &*input_mode.lock().expect("input mode"),
+            RawInputMode::Submitted { generation: 7, .. }
+        ));
+        let events: Vec<_> = receiver.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// Submitting the draft releases the capture the same way, so the
+    /// Submitted -> Draining -> Terminal chain drains synchronously and
+    /// input typed right after Enter is never quarantined (#1932).
+    #[test]
+    fn prompt_draft_submit_releases_the_capture_mode() {
+        let capture = RawInputCapture::PromptDraft {
+            id: "draft-1".to_string(),
+            initial_text: "hello".to_string(),
+        };
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+            capture: capture.clone(),
+            generation: 9,
+            installed_at: std::time::Instant::now(),
+        }));
+        let (sender, _receiver) = mpsc::channel();
+        let mut state = CardInputState::default();
+
+        let result = consume_captured_input(&mut state, &capture, 9, b"\r", &sender, &input_mode);
+
+        assert!(!result.retry);
+        assert_eq!(result.generation, Some(9));
+        assert!(matches!(
+            &*input_mode.lock().expect("input mode"),
+            RawInputMode::Submitted { generation: 9, .. }
         ));
     }
 }

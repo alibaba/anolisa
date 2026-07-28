@@ -24,7 +24,7 @@ pub(super) fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
     }
 }
 
-pub(super) fn releases_capture(event: &RawInputEvent) -> bool {
+pub(in crate::raw_input) fn releases_capture(event: &RawInputEvent) -> bool {
     matches!(
         event,
         RawInputEvent::CardApprove(_)

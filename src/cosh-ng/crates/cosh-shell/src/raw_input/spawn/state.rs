@@ -17,7 +17,7 @@ use super::super::mode::RawInputMode;
 use super::super::relay::{ExplicitExitTracker, InputRelayContext};
 use super::super::{MainPromptGate, RawInputEvent};
 use super::action::PendingDelayEscape;
-use super::capture::CaptureOwnedInput;
+use super::capture::{drain_capture_submission, CaptureOwnedInput};
 use super::prompt_ghost::{PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix};
 use super::InputRead;
 
@@ -98,18 +98,23 @@ pub(super) fn sync_pending_draft_escape(state: &mut RawInputRelayState) {
 
 /// On expiry, injects a second ESC into the capture: combined with the held
 /// first ESC it resolves to the explicit ESC+ESC cancel path, reusing the
-/// normal release/mode bookkeeping (#1721).
+/// normal release/mode bookkeeping (#1721). When the injected ESC releases
+/// the capture, the Submitted -> Draining chain must drain here as well
+/// (#1932): left pending, the quarantine would swallow the next keystroke
+/// typed after the cancel (e.g. the first Up arrow).
 pub(super) fn flush_pending_draft_escape(
     now: Instant,
+    master: &mut File,
+    input_classifier: &InputClassifier,
     input_events: &Sender<RawInputEvent>,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
-) {
+) -> std::io::Result<()> {
     let Some(deadline) = state.pending_draft_escape_deadline else {
-        return;
+        return Ok(());
     };
     if now < deadline {
-        return;
+        return Ok(());
     }
     state.pending_draft_escape_deadline = None;
     let mode = current_raw_input_mode(input_mode);
@@ -119,7 +124,7 @@ pub(super) fn flush_pending_draft_escape(
         ..
     } = mode
     {
-        let _ = consume_captured_input(
+        let result = consume_captured_input(
             &mut state.card_state,
             &capture,
             generation,
@@ -127,5 +132,41 @@ pub(super) fn flush_pending_draft_escape(
             input_events,
             input_mode,
         );
+        if result.generation.is_some() {
+            let RawInputRelayState {
+                card_state: _,
+                line_buffer,
+                native_line_state,
+                exit_tracker,
+                capture_owned_input,
+                deferred_input,
+                input_generation,
+                line_submits,
+                main_prompt_gate,
+                ..
+            } = state;
+            let mut relay = InputRelayContext {
+                master,
+                input_classifier,
+                input_events,
+                input_mode,
+                input_generation,
+                line_submits,
+                line_buffer,
+                native_line_state,
+                exit_tracker,
+                main_prompt_gate,
+            };
+            relay.line_buffer.clear();
+            relay.native_line_state.clear();
+            drain_capture_submission(
+                result,
+                capture_owned_input,
+                deferred_input,
+                None,
+                &mut relay,
+            )?;
+        }
     }
+    Ok(())
 }

@@ -95,10 +95,12 @@ where
                 Err(RecvTimeoutError::Timeout) => {
                     flush_pending_draft_escape(
                         Instant::now(),
+                        &mut master,
+                        &input_classifier,
                         &input_events,
                         &input_mode,
                         &mut state,
-                    );
+                    )?;
                     flush_pending_prompt_ghost_escape(
                         false,
                         Instant::now(),
