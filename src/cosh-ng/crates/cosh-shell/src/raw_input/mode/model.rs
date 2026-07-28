@@ -157,6 +157,12 @@ pub enum RawInputCapture {
         multiple: bool,
         secret: bool,
     },
+    /// Editable text-only question whose input buffer starts with `initial_text`.
+    TextQuestion {
+        id: String,
+        initial_text: String,
+        secret: bool,
+    },
     Approval {
         id: String,
         action_set: crate::ui::ApprovalActionSet,

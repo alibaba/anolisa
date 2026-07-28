@@ -75,6 +75,25 @@ fn question_capture_clears_free_text_after_submit() {
 }
 
 #[test]
+fn text_question_backspaces_from_initial_text() {
+    let capture = RawInputCapture::TextQuestion {
+        id: "auth@field-0-1".to_string(),
+        initial_text: "qwen3.7-max".to_string(),
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x7f"),
+        vec![RawInputEvent::CardInput(
+            "auth@field-0-1".to_string(),
+            "qwen3.7-ma".to_string(),
+        )]
+    );
+}
+
+#[test]
 fn question_capture_emits_one_submission_per_input_batch() {
     let capture = RawInputCapture::Question {
         id: "q-burst".to_string(),

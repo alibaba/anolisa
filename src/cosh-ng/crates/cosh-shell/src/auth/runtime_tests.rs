@@ -95,7 +95,7 @@ fn pending_auth_capture_marks_secret_fields() {
 
     assert!(matches!(
         pending_auth_capture(&state),
-        Some(RawInputCapture::Question { secret: true, .. })
+        Some(RawInputCapture::TextQuestion { secret: true, .. })
     ));
 }
 
@@ -125,12 +125,17 @@ fn pending_auth_capture_isolates_each_auth_field() {
     let auth = state.auth.state.as_mut().unwrap();
     auth.phase = AuthPhase::FillingField;
 
-    let RawInputCapture::Question { id: first_id, .. } = pending_auth_capture(&state).unwrap()
+    let RawInputCapture::TextQuestion {
+        id: first_id,
+        initial_text: first_input,
+        ..
+    } = pending_auth_capture(&state).unwrap()
     else {
         panic!("expected question capture");
     };
+    assert!(first_input.is_empty());
     state.auth.state.as_mut().unwrap().current_field = 1;
-    let RawInputCapture::Question { id: second_id, .. } = pending_auth_capture(&state).unwrap()
+    let RawInputCapture::TextQuestion { id: second_id, .. } = pending_auth_capture(&state).unwrap()
     else {
         panic!("expected question capture");
     };

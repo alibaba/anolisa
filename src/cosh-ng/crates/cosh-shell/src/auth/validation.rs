@@ -73,6 +73,7 @@ pub(super) fn record_field_submission(
     if let Some(error) = field_error(&field.name, &value) {
         auth.field_input = value;
         auth.field_error = Some(error.to_string());
+        auth.field_capture_revision = auth.field_capture_revision.wrapping_add(1);
         return FieldSubmission::Rejected;
     }
     auth.field_error = None;

@@ -45,6 +45,7 @@ fn filling_state(current_field: usize, collected: &[(&str, &str)]) -> RuntimeAut
             .collect(),
         field_input: String::new(),
         field_error: None,
+        field_capture_revision: 0,
         existing_providers: Vec::new(),
         editing_provider_name: None,
         error_message: None,

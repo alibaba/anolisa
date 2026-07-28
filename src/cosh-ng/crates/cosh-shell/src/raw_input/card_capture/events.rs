@@ -14,7 +14,9 @@ pub(super) fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
             RawInputEvent::ConfigLanguageCancel(id.clone())
         }
         RawInputCapture::Session { id, .. } => RawInputEvent::SessionCancel(id.clone()),
-        RawInputCapture::Question { id, .. } => RawInputEvent::QuestionCancel(id.clone()),
+        RawInputCapture::Question { id, .. } | RawInputCapture::TextQuestion { id, .. } => {
+            RawInputEvent::QuestionCancel(id.clone())
+        }
         RawInputCapture::Evidence { id } => RawInputEvent::EvidenceCancel(id.clone()),
         RawInputCapture::PromptDraft { id, .. } => {
             RawInputEvent::PromptDraftCancel { id: id.clone() }
@@ -115,6 +117,7 @@ pub(super) fn question_choice_count(capture: &RawInputCapture) -> usize {
             allow_free_text,
             ..
         } => shared_question_choice_count(*option_count, *allow_free_text),
+        RawInputCapture::TextQuestion { .. } => 0,
         RawInputCapture::Approval { .. }
         | RawInputCapture::Consultation { .. }
         | RawInputCapture::Evidence { .. }

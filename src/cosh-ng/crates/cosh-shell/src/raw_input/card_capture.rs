@@ -12,6 +12,7 @@ use events::{
 mod events;
 mod navigation;
 mod prompt_draft;
+mod text;
 
 #[derive(Debug, Default)]
 pub(super) struct CardInputState {
@@ -79,6 +80,13 @@ impl CardInputState {
                 option_count: *option_count,
                 allow_free_text: *allow_free_text,
                 multiple: *multiple,
+                secret: *secret,
+            },
+            RawInputCapture::TextQuestion { id, secret, .. } => CardInputKind::Question {
+                id: id.clone(),
+                option_count: 0,
+                allow_free_text: true,
+                multiple: false,
                 secret: *secret,
             },
             RawInputCapture::Approval { id, action_set } => CardInputKind::Approval {
@@ -174,7 +182,10 @@ impl CardInputState {
             };
             self.active_kind = Some(kind);
             self.selected = selected;
-            self.free_text.clear();
+            self.free_text = match capture {
+                RawInputCapture::TextQuestion { initial_text, .. } => initial_text.clone(),
+                _ => String::new(),
+            };
             self.selected_options.clear();
             self.pending_input.clear();
             self.draft = match capture {
@@ -242,7 +253,8 @@ impl CardInputState {
                         // Ctrl+C abandons the prompt outright. A capture is all that reaches the
                         // relay here, so this is the only place the interrupt can be told apart
                         // from the ESC arms below.
-                        RawInputCapture::Question { id, .. } => {
+                        RawInputCapture::Question { id, .. }
+                        | RawInputCapture::TextQuestion { id, .. } => {
                             events.push(RawInputEvent::QuestionAbort(id.clone()))
                         }
                         RawInputCapture::Evidence { id } => {
@@ -341,7 +353,8 @@ impl CardInputState {
                         RawInputCapture::Session { id, .. } => {
                             events.push(RawInputEvent::SessionCancel(id.clone()))
                         }
-                        RawInputCapture::Question { id, .. } => {
+                        RawInputCapture::Question { id, .. }
+                        | RawInputCapture::TextQuestion { id, .. } => {
                             events.push(RawInputEvent::QuestionCancel(id.clone()))
                         }
                         RawInputCapture::Evidence { id } => {
@@ -388,7 +401,8 @@ impl CardInputState {
                         idx += 1;
                         break;
                     }
-                    RawInputCapture::Question { id, .. } => {
+                    RawInputCapture::Question { id, .. }
+                    | RawInputCapture::TextQuestion { id, .. } => {
                         events.push(RawInputEvent::QuestionCancel(id.clone()));
                         idx += 1;
                         break;
@@ -504,47 +518,13 @@ impl CardInputState {
                             idx += 1;
                             continue;
                         }
-                        if byte.is_ascii() {
-                            self.free_text.push(byte as char);
-                            if let Some(event) = self.input_event(capture) {
-                                events.push(event);
-                            }
-                            idx += 1;
-                        } else {
-                            let start = idx;
-                            while idx < input.len()
-                                && !input[idx].is_ascii_control()
-                                && input[idx] != 0x1b
-                            {
-                                idx += 1;
-                            }
-                            let bytes = &input[start..idx];
-                            let appended = match std::str::from_utf8(bytes) {
-                                Ok(text) => {
-                                    self.free_text.push_str(text);
-                                    true
-                                }
-                                Err(error) if error.error_len().is_none() => {
-                                    let valid_len = error.valid_up_to();
-                                    if valid_len > 0 {
-                                        self.free_text.push_str(
-                                            std::str::from_utf8(&bytes[..valid_len])
-                                                .expect("validated UTF-8 prefix"),
-                                        );
-                                    }
-                                    self.pending_input.extend_from_slice(&bytes[valid_len..]);
-                                    valid_len > 0
-                                }
-                                Err(_) => {
-                                    self.free_text.push_str(&String::from_utf8_lossy(bytes));
-                                    true
-                                }
-                            };
-                            if appended {
-                                if let Some(event) = self.input_event(capture) {
-                                    events.push(event);
-                                }
-                            }
+                        if self.append_free_text(&input, &mut idx) {
+                            events.extend(self.input_event(capture));
+                        }
+                    }
+                    RawInputCapture::TextQuestion { .. } => {
+                        if self.append_free_text(&input, &mut idx) {
+                            events.extend(self.input_event(capture));
                         }
                     }
                 },
@@ -611,6 +591,17 @@ impl CardInputState {
                 }
                 None
             }
+            RawInputCapture::TextQuestion { id, secret, .. } => {
+                let answer = self.free_text.trim();
+                if is_removed_question_answer_slash(answer) {
+                    return None;
+                }
+                if answer.is_empty() {
+                    Some(empty_question_submission(id, *secret))
+                } else {
+                    Some(card_answer_event(answer, *secret))
+                }
+            }
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 if !self.free_text.trim().is_empty() {
                     return None;
@@ -673,6 +664,19 @@ impl CardInputState {
                 secret,
                 ..
             } if *allow_free_text => {
+                if is_removed_question_answer_slash_fragment(&self.free_text) {
+                    return None;
+                }
+                if *secret {
+                    Some(RawInputEvent::CardSecretInput(
+                        id.clone(),
+                        self.free_text.clone(),
+                    ))
+                } else {
+                    Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
+                }
+            }
+            RawInputCapture::TextQuestion { id, secret, .. } => {
                 if is_removed_question_answer_slash_fragment(&self.free_text) {
                     return None;
                 }

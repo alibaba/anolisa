@@ -104,6 +104,7 @@ impl CardInputState {
                     None
                 }
             }
+            RawInputCapture::TextQuestion { .. } => None,
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 let max_idx = capture_action_set(capture).max_index();
                 let previous = self.selected;
@@ -189,6 +190,7 @@ impl CardInputState {
                     None
                 }
             }
+            RawInputCapture::TextQuestion { .. } => None,
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 let max_idx = capture_action_set(capture).max_index();
                 self.selected = (self.selected + 1).min(max_idx);
@@ -243,6 +245,7 @@ impl CardInputState {
                     None
                 }
             }
+            RawInputCapture::TextQuestion { .. } => None,
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 self.selected = self.selected.saturating_sub(1);
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))

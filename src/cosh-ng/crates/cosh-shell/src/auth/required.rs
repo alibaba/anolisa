@@ -41,6 +41,7 @@ pub(crate) fn record_auth_required(
                 collected_values: HashMap::new(),
                 field_input: String::new(),
                 field_error: None,
+                field_capture_revision: 0,
                 existing_providers: Vec::new(),
                 editing_provider_name: None,
                 error_message: error_message.clone(),

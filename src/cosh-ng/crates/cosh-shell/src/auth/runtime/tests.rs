@@ -46,6 +46,7 @@ fn slash_auth_state(templates: &[&str], sysom: SysomMenu) -> RuntimeAuthState {
         collected_values: HashMap::new(),
         field_input: String::new(),
         field_error: None,
+        field_capture_revision: 0,
         existing_providers: Vec::new(),
         editing_provider_name: None,
         error_message: None,

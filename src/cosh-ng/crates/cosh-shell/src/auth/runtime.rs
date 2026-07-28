@@ -48,6 +48,8 @@ pub(crate) struct RuntimeAuthState {
     pub(crate) field_input: String,
     /// Inline validation error for the field being filled; cleared on the next edit.
     pub(crate) field_error: Option<String>,
+    /// Changes when inline validation re-arms the current field's input capture.
+    pub(crate) field_capture_revision: u64,
     /// Existing providers loaded from config.toml (for ManagingProviders phase)
     pub(crate) existing_providers: Vec<ExistingProvider>,
     /// The section name of the provider being edited (None = new provider)
@@ -199,6 +201,7 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         collected_values: HashMap::new(),
         field_input: String::new(),
         field_error: None,
+        field_capture_revision: 0,
         existing_providers,
         editing_provider_name: None,
         error_message: None,
