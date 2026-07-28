@@ -165,7 +165,7 @@ fn optimize_state(data: &AppState) -> Result<&Arc<OptimizeState>, HttpResponse> 
 /// ready-made ATIF v1.7 JSON.
 fn load_trajectory(
     db_path: &Path,
-    trajectory_store: Option<&TrajectoryStore>,
+    trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
     let store = GenAISqliteStore::new_with_path(db_path).map_err(|e| {
@@ -198,7 +198,7 @@ fn load_trajectory(
 /// persisted by the trajectory collector (log-collected Qoder/QoderWork
 /// sessions).
 fn load_collected_trajectory(
-    trajectory_store: Option<&TrajectoryStore>,
+    trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
     let Some(tstore) = trajectory_store else {
@@ -429,11 +429,8 @@ pub async fn run_optimization(
         }));
     };
 
-    let trajectory = match load_trajectory(
-        &data.storage_path,
-        data.trajectory_store.as_deref(),
-        &session_id,
-    ) {
+    let trajectory = match load_trajectory(&data.storage_path, data.trajectory_store(), &session_id)
+    {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -499,7 +496,7 @@ pub async fn run_optimization(
                 // Persist to trajectories.db for Dashboard query. The record
                 // becomes a subagent of the per-target run root (`opt:<target>`)
                 // so all dimension analyses of one session group under one row.
-                if let Some(ref traj_store) = data.trajectory_store {
+                if let Some(traj_store) = data.trajectory_store() {
                     let mut doc = recorder.to_atif();
                     let run_suffix = format!(
                         "{dimension_raw}-{}",
@@ -887,7 +884,7 @@ mod tests {
             .upsert_trajectory(&collected_record("log-1", atif))
             .unwrap();
 
-        let trajectory = load_trajectory(&db_path, Some(&tstore), "log-1").unwrap();
+        let trajectory = load_trajectory(&db_path, Some(Arc::new(tstore)), "log-1").unwrap();
         assert_eq!(trajectory.session_id, "log-1");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -900,7 +897,7 @@ mod tests {
         let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
 
         // Store present but session absent → 404.
-        let resp = load_trajectory(&db_path, Some(&tstore), "nope").unwrap_err();
+        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
         // No store at all → 404 as well.
@@ -919,7 +916,7 @@ mod tests {
             .upsert_trajectory(&collected_record("bad-1", "not json"))
             .unwrap();
 
-        let resp = load_trajectory(&db_path, Some(&tstore), "bad-1").unwrap_err();
+        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "bad-1").unwrap_err();
         assert_eq!(
             resp.status(),
             actix_web::http::StatusCode::UNPROCESSABLE_ENTITY

@@ -45,7 +45,9 @@ use super::io_util::{
     service_cleanup_suffix, write_installed_component_manifest,
 };
 use super::provision::{retained_packages_note, run_provision};
-use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
+use super::raw::{
+    InstallHooks, prepare_raw_execution, resolve_install_hooks, resolve_manifest_capabilities,
+};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
@@ -53,6 +55,9 @@ struct ReplayBackup {
     source: PathBuf,
     dest: PathBuf,
     sha256: Option<String>,
+    /// Permission bits `dest` carried before the replay, so restore puts
+    /// the file back executable if it was executable.
+    mode: Option<u32>,
 }
 
 /// Raw-backend [`OwnedOps`] for one replay operation.
@@ -172,6 +177,100 @@ impl<'a> RawReplayOps<'a> {
             .collect()
     }
 
+    /// Re-apply the file capabilities the *prior* contract declared, after
+    /// the backup has been put back.
+    ///
+    /// Restoring a file writes a new inode, and a new inode carries no
+    /// `security.capability` xattr — so a rollback silently strips the
+    /// capabilities the installed version was running with, the same way it
+    /// used to strip the executable bit. Ownership of that repair belongs
+    /// here rather than in a compensation of its own: capabilities attach to
+    /// the file, so they can only be re-applied once the file is back, and
+    /// `restore_backup` is the last compensation the executor replays.
+    ///
+    /// The prior contract is read from the restored manifest snapshot, not
+    /// from `self.prepared` — the new version's capability set is exactly
+    /// what rollback must *not* leave behind.
+    fn reapply_prior_capabilities(&self) -> Vec<String> {
+        let manifest_path = match crate::commands::common::installed_component_manifest_path(
+            self.layout,
+            &self.component,
+            super::COMMAND,
+        ) {
+            Ok(path) => path,
+            Err(err) => return vec![format!("cannot locate the restored manifest: {err}")],
+        };
+        if !manifest_path.exists() {
+            // Two very different situations reach here. If the record owned
+            // the snapshot, restore was supposed to put it back and did not,
+            // so the prior contract is unreadable and any capabilities it
+            // declared are silently gone — say so. If the record never owned
+            // one, this predates manifest snapshots: nothing was knowable to
+            // begin with, and warning on every such rollback would be noise.
+            if self.prior.files.iter().any(|f| f.path == manifest_path) {
+                return vec![format!(
+                    "restored files but {} is missing, so any file capabilities the previous \
+                     version declared could not be re-applied",
+                    manifest_path.display()
+                )];
+            }
+            return Vec::new();
+        }
+        let toml = match fs::read_to_string(&manifest_path) {
+            Ok(toml) => toml,
+            Err(err) => {
+                return vec![format!(
+                    "restored files but could not read {} to re-apply file capabilities: {err}",
+                    manifest_path.display()
+                )];
+            }
+        };
+        let manifest = match anolisa_core::ComponentManifest::from_toml_str(&toml) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                return vec![format!(
+                    "restored files but could not parse {} to re-apply file capabilities: {err}",
+                    manifest_path.display()
+                )];
+            }
+        };
+        let requests = match resolve_manifest_capabilities(&manifest, self.layout, &self.component)
+        {
+            Ok(requests) => requests,
+            Err(err) => {
+                return vec![format!(
+                    "restored files but could not resolve the file capabilities {} declares: {}",
+                    manifest_path.display(),
+                    err.reason()
+                )];
+            }
+        };
+        if requests.is_empty() {
+            return Vec::new();
+        }
+
+        let manager = capability_for_install_mode(self.ctx.install_mode.as_str(), &self.env);
+        let outcome = apply_capabilities(
+            manager.as_ref(),
+            &requests,
+            Some(&self.log),
+            &self.component,
+            &self.operation_id,
+            "cli",
+            self.ctx.install_mode.as_str(),
+        );
+        let mut warnings = outcome.warnings;
+        // A required capability that would not apply aborts the *install*
+        // path; during rollback there is nothing left to abort, so it
+        // downgrades to a warning naming what the restored file lost.
+        if let Some(reason) = outcome.aborted {
+            warnings.push(format!(
+                "restored files but could not re-apply their file capabilities: {reason}"
+            ));
+        }
+        warnings
+    }
+
     fn not_wired(what: &str) -> Result<StepSuccess, OwnedOpError> {
         Err(OwnedOpError(format!(
             "{what} is not wired for owned replay yet"
@@ -230,6 +329,7 @@ impl OwnedOps for RawReplayOps<'_> {
                 Ok(Some(artifact)) => self.backups.push(ReplayBackup {
                     source: backup_path,
                     dest: file.path.clone(),
+                    mode: artifact.mode(),
                     sha256: artifact.into_sha256(),
                 }),
                 // Already gone from disk — nothing to preserve; placement
@@ -422,14 +522,23 @@ impl OwnedOps for RawReplayOps<'_> {
     fn restore_backup(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
         for backup in &self.backups {
-            if let Err(err) =
-                restore_backup_file(&backup.source, &backup.dest, backup.sha256.as_deref())
-            {
-                warnings.push(format!(
+            match restore_backup_file(
+                &backup.source,
+                &backup.dest,
+                backup.sha256.as_deref(),
+                backup.mode,
+            ) {
+                Ok(restore_warnings) => warnings.extend(restore_warnings),
+                Err(err) => warnings.push(format!(
                     "failed to restore {} from its backup: {err}",
                     backup.dest.display()
-                ));
+                )),
             }
+        }
+        // The restored inodes carry no capability xattrs; put the prior
+        // contract's back before the executor calls the rollback done.
+        if !self.backups.is_empty() {
+            warnings.extend(self.reapply_prior_capabilities());
         }
         warnings
     }

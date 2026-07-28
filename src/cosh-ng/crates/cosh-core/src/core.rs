@@ -28,8 +28,9 @@ use crate::tool::{ToolContext, ToolKind, ToolRegistry, ToolResult};
 use crate::truncator::OutputTruncator;
 
 use self::tool_execution::{
-    hash_bytes, hash_json, invalid_arguments_message, json_shape, parse_in_band_question,
-    parse_tool_arguments, InBandQuestion,
+    hash_bytes, hash_json, invalid_arguments_exhausted_error, invalid_arguments_message,
+    json_shape, parse_in_band_question, parse_tool_arguments, InBandQuestion,
+    InvalidArgumentStreak, MAX_INVALID_ARGUMENT_ATTEMPTS,
 };
 
 mod auth;
@@ -195,8 +196,6 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
-        let content = crate::redaction::redact_text(content);
-
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
@@ -207,7 +206,7 @@ impl CoshCore {
         let cwd_str = self.cwd().to_string_lossy().to_string();
         let prompt_result = self
             .hook_system
-            .fire_user_prompt_submit(&self.session_id, &cwd_str, &content)
+            .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
             .await;
         self.audit.record_hook_decision(
             CoreAuditScope::run(&run_id),
@@ -314,7 +313,7 @@ impl CoshCore {
             self.emit_hook_notifications(writer, &prompt_result.notifications, None);
         }
 
-        self.messages.push(Message::user(&content));
+        self.messages.push(Message::user(content));
 
         // Inject additional context from hooks
         if let Some(ref ctx) = prompt_result.additional_context {
@@ -351,6 +350,10 @@ impl CoshCore {
         );
 
         let max_turns = self.config.agent.max_turns;
+        // Spans the whole message, not one turn: the model re-issues a rejected
+        // tool call on the *next* turn, so a per-turn counter would never see two
+        // attempts in a row.
+        let mut invalid_arguments = InvalidArgumentStreak::default();
 
         for _turn in 0..max_turns {
             // ─── Context preflight (every provider call, incl. tool loop) ───
@@ -371,8 +374,8 @@ impl CoshCore {
             let turn_id = uuid::Uuid::new_v4().to_string();
             let turn_scope = CoreAuditScope::turn(&run_id, &turn_id);
             self.audit.record_turn_started(turn_scope);
-            let mut provider_messages = self.compaction.effective_messages(&self.messages);
-            crate::redaction::redact_messages(&mut provider_messages);
+            // Runtime context stays lossless; observers and stores redact their own copies.
+            let provider_messages = self.compaction.effective_messages(&self.messages);
 
             // ─── Hook: BeforeModel ───
             let before_model_result = self
@@ -843,9 +846,24 @@ impl CoshCore {
             };
 
             let mut interrupted = false;
+            // Set once a tool call ends the run. The error is returned only after
+            // this batch is fully answered.
+            let mut fatal_error: Option<String> = None;
 
             for tc in &tool_calls {
                 if tc.name.is_empty() {
+                    continue;
+                }
+
+                // Every id in the assistant message needs exactly one tool result,
+                // or the next provider request violates tool-message pairing — and
+                // headless persists and reuses the session even when a turn fails.
+                if fatal_error.is_some() {
+                    self.skip_unexecuted_tool_call(
+                        CoreAuditScope::tool(&run_id, &turn_id, &tc.id),
+                        writer,
+                        tc,
+                    );
                     continue;
                 }
 
@@ -899,11 +917,16 @@ impl CoshCore {
                     .record_tool_requested(tool_scope, &tc.name, &tool_data);
 
                 let params = match parsed_params {
-                    Ok(params) => params,
+                    Ok(params) => {
+                        invalid_arguments.clear();
+                        params
+                    }
                     Err(parse_error) => {
                         // Executing a tool with `null` parameters used to look like
                         // a call with every field absent; fail the call instead so
                         // the model can re-issue it.
+                        let attempt =
+                            invalid_arguments.record(&tc.name, parse_error.code(), &turn_id);
                         tracing::warn!(
                             provider_type = %resolved_provider.provider_type,
                             tool_call_id = %tc.id,
@@ -914,15 +937,37 @@ impl CoshCore {
                             argument_bytes = tc.arguments.len(),
                             json_parse_status = parse_error.json_parse_status(),
                             validation_error_code = parse_error.code(),
+                            attempt,
                             "rejected malformed tool arguments"
                         );
-                        self.reject_tool_arguments(
+                        let result = self.reject_tool_arguments(
                             tool_scope,
                             &tc.name,
                             &tc.id,
                             &tool_data,
-                            invalid_arguments_message(&tc.name, &parse_error),
+                            invalid_arguments_message(
+                                &tc.name,
+                                &parse_error,
+                                attempt,
+                                MAX_INVALID_ARGUMENT_ATTEMPTS,
+                            ),
                         );
+                        // Closes the pending tool in the UI before the run ends, so
+                        // the last thing on screen is the failure, not a tool that
+                        // looks like it is still generating arguments.
+                        self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                        if attempt >= MAX_INVALID_ARGUMENT_ATTEMPTS {
+                            self.audit.record_turn_terminal(
+                                turn_scope,
+                                AuditOutcomeStatus::Failed,
+                                Some("invalid_tool_arguments_exhausted"),
+                            );
+                            // Recorded, not returned: the assistant message already
+                            // declared every call in this batch, and the loop must
+                            // still answer the rest before the run ends.
+                            fatal_error =
+                                Some(invalid_arguments_exhausted_error(&tc.name, &parse_error));
+                        }
                         continue;
                     }
                 };
@@ -1362,6 +1407,11 @@ impl CoshCore {
                     );
                     return Ok(());
                 }
+            }
+            // The turn was already audited as failed at the rejection; every call in
+            // the batch now has a result, so the run can end on a paired history.
+            if let Some(error) = fatal_error {
+                return Err(error);
             }
             self.audit
                 .record_turn_terminal(turn_scope, AuditOutcomeStatus::Success, None);

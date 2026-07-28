@@ -29,7 +29,6 @@ new over-threshold file appears that is not listed here.
 | 1717 | `src/ui/agent_render/health.rs` | ui | Health banner rendering; pre-existing. Split per-severity renderers. |
 | 1628 | `src/diagnostics/health/collectors.rs` | diagnostics | Per-subsystem collectors; pre-existing. Split by collector family. |
 | 992 | `src/runtime/state.rs` | runtime | Central inline state; pre-existing. Extract per-domain state modules. |
-| 925 | `src/agent/heartbeat.rs` | agent | Heartbeat/status animation; pre-existing. Split timing from rendering. |
 | 912 | `src/evidence/output_policy.rs` | evidence | Output excerpt policy; pre-existing. Split bounding from classification. |
 | 906 | `src/adapter/fake.rs` | adapter | Test fake adapter; pre-existing. Split scripted-scenario builders. |
 | 944 | `src/ui/agent_render/approval.rs` | ui | Approval card rendering; action-row rendering extracted to `approval_actions.rs` (turn consent, #1773). Split per-card-kind renderers next. |
@@ -50,4 +49,5 @@ new over-threshold file appears that is not listed here.
 | 724 | `src/runtime/hooks.rs` | runtime | Runtime hook dispatch; pre-existing. Split per-hook-type handling. |
 | 722 | `src/i18n/message_id_all.rs` | i18n | `MessageId::ALL` mirror of the enum; near-threshold historical file (main baseline 699, zero headroom). The compaction feature added 23 required user-facing message ids, crossing the threshold. Split plan: generate the enum + `ALL` array from a single macro so new ids do not grow either file. |
 | 722 | `src/i18n/message_id.rs` | i18n | `MessageId` enum; near-threshold historical file (main baseline 699, zero headroom). The compaction feature added 23 required user-facing message ids, crossing the threshold. Split plan: partition `MessageId` into domain sub-enums (or macro-generate it) as a follow-up i18n refactor. |
+| 727 | `src/shell_host/marker/bash.rs` | shell_host | Embedded bash marker script; near-threshold historical file (main baseline 697, zero headroom after the extdebug prompt-hook fix). The #1919 missing-path natural-language interception added the DEBUG-trap gate helper and two mount points, crossing the threshold. Split plan: extract the embedded script body into a standalone `.sh` asset loaded via `include_str!`, mirroring the existing `shell_host/input_intent.sh` pattern (golden byte-identity tests keep the emitted script stable). |
 | 710 | `src/slash/hooks.rs` | slash | Slash hook command; pre-existing. Split subcommands. |

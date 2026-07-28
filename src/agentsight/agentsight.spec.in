@@ -68,6 +68,11 @@ install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 %license %{_docdir}/agentsight/LICENSE
 
 %changelog
+* Tue Jul 28 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.9.0-1
+- Release AgentSight 0.9.0
+- Add optimization dashboard, trajectory collection, and ATIF v1.7 support
+- Fix Anthropic parsing, trajectory collection, dashboard, and trace output issues
+
 * Sat Apr 11 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.2.0-1
 - Add systemd service file (agentsight.service)
 - Add systemd post/preun/postun hooks for service management

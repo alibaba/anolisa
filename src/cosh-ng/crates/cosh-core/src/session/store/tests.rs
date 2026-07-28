@@ -153,15 +153,7 @@ fn persisted_and_loaded_sessions_are_redacted() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);
     let secret = "sk-session-secret-value";
-    // Bypass the redacting Message constructors so this exercises the
-    // store's own persist-time redaction boundary.
-    let raw = Message {
-        role: "user".to_string(),
-        content: crate::provider::MessageContent::Text(format!("use api_key={secret}")),
-        tool_call_id: None,
-        name: None,
-        tool_calls: None,
-    };
+    let raw = Message::user(&format!("use api_key={secret}"));
     let mut session = PersistedSession::new(
         ProviderSessionId::new(),
         store.workspace_scope().to_string(),
@@ -180,6 +172,50 @@ fn persisted_and_loaded_sessions_are_redacted() {
 
     let loaded = store.load(&session.session_id).unwrap();
     assert!(!loaded.messages[0].content.as_text().contains(secret));
+}
+
+#[test]
+fn persisted_projection_tracks_the_redacted_transcript() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let secret = "sk-projection-secret-value";
+    let mut session = new_session(&store, &format!("use api_key={secret}"));
+    let mut state = projection(1);
+    state.compacted_through = session.messages.len();
+    state.source_digest = crate::compaction::source_digest(&session.messages);
+    let runtime_digest = state.source_digest.clone();
+    session.compaction = Some(state);
+
+    store.persist(&mut session).unwrap();
+
+    let stored = envelope_json(&store, &session.session_id);
+    assert!(!stored.to_string().contains(secret), "{stored}");
+    assert_ne!(
+        stored["compaction"]["source_digest"],
+        serde_json::Value::String(runtime_digest)
+    );
+    let loaded = store.load(&session.session_id).unwrap();
+    assert!(loaded.compaction.is_some());
+    assert!(session.messages[0].content.as_text().contains(secret));
+}
+
+#[test]
+fn persist_rejects_projection_outside_the_transcript() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let transcript_len = new_session(&store, "hello").messages.len();
+
+    for compacted_through in [0, transcript_len + 1] {
+        let mut session = new_session(&store, "hello");
+        let mut state = projection(1);
+        state.compacted_through = compacted_through;
+        session.compaction = Some(state);
+
+        let error = store.persist(&mut session).unwrap_err();
+
+        assert_eq!(error.code(), "corrupt");
+        assert!(!store.session_file(&session.session_id).exists());
+    }
 }
 
 #[test]

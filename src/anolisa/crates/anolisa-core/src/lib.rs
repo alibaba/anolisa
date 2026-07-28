@@ -41,6 +41,7 @@ pub mod sandbox_manifest;
 pub mod self_update;
 pub mod service;
 pub mod state;
+mod state_identity;
 pub mod state_migration;
 pub mod state_store;
 pub mod system_helper;

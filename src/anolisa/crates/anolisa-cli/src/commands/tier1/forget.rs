@@ -213,8 +213,18 @@ fn persist_forget(
             "component '{component}' disappeared from state during forget; nothing removed"
         ),
     })?;
+    let legacy_manifest_dir = store
+        .find(ObjectKind::Component, component)
+        .map(|installation| {
+            common::legacy_component_manifest_dir_for_installation(&layout, installation, command)
+        })
+        .transpose()?
+        .flatten();
     store.remove(ObjectKind::Component, component);
     remove_component_manifest_snapshot(&layout, component, command)?;
+    if let Some(dir) = legacy_manifest_dir {
+        remove_manifest_snapshot_dir(&dir, command)?;
+    }
 
     let now = now_iso8601();
     let lock_ts = Utc::now();
@@ -293,7 +303,11 @@ fn remove_component_manifest_snapshot(
     command: &str,
 ) -> Result<(), CliError> {
     let dir = common::installed_component_manifest_dir(layout, component, command)?;
-    match std::fs::remove_dir_all(&dir) {
+    remove_manifest_snapshot_dir(&dir, command)
+}
+
+fn remove_manifest_snapshot_dir(dir: &std::path::Path, command: &str) -> Result<(), CliError> {
+    match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(CliError::Runtime {
@@ -559,6 +573,49 @@ mod tests {
         assert!(
             !snapshot_dir.exists(),
             "component manifest snapshot dir must be removed",
+        );
+    }
+
+    #[test]
+    fn forget_repaired_cosh_ng_removes_the_legacy_snapshot() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![rpm_observed_object("cosh", "cosh-ng", "0.13.0-1.al8")],
+            Vec::new(),
+        );
+        let layout = common::resolve_layout(&c);
+        let legacy_snapshot = common::installed_component_manifest_path(&layout, "cosh", COMMAND)
+            .expect("legacy snapshot path");
+        std::fs::create_dir_all(legacy_snapshot.parent().expect("snapshot dir"))
+            .expect("create snapshot dir");
+        std::fs::write(
+            &legacy_snapshot,
+            r#"
+            [component]
+            name = "cosh"
+            version = "0.13.0"
+
+            [backends.rpm]
+            package = "cosh-ng"
+            "#,
+        )
+        .expect("write legacy snapshot");
+
+        handle(
+            ForgetArgs {
+                component: "cosh-ng".to_string(),
+            },
+            &c,
+        )
+        .expect("forget repaired cosh-ng");
+
+        assert!(!legacy_snapshot.exists());
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "cosh-ng")
+                .is_none()
         );
     }
 

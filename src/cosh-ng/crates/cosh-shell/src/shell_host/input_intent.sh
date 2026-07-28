@@ -90,12 +90,23 @@ _cosh_utf8_han_status() {
 _cosh_command_veto() {
   local input="$1"
   local top_token="$2"
+  local context="${3:-}"
   local scan="$input"
   local word name
 
   case "$top_token" in
-    /*|*/*|~/*|command|env|sudo|exec|nohup|time|xargs)
+    ~/*|command|env|sudo|exec|nohup|time|xargs)
       return 0
+      ;;
+    /*|*/*)
+      # missing-path context (#1919): the caller has proven the
+      # slash-bearing first token does not resolve to an existing path
+      # (bash reports "No such file or directory" without consulting
+      # command_not_found_handle), so the slash shape alone no longer
+      # proves a command; every other veto rule below still applies.
+      if [[ "$context" != "missing_path" ]]; then
+        return 0
+      fi
       ;;
   esac
 
@@ -129,6 +140,54 @@ _cosh_command_veto() {
   return 1
 }
 
+# Proves the path is missing with ENOENT semantics: walk the components
+# top-down; every existing ancestor must be a searchable directory and the
+# first missing component must be provably absent (neither -e nor -L) in a
+# readable parent. Dangling symlinks, permission-opaque directories, and
+# non-directory ancestors all return 1 (not provable), because bash would
+# report those as 126/127 path errors on a *real* path and interception
+# must never shadow that native outcome.
+_cosh_path_provably_missing() {
+  local path="$1"
+  local prefix rest component
+  case "$path" in
+    /*) prefix="/"; rest="${path#/}" ;;
+    *) prefix=""; rest="$path" ;;
+  esac
+  while [[ -n "$rest" ]]; do
+    component="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then
+      rest="${rest#*/}"
+    else
+      rest=""
+    fi
+    [[ -n "$component" ]] || continue
+    local current="${prefix}${component}"
+    if [[ -L "$current" ]]; then
+      # Symlink component (dangling or not): resolution semantics belong
+      # to the kernel at execve time, never provably ENOENT here.
+      return 1
+    fi
+    if [[ -e "$current" ]]; then
+      if [[ -n "$rest" ]]; then
+        # An existing ancestor must be a searchable directory, otherwise
+        # bash would report ENOTDIR/EACCES for the real path.
+        [[ -d "$current" && -x "$current" ]] || return 1
+      fi
+      prefix="${current}/"
+      continue
+    fi
+    # First missing component: only provable in a readable+searchable
+    # parent (stat on an unsearchable directory fails with EACCES, which
+    # is indistinguishable from an existing file).
+    local parent="${prefix:-.}"
+    [[ -d "$parent" && -r "$parent" && -x "$parent" ]] || return 1
+    return 0
+  done
+  # The whole path exists.
+  return 1
+}
+
 _cosh_request_verb() {
   case "$1" in
     [Ee][Xx][Pp][Ll][Aa][Ii][Nn]|[Cc][Hh][Ee][Cc][Kk]|[Ss][Hh][Oo][Ww]|[Tt][Ee][Ll][Ll]|[Hh][Ee][Ll][Pp]|[Aa][Nn][Aa][Ll][Yy][Zz][Ee]|[Aa][Nn][Aa][Ll][Yy][Ss][Ee]|[Rr][Ee][Vv][Ii][Ee][Ww]|[Ff][Ii][Xx]|[Ss][Uu][Mm][Mm][Aa][Rr][Ii][Zz][Ee]|[Ss][Uu][Mm][Mm][Aa][Rr][Ii][Ss][Ee]|[Ii][Nn][Ss][Pp][Ee][Cc][Tt]|[Dd][Ii][Aa][Gg][Nn][Oo][Ss][Ee]|[Dd][Ee][Bb][Uu][Gg]|[Cc][Oo][Mm][Pp][Aa][Rr][Ee]|[Dd][Ee][Ss][Cc][Rr][Ii][Bb][Ee]|[Ll][Ii][Ss][Tt]|[Tt][Rr][Aa][Nn][Ss][Ll][Aa][Tt][Ee]|[Gg][Ee][Nn][Ee][Rr][Aa][Tt][Ee]|[Rr][Uu][Nn]|[Ff][Ii][Nn][Dd]|[Ss][Ee][Aa][Rr][Cc][Hh]|[Oo][Pp][Ee][Nn]|[Rr][Ee][Aa][Dd]|[Ee][Dd][Ii][Tt]|[Cc][Rr][Ee][Aa][Tt][Ee]|[Uu][Pp][Dd][Aa][Tt][Ee]|[Ww][Rr][Ii][Tt][Ee]|[Rr][Ee][Mm][Oo][Vv][Ee]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Ii][Nn][Ss][Tt][Aa][Ll][Ll]|[Uu][Nn][Ii][Nn][Ss][Tt][Aa][Ll][Ll]|[Cc][Oo][Nn][Ff][Ii][Gg][Uu][Rr][Ee]|[Ss][Ee][Tt][Uu][Pp]|[Ss][Tt][Aa][Rr][Tt]|[Ss][Tt][Oo][Pp]|[Rr][Ee][Ss][Tt][Aa][Rr][Tt]|[Rr][Ee][Ll][Oo][Aa][Dd]|[Rr][Ee][Ss][Ee][Tt]|[Bb][Uu][Ii][Ll][Dd]|[Dd][Ee][Pp][Ll][Oo][Yy]|[Tt][Ee][Ss][Tt]|[Vv][Aa][Ll][Ii][Dd][Aa][Tt][Ee]|[Vv][Ee][Rr][Ii][Ff][Yy]|[Ii][Nn][Vv][Ee][Ss][Tt][Ii][Gg][Aa][Tt][Ee]|[Tt][Rr][Oo][Uu][Bb][Ll][Ee][Ss][Hh][Oo][Oo][Tt]|[Mm][Oo][Nn][Ii][Tt][Oo][Rr]|[Oo][Pp][Tt][Ii][Mm][Ii][Zz][Ee]|[Oo][Pp][Tt][Ii][Mm][Ii][Ss][Ee]|[Cc][Ll][Ee][Aa][Nn]|[Ff][Oo][Rr][Mm][Aa][Tt]|[Cc][Oo][Nn][Vv][Ee][Rr][Tt]|[Dd][Oo][Ww][Nn][Ll][Oo][Aa][Dd]|[Uu][Pp][Ll][Oo][Aa][Dd])
@@ -143,6 +202,7 @@ _cosh_classify_missing() {
   local original
   original="$(_cosh_ascii_trim "$1")"
   local top_token="$2"
+  local context="${3:-}"
   local han_status had_question=0 polite=0
   local IFS=$' \t\n'
 
@@ -150,7 +210,7 @@ _cosh_classify_missing() {
     printf '%s' "unsafe"
     return 0
   fi
-  if _cosh_command_veto "$original" "$top_token"; then
+  if _cosh_command_veto "$original" "$top_token" "$context"; then
     printf '%s' "command"
     return 0
   fi

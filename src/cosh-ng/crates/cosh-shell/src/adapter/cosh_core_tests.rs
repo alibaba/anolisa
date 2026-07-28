@@ -291,6 +291,18 @@ fn prepare_invocation_prompt_includes_cosh_shell_contract() {
 }
 
 #[test]
+fn prepare_invocation_prompt_preserves_user_provided_secret() {
+    let secret = "api_key=sk-cosh-shell-runtime-secret";
+    let mut request = test_request();
+    request.user_input = Some(format!("write this exact value: {secret}"));
+
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Auto);
+
+    assert!(inv.prompt.contains(secret), "{}", inv.prompt);
+    assert!(!inv.prompt.contains("<redacted>"), "{}", inv.prompt);
+}
+
+#[test]
 fn prepare_invocation_prompt_uses_shell_output_tool_mode() {
     let mut request = test_request();
     let mut context = request.command_block.clone();

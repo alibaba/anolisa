@@ -197,6 +197,37 @@ Skill Ledger 推荐与 SkillFS 联合使用：SkillFS 捕获 Skill 变更，通�
 3. daemon 根据签名 manifest、当前文件状态、用户决策和 activation policy 刷新 `.skill-meta/activation.json`，并尽力同步写入 xattr。
 4. 若当前风险版本不可直接激活，activation metadata 会指向上一个可信 `pass` / `warn` snapshot；若没有可信 fallback，则指向安全 pending review stub；用户 `block` 决策或 fail-safe 场景才写 `target: null`。
 
+**版本要求：SkillFS 必须 ≥ 0.4.0。**
+
+第 2 步的 `skill_ledger.skillfs_notify_change` 从 0.4.0 起使用 **notify v2**：业务
+payload 只有 `canonicalSkillDir`、`skillId`、`eventKind` 和 `paths` 四个字段。这是一次
+**没有回退路径的破坏性升级** —— daemon 明确拒绝 `schemaVersion != 2` 的请求，SkillFS 侧
+也不做版本协商。因此两个组件必须协调升级：
+
+- 0.4.0 之前的 SkillFS 只发送 notify v1，会被当前 daemon 逐条拒绝；
+- notify 投递失败在 SkillFS 侧只是 warning，不会中断 FUSE 服务。
+
+版本不匹配的表现因此是**静默失效**：新装的 Skill 一直停留在 hidden，两侧都没有明显
+报错。排查时先确认 `skillfs --version` ≥ 0.4.0。
+
+**两个 socket，方向相反。** 联合部署最常见的接线错误来自把它们混为一谈：
+
+| Socket | 谁监听 | 默认路径 | 用途 |
+|---|---|---|---|
+| daemon socket | agent-sec-core daemon | `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock`（`AGENT_SEC_DAEMON_SOCKET` 可覆盖） | SkillFS 用 `--notify-socket` 指向这里，发送变更通知 |
+| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock` | daemon 反向查询 `skill.resolveLiveSource`，并写 activation 元数据 |
+
+control socket 的路径**不要自定义**。Ledger 的 resolver 客户端只探测上表中的默认路径，
+没有配置项可以让它跟随 `--control-socket` 指定的其他路径；改了之后 Ledger 会静默按
+host 模式处理。SkillFS 与 daemon 还必须运行在相同 effective UID 下。
+
+Hermes 布局下 activation 流程携带的是嵌套身份（`category/skill`），而非扁平 skill 名；
+`skillId` 会保留两个分量。
+
+完整的协议定义、canonical path 语义和部署边界见
+[Skill Ledger 的 SkillFS 集成设计](../../../../../src/agent-sec-core/docs/design/SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md)
+与 [SkillFS 用户指南](../../runtime/skillfs.md)。
+
 ### 兼容路径：Hook / capability policy
 
 当 Agent 加载 Skill 时，OpenClaw、Hermes 和 copilot-shell hook 会解析 Skill 目录，执行 `agent-sec-cli skill-ledger show <skill_dir>`，并由统一 `policy` 控制可见行为。这些 hook 只消费 summary 中的 `message`：

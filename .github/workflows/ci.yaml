@@ -654,7 +654,7 @@ jobs:
         run: |
           cd src/agentsight
           cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs)'
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs|src/local/)'
 
       - name: Generate coverage summary
         if: always()
@@ -903,6 +903,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src/anolisa
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate npm packaging
+        run: |
+          cd src/anolisa
+          node npm/tests/platforms.test.js
+          node npm/scripts/package-npm.js --validate
 
       - name: Check formatting
         run: |

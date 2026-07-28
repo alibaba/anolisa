@@ -122,24 +122,31 @@ fn bash_extdebug_does_not_leak_via_exported_bashopts() {
     // The user rcfile runs before this hook setup, so its DEBUG trap is live
     // in between: the export attribute must be dropped *before* extdebug is
     // enabled, or a trap-spawned child inherits the leak.
-    let shopt = script
-        .find("shopt -s extdebug")
-        .expect("extdebug setup should exist");
+    //
+    // The prompt-hook toggle in _cosh_run_user_prompt_command sits earlier in
+    // the text but only executes at prompt time — after this hook setup — so
+    // anchor on the hook-setup enable, not the first textual `shopt -s
+    // extdebug`: the unexport must be immediately adjacent to it.
     let unexport = script
         .find("export -n BASHOPTS 2>/dev/null || true")
         .expect("BASHOPTS export attribute must be dropped before enabling extdebug");
-    assert!(
-        unexport < shopt,
-        "export -n BASHOPTS must precede shopt -s extdebug"
+    let hook_setup_shopt = script[unexport..]
+        .find("shopt -s extdebug 2>/dev/null || true")
+        .map(|offset| unexport + offset)
+        .expect("hook-setup extdebug enable should follow the unexport");
+    assert_eq!(
+        script[unexport..hook_setup_shopt].trim(),
+        "export -n BASHOPTS 2>/dev/null || true",
+        "export -n BASHOPTS must immediately precede the hook-setup extdebug enable"
     );
 
     // The unexport must land in the same hook-setup block, before the DEBUG
     // trap is (re-)installed there, so no child spawned afterwards sees the
     // leak. Anchor on the trap occurrence after the shopt line: earlier
     // occurrences live inside recovery helper functions.
-    let debug_trap = script[shopt..]
+    let debug_trap = script[hook_setup_shopt..]
         .find("trap '_cosh_preexec_marker' DEBUG")
-        .map(|offset| shopt + offset)
+        .map(|offset| hook_setup_shopt + offset)
         .expect("hook-setup DEBUG trap installation should exist");
     assert!(
         unexport < debug_trap,

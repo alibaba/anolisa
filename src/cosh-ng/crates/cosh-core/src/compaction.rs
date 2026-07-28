@@ -23,5 +23,5 @@ pub(crate) use boundary::has_new_compactable_prefix;
 pub(crate) use budget::estimate_text_tokens;
 pub(crate) use engine::run_compact_cli;
 pub(crate) use preflight::run_context_preflight;
-pub(crate) use projection::sanitize_loaded_state;
+pub(crate) use projection::{sanitize_loaded_state, source_digest};
 pub(crate) use runtime::estimate_prefix_tokens;

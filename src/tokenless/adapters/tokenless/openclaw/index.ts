@@ -22,7 +22,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, statSync, readFileSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 
 // ---- Session ID mapping --------------------------------------------------------
 // OpenClaw's tool_result_persist ctx provides sessionKey ("agent:main:main")
@@ -56,18 +56,38 @@ let tokenlessAvailable: boolean | null = null;
 let tokenlessCheckedAt: number | null = null;
 
 // Resolved absolute paths — set by check*() functions so subprocess calls
-// use the correct path even when the binary is not on PATH (e.g. RPM installs
-// that place rtk/toon in /usr/libexec/anolisa/tokenless/ or Debian installs
-// that use /usr/lib/anolisa/tokenless/).
+// use the correct path even when the binary is not on PATH.
 let rtkPath: string = "rtk";
 let tokenlessPath: string = "tokenless";
 
+// KEEP IN SYNC with common/hooks/hook_utils.py, tool_ready_hook.sh,
+// env_check.rs::binary_fallback_paths, and the Codex standalone scripts.
+// Makefile and the Anolisa component manifest define the supported layouts;
+// the canonical order is user, /usr/local, /usr, then legacy.
 const LIBEXEC_FALLBACK = "/usr/libexec/anolisa/tokenless";
 const LIB_FALLBACK = "/usr/lib/anolisa/tokenless";
 const TOKENLESS_FALLBACK = "/usr/bin/tokenless";
-const LOCAL_BIN = `${process.env.HOME || ""}/.local/bin`;
-const LOCAL_LIB = `${process.env.HOME || ""}/.local/lib/anolisa/tokenless`;
-const LOCAL_FALLBACK = `${process.env.HOME || ""}/.local/share/anolisa/tokenless`;
+const SYSTEM_BIN = "/usr/local/bin";
+const SYSTEM_LIBEXEC = "/usr/local/libexec/anolisa/tokenless";
+const RPM_BIN = "/usr/bin";
+const USER_HOME = process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : null;
+const LOCAL_BIN = USER_HOME ? join(USER_HOME, ".local", "bin") : null;
+const LOCAL_ANOLISA_LIBEXEC = USER_HOME
+  ? join(USER_HOME, ".local", "lib", "anolisa", "libexec", "tokenless")
+  : null;
+const LOCAL_MAKE_LIBEXEC = USER_HOME
+  ? join(USER_HOME, ".local", "libexec", "anolisa", "tokenless")
+  : null;
+const LOCAL_LIB = USER_HOME
+  ? join(USER_HOME, ".local", "lib", "anolisa", "tokenless")
+  : null;
+const LOCAL_FALLBACK = USER_HOME
+  ? join(USER_HOME, ".local", "share", "anolisa", "tokenless")
+  : null;
+
+function binaryIn(directory: string | null, name: string): string {
+  return directory ? join(directory, name) : "";
+}
 
 // Check both existence and execute permission (mirrors shell `-x` test).
 function isExecutable(path: string): boolean {
@@ -108,7 +128,19 @@ function checkRtk(): boolean {
     rtkAvailable = null;
   }
   if (rtkAvailable !== null) return rtkAvailable;
-  const resolved = resolveBinaryPath("rtk", `${LIBEXEC_FALLBACK}/rtk`, `${LIB_FALLBACK}/rtk`, `${LOCAL_FALLBACK}/rtk`, `${LOCAL_LIB}/rtk`, `${LOCAL_BIN}/rtk`);
+  const resolved = resolveBinaryPath(
+    "rtk",
+    binaryIn(LOCAL_BIN, "rtk"),
+    binaryIn(LOCAL_ANOLISA_LIBEXEC, "rtk"),
+    binaryIn(LOCAL_MAKE_LIBEXEC, "rtk"),
+    join(SYSTEM_BIN, "rtk"),
+    join(SYSTEM_LIBEXEC, "rtk"),
+    join(RPM_BIN, "rtk"),
+    join(LIBEXEC_FALLBACK, "rtk"),
+    join(LIB_FALLBACK, "rtk"),
+    binaryIn(LOCAL_FALLBACK, "rtk"),
+    binaryIn(LOCAL_LIB, "rtk"),
+  );
   if (resolved) { rtkPath = resolved; rtkAvailable = true; }
   else { rtkAvailable = false; }
   rtkCheckedAt = Date.now();
@@ -132,7 +164,14 @@ function checkTokenless(): boolean {
     tokenlessAvailable = null;
   }
   if (tokenlessAvailable !== null) return tokenlessAvailable;
-  const resolved = resolveBinaryPath("tokenless", TOKENLESS_FALLBACK, `${LOCAL_FALLBACK}/tokenless`, `${LOCAL_LIB}/tokenless`, `${LOCAL_BIN}/tokenless`);
+  const resolved = resolveBinaryPath(
+    "tokenless",
+    binaryIn(LOCAL_BIN, "tokenless"),
+    join(SYSTEM_BIN, "tokenless"),
+    TOKENLESS_FALLBACK,
+    binaryIn(LOCAL_FALLBACK, "tokenless"),
+    binaryIn(LOCAL_LIB, "tokenless"),
+  );
   if (resolved) { tokenlessPath = resolved; tokenlessAvailable = true; }
   else { tokenlessAvailable = false; }
   tokenlessCheckedAt = Date.now();

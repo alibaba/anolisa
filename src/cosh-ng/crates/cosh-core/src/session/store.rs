@@ -144,6 +144,23 @@ impl SessionStore {
                 actual: session.workspace_scope.clone(),
             });
         }
+        let projection_cut = match session.compaction.as_ref() {
+            Some(state)
+                if state.compacted_through == 0
+                    || state.compacted_through > session.messages.len() =>
+            {
+                return Err(SessionError::Corrupt {
+                    session_id: session.session_id.to_string(),
+                    message: format!(
+                        "compaction boundary {} is outside transcript length {}",
+                        state.compacted_through,
+                        session.messages.len()
+                    ),
+                });
+            }
+            Some(state) => Some(state.compacted_through),
+            None => None,
+        };
 
         let Some(directory) = self.scoped.directory(true)? else {
             return Err(io_error(
@@ -218,6 +235,10 @@ impl SessionStore {
         // keeps the original text for the current provider conversation.
         let mut envelope = next.clone();
         crate::redaction::redact_messages(&mut envelope.messages);
+        // Bind persisted projections to the redacted transcript loaded on resume.
+        if let (Some(state), Some(cut)) = (envelope.compaction.as_mut(), projection_cut) {
+            state.source_digest = crate::compaction::source_digest(&envelope.messages[..cut]);
+        }
         let bytes =
             serde_json::to_vec_pretty(&envelope).map_err(|error| SessionError::Corrupt {
                 session_id: session.session_id.to_string(),

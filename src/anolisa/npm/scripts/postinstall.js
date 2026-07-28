@@ -24,6 +24,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { platform, arch } from 'node:os';
+import { platformPackageName } from './platforms.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -31,23 +32,8 @@ const require = createRequire(import.meta.url);
 const packageRoot = join(__dirname, '..');
 const binDir = join(packageRoot, 'bin');
 
-// Map Node.js platform/arch to package names
-const PLATFORM_MAP = {
-  'linux-x64': '@anolisa/cli-linux-x64',
-  'linux-arm64': '@anolisa/cli-linux-arm64',
-};
-
 function resolvePackageBinary() {
-  const key = `${platform()}-${arch()}`;
-  const pkgName = PLATFORM_MAP[key];
-
-  if (!pkgName) {
-    console.warn(
-      `@anolisa/cli: No prebuilt binary available for ${platform()}-${arch()}.`,
-    );
-    console.warn('You can build from source: cd src/anolisa && cargo build --release');
-    process.exit(0);
-  }
+  const pkgName = platformPackageName(platform(), arch());
 
   // Resolve platform package using createRequire (compatible with Node 16+)
   let pkgDir;
@@ -68,21 +54,16 @@ function resolvePackageBinary() {
   }
 
   if (!pkgDir || !existsSync(pkgDir)) {
-    console.warn(
-      `@anolisa/cli: Platform package ${pkgName} not found.`,
+    throw new Error(
+      `Platform package ${pkgName} not found; optional dependencies may have been skipped`,
     );
-    console.warn(
-      'This may happen if optional dependencies were skipped during install.',
-    );
-    process.exit(0);
   }
 
   const nativeBinary = join(pkgDir, 'bin', 'anolisa');
   if (!existsSync(nativeBinary)) {
-    console.error(
-      `@anolisa/cli: Binary not found in ${pkgName} at ${nativeBinary}`,
+    throw new Error(
+      `Binary not found in ${pkgName} at ${nativeBinary}`,
     );
-    process.exit(1);
   }
 
   return nativeBinary;
@@ -110,4 +91,9 @@ function main() {
   console.log(`@anolisa/cli: Linked native binary for ${platform()}-${arch()}`);
 }
 
-main();
+try {
+  main();
+} catch (error) {
+  console.error(`@anolisa/cli: ${error.message}`);
+  process.exit(1);
+}

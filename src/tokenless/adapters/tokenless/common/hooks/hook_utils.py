@@ -1,5 +1,7 @@
 """Shared utilities for tokenless Python hooks."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -7,22 +9,109 @@ import shutil
 import subprocess
 import sys
 
-# -- FHS fallback paths (ANOLISA spec) ----------------------------------------
+# -- Binary fallback paths ----------------------------------------------------
+#
+# Tokenless has three supported installers whose layouts differ:
+#
+# - Makefile:     ~/.local/{bin,libexec} or /usr/{bin,libexec}
+# - Anolisa CLI:  ~/.local/{bin,lib/anolisa/libexec} or /usr/local/{bin,libexec}
+# - RPM:          /usr/{bin,libexec}
+#
+# Keep the legacy lib/share paths until installations made by older releases
+# have aged out.
+#
+# KEEP IN SYNC with tool_ready_hook.sh::resolve_binary,
+# env_check.rs::binary_fallback_paths, OpenClaw's fallback constants, and the
+# Codex standalone scripts. Makefile and the Anolisa component manifest define
+# the supported layouts; the canonical order is user, /usr/local, /usr, legacy.
+
+_USER_HOME = os.path.expanduser("~")
+if not _USER_HOME or not os.path.isabs(_USER_HOME):
+    _USER_HOME = ""
+
+
+def _user_path(*parts: str) -> str:
+    return os.path.join(_USER_HOME, *parts) if _USER_HOME else ""
+
 
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOKENLESS_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless"
+_TOKENLESS_LOCAL_SHARE = _user_path(
+    ".local", "share", "anolisa", "tokenless", "tokenless"
 )
-_TOKENLESS_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless"
+_TOKENLESS_LOCAL_LIB = _user_path(
+    ".local", "lib", "anolisa", "tokenless", "tokenless"
 )
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk"
+_RTK_LOCAL_SHARE = _user_path(
+    ".local", "share", "anolisa", "tokenless", "rtk"
 )
-_RTK_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk"
-)
+_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
+
+_TOKENLESS_HELPER_BINARIES = frozenset({"rtk", "toon"})
+
+
+def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
+    """Return install-layout fallbacks for a binary outside ``PATH``."""
+    if not name or os.path.basename(name) != name or name in {".", ".."}:
+        return ()
+    home = os.path.expanduser("~") if home is None else home
+    user_home = home if home and os.path.isabs(home) else None
+    paths = []
+    if user_home:
+        paths.append(os.path.join(user_home, ".local", "bin", name))
+    if name in _TOKENLESS_HELPER_BINARIES:
+        if user_home:
+            paths.extend(
+                [
+                    # Anolisa CLI user mode.
+                    os.path.join(
+                        user_home,
+                        ".local",
+                        "lib",
+                        "anolisa",
+                        "libexec",
+                        "tokenless",
+                        name,
+                    ),
+                    # Makefile user mode.
+                    os.path.join(
+                        user_home,
+                        ".local",
+                        "libexec",
+                        "anolisa",
+                        "tokenless",
+                        name,
+                    ),
+                ]
+            )
+    paths.append(os.path.join("/usr/local/bin", name))
+    if name in _TOKENLESS_HELPER_BINARIES:
+        # Anolisa CLI system mode.
+        paths.append(
+            os.path.join("/usr/local/libexec/anolisa/tokenless", name)
+        )
+    paths.append(os.path.join("/usr/bin", name))
+    if name in _TOKENLESS_HELPER_BINARIES:
+        paths.extend(
+            [
+                # Makefile system mode and RPM.
+                os.path.join("/usr/libexec/anolisa/tokenless", name),
+                # Debian and pre-layout-migration compatibility.
+                os.path.join("/usr/lib/anolisa/tokenless", name),
+            ]
+        )
+        if user_home:
+            paths.extend(
+                [
+                    os.path.join(
+                        user_home, ".local", "share", "anolisa", "tokenless", name
+                    ),
+                    os.path.join(
+                        user_home, ".local", "lib", "anolisa", "tokenless", name
+                    ),
+                ]
+            )
+    return tuple(paths)
 
 # -- Unified tool categorization ----------------------------------------------
 
@@ -263,12 +352,13 @@ _resolved_cache: dict[tuple, str | None] = {}
 
 
 def resolve_binary(name: str, *fallback_paths: str) -> str | None:
-    """Locate a binary by PATH search, then optional fallback paths.
+    """Locate a binary by PATH search, install layouts, then explicit paths.
 
-    Results are cached per (name, fallback_paths) — different callers passing
-    distinct fallback paths for the same name get independent cache entries.
+    Results are cached per name, explicit fallbacks, and home directory so
+    callers with distinct install contexts get independent entries.
     """
-    cache_key = (name, fallback_paths)
+    home = os.path.expanduser("~")
+    cache_key = (name, fallback_paths, home)
     if cache_key in _resolved_cache:
         return _resolved_cache[cache_key]
 
@@ -277,7 +367,8 @@ def resolve_binary(name: str, *fallback_paths: str) -> str | None:
     if path:
         result = path
     else:
-        for fp in fallback_paths:
+        candidates = dict.fromkeys((*_known_binary_paths(name, home), *fallback_paths))
+        for fp in candidates:
             if fp and os.path.isfile(fp) and os.access(fp, os.X_OK):
                 result = fp
                 break

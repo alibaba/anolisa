@@ -10,6 +10,7 @@ import { homedir, platform } from 'node:os';
 import * as dotenv from 'dotenv';
 import process from 'node:process';
 import {
+  AuthType,
   FatalConfigError,
   QWEN_DIR,
   getErrorMessage,
@@ -19,6 +20,7 @@ import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
 import { DefaultDark } from '../ui/themes/default.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { loadCoshNgProviderFallback } from './coshNgProviderFallback.js';
 import {
   type Settings,
   type MemoryImportFormat,
@@ -30,6 +32,7 @@ import {
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { customDeepMerge, type MergeableObject } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
+import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
 
 function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   let current: SettingDefinition | undefined = undefined;
@@ -499,6 +502,44 @@ function mergeSettings(
   ) as Settings;
 }
 
+function hasCompleteNativeOpenAiAuth(nativeSettings: Settings): boolean {
+  const nativeAuth = nativeSettings.security?.auth;
+  return !!(
+    nativeAuth?.apiKey &&
+    nativeAuth.baseUrl &&
+    (nativeAuth.openaiModel || nativeSettings.model?.name)
+  );
+}
+
+function shouldLoadCoshNgFallback(nativeSettings: Settings): boolean {
+  const nativeType = nativeSettings.security?.auth?.selectedType;
+  return (
+    !nativeType ||
+    (nativeType === AuthType.USE_OPENAI &&
+      !hasCompleteNativeOpenAiAuth(nativeSettings))
+  );
+}
+
+function shouldMergeCoshNgFallback(
+  nativeSettings: Settings,
+  fallback: Settings,
+): boolean {
+  const nativeType = nativeSettings.security?.auth?.selectedType;
+  const fallbackType = fallback.security?.auth?.selectedType;
+  if (!nativeType) {
+    return true;
+  }
+
+  // /model persists the effective auth type and model, but not credentials.
+  // Let a matching fallback fill that partial state without overriding any
+  // native values.
+  return (
+    nativeType === AuthType.USE_OPENAI &&
+    fallbackType === AuthType.USE_OPENAI &&
+    !hasCompleteNativeOpenAiAuth(nativeSettings)
+  );
+}
+
 export class LoadedSettings {
   constructor(
     system: SettingsFile,
@@ -851,6 +892,33 @@ export function loadSettings(
   // loadEnviroment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
   loadEnvironment(tempMergedSettings);
+
+  // cosh-ng compatibility: `cosh-switch` swaps the RPM but leaves the shared
+  // ~/.copilot-shell/ config untouched. After loading the environment, expose
+  // cosh-ng's active provider only when neither env-inferred auth nor a usable
+  // native selection should win. Untrusted workspace settings are absent from
+  // tempMergedSettings and therefore cannot suppress the fallback.
+  if (!getAuthTypeFromEnv() && shouldLoadCoshNgFallback(tempMergedSettings)) {
+    const coshNgFallback = loadCoshNgProviderFallback(USER_SETTINGS_DIR);
+    if (
+      coshNgFallback &&
+      shouldMergeCoshNgFallback(tempMergedSettings, coshNgFallback)
+    ) {
+      // Merged into the resolved copy only - `systemDefaultsOriginalSettings`
+      // stays untouched, so saveSettings() can never persist the fallback.
+      //
+      // Deliberately not passed through resolveEnvVarsInObject(): the cosh-ng
+      // reader already expanded `${VAR}` with cosh-ng's own semantics, and
+      // resolving again would also rewrite bare `$VAR`, corrupting a credential
+      // that legitimately contains a dollar sign.
+      systemDefaultSettings = customDeepMerge(
+        getMergeStrategyForPath,
+        {},
+        coshNgFallback,
+        systemDefaultSettings,
+      ) as Settings;
+    }
+  }
 
   // Create LoadedSettings first
 

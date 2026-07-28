@@ -498,6 +498,22 @@ tokenless env-check --all --checklist
 | 适配器 enable 失败 | `anolisa adapter scan` 确认框架已安装；`anolisa adapter status tokenless` 查看详情 |
 | 手动 dnf 操作后 system 状态不同步 | `sudo anolisa --install-mode system repair tokenless`；若 RPM 仍存在，可依次执行 system-scoped `forget` 和 `adopt` 重建记录 |
 
+### Qoder 插件缓存恢复（仅限从受影响的旧版本升级后）
+
+仅在从受影响的旧版本升级并出现以下症状时需要本小节：Qoder IDE 会话中所有 Bash 类工具调用被拦截，报错 `python3: can't open file '/rewrite_hook.py'`。受影响的安装会在 qodercli 插件缓存中残留未展开的 `${QODER_TOKENLESS_HOOKS}` 占位符，缓存只能通过重新注册适配器刷新：
+
+```bash
+# 先升级到包含修复的版本
+anolisa adapter disable tokenless qoder
+anolisa adapter enable tokenless qoder
+
+# 预期无输出
+grep -R -n 'QODER_TOKENLESS_HOOKS' \
+  ~/.qoder/plugins/cache/local/tokenless*/*/hooks.json 2>/dev/null
+```
+
+完成后重启 Qoder IDE——已在运行的会话可能仍持有旧 hook 配置。
+
 ### 状态不一致修复
 
 若通过 `dnf remove` / `rpm -e` 直接操作了 ANOLISA 管理的包：
