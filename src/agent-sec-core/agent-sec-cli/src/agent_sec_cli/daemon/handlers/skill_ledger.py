@@ -35,6 +35,12 @@ _NOTIFY_V2_PARAM_KEYS = frozenset(
         "paths",
     }
 )
+# SkillFS v0.3.x sends v1 protocol with skillDir/skillName instead of
+# canonicalSkillDir/skillId.  Map v1 fields to v2 for backward compat.
+_NOTIFY_V1_TO_V2_FIELD_MAP = {
+    "skillDir": "canonicalSkillDir",
+    "skillName": "skillId",
+}
 
 
 def register_skill_ledger_methods(registry: MethodRegistry) -> None:
@@ -85,12 +91,22 @@ def skillfs_notify_change_handler(
 
 
 def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
-    """Validate daemon request params for a SkillFS change notification."""
+    """Validate daemon request params for a SkillFS change notification.
+
+    Accepts both v2 (canonicalSkillDir/skillId) and v1 (skillDir/skillName)
+    protocol fields.  SkillFS v0.3.x sends v1; v0.4+ sends v2.
+    """
+    schema_version = params.get("schemaVersion")
+
+    # Backward-compat: normalize v1 fields to v2 before strict validation.
+    if schema_version == 1 or "skillDir" in params:
+        params = _normalize_v1_params(params)
     _validate_notify_v2_param_keys(params)
 
-    schema_version = params.get("schemaVersion")
-    if schema_version != SCHEMA_VERSION:
-        raise BadRequestError("params.schemaVersion must be 2")
+    if schema_version not in (1, 2):
+        raise BadRequestError(
+            f"params.schemaVersion must be 1 or 2, got {schema_version!r}"
+        )
 
     canonical_skill_dir = _validate_canonical_skill_dir(params.get("canonicalSkillDir"))
     skill_id = _validate_skill_id(params.get("skillId"))
@@ -119,6 +135,16 @@ def _validate_notify_v2_param_keys(params: dict[str, Any]) -> None:
     if missing_fields:
         names = ", ".join(missing_fields)
         raise BadRequestError(f"params is missing required fields: {names}")
+
+
+def _normalize_v1_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Normalize SkillFS v1 notify params to v2 field names."""
+    normalized = dict(params)
+    for v1_key, v2_key in _NOTIFY_V1_TO_V2_FIELD_MAP.items():
+        if v1_key in normalized:
+            normalized[v2_key] = normalized.pop(v1_key)
+    normalized["schemaVersion"] = SCHEMA_VERSION
+    return normalized
 
 
 def _validate_canonical_skill_dir(value: Any) -> Path:
