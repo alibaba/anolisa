@@ -9,7 +9,6 @@ macro_rules! help_core_ids {
             HelpGroupHealth,
             HelpGroupModes,
             HelpGroupHooks,
-            HelpGroupAudit,
             HelpSummaryHelp,
             HelpSummaryAuth,
             HelpSummaryConfig,
@@ -143,6 +142,16 @@ macro_rules! prompt_soft_newline_ids {
             PromptDraftFooterEditing,
             PromptDraftFooterSubmitted,
             PromptDraftFooterCancelled,
+        );
+    };
+}
+
+macro_rules! help_group_audit_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpGroupAudit,
         );
     };
 }

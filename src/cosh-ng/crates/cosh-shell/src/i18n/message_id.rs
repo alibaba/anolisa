@@ -89,4 +89,5 @@ collect_message_ids!([
     approval_turn_consent_ids,
     status_query_ids,
     prompt_soft_newline_ids,
+    help_group_audit_ids,
 ],);
