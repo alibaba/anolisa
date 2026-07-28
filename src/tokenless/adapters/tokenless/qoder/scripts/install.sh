@@ -82,6 +82,13 @@ cp -a "$PLUGIN_DIR" "$TEMP_DIR/tokenless"
 # Expand ${QODER_TOKENLESS_HOOKS} to the absolute hooks directory
 # in the staged copy so qodercli's plugin cache gets resolved paths.
 sed -i "s|\${QODER_TOKENLESS_HOOKS}|${HOOKS_DIR}|g" "$TEMP_DIR/tokenless/hooks.json"
+# Verify the placeholder was fully expanded; fail loudly rather than
+# installing a broken hooks.json that Qoder IDE will silently misload.
+if grep -q 'QODER_TOKENLESS_HOOKS' "$TEMP_DIR/tokenless/hooks.json"; then
+    echo "[${COMPONENT}] ERROR: hooks.json still contains unexpanded \${QODER_TOKENLESS_HOOKS} placeholder" >&2
+    echo "    HOOKS_DIR='${HOOKS_DIR}'" >&2
+    exit 1
+fi
 # Use `if !` so the failure branch survives `set -e`: a bare
 # `OUT=$(...)` assignment would otherwise abort the script before $?
 # is captured, and qodercli's stderr (now redirected into the var)

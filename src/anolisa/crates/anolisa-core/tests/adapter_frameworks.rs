@@ -1041,7 +1041,7 @@ exit 0
     path
 }
 
-/// Returns `(log, settings_path, cache_dir, staging_symlink)`.
+/// Returns `(log, settings_path, cache_dir, staging_path)`.
 fn apply_qoder_env(
     guard: &EnvGuard,
     world: &World,

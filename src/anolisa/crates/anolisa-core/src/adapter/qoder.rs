@@ -186,7 +186,7 @@ impl FrameworkDriver for QoderDriver {
         let plugin = plugin_name(bundle, ctx);
         let program =
             qodercli_program(ctx.user_home.as_deref()).unwrap_or_else(|| "qodercli".to_string());
-        let staging = staging_symlink(ctx.user_home.as_deref(), &plugin);
+        let staging = staging_path(ctx.user_home.as_deref(), &plugin);
         let staging_display = staging
             .as_ref()
             .map(|p| p.display().to_string())
@@ -315,7 +315,7 @@ impl FrameworkDriver for QoderDriver {
                 reason: "qodercli not found on PATH or under ~/.qoder/bin".to_string(),
             }
         })?;
-        let staging = staging_symlink(ctx.user_home.as_deref(), &plugin).ok_or_else(|| {
+        let staging = staging_path(ctx.user_home.as_deref(), &plugin).ok_or_else(|| {
             AdapterError::FrameworkCli {
                 program: program.clone(),
                 reason: "cannot resolve qoder plugin staging dir (no home / XDG_DATA_HOME)"
@@ -333,12 +333,28 @@ impl FrameworkDriver for QoderDriver {
         //    install succeeds or not.
         ctx.ops.copy_tree(&claim.resource_root, &staging)?;
         let staged_hooks = staging.join(QODER_HOOKS_FILE);
-        if let Some(hooks_bytes) = ctx.ops.read_file(&staged_hooks)? {
-            let hooks_str = String::from_utf8_lossy(&hooks_bytes);
-            let hooks_dir = common_hooks_dir(&claim.resource_root);
-            let expanded = hooks_str.replace(HOOKS_PLACEHOLDER, &hooks_dir.to_string_lossy());
-            ctx.ops.write_file(&staged_hooks, expanded.as_bytes())?;
+        let hooks_bytes = ctx
+            .ops
+            .read_file(&staged_hooks)?
+            .ok_or_else(|| AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: format!(
+                    "staged hooks.json missing after copy: {}",
+                    staged_hooks.display()
+                ),
+            })?;
+        let hooks_str = String::from_utf8_lossy(&hooks_bytes);
+        let hooks_dir = common_hooks_dir(&claim.resource_root);
+        let expanded = hooks_str.replace(HOOKS_PLACEHOLDER, &hooks_dir.to_string_lossy());
+        if expanded.contains(HOOKS_PLACEHOLDER) {
+            return Err(AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: format!(
+                    "hooks.json still contains {HOOKS_PLACEHOLDER} after expansion"
+                ),
+            });
         }
+        ctx.ops.write_file(&staged_hooks, expanded.as_bytes())?;
         let install_cmd = build_install_cmd(&program, &staging);
         let cli_program = install_cmd.program.clone();
         let install = ctx.ops.run_framework_cli(install_cmd);
@@ -615,7 +631,7 @@ fn plugin_staging_root(user_home: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// Install-time staging directory: `<staging root>/<plugin>`.
-fn staging_symlink(user_home: Option<&Path>, plugin: &str) -> Option<PathBuf> {
+fn staging_path(user_home: Option<&Path>, plugin: &str) -> Option<PathBuf> {
     plugin_staging_root(user_home).map(|root| root.join(plugin))
 }
 
