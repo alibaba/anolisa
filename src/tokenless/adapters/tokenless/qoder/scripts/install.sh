@@ -70,10 +70,18 @@ echo "[${COMPONENT}] Installing ${AGENT} plugin v${VERSION}..."
 # under a name matching plugin.json's "name" field via a private tempdir.
 # (A predictable /tmp/tokenless would collide across users on shared hosts and
 # race with concurrent installs.)
+# Stage a real copy (not a symlink) and expand the hooks placeholder so
+# qodercli's plugin cache gets hooks.json with absolute paths. Qoder IDE
+# loads the cached hooks.json without variable expansion; a symlink to
+# the raw bundle would leave ${QODER_TOKENLESS_HOOKS} unresolved and
+# break every tool call.
 echo "[${COMPONENT}] Registering plugin with qodercli..."
 TEMP_DIR="$(mktemp -d -t tokenless-qoder-install.XXXXXX)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
-ln -sfn "$PLUGIN_DIR" "$TEMP_DIR/tokenless"
+cp -R "$PLUGIN_DIR" "$TEMP_DIR/tokenless"
+if [ -f "$TEMP_DIR/tokenless/hooks.json" ]; then
+    sed -i "s|\${QODER_TOKENLESS_HOOKS}|$HOOKS_DIR|g" "$TEMP_DIR/tokenless/hooks.json"
+fi
 # Use `if !` so the failure branch survives `set -e`: a bare
 # `OUT=$(...)` assignment would otherwise abort the script before $?
 # is captured, and qodercli's stderr (now redirected into the var)

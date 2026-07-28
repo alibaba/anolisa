@@ -14,10 +14,12 @@
 //!
 //! The plugin bundle lives under a resource directory named `qoder`, but
 //! `qodercli` derives the plugin id from the *directory name*, so enable
-//! stages a symlink named after the plugin id (`tokenless`) pointing at the
-//! resource root and installs from there — mirroring the legacy script's
-//! private tempdir. The symlink is install-time only (qodercli copies the
-//! plugin into its own cache) and is removed immediately after install.
+//! stages a real copy (not a symlink) of the plugin directory named after the
+//! plugin id (`tokenless`) and installs from there — mirroring the legacy
+//! script's private tempdir. The copy has `${QODER_TOKENLESS_HOOKS}` expanded
+//! to the absolute hooks path so qodercli's plugin cache gets a resolved
+//! `hooks.json`. The staging copy is install-time only and is removed
+//! immediately after install.
 //!
 //! **settings.json is merged, then atomically swapped in via rename.** All
 //! reads and writes go through the Manager's controlled
@@ -209,7 +211,7 @@ impl FrameworkDriver for QoderDriver {
         );
         let actions = vec![
             format!(
-                "stage qoder plugin dir {staging_display} -> {}",
+                "copy qoder plugin dir to {staging_display} (from {})",
                 bundle.resource_root.display()
             ),
             format!("register qoder plugin '{plugin}' via `qodercli plugins install`"),
@@ -333,11 +335,21 @@ impl FrameworkDriver for QoderDriver {
             }
         })?;
 
-        // 1. Stage a directory named after the plugin id (qodercli derives
-        //    the id from the dir name) and install from it. The staging
-        //    symlink is install-time only — remove it whether install
-        //    succeeds or not.
-        ctx.ops.create_symlink(&staging, &claim.resource_root)?;
+        // 1. Stage a real copy (not a symlink) of the plugin directory so
+        //    qodercli's plugin cache gets hooks.json with the placeholder
+        //    already expanded. Qoder IDE loads the cached hooks.json
+        //    without variable expansion; an unresolved placeholder would
+        //    break every tool call. Remove the staging copy after install.
+        ctx.ops.copy_tree(&claim.resource_root, &staging)?;
+        // Expand ${QODER_TOKENLESS_HOOKS} in the staged hooks.json to the
+        // absolute common/hooks path.
+        let hooks_json_path = staging.join(QODER_HOOKS_FILE);
+        if let Some(hooks_bytes) = ctx.ops.read_file(&hooks_json_path)? {
+            let hooks_str = String::from_utf8_lossy(&hooks_bytes);
+            let hooks_dir = common_hooks_dir(&claim.resource_root);
+            let expanded = hooks_str.replace(HOOKS_PLACEHOLDER, &hooks_dir.to_string_lossy());
+            ctx.ops.write_file(&hooks_json_path, expanded.as_bytes())?;
+        }
         let install_cmd = build_install_cmd(&program, &staging);
         let cli_program = install_cmd.program.clone();
         let install = ctx.ops.run_framework_cli(install_cmd);
@@ -613,7 +625,7 @@ fn plugin_staging_root(user_home: Option<&Path>) -> Option<PathBuf> {
     anolisa_data_base(user_home).map(|base| base.join("qoder-plugins"))
 }
 
-/// Install-time staging symlink: `<staging root>/<plugin>`.
+/// Install-time staging directory: `<staging root>/<plugin>`.
 fn staging_symlink(user_home: Option<&Path>, plugin: &str) -> Option<PathBuf> {
     plugin_staging_root(user_home).map(|root| root.join(plugin))
 }
