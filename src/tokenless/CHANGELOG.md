@@ -7,6 +7,24 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-28
+
+### Added
+
+- ANOLISA can now install Tokenless on macOS and enable Qwencode as an independent adapter ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
+### Changed
+
+- Adapter hooks now discover `tokenless`, `rtk`, and `toon` across user, `/usr/local`, RPM, and legacy installation layouts ([#1957](https://github.com/alibaba/anolisa/pull/1957)).
+- Hook launchers now prefer resources from the active installation, preventing mixed versions when multiple Tokenless installations coexist ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
+### Fixed
+
+- Tool schema compression now reads the canonical Cosh and Cosh-NG request field, so schemas are compressed instead of silently passing through unchanged ([#1894](https://github.com/alibaba/anolisa/pull/1894)).
+- Cosh-NG compression statistics are now attributed to `cosh-ng` when hook environment variables are present ([#1894](https://github.com/alibaba/anolisa/pull/1894)).
+- Qoder plugin installation now expands cached hook paths, preventing invalid `/rewrite_hook.py` commands from blocking tool calls; the user manual includes recovery steps for affected upgrades ([#1924](https://github.com/alibaba/anolisa/pull/1924)).
+- ANOLISA packages now include the shared hook resources required by Tokenless adapters ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
 ## [0.7.2] - 2026-07-27
 
 ### Added
@@ -185,5 +203,6 @@ Releases from 0.7.2 onward follow
 
 - introduce tokenless into ANOLISA (#199)
 
-[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...HEAD
+[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...HEAD
+[0.7.3]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...tokenless/v0.7.3
 [0.7.2]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.1...tokenless/v0.7.2
