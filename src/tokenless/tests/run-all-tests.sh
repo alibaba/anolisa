@@ -9,6 +9,9 @@
 
 set -uo pipefail
 
+TEST_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOKENLESS_SOURCE_DIR="$(cd "$TEST_SCRIPT_DIR/.." && pwd)"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -309,7 +312,9 @@ test_tool_ready() {
     local SPEC_FILE=""
     for p in \
         "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tool-ready-spec.json}" \
+        "$TOKENLESS_SOURCE_DIR/adapters/tokenless/common/tool-ready-spec.json" \
         "$HOME/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
+        "/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
         "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
         "$HOME/.tokenless/tool-ready-spec.json"; do
         if [ -f "$p" ]; then SPEC_FILE="$p"; break; fi
@@ -317,12 +322,29 @@ test_tool_ready() {
     local FIX_SCRIPT=""
     for p in \
         "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tokenless-env-fix.sh}" \
+        "$TOKENLESS_SOURCE_DIR/adapters/tokenless/common/tokenless-env-fix.sh" \
         "$HOME/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
+        "/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
         "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
         "$HOME/.tokenless/tokenless-env-fix.sh"; do
         if [ -f "$p" ] && [ -x "$p" ]; then FIX_SCRIPT="$p"; break; fi
     done
-    HOOK_DIR="/usr/share/anolisa/adapters/tokenless/common/hooks"
+    local HOOK_DIR=""
+    for d in \
+        "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/hooks}" \
+        "$TOKENLESS_SOURCE_DIR/adapters/tokenless/common/hooks" \
+        "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks" \
+        "/usr/local/share/anolisa/adapters/tokenless/common/hooks" \
+        "/usr/share/anolisa/adapters/tokenless/common/hooks"; do
+        if [ -f "$d/tool_ready_hook.sh" ] && [ -f "$d/compress_response_hook.py" ]; then
+            HOOK_DIR="$d"
+            break
+        fi
+    done
+    if [ -z "$HOOK_DIR" ]; then
+        log_fail "tokenless common hooks not found"
+        return
+    fi
     READY_SCRIPT="$HOOK_DIR/tool_ready_hook.sh"
     COMPRESS_SCRIPT="$HOOK_DIR/compress_response_hook.py"
 
@@ -517,7 +539,14 @@ test_tool_ready() {
     # 6.22 tool-ready hook: NOT_READY + Skip retry
     # ==========================================
     log_info "Test 6.22: tool-ready hook — NOT_READY"
-    local tmp_spec=$(mktemp)
+    local tmp_dir
+    local tmp_spec
+    if ! tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tokenless-tool-ready.XXXXXX"); then
+        log_fail "unable to create private temporary directory"
+        return
+    fi
+    chmod 0700 "$tmp_dir"
+    tmp_spec="$tmp_dir/tool-ready-spec.json"
     cat > "$tmp_spec" << 'EOF'
 {"TestMissing":{"required":[{"binary":"fakebin99","package":"fakebin99","manager":"rpm"}],"recommended":[],"permissions":[],"network":[]}}
 EOF
@@ -525,6 +554,7 @@ EOF
     assert_contains "$not_ready_out" "NOT_READY" "hook outputs NOT_READY"
     assert_contains "$not_ready_out" "Skip retry" "hook includes Skip retry guidance"
     rm -f "$tmp_spec"
+    rmdir "$tmp_dir"
 
     # ==========================================
     # 6.23 Attribution: ENV_DEPENDENCY_MISSING

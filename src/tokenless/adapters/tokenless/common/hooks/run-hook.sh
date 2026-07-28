@@ -37,6 +37,7 @@ case "$SCRIPT" in
 esac
 
 CANDIDATES=(
+    "/usr/local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
     "/usr/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
     "${HOME}/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
 )

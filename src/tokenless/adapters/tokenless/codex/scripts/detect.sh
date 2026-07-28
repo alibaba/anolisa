@@ -19,6 +19,7 @@ fi
 if [[ -z "$TOKENLESS_BIN" ]]; then
     for fp in \
         "$HOME/.local/bin/tokenless" \
+        "/usr/local/bin/tokenless" \
         "/usr/bin/tokenless" \
         "$HOME/.local/share/anolisa/tokenless/tokenless" \
         "$HOME/.local/lib/anolisa/tokenless/tokenless"; do
