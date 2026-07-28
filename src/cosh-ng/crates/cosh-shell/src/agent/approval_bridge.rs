@@ -35,8 +35,18 @@ pub(crate) fn render_trusted_tool<W: Write>(
         ) else {
             continue;
         };
-        // Hook ask decisions must never be auto-approved
+        // Hook ask decisions must never be auto-approved, but in trust
+        // mode they must still surface to the user via the approval panel
+        // to prevent cosh-core deadlocks when sandbox_bypass approvals
+        // arrive with hook_requires_approval=true (issue #1920).
         if request.hook_requires_approval {
+            blocked_approval_ids.extend(record_approval_requests(
+                state,
+                std::slice::from_ref(event),
+                run_request,
+                origin,
+                false,
+            ));
             continue;
         }
         if provider_tool_call_fallback && !request_is_executable_bash_tool(&request) {
@@ -740,6 +750,52 @@ mod tests {
         }));
         assert_eq!(state.approvals.active_panel_id.as_deref(), Some("req-1"));
         assert!(state.approvals.active_panel_height > 0);
+    }
+
+    #[test]
+    fn trust_mode_surfaces_hook_requires_approval_to_panel() {
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Trust,
+            ..InlineState::default()
+        };
+        let governed = [GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+            event: AgentEvent::ToolPermissionRequest {
+                run_id: "run-1".to_string(),
+                request_id: "req-1".to_string(),
+                tool_name: "shell".to_string(),
+                tool_input: serde_json::json!({"command": "find / -name SKILL.md"}),
+                tool_use_id: "toolu-1".to_string(),
+                hook_requires_approval: true,
+                audit_ref: None,
+            },
+            reason: "sandbox_bypass".to_string(),
+            display_text: "sandbox_bypass".to_string(),
+            auto_execute: false,
+        }];
+        let mut output = Vec::new();
+
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &governed,
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render trusted hook approval");
+
+        // The request must be surfaced to the approval panel (not silently
+        // dropped), so that cosh-core does not deadlock waiting for a response.
+        assert_eq!(state.approvals.requests.len(), 1);
+        assert_eq!(
+            state.approvals.requests[0].status,
+            ApprovalRequestStatus::Pending
+        );
+        assert!(state.approvals.requests[0].hook_requires_approval);
+        assert_eq!(state.approvals.active_panel_id.as_deref(), Some("req-1"));
     }
 
     #[test]
