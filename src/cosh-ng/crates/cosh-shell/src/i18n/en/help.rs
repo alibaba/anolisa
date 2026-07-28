@@ -87,6 +87,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "list/manage cosh-core extensions",
         MessageId::HelpSummarySkills => "list/inspect cosh-core skills",
+        MessageId::HelpSummaryMcp => "manage MCP servers",
         MessageId::HelpGroupStatus => "Status",
         MessageId::HelpSummaryStatus => "show version, provider, model, and runtime status",
         MessageId::HelpSummaryStats => "show model and tool session statistics",
@@ -134,6 +135,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::SlashExtensionsTitle => "Extensions",
         MessageId::SlashSkillsTitle => "Skills",
+        MessageId::SlashMcpTitle => "MCP Servers",
         MessageId::SlashRegistryUnavailable => {
             "This feature requires cosh-core backend."
         }

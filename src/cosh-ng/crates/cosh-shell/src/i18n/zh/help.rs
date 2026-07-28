@@ -81,6 +81,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",
         MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",
+        MessageId::HelpSummaryMcp => "管理 MCP 服务器",
         MessageId::HelpGroupStatus => "状态",
         MessageId::HelpSummaryStatus => "显示版本、服务商、模型和运行状态",
         MessageId::HelpSummaryStats => "显示模型和工具的会话统计",
@@ -124,6 +125,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::SlashExtensionsTitle => "扩展",
         MessageId::SlashSkillsTitle => "技能",
+        MessageId::SlashMcpTitle => "MCP 服务器",
         MessageId::SlashRegistryUnavailable => "此功能需要 cosh-core 后端支持。",
         MessageId::SlashHooksShellSection => "Shell Hooks",
         MessageId::SlashHooksAgentSection => "Agent Hooks",

@@ -6,6 +6,7 @@ use crate::slash::debug::render_debug_command;
 use crate::slash::extensions::render_extensions_command;
 use crate::slash::health::render_health_command;
 use crate::slash::hooks::render_hooks_command;
+use crate::slash::mcp::render_mcp_command;
 use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
 };
@@ -72,6 +73,10 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Skills(sub, arg) => {
             render_skills_command(sub, arg, adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Mcp(sub, arg) => {
+            render_mcp_command(sub, arg, adapter, state, output)?;
             Ok(true)
         }
         SlashCommand::Session(arguments) => {
