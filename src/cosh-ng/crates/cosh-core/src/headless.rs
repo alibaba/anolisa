@@ -460,6 +460,9 @@ where
         }
 
         InputMessage::ControlResponse { .. } => {}
+        // Receipts only matter to an interactive `wait_for_approval` loop;
+        // the headless path never waits on one.
+        InputMessage::ApprovalReceipt { .. } => {}
         InputMessage::RegistryRequest {
             request_id,
             domain,

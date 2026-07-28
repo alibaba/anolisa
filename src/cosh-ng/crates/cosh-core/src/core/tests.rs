@@ -1011,6 +1011,347 @@ async fn request_id_skips_mismatched() {
     assert!(matches!(result, ApprovalResult::Denied(_)));
 }
 
+/// Serializes the two tests that mutate the process-wide
+/// `COSH_CORE_APPROVAL_TIMEOUT_SECS`; without it a concurrent
+/// `remove_var` could send the hanging test back to the 6h default.
+static APPROVAL_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn unanswered_approval_times_out_instead_of_hanging_forever() {
+    // #1940 residual guard: hours-scale by default, overridden here so the
+    // wait ends quickly. A peer that never answers and never closes the
+    // channel must not hang the turn forever.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (client, _server) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::TimedOut));
+}
+
+#[tokio::test]
+async fn answered_approval_beats_the_residual_timeout() {
+    // A response that arrives normally must win over the deadline: the
+    // guard only fires when nothing ever comes back.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(256);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"allow"}}}
+"#,
+            )
+            .await
+            .expect("write response");
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::Allowed));
+}
+
+#[tokio::test]
+async fn approval_receipt_disarms_the_residual_timeout_for_a_pending_card() {
+    // #1940 receipt protocol: once the shell acknowledges the request, a
+    // card waiting on the user may outlive the residual deadline — the
+    // shell owns the terminal state from that point on.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(512);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"approval_receipt","request_id":"expected-id"}
+"#,
+            )
+            .await
+            .expect("write receipt");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        server
+            .write_all(
+                br#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"allow"}}}
+"#,
+            )
+            .await
+            .expect("write response");
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::Allowed));
+}
+
+#[tokio::test]
+async fn approval_receipt_disarms_the_residual_timeout_for_a_slow_host_command() {
+    // Same disarm for a host-executed command finishing after the residual
+    // deadline: the executed result must reach the model, never a phantom
+    // "not executed" timeout.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(512);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"approval_receipt","request_id":"expected-id"}
+"#,
+            )
+            .await
+            .expect("write receipt");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        server
+            .write_all(
+                br#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"host_executed_shell","result":{"llmContent":"command output","metadata":{"exit_code":0}}}}}
+"#,
+            )
+            .await
+            .expect("write response");
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", true, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(
+        result,
+        ApprovalResult::HostExecutedShell {
+            exit_code: Some(0),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn approval_receipt_for_a_different_request_keeps_the_residual_timeout() {
+    // A receipt only disarms the wait for its own request id; an unrelated
+    // receipt observed on the shared reader must not leak the disarm.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(256);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"approval_receipt","request_id":"other-id"}
+"#,
+            )
+            .await
+            .expect("write receipt");
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::TimedOut));
+}
+
+#[tokio::test]
+async fn approval_timeout_fails_the_turn_without_a_second_generation() {
+    // #1940: a timed-out approval must end the turn. The mock peer keeps
+    // the channel open but never answers; after the residual deadline the
+    // turn fails — no second provider generation, the gated tool never
+    // runs, and a late response written afterwards is never consumed.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let shell_calls = Arc::new(AtomicUsize::new(0));
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"echo must-not-run"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("second generation must never happen".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "suggest".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&shell_calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+    let (client, mut server) = tokio::io::duplex(256);
+    let mut reader = BufReader::new(client).lines();
+    let mut output = Vec::new();
+
+    let result = core
+        .handle_user_message("run it", &mut reader, &mut output)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+
+    // A late response written after the timeout has no waiter left: it must
+    // never turn into an execution.
+    use tokio::io::AsyncWriteExt;
+    server
+        .write_all(
+            br#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"allow"}}}
+"#,
+        )
+        .await
+        .expect("write late response");
+
+    let error = result.expect_err("a timed-out approval must fail the turn");
+    assert!(
+        error.contains("timed out"),
+        "the failure must name the timeout: {error}"
+    );
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        !output_str.contains("second generation must never happen"),
+        "the turn must fail before another provider generation: {output_str}"
+    );
+    assert_eq!(
+        shell_calls.load(Ordering::SeqCst),
+        0,
+        "the gated tool must never execute"
+    );
+    let tool_result = core
+        .messages
+        .iter()
+        .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-1"))
+        .expect("the declared tool call keeps a paired result");
+    match &tool_result.content {
+        crate::provider::MessageContent::Text(content) => {
+            assert!(content.contains("approval timed out"), "{content}");
+        }
+        _ => panic!("expected text tool result"),
+    }
+}
+
+/// A post_tool_use_failure hook that requests a sandbox bypass and touches a
+/// marker file so the test can prove the hook actually ran.
+fn sandbox_bypass_hook(marker: &std::path::Path) -> crate::config::HookDefinition {
+    crate::config::HookDefinition {
+        command: format!(
+            "touch '{}' && printf '%s\\n' '{}'",
+            marker.display(),
+            r#"{"hookSpecificOutput":{"sandbox_bypass_request":{"original_command":"echo must-not-run","reason":"sandbox blocked"}}}"#
+        ),
+        name: Some("sandbox-bypass-hook".to_string()),
+        matcher: None,
+        timeout: Some(10_000),
+        sequential: None,
+        env: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn approval_timeout_suppresses_the_sandbox_bypass_reprompt() {
+    // #1940: once the policy approval times out the turn is fatal, so a
+    // post_tool_use_failure hook's sandbox-bypass request must not open a
+    // second approval — its Allowed arm would execute the tool behind the
+    // recorded "not executed" result.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let hook_marker = std::env::temp_dir().join(format!(
+        "cosh-bypass-hook-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&hook_marker);
+    let shell_calls = Arc::new(AtomicUsize::new(0));
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"echo must-not-run"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("second generation must never happen".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "suggest".to_string();
+    config.hooks.enabled = true;
+    config.hooks.post_tool_use_failure = vec![sandbox_bypass_hook(&hook_marker)];
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&shell_calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+    let (client, _server) = tokio::io::duplex(256);
+    let mut reader = BufReader::new(client).lines();
+    let mut output = Vec::new();
+
+    let result = core
+        .handle_user_message("run it", &mut reader, &mut output)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+
+    let error = result.expect_err("a timed-out approval must fail the turn");
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        hook_marker.exists(),
+        "the failure hook must have run, otherwise this test proves nothing"
+    );
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        !output_str.contains("second generation must never happen"),
+        "the turn must fail before another provider generation: {output_str}"
+    );
+    assert_eq!(
+        output_str.matches("can_use_tool").count(),
+        1,
+        "only the policy approval may be emitted; the bypass reprompt must be suppressed: {output_str}"
+    );
+    assert_eq!(
+        shell_calls.load(Ordering::SeqCst),
+        0,
+        "the tool must never execute, not even behind a bypass approval"
+    );
+    let _ = std::fs::remove_file(&hook_marker);
+}
+
 #[tokio::test]
 async fn approval_flow_host_executed_shell_uses_tool_result() {
     let shell_calls = Arc::new(AtomicUsize::new(0));

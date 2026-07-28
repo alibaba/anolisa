@@ -405,6 +405,21 @@ impl CoshCore {
                     );
                     return Ok(AgentTurnOutcome::Completed);
                 }
+                ApprovalResult::TimedOut => {
+                    // #1940: fail closed like the transport failure above —
+                    // the turn must end rather than continue while a late
+                    // shell-side decision could still execute.
+                    self.emit(
+                        writer,
+                        &OutputMessage::assistant_text(
+                            &self.session_id,
+                            "Prompt approval timed out before reaching a decision surface. Nothing was executed; please retry.",
+                        ),
+                    );
+                    return Err(format!(
+                        "prompt approval timed out before reaching a decision surface (request_id={request_id}); nothing was executed and the turn ends here so a late decision cannot split state"
+                    ));
+                }
                 ApprovalResult::Interrupted | ApprovalResult::HostExecutedShell { .. } => {
                     return Ok(AgentTurnOutcome::Completed);
                 }
@@ -1334,6 +1349,20 @@ impl CoshCore {
                                     interrupted = true;
                                     ToolResult::error("Interrupted by user")
                                 }
+                                ApprovalResult::TimedOut => {
+                                    self.metrics.approval_deny += 1;
+                                    // #1940: fail closed. The batch still answers
+                                    // every declared call so tool-message pairing
+                                    // holds, then the fatal ends the turn before
+                                    // another provider generation — the core must
+                                    // never record "not executed" and continue a
+                                    // turn in which a late shell-side decision
+                                    // could still execute.
+                                    hold_approval_timeout_fatal(&mut fatal_turn, &request_id);
+                                    ToolResult::error(
+                                        "approval timed out: the request never reached a decision surface; the tool was not executed",
+                                    )
+                                }
                             }
                         }
                     }
@@ -1435,7 +1464,14 @@ impl CoshCore {
                     // If a hook requests sandbox bypass, present an approval
                     // panel with the original (un-sandboxed) command.
                     // ─── SLS: sandbox blocked ───
-                    if let Some(bypass) = failure_hook.sandbox_bypass_request {
+                    // #1940: when the turn is already fatal (the policy
+                    // approval above timed out), the recorded tool result is
+                    // final — never open a second approval whose Allowed arm
+                    // would still execute the tool behind that result.
+                    if let Some(bypass) = failure_hook
+                        .sandbox_bypass_request
+                        .filter(|_| fatal_turn.is_none())
+                    {
                         self.metrics.sandbox_blocked += 1;
                         self.emit(
                             writer,
@@ -1540,6 +1576,13 @@ impl CoshCore {
                                         output: llm_content,
                                         is_error,
                                     };
+                                }
+                                // #1940: same fail-closed contract as the
+                                // policy approval above — a timed-out bypass
+                                // approval ends the turn; the original sandbox
+                                // failure stays as this call's tool result.
+                                ApprovalResult::TimedOut => {
+                                    hold_approval_timeout_fatal(&mut fatal_turn, &request_id);
                                 }
                                 _ => { /* denied / interrupted: keep original error */ }
                             }
@@ -1891,7 +1934,29 @@ impl CoshCore {
         accepts_host_executed_shell: bool,
         reader: &mut tokio::io::Lines<R>,
     ) -> ApprovalResult {
-        while let Ok(Some(line)) = reader.next_line().await {
+        // #1940 residual guard: this whole-wait deadline only ends the form
+        // where the request never reached the shell's decision surface at
+        // all — without it the turn would hang forever with no visible
+        // cause. Once the shell acknowledges the request with an
+        // `approval_receipt`, the shell owns its terminal state and the
+        // guard is disarmed: a legitimate wait (a card pending on the user,
+        // a host-executed command running) can then take as long as it
+        // needs, and a dead shell still surfaces via EOF below.
+        let mut deadline = Some(tokio::time::Instant::now() + approval_response_timeout());
+        loop {
+            let line = match deadline {
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline, reader.next_line()).await {
+                        Ok(Ok(Some(line))) => line,
+                        Ok(Ok(None)) | Ok(Err(_)) => return ApprovalResult::Interrupted,
+                        Err(_) => return ApprovalResult::TimedOut,
+                    }
+                }
+                None => match reader.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) | Err(_) => return ApprovalResult::Interrupted,
+                },
+            };
             let line = line.trim().to_string();
             if line.is_empty() {
                 continue;
@@ -1903,6 +1968,15 @@ impl CoshCore {
             };
 
             match msg {
+                InputMessage::ApprovalReceipt { request_id } => {
+                    // Disarm only the request this wait owns; a receipt for a
+                    // different id (a concurrent approval observed while this
+                    // wait holds the reader) is dropped, and that request
+                    // simply keeps its residual guard.
+                    if request_id == expected_request_id {
+                        deadline = None;
+                    }
+                }
                 InputMessage::ControlResponse { response } => {
                     if response.request_id != expected_request_id {
                         continue;
@@ -1944,7 +2018,6 @@ impl CoshCore {
                 _ => {}
             }
         }
-        ApprovalResult::Interrupted
     }
 }
 
@@ -1955,6 +2028,10 @@ pub(crate) fn max_turns_error(max_turns: u32) -> String {
 /// Audit reason code for a turn ended by a dead control transport.
 const CONTROL_TRANSPORT_AUDIT_REASON: &str = "control_transport_failed";
 
+/// Audit reason code for a turn ended by an approval that never reached a
+/// decision surface before the residual deadline (#1940).
+const APPROVAL_TIMEOUT_AUDIT_REASON: &str = "approval_timeout";
+
 /// One fatal turn outcome held until every declared tool call is closed.
 struct FatalTurn {
     error: String,
@@ -1964,6 +2041,21 @@ struct FatalTurn {
 impl FatalTurn {
     fn new(error: String, reason_code: &'static str) -> Self {
         Self { error, reason_code }
+    }
+}
+
+/// #1940: holds the turn-fatal for a timed-out approval, keeping the first
+/// fatal in the batch. The batch still answers every declared call, then
+/// the turn ends before another provider generation so a late shell-side
+/// decision can never split state against a recorded "not executed".
+fn hold_approval_timeout_fatal(fatal_turn: &mut Option<FatalTurn>, request_id: &str) {
+    if fatal_turn.is_none() {
+        *fatal_turn = Some(FatalTurn::new(
+            format!(
+                "approval timed out before reaching a decision surface (request_id={request_id}); the tool was not executed and the turn ends here so a late decision cannot split state"
+            ),
+            APPROVAL_TIMEOUT_AUDIT_REASON,
+        ));
     }
 }
 
@@ -2036,6 +2128,45 @@ enum ApprovalResult {
         exit_code: Option<i32>,
     },
     Interrupted,
+    /// #1940 residual guard: the wait exceeded the last-resort deadline,
+    /// meaning the request never reached a decision surface on the shell
+    /// side. Always fails the turn closed, never ends in an execution.
+    TimedOut,
+}
+
+/// #1940 residual guard: hours-scale by design so legitimate waits (card
+/// pending, host-executed command running) effectively never hit it. A
+/// request with no receipt beyond this horizon is failed closed as
+/// "shell presumed dead": the turn ends fatally rather than recording
+/// "not executed" and continuing into a state split, and a late decision
+/// degrades through the shell's OwnerUnavailable recovery path.
+/// env override exists for tests and incident response.
+const APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS: u64 = 6 * 60 * 60;
+/// Upper bound for the env override: an absurd value would overflow
+/// `Instant + Duration` and panic at the next approval wait.
+const APPROVAL_RESPONSE_TIMEOUT_MAX_SECS: u64 = 30 * 24 * 60 * 60;
+
+fn approval_response_timeout() -> std::time::Duration {
+    let fallback = || std::time::Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS);
+    let Ok(raw) = std::env::var("COSH_CORE_APPROVAL_TIMEOUT_SECS") else {
+        return fallback();
+    };
+    match raw.parse::<u64>() {
+        Ok(secs) if secs > 0 && secs <= APPROVAL_RESPONSE_TIMEOUT_MAX_SECS => {
+            std::time::Duration::from_secs(secs)
+        }
+        _ => {
+            // Loud fallback (PR #1968 review): an ignored override must not
+            // leave the operator wondering why their timeout did not apply.
+            tracing::warn!(
+                value = %raw,
+                "invalid COSH_CORE_APPROVAL_TIMEOUT_SECS (want 1..={} secs); \
+                 falling back to the default approval timeout",
+                APPROVAL_RESPONSE_TIMEOUT_MAX_SECS
+            );
+            fallback()
+        }
+    }
 }
 
 fn hook_decision_name(decision: &HookDecision) -> &'static str {
@@ -2061,6 +2192,7 @@ fn approval_audit_outcome(approval: &ApprovalResult) -> (AuditOutcomeStatus, &'s
             (AuditOutcomeStatus::Allowed, "allow")
         }
         ApprovalResult::Denied(_) => (AuditOutcomeStatus::Denied, "deny"),
+        ApprovalResult::TimedOut => (AuditOutcomeStatus::Denied, "timeout"),
         ApprovalResult::Interrupted => (AuditOutcomeStatus::Cancelled, "interrupted"),
     }
 }
