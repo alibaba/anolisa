@@ -15,6 +15,7 @@ use crate::agent::run::{
     start_agent_run_with_origin, stop_active_agent_run_without_rendering, AgentStartIntent,
 };
 use crate::approval::runtime::render_approval_actions;
+use crate::i18n::MessageId;
 use crate::insight::model::InterventionDecision;
 use crate::insight::policy::InterventionGates;
 use crate::question::runtime::{
@@ -186,6 +187,8 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_startup_health_banner(state, output)?;
     render_pending_recommendation_notice(state, output)?;
     update_personal_shell_input_state(action_events, state);
+    update_soft_newline_tip_state(action_events, state);
+    crate::runtime::prompt_draft::handle_prompt_draft_events(action_events, state, output)?;
     let personal_idle = state.agent_run.active.is_none()
         && !state.personalization.shell_input_active
         && !action_events
@@ -331,6 +334,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     }
     flush_held_agent_events(state, output)?;
     poll_background_compaction(state, output, adapter, false)?;
+    render_soft_newline_tip(events, state, output)?;
     render_owned_shell_prompt(state, output)?;
 
     Ok(())
@@ -352,6 +356,50 @@ fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineSt
             _ => {}
         }
     }
+}
+
+fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState) {
+    if state.shown_soft_newline_tip {
+        return;
+    }
+    let observed = events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("soft_newline_shortcut")
+    });
+    if observed {
+        state.pending_soft_newline_tip = true;
+    }
+}
+
+/// One-time discoverability tip (#1721 T-c): a soft-newline shortcut was
+/// pressed on the bash-owned input path where it cannot take effect. Rendered
+/// only at a prompt-ready boundary; output-side only, never touches input
+/// relaying or marker timing.
+fn render_soft_newline_tip<W: Write>(
+    events: &[ShellEvent],
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if !state.pending_soft_newline_tip || state.shown_soft_newline_tip {
+        return Ok(());
+    }
+    if !events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::ShellReady)
+    {
+        return Ok(());
+    }
+    // D12: never interleave the tip with an in-progress draft; only render
+    // at a quiet prompt boundary.
+    if state.personalization.shell_input_active {
+        return Ok(());
+    }
+    let tip = state.i18n().t(MessageId::PromptSoftNewlineTip);
+    write!(output, "\x1b[2m{tip}\x1b[0m\r\n")?;
+    output.flush()?;
+    state.pending_soft_newline_tip = false;
+    state.shown_soft_newline_tip = true;
+    Ok(())
 }
 
 fn render_owned_shell_prompt<W: Write>(

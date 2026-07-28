@@ -989,7 +989,7 @@ fn ensure_no_adapter_claims(
 /// way out; this mapping only renders it.
 fn plan_error_to_cli(err: PlanError, target: &str, command: &str, store: &StateStore) -> CliError {
     match err {
-        PlanError::NotInstalled => CliError::InvalidArgument {
+        PlanError::NotInstalled => CliError::NotInstalled {
             command: command.to_string(),
             reason: format!(
                 "component '{target}' is not installed — nothing to uninstall (run `anolisa status` to see what is installed)",
@@ -1418,11 +1418,11 @@ mod tests {
         );
     }
 
-    /// Asking to uninstall a component that is not installed must
-    /// surface `INVALID_ARGUMENT` (exit 2), not `EXECUTION_FAILED`,
-    /// so wrapping scripts can rely on the routing.
+    /// Asking to uninstall a component that is not installed must surface
+    /// `NOT_INSTALLED` (exit 2), not `EXECUTION_FAILED` — the machine did
+    /// not fail, there was simply nothing to act on.
     #[test]
-    fn uninstall_unknown_component_routes_to_invalid_argument_exit_2() {
+    fn uninstall_unknown_component_routes_to_not_installed_exit_2() {
         let tmp = tempdir().expect("tmpdir");
         let err = handle(
             args("agentsight", false),
@@ -1434,7 +1434,7 @@ mod tests {
             ),
         )
         .expect_err("must error");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert_eq!(err.exit_code(), 2);
         assert!(
             err.reason().contains("not installed"),
@@ -1519,7 +1519,7 @@ mod tests {
             ),
         )
         .expect_err("dry-run must report the same refusal as a real run");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert!(err.reason().contains("not installed"), "{}", err.reason());
     }
 

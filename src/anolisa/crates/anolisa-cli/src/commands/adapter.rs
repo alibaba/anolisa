@@ -599,8 +599,9 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
 // ---------------------------------------------------------------------------
 
 /// Map an [`AdapterError`] to the CLI error model. Input/environment
-/// problems are `INVALID_ARGUMENT` (exit 2); machine-side failures (CLI
-/// spawn, lock, state/log IO) are `EXECUTION_FAILED` (exit 1).
+/// problems are `INVALID_ARGUMENT` (exit 2), an absent component is
+/// `NOT_INSTALLED` (also exit 2); machine-side failures (CLI spawn, lock,
+/// state/log IO) are `EXECUTION_FAILED` (exit 1).
 fn map_err(command: &str, err: AdapterError) -> CliError {
     match err {
         AdapterError::UnknownPlaceholder { .. }
@@ -608,7 +609,6 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         | AdapterError::AmbiguousFramework { .. }
         | AdapterError::UnsupportedAdapterType { .. }
         | AdapterError::InvalidAdapterInput { .. }
-        | AdapterError::ComponentNotInstalled { .. }
         | AdapterError::AdapterNotDeclared { .. }
         | AdapterError::ResourceRootNotFound { .. }
         | AdapterError::ContractResourceRootNotFound { .. }
@@ -617,6 +617,13 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         | AdapterError::BundleInvalid { .. }
         | AdapterError::UnsafeInstallNotApplicable { .. }
         | AdapterError::ClaimValidation(_) => CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: err.to_string(),
+        },
+        // Same condition the lifecycle commands report as NOT_INSTALLED:
+        // the target is absent from state. Routing it anywhere else would
+        // make the code depend on which command the caller happened to run.
+        AdapterError::ComponentNotInstalled { .. } => CliError::NotInstalled {
             command: command.to_string(),
             reason: err.to_string(),
         },
@@ -714,6 +721,21 @@ mod tests {
             }
             _ => panic!("expected enable"),
         }
+    }
+
+    /// An absent component reports the same code here as it does from
+    /// `uninstall`/`update`/`repair`, so a caller never has to know which
+    /// command surfaced the condition.
+    #[test]
+    fn component_not_installed_maps_to_not_installed() {
+        let err = map_err(
+            "adapter enable",
+            AdapterError::ComponentNotInstalled {
+                component: "cosh".to_string(),
+            },
+        );
+        assert_eq!(err.code(), "NOT_INSTALLED");
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]

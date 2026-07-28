@@ -198,6 +198,9 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Jul 27 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.5-1
+- fix(memory): improve auto-recall for long English and CJK prompts
+
 * Fri Jul 17 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.2.4-1
 - fix(memory): auto-recall returns empty results after observe — synchronously reindex after memory_observe so before_prompt_build hook finds new content (#1520)
 - fix(memory): install.sh sets allowConversationAccess for hooks (#1521)

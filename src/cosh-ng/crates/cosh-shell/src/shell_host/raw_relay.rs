@@ -23,11 +23,13 @@ use super::prompt_replay::{
 };
 
 mod input_events;
+mod input_readiness;
 mod pty_emit;
 mod terminal_recovery;
 mod terminal_size;
 
 use input_events::drain_raw_input_events;
+use input_readiness::RawInputReadinessProbe;
 use pty_emit::resolve_pty_emit;
 #[cfg(test)]
 use pty_emit::restore_prompt_display_before_handoff;
@@ -80,6 +82,7 @@ where
     let mut last_pty_output: Option<Instant> = None;
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut pending_prompt_restore = None;
+    let mut input_readiness = RawInputReadinessProbe::from_env();
     loop {
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
@@ -337,6 +340,7 @@ where
             )?;
             output.flush()?;
         }
+        input_readiness.acknowledge_if_ready(output, input_mode)?;
         // The PTY is drained (WouldBlock) at this point: write off
         // submissions a foreground program consumed once the shell has
         // painted a prompt after the last boundary and idles at it. A bare

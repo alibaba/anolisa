@@ -21,12 +21,13 @@ use super::relay::{
     relay_prompt_ghost_input, send_held_input_events, send_raw_input_events,
     write_user_bytes_to_pty, ExplicitExitTracker, InputRelayContext,
 };
-use super::{PromptGhostRoute, RawInputEvent, ESC};
+use super::{MainPromptGate, PromptGhostRoute, RawInputEvent, ESC};
 
 mod action;
 mod capture;
 mod prompt_ghost;
 mod reader;
+mod state;
 #[cfg(test)]
 mod tests;
 
@@ -41,35 +42,13 @@ use prompt_ghost::{
     dismiss_replaced_prompt_ghost, PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix,
 };
 use reader::read_input_chunks;
+pub(super) use state::RawInputRelayState;
+use state::{flush_pending_draft_escape, input_relay_context, sync_pending_draft_escape};
 
 const PROMPT_GHOST_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 const DELAY_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 // Retain a complete split Shift+Tab sequence while the relay handles ESC.
 const INPUT_READ_AHEAD_CAPACITY: usize = 3;
-
-#[derive(Default)]
-pub(super) struct RawInputRelayState {
-    card_state: CardInputState,
-    line_buffer: CandidateLineBuffer,
-    native_line_state: NativeLineState,
-    exit_tracker: ExplicitExitTracker,
-    input_generation: UserPtyInputGeneration,
-    line_submits: LineSubmitCounter,
-    pending_prompt_ghost_escape: Option<PendingPromptGhostEscape>,
-    pending_delay_escape: Option<PendingDelayEscape>,
-    pending_replaced_prompt_ghost_suffix: Option<PendingReplacedPromptGhostSuffix>,
-    capture_owned_input: CaptureOwnedInput,
-    deferred_input: Option<InputRead>,
-}
-
-impl RawInputRelayState {
-    fn with_generation(input_generation: UserPtyInputGeneration) -> Self {
-        Self {
-            input_generation,
-            ..Self::default()
-        }
-    }
-}
 
 enum InputRead {
     Bytes {
@@ -96,6 +75,7 @@ pub(crate) fn spawn_raw_input_relay<R>(
     input_classifier: InputClassifier,
     input_mode: Arc<Mutex<RawInputMode>>,
     input_generation: UserPtyInputGeneration,
+    main_prompt_gate: MainPromptGate,
 ) -> JoinHandle<io::Result<()>>
 where
     R: Read + Send + 'static,
@@ -106,11 +86,19 @@ where
         let reader_input_mode = input_mode.clone();
         thread::spawn(move || read_input_chunks(input, read_tx, reader_input_mode));
 
-        let mut state = RawInputRelayState::with_generation(input_generation);
+        let mut state =
+            RawInputRelayState::with_generation_and_gate(input_generation, main_prompt_gate);
         loop {
+            sync_pending_draft_escape(&mut state);
             let input = match receive_input(&read_rx, &mut state) {
                 Ok(input) => input,
                 Err(RecvTimeoutError::Timeout) => {
+                    flush_pending_draft_escape(
+                        Instant::now(),
+                        &input_events,
+                        &input_mode,
+                        &mut state,
+                    );
                     flush_pending_prompt_ghost_escape(
                         false,
                         Instant::now(),
@@ -272,6 +260,7 @@ pub(super) fn next_pending_deadline(state: &RawInputRelayState) -> Option<Instan
                 .as_ref()
                 .map(|pending| pending.deadline),
         )
+        .chain(state.pending_draft_escape_deadline)
         .min()
 }
 
@@ -603,6 +592,7 @@ fn relay_input_for_mode(
         deferred_input,
         input_generation,
         line_submits,
+        main_prompt_gate,
         ..
     } = state;
     let mut relay = InputRelayContext {
@@ -615,6 +605,7 @@ fn relay_input_for_mode(
         line_buffer,
         native_line_state,
         exit_tracker,
+        main_prompt_gate,
     };
     relay_input_chunk(
         bytes,
@@ -626,26 +617,6 @@ fn relay_input_for_mode(
         read_context.expected_capture_generation,
         &mut relay,
     )
-}
-
-fn input_relay_context<'a>(
-    master: &'a mut File,
-    input_classifier: &'a InputClassifier,
-    input_events: &'a Sender<RawInputEvent>,
-    input_mode: &'a Arc<Mutex<RawInputMode>>,
-    state: &'a mut RawInputRelayState,
-) -> InputRelayContext<'a> {
-    InputRelayContext {
-        master,
-        input_classifier,
-        input_events,
-        input_mode,
-        input_generation: &state.input_generation,
-        line_submits: &mut state.line_submits,
-        line_buffer: &mut state.line_buffer,
-        native_line_state: &mut state.native_line_state,
-        exit_tracker: &mut state.exit_tracker,
-    }
 }
 
 fn flush_pending_prompt_ghost_escape(

@@ -95,6 +95,7 @@ fn capture_target(capture: &RawInputCapture) -> (&'static str, &str) {
         RawInputCapture::Session { id, .. } => ("session", id),
         RawInputCapture::Consultation { id } => ("consultation", id),
         RawInputCapture::Evidence { id } => ("evidence", id),
+        RawInputCapture::PromptDraft { id, .. } => ("prompt_draft", id),
     }
 }
 

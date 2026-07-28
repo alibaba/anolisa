@@ -34,6 +34,14 @@ fn raw_cli_help_renders_slash_command_reference() {
         "{output}"
     );
     assert!(normalized.contains("/status"), "{output}");
+    // /auth renders as an indented group entry with its own summary line; the
+    // contextual /audit stays hidden below. Config-group membership is pinned
+    // by the registry unit test recommendations_and_auth_are_public_config_controls.
+    assert!(normalized.contains("│   /auth"), "{output}");
+    assert!(
+        normalized.contains("│       configure AI provider credentials"),
+        "{output}"
+    );
     assert!(normalized.contains("/stats [model|tools]"), "{output}");
     assert!(
         normalized.contains("/mode approval [recommend|auto|trust]"),
