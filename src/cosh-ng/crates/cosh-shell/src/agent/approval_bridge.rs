@@ -18,7 +18,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<bool> {
-    if state.approval_mode != CoshApprovalMode::Trust {
+    if state.effective_approval_mode() != CoshApprovalMode::Trust {
         return Ok(false);
     }
 
@@ -111,7 +111,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<bool> {
-    if state.approval_mode != CoshApprovalMode::Auto {
+    if state.effective_approval_mode() != CoshApprovalMode::Auto {
         return Ok(false);
     }
 

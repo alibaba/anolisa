@@ -9,7 +9,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeApprovalLine => "审批: {mode}",
         MessageId::ModeAnalysisLine => "分析: {mode}",
         MessageId::ModeSummaryFooter => {
-            "使用 /mode approval [recommend|auto|trust] 或 /mode analysis [smart|auto|manual]。"
+            "使用 /mode approval [recommend|auto|trust]、/mode analysis [smart|auto|manual] 或 /mode plan [on|off|status]。"
         }
         MessageId::ModeRemovedTitle => "模式命令已移除",
         MessageId::ModeRemovedBody => "/mode {mode} 不再支持。",
@@ -75,6 +75,19 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AnalysisModeRemainsBody => "模式仍为 {mode}。",
         MessageId::AnalysisModeCancelBody => "模式未改变: {mode}。",
         MessageId::AnalysisModeCancelFooter => "没有执行 shell 命令。",
+        MessageId::PlanModeTitle => "Plan 模式",
+        MessageId::PlanModeOnBody => "Plan 模式已开启。",
+        MessageId::PlanModeOffBody => "Plan 模式已关闭。",
+        MessageId::PlanModeStatusBody => "Plan 模式: {state}。",
+        MessageId::PlanModeUnknownBody => "未知 plan 选项: {option}",
+        MessageId::PlanModeUsageFooter => {
+            "使用 /plan [on|off|status] 或 /mode plan [on|off|status]。"
+        }
+        MessageId::PlanModeOnFooter => {
+            "Agent 只做规划不执行变更；在运行 /plan off 之前保持只读。"
+        }
+        MessageId::PlanModeOffFooter => "已恢复审批模式 {mode}。",
+        MessageId::ModePlanLine => "plan: {state}",
         _ => return None,
     })
 }

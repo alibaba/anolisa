@@ -19,6 +19,7 @@ pub(super) enum SlashCommand<'a> {
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Mode(Option<&'a str>, Option<&'a str>, Option<&'a str>),
+    Plan(Option<&'a str>),
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
     #[allow(dead_code)]
@@ -71,6 +72,7 @@ impl<'a> SlashCommand<'a> {
                 let third = parts.next();
                 Some(Self::Mode(first, second, third))
             }
+            "/plan" => Some(Self::Plan(parts.next())),
             "/approval-mode" => Some(Self::Removed(RemovedCommand::ApprovalMode(parts.next()))),
             "/allow" | "/approve" | "/deny" => {
                 Some(Self::Removed(RemovedCommand::ApprovalDecision(token)))
@@ -142,6 +144,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/auth"
             | "/hooks"
             | "/mode"
+            | "/plan"
             | "/approval-mode"
             | "/allow"
             | "/approve"
@@ -246,6 +249,24 @@ mod tests {
     }
 
     #[test]
+    fn plan_command_parses_with_and_without_subcommand() {
+        match SlashCommand::parse("/plan") {
+            Ok(Some(SlashCommand::Plan(None))) => {}
+            _ => panic!("/plan did not parse as plan toggle"),
+        }
+        for (command, expected) in [
+            ("/plan on", "on"),
+            ("/plan off", "off"),
+            ("/plan status", "status"),
+        ] {
+            match SlashCommand::parse(command) {
+                Ok(Some(SlashCommand::Plan(Some(sub)))) => assert_eq!(sub, expected),
+                _ => panic!("{command} did not parse as plan command"),
+            }
+        }
+    }
+
+    #[test]
     fn status_about_and_stats_parse_as_read_only_commands() {
         for command in ["/status", "/about"] {
             assert!(
@@ -268,6 +289,7 @@ mod tests {
             "/health \"quick\"",
             "/stats \"model\"",
             "/recommendations \"on\"",
+            "/plan \"on\"",
         ] {
             assert!(
                 matches!(

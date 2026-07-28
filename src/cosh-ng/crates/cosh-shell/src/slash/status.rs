@@ -67,6 +67,7 @@ pub(super) fn render_status_command<W: Write>(
             &[
                 ("approval", state.approval_mode.label()),
                 ("analysis", state.analysis_mode.label()),
+                ("plan", state.plan_mode_label()),
             ],
         ),
     ];

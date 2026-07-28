@@ -13,6 +13,7 @@ pub(crate) fn render_mode_command<W: Write>(
         None => render_mode_summary(state, output),
         Some("approval") => render_approval_mode_command(sub, confirm, state, output),
         Some("analysis") => render_analysis_mode_command(sub, state, output),
+        Some("plan") => render_plan_mode_command(sub, false, state, output),
         Some("recommend" | "auto" | "trust") => render_notice_panel(
             output,
             state.i18n().t(MessageId::ModeRemovedTitle),
@@ -57,6 +58,10 @@ fn render_mode_summary<W: Write>(state: &InlineState, output: &mut W) -> std::io
             state.i18n().format(
                 MessageId::ModeAnalysisLine,
                 &[("mode", state.analysis_mode.label())],
+            ),
+            state.i18n().format(
+                MessageId::ModePlanLine,
+                &[("state", state.plan_mode_label())],
             ),
         ],
         Some(state.i18n().t(MessageId::ModeSummaryFooter)),
@@ -216,6 +221,79 @@ fn render_analysis_mode_command<W: Write>(
         )
         .map(|_| true),
     }
+}
+
+pub(crate) fn render_plan_command<W: Write>(
+    sub: Option<&str>,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    render_plan_mode_command(sub, true, state, output)
+}
+
+fn render_plan_mode_command<W: Write>(
+    sub: Option<&str>,
+    toggle_when_missing: bool,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    match sub {
+        None if toggle_when_missing => set_plan_mode(!state.plan_mode, state, output),
+        None | Some("status") => render_plan_mode_status(state, output),
+        Some("on") => set_plan_mode(true, state, output),
+        Some("off") => set_plan_mode(false, state, output),
+        Some(other) => render_notice_panel(
+            output,
+            state.i18n().t(MessageId::PlanModeTitle),
+            vec![state
+                .i18n()
+                .format(MessageId::PlanModeUnknownBody, &[("option", other)])],
+            Some(state.i18n().t(MessageId::PlanModeUsageFooter)),
+        )
+        .map(|_| true),
+    }
+}
+
+fn set_plan_mode<W: Write>(
+    on: bool,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    state.plan_mode = on;
+    let (body, footer) = if on {
+        (
+            state.i18n().t(MessageId::PlanModeOnBody).to_string(),
+            state.i18n().t(MessageId::PlanModeOnFooter).to_string(),
+        )
+    } else {
+        (
+            state.i18n().t(MessageId::PlanModeOffBody).to_string(),
+            state.i18n().format(
+                MessageId::PlanModeOffFooter,
+                &[("mode", state.approval_mode.label())],
+            ),
+        )
+    };
+    render_notice_panel(
+        output,
+        state.i18n().t(MessageId::PlanModeTitle),
+        vec![body],
+        Some(&footer),
+    )?;
+    Ok(true)
+}
+
+fn render_plan_mode_status<W: Write>(state: &InlineState, output: &mut W) -> std::io::Result<bool> {
+    render_notice_panel(
+        output,
+        state.i18n().t(MessageId::PlanModeTitle),
+        vec![state.i18n().format(
+            MessageId::PlanModeStatusBody,
+            &[("state", state.plan_mode_label())],
+        )],
+        Some(state.i18n().t(MessageId::PlanModeUsageFooter)),
+    )?;
+    Ok(true)
 }
 
 pub(crate) fn render_mode_card_actions<W: Write>(

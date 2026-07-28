@@ -64,3 +64,24 @@ macro_rules! mode_ids {
         );
     };
 }
+
+// Appended as a trailing segment so existing MessageId discriminants stay
+// stable (see the ordinal test in i18n/mod.rs).
+macro_rules! plan_mode_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            PlanModeTitle,
+            PlanModeOnBody,
+            PlanModeOffBody,
+            PlanModeStatusBody,
+            PlanModeUnknownBody,
+            PlanModeUsageFooter,
+            PlanModeOnFooter,
+            PlanModeOffFooter,
+            ModePlanLine,
+            HelpSummaryPlan,
+        );
+    };
+}

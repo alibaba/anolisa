@@ -9,7 +9,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeApprovalLine => "approval: {mode}",
         MessageId::ModeAnalysisLine => "analysis: {mode}",
         MessageId::ModeSummaryFooter => {
-            "Use /mode approval [recommend|auto|trust] or /mode analysis [smart|auto|manual]."
+            "Use /mode approval [recommend|auto|trust], /mode analysis [smart|auto|manual], or /mode plan [on|off|status]."
         }
         MessageId::ModeRemovedTitle => "Mode command removed",
         MessageId::ModeRemovedBody => "/mode {mode} is not supported.",
@@ -87,6 +87,19 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AnalysisModeRemainsBody => "Mode remains {mode}.",
         MessageId::AnalysisModeCancelBody => "Mode unchanged: {mode}.",
         MessageId::AnalysisModeCancelFooter => "No shell command ran.",
+        MessageId::PlanModeTitle => "Plan mode",
+        MessageId::PlanModeOnBody => "Plan mode is on.",
+        MessageId::PlanModeOffBody => "Plan mode is off.",
+        MessageId::PlanModeStatusBody => "Plan mode: {state}.",
+        MessageId::PlanModeUnknownBody => "Unknown plan option: {option}",
+        MessageId::PlanModeUsageFooter => {
+            "Use /plan [on|off|status] or /mode plan [on|off|status]."
+        }
+        MessageId::PlanModeOnFooter => {
+            "Agent plans without executing changes; runs stay read-only until you run /plan off."
+        }
+        MessageId::PlanModeOffFooter => "Approval mode {mode} is active again.",
+        MessageId::ModePlanLine => "plan: {state}",
         _ => return None,
     })
 }

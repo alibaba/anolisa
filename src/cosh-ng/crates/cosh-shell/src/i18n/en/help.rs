@@ -26,6 +26,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "manage personalized prompt recommendations only (failure insights: /mode analysis); analysis sends bounded activity to the provider, and local clear does not control provider retention"
         }
         MessageId::HelpSummaryModeApproval => "change approval mode",
+        MessageId::HelpSummaryPlan => {
+            "toggle plan mode: agent plans and suggests without executing changes"
+        }
         MessageId::HelpSummaryModeAnalysis => {
             "choose suggested mode, automatic analysis, or no proactive assistance; controls passive suggestions and failure insights after failed commands"
         }
@@ -102,7 +105,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashStatusSessionLine => "Session: {session}",
         MessageId::SlashStatusOsLine => "OS: {os}",
         MessageId::SlashStatusModesLine => {
-            "Modes: approval={approval}, analysis={analysis}"
+            "Modes: approval={approval}, analysis={analysis}, plan={plan}"
         }
         MessageId::SlashStatusProviderUnavailableLine => {
             "Provider details: unavailable from the current backend"

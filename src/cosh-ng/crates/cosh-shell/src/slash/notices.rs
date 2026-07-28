@@ -110,7 +110,7 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
             footer: i18n.format(
                 MessageId::HelpFooter,
                 &[
-                    ("mode", state.approval_mode.label()),
+                    ("mode", state.approval_mode_display_label()),
                     ("strategy", state.analysis_mode.label()),
                 ],
             ),
@@ -129,7 +129,7 @@ pub(super) fn render_hint<W: Write>(
             .format(MessageId::SlashHintPrefix, &[("prefix", prefix)]),
         state.i18n().format(
             MessageId::SlashHintCurrentMode,
-            &[("mode", state.approval_mode.label())],
+            &[("mode", state.approval_mode_display_label())],
         ),
     ];
     body.extend(

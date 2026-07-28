@@ -145,6 +145,22 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/mode",
+            usage: "/mode plan [on|off|status]",
+            summary_id: MessageId::HelpSummaryPlan,
+            group: Some("Modes"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/plan",
+            usage: "/plan [on|off|status]",
+            summary_id: MessageId::HelpSummaryPlan,
+            group: Some("Modes"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/agent",
             usage: "/agent",
             summary_id: MessageId::HelpSummaryAgent,
@@ -379,6 +395,8 @@ mod tests {
             .any(|usage| usage.starts_with("/session [new|status|list|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
+        assert!(visible.contains(&"/mode plan [on|off|status]"));
+        assert!(visible.contains(&"/plan [on|off|status]"));
         assert!(visible.contains(&"/hooks"));
         assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
         assert!(!visible.iter().any(|usage| usage.starts_with("/agent")));

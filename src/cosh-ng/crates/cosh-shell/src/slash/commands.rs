@@ -1,4 +1,4 @@
-use crate::runtime::mode::render_mode_command;
+use crate::runtime::mode::{render_mode_command, render_plan_command};
 use crate::runtime::prelude::*;
 use crate::slash::audit::render_audit_command;
 use crate::slash::config::render_config_command;
@@ -45,6 +45,7 @@ pub(super) fn render_slash_command<W: Write>(
         SlashCommand::Mode(arg, sub, confirm) => {
             render_mode_command(arg, sub, confirm, state, output)
         }
+        SlashCommand::Plan(sub) => render_plan_command(sub, state, output),
         SlashCommand::Config(sub, value) => render_config_command(sub, value, state, output),
         SlashCommand::Debug(sub) => {
             render_debug_command(sub, adapter, state, output)?;

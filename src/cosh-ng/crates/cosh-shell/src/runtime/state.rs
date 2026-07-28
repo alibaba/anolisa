@@ -99,6 +99,10 @@ pub(crate) struct InlineState {
     pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,
     pub(crate) analysis_mode: AnalysisMode,
+    /// Session-scoped plan mode toggle (#681). While on, agent runs are
+    /// forced into the read-only Recommend provider mode regardless of the
+    /// configured approval mode.
+    pub(crate) plan_mode: bool,
     pub(crate) debug: bool,
     pub(crate) analysis_throttle: AnalysisThrottle,
     pub(crate) trigger_pty_prompt: bool,
@@ -827,6 +831,34 @@ impl InlineState {
     }
     pub(crate) fn i18n(&self) -> I18n {
         I18n::new(self.language)
+    }
+
+    /// Approval mode after applying the plan-mode override: plan mode forces
+    /// the read-only Recommend contract for agent runs and approval gating.
+    pub(crate) fn effective_approval_mode(&self) -> CoshApprovalMode {
+        if self.plan_mode {
+            CoshApprovalMode::Recommend
+        } else {
+            self.approval_mode
+        }
+    }
+
+    pub(crate) fn plan_mode_label(&self) -> &'static str {
+        if self.plan_mode {
+            "on"
+        } else {
+            "off"
+        }
+    }
+
+    /// User-facing mode label: surfaces "plan" while plan mode overrides the
+    /// configured approval mode.
+    pub(crate) fn approval_mode_display_label(&self) -> &'static str {
+        if self.plan_mode {
+            "plan"
+        } else {
+            self.approval_mode.label()
+        }
     }
 }
 

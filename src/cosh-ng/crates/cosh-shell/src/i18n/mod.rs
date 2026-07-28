@@ -122,10 +122,14 @@ mod tests {
         );
         assert_eq!(
             MessageId::AgentStatusToolArguments as usize,
-            MessageId::ALL.len() - 2
+            MessageId::PlanModeTitle as usize - 2
         );
         assert_eq!(
             MessageId::AgentStatusGeneratingToolArguments as usize,
+            MessageId::PlanModeTitle as usize - 1
+        );
+        assert_eq!(
+            MessageId::HelpSummaryPlan as usize,
             MessageId::ALL.len() - 1
         );
     }

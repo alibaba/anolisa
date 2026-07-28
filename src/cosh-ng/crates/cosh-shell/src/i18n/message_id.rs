@@ -90,4 +90,5 @@ collect_message_ids!([
     status_query_ids,
     prompt_soft_newline_ids,
     tool_argument_status_ids,
+    plan_mode_ids,
 ],);

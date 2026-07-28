@@ -26,6 +26,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "仅管理个性化提示词推荐（失败命令 Insight 由 /mode analysis 控制）；分析会向服务商发送有界活动，本地 clear 不控制服务商侧保留"
         }
         MessageId::HelpSummaryModeApproval => "切换审批模式",
+        MessageId::HelpSummaryPlan => "切换 plan 模式：Agent 只规划和建议，不执行变更",
         MessageId::HelpSummaryModeAnalysis => {
             "选择建议模式、自动分析或关闭主动介入；控制被动建议与失败命令 Insight"
         }
@@ -95,7 +96,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashStatusModelLine => "模型: {model}",
         MessageId::SlashStatusSessionLine => "会话: {session}",
         MessageId::SlashStatusOsLine => "操作系统: {os}",
-        MessageId::SlashStatusModesLine => "模式: 审批={approval}，分析={analysis}",
+        MessageId::SlashStatusModesLine => "模式: 审批={approval}，分析={analysis}，plan={plan}",
         MessageId::SlashStatusProviderUnavailableLine => {
             "服务商详情: 当前后端未提供"
         }
