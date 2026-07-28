@@ -142,6 +142,17 @@ macro_rules! prompt_soft_newline_ids {
             PromptDraftFooterEditing,
             PromptDraftFooterSubmitted,
             PromptDraftFooterCancelled,
+        );
+    };
+}
+
+// #1932 additions live in a trailing segment so the existing MessageId
+// discriminants (a registered stable runtime interface) never shift.
+macro_rules! multiline_entry_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
             HelpGroupPrompt,
             HelpSummaryDraft,
             PromptMultilineEntryHint,

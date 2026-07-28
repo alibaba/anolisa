@@ -120,14 +120,13 @@ mod tests {
             MessageId::ApprovalTitle as usize,
             MessageId::QuestionNoPendingBody as usize + 1
         );
-        assert_eq!(
-            MessageId::AgentStatusToolArguments as usize,
-            MessageId::ALL.len() - 2
-        );
-        assert_eq!(
-            MessageId::AgentStatusGeneratingToolArguments as usize,
-            MessageId::ALL.len() - 1
-        );
+        // The tool-argument status pair is a registered stable runtime
+        // interface: pin the discriminants with fixed values so a segment
+        // inserted ahead of them can never shift the tail unnoticed
+        // (new segments must append after multiline_entry_ids).
+        assert_eq!(MessageId::AgentStatusToolArguments as usize, 829);
+        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 830);
+        assert_eq!(MessageId::HelpGroupPrompt as usize, 831);
     }
 
     #[test]
