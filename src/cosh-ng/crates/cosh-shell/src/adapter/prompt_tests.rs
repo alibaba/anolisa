@@ -973,9 +973,28 @@ fn provider_prompt_contract_includes_language_hint_without_losing_governance() {
         crate::Language::ZhCn,
     );
 
-    assert!(en.contains("Respond in English"), "{en}");
+    assert!(
+        en.contains("If the user explicitly asks for replies in a specific language"),
+        "{en}"
+    );
+    assert!(
+        en.contains("reply in the language of the user's message"),
+        "{en}"
+    );
+    assert!(en.contains("respond in English by default"), "{en}");
     assert!(en.contains("do not emit tool calls"), "{en}");
-    assert!(zh.contains("Respond in Simplified Chinese"), "{zh}");
+    assert!(
+        zh.contains("If the user explicitly asks for replies in a specific language"),
+        "{zh}"
+    );
+    assert!(
+        zh.contains("reply in the language of the user's message"),
+        "{zh}"
+    );
+    assert!(
+        zh.contains("respond in Simplified Chinese by default"),
+        "{zh}"
+    );
     assert!(
         zh.contains("approval system is handled by cosh-shell"),
         "{zh}"

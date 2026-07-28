@@ -194,6 +194,13 @@ fn approval_mode_from_config(value: &str) -> CoshApprovalMode {
 }
 
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
+    // #1721 D13: an open draft card owns every keystroke until submit/cancel.
+    if let Some(draft) = state.prompt_draft.as_ref() {
+        return Some(RawInputCapture::PromptDraft {
+            id: draft.id.clone(),
+            initial_text: draft.text.clone(),
+        });
+    }
     if let Some(session_panel) = state.control.session().pending_panel() {
         return Some(RawInputCapture::Session {
             id: session_panel.id.clone(),

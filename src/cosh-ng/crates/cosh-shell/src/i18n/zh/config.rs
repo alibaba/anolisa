@@ -12,7 +12,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ConfigSavedTitle => "配置已保存",
         MessageId::ConfigSavedValueLine => "已保存 ui.{setting} = \"{value}\"。",
         MessageId::ConfigCurrentSessionLanguageLine => "当前会话语言: {language}。",
-        MessageId::ConfigSavedFooter => "保存的设置会在下次启动时生效。",
+        MessageId::ConfigSavedFooter => "保存的设置立即生效；Agent 回复跟随你的提问语言。",
         MessageId::ConfigSaveFailedTitle => "配置保存失败",
         MessageId::ConfigSaveFailedBody => "配置保存失败: {error}",
         MessageId::ConfigSavePromptTitle => "保存配置？",

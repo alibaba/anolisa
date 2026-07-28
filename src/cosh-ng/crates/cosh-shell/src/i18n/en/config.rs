@@ -12,7 +12,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ConfigSavedTitle => "Config saved",
         MessageId::ConfigSavedValueLine => "Saved ui.{setting} = \"{value}\".",
         MessageId::ConfigCurrentSessionLanguageLine => "Current session language: {language}.",
-        MessageId::ConfigSavedFooter => "Saved setting takes effect next startup.",
+        MessageId::ConfigSavedFooter => {
+            "Saved setting takes effect immediately; agent replies follow your message language."
+        }
         MessageId::ConfigSaveFailedTitle => "Config save failed",
         MessageId::ConfigSaveFailedBody => "Config save failed: {error}",
         MessageId::ConfigSavePromptTitle => "Save config?",

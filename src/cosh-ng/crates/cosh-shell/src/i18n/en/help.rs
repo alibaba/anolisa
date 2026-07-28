@@ -3,7 +3,18 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash commands",
-        MessageId::HelpFooter => "Mode: {mode}. Strategy: {strategy}.",
+        MessageId::HelpFooter => {
+            "Mode: {mode}. Strategy: {strategy}. Shift+Enter / Alt+Enter insert a newline in the prompt; start prompts with ?? to compose multi-line."
+        }
+        MessageId::PromptSoftNewlineTip => {
+            "Tip: start with ?? to compose multi-line prompts (Shift+Enter for newline)."
+        }
+        MessageId::PromptDraftTitle => "Prompt draft",
+        MessageId::PromptDraftFooterEditing => {
+            "Enter send · Shift+Enter newline · Esc cancel"
+        }
+        MessageId::PromptDraftFooterSubmitted => "Sent to agent",
+        MessageId::PromptDraftFooterCancelled => "Draft cancelled",
         MessageId::HelpGroupConfig => "Config",
         MessageId::HelpGroupHealth => "Health",
         MessageId::HelpGroupModes => "Modes",
@@ -69,7 +80,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "render fallback: set COSH_SHELL_RENDER=plain before starting cosh-shell."
         }
         MessageId::SlashInfoConfigFooter => {
-            "Use /config language [auto|en-US|zh-CN]. Saved language takes effect next startup."
+            "Use /config language [auto|en-US|zh-CN]. Takes effect immediately; agent replies follow your message language."
         }
         MessageId::HelpGroupSessions => "Sessions",
         MessageId::HelpSummarySession => "discover, resume, and clear Agent sessions",

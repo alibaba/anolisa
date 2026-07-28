@@ -912,3 +912,77 @@ fn secret_submit_clears_free_text_for_next_capture() {
         ))
     );
 }
+
+fn draft_capture() -> RawInputCapture {
+    RawInputCapture::PromptDraft {
+        id: "draft-1".to_string(),
+        initial_text: "第一行".to_string(),
+    }
+}
+
+// Split legacy Alt+Enter (#1721): a trailing bare ESC is held (possible split legacy Alt+Enter);
+// a following CR resolves to a soft newline instead of a cancel.
+#[test]
+fn draft_bare_esc_then_cr_inserts_newline_across_chunks() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+        "bare ESC must be held, not cancel: {events:?}"
+    );
+    assert!(state.draft_escape_pending(), "ESC must be pending");
+
+    let (events, _) = state.consume_split(&capture, b"\r");
+    let changed = events
+        .iter()
+        .find_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("split ESC+CR must insert a newline");
+    assert_eq!(changed, "第一行\n");
+    assert!(!state.draft_escape_pending());
+}
+
+// Split legacy Alt+Enter (#1721): on timeout the relay injects a second ESC; the held ESC plus
+// the injected one resolve to the explicit cancel path.
+#[test]
+fn draft_bare_esc_timeout_injection_cancels() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (_, _) = state.consume_split(&capture, b"\x1b");
+    assert!(state.draft_escape_pending());
+    let (events, _) = state.consume_split(&capture, b"\x1b");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+        "injected second ESC must cancel: {events:?}"
+    );
+}
+
+// Pasted data integrity (#1721): tabs inside a bracketed paste are data, not completion keys.
+#[test]
+fn draft_pasted_tab_is_inserted_as_data() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[200~A\tB\x1b[201~");
+    let changed = events
+        .iter()
+        .filter_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("paste must report a draft change");
+    assert_eq!(changed, "第一行A\tB", "pasted tab must survive: {changed}");
+}

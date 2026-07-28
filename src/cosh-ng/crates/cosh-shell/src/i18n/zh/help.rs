@@ -3,7 +3,18 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
-        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
+        MessageId::HelpFooter => {
+            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可多行组稿。"
+        }
+        MessageId::PromptSoftNewlineTip => {
+            "提示：以 ?? 开头可组稿多行 prompt（Shift+Enter 换行）。"
+        }
+        MessageId::PromptDraftTitle => "Prompt 草稿",
+        MessageId::PromptDraftFooterEditing => {
+            "Enter 发送 · Shift+Enter 换行 · Esc 取消"
+        }
+        MessageId::PromptDraftFooterSubmitted => "已发送给 Agent",
+        MessageId::PromptDraftFooterCancelled => "草稿已取消",
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
@@ -63,7 +74,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "渲染降级: 启动 cosh-shell 前设置 COSH_SHELL_RENDER=plain。"
         }
         MessageId::SlashInfoConfigFooter => {
-            "使用 /config language [auto|en-US|zh-CN]。保存的语言会在下次启动时生效。"
+            "使用 /config language [auto|en-US|zh-CN]。设置立即生效；Agent 回复跟随你的提问语言。"
         }
         MessageId::HelpGroupSessions => "会话",
         MessageId::HelpSummarySession => "查找、恢复和清理智能体会话",

@@ -130,7 +130,13 @@ pub(super) fn render_skills_command<W: Write>(
     }
 }
 
-fn format_skills_list(data: &Value, i18n: &I18n) -> Vec<String> {
+/// Renders one short line per skill.
+///
+/// Descriptions are deliberately omitted: they are unbounded free text, so
+/// appending them made every row wrap over several terminal lines and turned
+/// the list into a wall of prose. Full text stays available via
+/// `/skills detail <name>`.
+pub(super) fn format_skills_list(data: &Value, i18n: &I18n) -> Vec<String> {
     let Some(arr) = data.as_array() else {
         return vec![i18n.t(MessageId::SlashSkillsEmptyBody).to_string()];
     };
@@ -140,25 +146,21 @@ fn format_skills_list(data: &Value, i18n: &I18n) -> Vec<String> {
     arr.iter()
         .filter_map(|skill| {
             let name = skill.get("name")?.as_str()?;
-            let desc = skill
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
             let level = skill.get("level").and_then(|v| v.as_str()).unwrap_or("?");
             let disabled = skill
                 .get("disabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if disabled {
-                Some(format!("  ○ {name} [{level}] [disabled] — {desc}"))
+                Some(format!("  ○ {name} [{level}] [disabled]"))
             } else {
-                Some(format!("  • {name} [{level}] — {desc}"))
+                Some(format!("  • {name} [{level}]"))
             }
         })
         .collect()
 }
 
-fn format_skill_detail(data: &Value) -> Vec<String> {
+pub(super) fn format_skill_detail(data: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
         lines.push(format!("  Name: {name}"));
