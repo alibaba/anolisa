@@ -15,10 +15,6 @@ use crate::auth::menu::{
     has_manageable_entries, management_entry, management_entry_count, management_entry_index,
     AuthManagementEntry, EcsRamRolePrepare, PrefetchedAliyunPrepare, SysomMenu,
 };
-use crate::auth::menu::{
-    has_manageable_entries, management_entry, management_entry_count, management_entry_index,
-    AuthManagementEntry, EcsRamRolePrepare, PrefetchedAliyunPrepare, SysomMenu,
-};
 use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
 use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
