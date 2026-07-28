@@ -139,6 +139,13 @@ pub(crate) enum RawInputEvent {
     CaptureOverflow {
         generation: u64,
     },
+    /// Quarantined submit-window bytes were discarded on an unsafe chain
+    /// terminal state (follow-up card, invalidated chain, late arrival);
+    /// the runtime renders a visible rejection notice (#1913).
+    CaptureInputRejected {
+        generation: u64,
+        byte_len: usize,
+    },
     CardFocus(String, usize),
     CardToggle(String, usize),
     CardInput(String, String),

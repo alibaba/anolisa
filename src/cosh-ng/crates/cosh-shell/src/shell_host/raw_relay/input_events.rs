@@ -221,6 +221,12 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 None,
                 None,
             ),
+            RawInputEvent::CaptureInputRejected { generation, .. } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::InputRejected,
+                generation,
+                None,
+                None,
+            ),
             RawInputEvent::CardFocus(id, selected) => {
                 parser.push_card_event("focus", &format!("{id}:{selected}"))
             }

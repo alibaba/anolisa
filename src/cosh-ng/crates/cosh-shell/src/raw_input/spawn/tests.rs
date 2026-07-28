@@ -265,6 +265,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
         generation: 7,
         next_capture: Some(next),
         invalidated: false,
+        post_owner: PostCaptureOwner::MainPrompt,
     };
     let mode = current_raw_input_mode(&input_mode);
     flush_pending_replaced_prompt_ghost_suffix(

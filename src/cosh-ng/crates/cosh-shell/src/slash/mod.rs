@@ -1,4 +1,5 @@
 pub(super) mod audit;
+pub(super) mod capture_notice;
 pub(super) mod commands;
 pub(super) mod config;
 pub(super) mod debug;

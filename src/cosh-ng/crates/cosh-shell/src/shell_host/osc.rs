@@ -743,6 +743,7 @@ impl OscParser {
             ShellCaptureLifecycle::Drained => "capture_drained",
             ShellCaptureLifecycle::Expired => "capture_expired",
             ShellCaptureLifecycle::Overflow => "capture_overflow",
+            ShellCaptureLifecycle::InputRejected => "capture_input_rejected",
         };
         self.events.push(ShellEvent {
             kind: ShellEventKind::UserInputIntercepted,

@@ -104,11 +104,52 @@ pub(crate) enum RawInputMode {
         generation: u64,
         next_capture: Option<RawInputCapture>,
         invalidated: bool,
+        post_owner: PostCaptureOwner,
     },
     Terminal {
         previous_capture: RawInputCapture,
         generation: u64,
     },
+}
+
+/// Input owner acknowledged by the observer for after the capture chain
+/// drains. The drain terminal installs this owner (instead of assuming
+/// the main prompt) so quarantined submit-window bytes replay with the
+/// same routing a live keystroke would get under that owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostCaptureOwner {
+    MainPrompt,
+    Delay,
+    RawPassthrough,
+    Hold,
+    /// A prompt ghost cannot be reconstructed from the drain terminal;
+    /// replaying into its interactive Tab/Enter interpreter could submit
+    /// text the user never confirmed, so this owner rejects the replay.
+    PromptGhost,
+}
+
+impl PostCaptureOwner {
+    /// Exhaustive on purpose: a new observer action must pick an owner
+    /// classification before it can follow a submitted capture.
+    pub(crate) fn from_action(action: &RawObserverAction) -> Self {
+        match action {
+            RawObserverAction::DelayShellOutput => Self::Delay,
+            RawObserverAction::RawPassthrough => Self::RawPassthrough,
+            RawObserverAction::HoldShellOutput => Self::Hold,
+            RawObserverAction::RestorePrompt {
+                ghost_text: Some(_),
+                ..
+            } => Self::PromptGhost,
+            RawObserverAction::CaptureInput(_)
+            | RawObserverAction::Continue
+            | RawObserverAction::EmitToPty(_)
+            | RawObserverAction::EmitToPtyWithPromptRestore(_)
+            | RawObserverAction::InterruptForeground
+            | RawObserverAction::RestorePrompt {
+                ghost_text: None, ..
+            } => Self::MainPrompt,
+        }
+    }
 }
 
 /// Input ownership boundary for a [`RawInputMode`]. Display-only updates

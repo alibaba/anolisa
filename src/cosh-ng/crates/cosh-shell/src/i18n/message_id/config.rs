@@ -30,3 +30,16 @@ macro_rules! config_ids {
         );
     };
 }
+
+// #1913 additions live in a trailing segment so the existing MessageId
+// discriminants (a registered stable runtime interface) never shift.
+macro_rules! capture_notice_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            CaptureInputRejectedTitle,
+            CaptureInputRejectedBody,
+        );
+    };
+}

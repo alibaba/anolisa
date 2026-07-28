@@ -134,7 +134,7 @@ pub(super) fn flush_pending_draft_escape(
         );
         if result.generation.is_some() {
             let RawInputRelayState {
-                card_state: _,
+                card_state,
                 line_buffer,
                 native_line_state,
                 exit_tracker,
@@ -163,6 +163,7 @@ pub(super) fn flush_pending_draft_escape(
             relay.native_line_state.clear();
             drain_capture_submission(
                 result,
+                card_state,
                 capture_owned_input,
                 deferred_input,
                 None,

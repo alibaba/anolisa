@@ -734,7 +734,7 @@ fn raw_relay_hold_mode_still_observes_ctrl_c() {
 }
 
 #[test]
-fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
+fn raw_relay_capture_ack_replays_same_read_multiline_suffix() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-capture-drain-test-{}-{}",
         std::process::id(),
@@ -754,7 +754,7 @@ fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
         vec![
             RawRelayAction::wait(Duration::from_millis(50)),
             RawRelayAction::write(b"yes\necho capture-drain-ok\n".to_vec()),
-            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::wait(Duration::from_millis(400)),
         ],
         Vec::new(),
         move |events, _| {
@@ -770,12 +770,15 @@ fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
     )
     .expect("capture drain relay");
 
+    // issue #1913: the suffix typed in the same read as the submitting
+    // Enter is type-ahead, not capture input. A cleanly drained chain
+    // replays it to the shell instead of silently discarding it.
     let blocks: Vec<_> = ledger_from_output(&output)
         .blocks
         .into_iter()
         .filter(|block| block.command == "echo capture-drain-ok")
         .collect();
-    assert!(blocks.is_empty(), "{:?}", output.events);
+    assert!(!blocks.is_empty(), "{:?}", output.events);
     assert!(output.events.iter().any(|event| {
         event.message.as_deref() == Some("capture_submitted")
             && event.capture.as_ref().is_some_and(|capture| {
@@ -789,6 +792,11 @@ fn raw_relay_capture_ack_discards_same_read_multiline_suffix() {
         .events
         .iter()
         .any(|event| event.message.as_deref() == Some("capture_drained")));
+    // The replayed suffix must not surface a rejection notice.
+    assert!(!output
+        .events
+        .iter()
+        .any(|event| event.message.as_deref() == Some("capture_input_rejected")));
 }
 
 #[test]

@@ -455,7 +455,8 @@ fn latest_capture_submission_generation(events: &[ShellEvent]) -> Option<u64> {
             crate::types::ShellCaptureLifecycle::Submitted => return Some(capture.generation),
             crate::types::ShellCaptureLifecycle::Drained
             | crate::types::ShellCaptureLifecycle::Expired
-            | crate::types::ShellCaptureLifecycle::Overflow => return None,
+            | crate::types::ShellCaptureLifecycle::Overflow
+            | crate::types::ShellCaptureLifecycle::InputRejected => return None,
         }
     }
     None

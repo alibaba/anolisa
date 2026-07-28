@@ -24,4 +24,8 @@ pub enum ShellCaptureLifecycle {
     Drained,
     Expired,
     Overflow,
+    /// Bytes typed during the submit window could not be delivered safely
+    /// (follow-up card armed, chain invalidated, or late arrival after the
+    /// chain ended) and were discarded with user-visible feedback (#1913).
+    InputRejected,
 }

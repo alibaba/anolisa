@@ -13,7 +13,7 @@ use super::event_parser::{CandidateLineBuffer, NativeLineState};
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::{
     abandon_active_capture, complete_capture_chain_if_pending, complete_capture_replay,
-    current_raw_input_mode, expire_capture_submission, RawInputMode,
+    current_raw_input_mode, expire_capture_submission, PostCaptureOwner, RawInputMode,
 };
 use super::pty::write_all_pty;
 use super::relay::{

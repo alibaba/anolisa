@@ -137,10 +137,23 @@ mod tests {
             MessageId::ApprovalReceiptForegroundInteractiveHint as usize,
             836
         );
+        // The #2029 turn-extension segment keeps its pinned discriminants.
         assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 837);
         assert_eq!(
             MessageId::ApprovalTurnExtensionUnavailableBody as usize,
+            846
+        );
+        // The #1913 capture-notice segment is the current tail; the tail
+        // ownership assertions move with each appended segment.
+        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
+        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
+        assert_eq!(
+            MessageId::CaptureInputRejectedBody as usize,
             MessageId::ALL.len() - 1
+        );
+        assert_eq!(
+            MessageId::CaptureInputRejectedTitle as usize,
+            MessageId::ALL.len() - 2
         );
     }
 

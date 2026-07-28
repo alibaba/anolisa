@@ -1,5 +1,6 @@
 use crate::runtime::mode::render_mode_card_actions;
 use crate::runtime::prelude::*;
+use crate::slash::capture_notice::render_capture_input_rejected;
 use crate::slash::commands::render_slash_command;
 use crate::slash::config::render_config_card_actions;
 use crate::slash::notices::render_slash_parse_error;
@@ -19,6 +20,7 @@ pub(crate) fn render_slash_actions<W: Write>(
     render_session_card_actions(events, adapter, state, output, event_index_base)?;
     render_mode_card_actions(events, state, output, event_index_base)?;
     render_config_card_actions(events, state, output, event_index_base)?;
+    render_capture_input_rejected(events, state, output)?;
 
     for (idx, event) in events.iter().enumerate() {
         let event_index = event_index_base + idx;

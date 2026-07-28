@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 mod model;
 
-pub(crate) use model::{InputOwnership, RawInputMode};
+pub(crate) use model::{InputOwnership, PostCaptureOwner, RawInputMode};
 pub use model::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 
 static CAPTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -63,6 +63,7 @@ pub(crate) fn update_locked_input_mode(
             generation: *generation,
             next_capture,
             invalidated: false,
+            post_owner: PostCaptureOwner::from_action(action),
         };
         return;
     }
@@ -71,6 +72,7 @@ pub(crate) fn update_locked_input_mode(
         next_capture,
         invalidated,
         generation,
+        post_owner,
         ..
     } = &mut *mode
     {
@@ -82,7 +84,12 @@ pub(crate) fn update_locked_input_mode(
                 *next_capture = Some(next.clone());
             }
             RawObserverAction::CaptureInput(_) => {}
-            _ => *next_capture = None,
+            _ => {
+                *next_capture = None;
+                // The latest acknowledged owner wins, mirroring the
+                // next-capture replacement semantics above.
+                *post_owner = PostCaptureOwner::from_action(action);
+            }
         }
         return;
     }
@@ -120,6 +127,7 @@ pub(crate) fn update_locked_input_mode(
             generation: *generation,
             next_capture: None,
             invalidated: false,
+            post_owner: PostCaptureOwner::from_action(action),
         };
         return;
     }
@@ -210,23 +218,32 @@ pub(crate) fn complete_capture_chain_if_pending(
     true
 }
 
-pub(crate) fn complete_capture_replay(input_mode: &Arc<Mutex<RawInputMode>>, generation: u64) {
+/// Completes a drained chain by installing the observer-acknowledged
+/// post-capture owner (main prompt, delay, raw passthrough, hold) or the
+/// pending next capture. Returns the installed mode so the caller can
+/// route the quarantined replay against the exact owner snapshot.
+pub(crate) fn complete_capture_replay(
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    generation: u64,
+) -> Option<(RawInputMode, PostCaptureOwner)> {
     let Ok(mut mode) = input_mode.lock() else {
-        return;
+        return None;
     };
     let RawInputMode::Draining {
         previous_capture,
         generation: active,
         next_capture,
+        post_owner,
         ..
     } = &*mode
     else {
-        return;
+        return None;
     };
     if *active != generation {
-        return;
+        return None;
     }
     let previous_capture = previous_capture.clone();
+    let post_owner = *post_owner;
     *mode = if let Some(capture) = next_capture.clone() {
         RawInputMode::Capture {
             capture,
@@ -234,11 +251,22 @@ pub(crate) fn complete_capture_replay(input_mode: &Arc<Mutex<RawInputMode>>, gen
             installed_at: std::time::Instant::now(),
         }
     } else {
-        RawInputMode::Terminal {
-            previous_capture,
-            generation,
+        match post_owner {
+            PostCaptureOwner::Delay => new_delay_input_mode(),
+            PostCaptureOwner::RawPassthrough => RawInputMode::RawPassthrough,
+            PostCaptureOwner::Hold => RawInputMode::Hold,
+            // A ghost owner cannot be reconstructed here; the host replays
+            // its pending prompt restore, so land on the terminal state and
+            // let the replay verdict reject instead of driving the ghost.
+            PostCaptureOwner::MainPrompt | PostCaptureOwner::PromptGhost => {
+                RawInputMode::Terminal {
+                    previous_capture,
+                    generation,
+                }
+            }
         }
     };
+    Some((mode.clone(), post_owner))
 }
 
 pub(crate) fn expire_capture_submission(input_mode: &Arc<Mutex<RawInputMode>>, generation: u64) {
@@ -253,6 +281,7 @@ pub(crate) fn expire_capture_submission(input_mode: &Arc<Mutex<RawInputMode>>, g
                 generation,
                 next_capture: None,
                 invalidated: true,
+                post_owner: PostCaptureOwner::MainPrompt,
             };
         } else if let RawInputMode::Draining {
             generation: active,
@@ -282,6 +311,7 @@ pub(crate) fn abandon_active_capture(input_mode: &Arc<Mutex<RawInputMode>>) {
                 generation: *generation,
                 next_capture: None,
                 invalidated: true,
+                post_owner: PostCaptureOwner::MainPrompt,
             };
         }
     }
@@ -524,7 +554,7 @@ mod tests {
             None,
         );
         assert!(!complete_capture_chain_if_pending(&state, generation));
-        complete_capture_replay(&state, generation);
+        let _ = complete_capture_replay(&state, generation);
         assert!(matches!(
             current_raw_input_mode(&state),
             RawInputMode::Capture { capture: active, .. } if active == next_capture
@@ -545,7 +575,7 @@ mod tests {
         let generation = submit_capture(&state, &capture).expect("submitted capture");
         update_input_mode(&state, &RawObserverAction::Continue, Some(generation));
         assert!(!complete_capture_chain_if_pending(&state, generation));
-        complete_capture_replay(&state, generation);
+        let _ = complete_capture_replay(&state, generation);
 
         update_input_mode(
             &state,
@@ -606,7 +636,7 @@ mod tests {
         update_input_mode(&state, &RawObserverAction::Continue, Some(generation));
 
         assert!(!complete_capture_chain_if_pending(&state, generation));
-        complete_capture_replay(&state, generation);
+        let _ = complete_capture_replay(&state, generation);
         assert!(matches!(
             current_raw_input_mode(&state),
             RawInputMode::Terminal { .. }

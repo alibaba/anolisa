@@ -26,6 +26,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ConfigLanguageEnLine => "en-US   英语",
         MessageId::ConfigLanguageZhLine => "zh-CN   简体中文",
         MessageId::ConfigLanguageKeysFooter => "按键: Left/Right 选择 | Enter 确认 | Esc 取消",
+        MessageId::CaptureInputRejectedTitle => "输入未投递",
+        MessageId::CaptureInputRejectedBody => {
+            "卡片操作处理期间键入的内容无法安全投递，请重新输入。"
+        }
         _ => return None,
     })
 }
