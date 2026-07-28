@@ -134,8 +134,13 @@ pub(super) fn load_settings_for_merge(
     }
 }
 
-/// Read `hooks.json`, expand hook script placeholders, and parse it.
-pub(super) fn load_resolved_hooks(resource_root: &Path) -> Result<Value, AdapterError> {
+/// Read `hooks.json` and expand the hook-scripts placeholder to the
+/// absolute sibling `common/hooks` path, returning the patched text.
+/// Used both for the entries merged into `settings.json` and for the
+/// staged plugin copy handed to `qodercli plugins install` — qodercli
+/// copies the plugin into its cache verbatim, and consumers that load
+/// the cached `hooks.json` directly never expand the placeholder.
+pub(super) fn render_resolved_hooks_text(resource_root: &Path) -> Result<String, AdapterError> {
     let path = resource_root.join(QODER_HOOKS_FILE);
     let bytes = std::fs::read(&path).map_err(|source| AdapterError::Io {
         path: path.clone(),
@@ -143,7 +148,12 @@ pub(super) fn load_resolved_hooks(resource_root: &Path) -> Result<Value, Adapter
     })?;
     let hooks_dir = common_hooks_dir(resource_root);
     let text = String::from_utf8_lossy(&bytes);
-    let substituted = text.replace(HOOKS_PLACEHOLDER, &hooks_dir.to_string_lossy());
+    Ok(text.replace(HOOKS_PLACEHOLDER, &hooks_dir.to_string_lossy()))
+}
+
+/// Read `hooks.json`, expand hook script placeholders, and parse it.
+pub(super) fn load_resolved_hooks(resource_root: &Path) -> Result<Value, AdapterError> {
+    let substituted = render_resolved_hooks_text(resource_root)?;
     serde_json::from_str(&substituted).map_err(|source| AdapterError::BundleInvalid {
         root: resource_root.to_path_buf(),
         reason: format!("failed to parse {QODER_HOOKS_FILE}: {source}"),

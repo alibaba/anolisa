@@ -1,19 +1,34 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
+import type { AppCapability } from '../utils/apiClient';
 
-const navItems = [
-  { path: '/', label: 'Agent 可观测', icon: '📊' },
-  { path: '/sessions', label: '会话列表', icon: '🗂️' },
-  { path: '/savings', label: 'Token 节省', icon: '⚡' },
-  { path: '/optimization', label: '优化分析', icon: '🔬' },
-  { path: '/skills', label: 'Skill 指标', icon: '🧩' },
-  { path: '/security', label: '安全可观测', icon: '🛡️' },
-  { path: '/atif', label: '轨迹查看', icon: '🔍' },
-  { path: '/settings', label: '设置', icon: '⚙️' },
+type NavItem = {
+  path: string;
+  label: string;
+  icon: string;
+  capability: AppCapability;
+};
+
+const navItems: NavItem[] = [
+  { path: '/', label: 'Agent 可观测', icon: '📊', capability: 'agent_observability' },
+  { path: '/sessions', label: '会话列表', icon: '🗂️', capability: 'sessions' },
+  { path: '/savings', label: 'Token 节省', icon: '⚡', capability: 'token_savings' },
+  { path: '/optimization', label: '优化分析', icon: '🔬', capability: 'optimization' },
+  { path: '/skills', label: 'Skill 指标', icon: '🧩', capability: 'skills' },
+  { path: '/security', label: '安全可观测', icon: '🛡️', capability: 'security' },
+  { path: '/atif', label: '轨迹查看', icon: '🔍', capability: 'atif' },
+  { path: '/settings', label: '设置', icon: '⚙️', capability: 'settings' },
 ];
 
-export const NavBar: React.FC = () => {
+interface NavBarProps {
+  capabilities?: AppCapability[];
+}
+
+export const NavBar: React.FC<NavBarProps> = ({ capabilities }) => {
   const location = useLocation();
+  const visibleItems = Array.isArray(capabilities)
+    ? navItems.filter((item) => capabilities.includes(item.capability))
+    : navItems;
 
   return (
     <nav className="bg-white border-b border-gray-200 px-6 py-3">
@@ -26,7 +41,7 @@ export const NavBar: React.FC = () => {
 
         {/* Navigation Links */}
         <div className="flex items-center gap-1">
-          {navItems.map((item) => {
+          {visibleItems.map((item) => {
             const isActive = item.path === '/' 
               ? location.pathname === '/' 
               : location.pathname.startsWith(item.path);

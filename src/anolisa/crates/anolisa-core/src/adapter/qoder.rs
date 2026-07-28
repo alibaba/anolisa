@@ -14,10 +14,16 @@
 //!
 //! The plugin bundle lives under a resource directory named `qoder`, but
 //! `qodercli` derives the plugin id from the *directory name*, so enable
-//! stages a symlink named after the plugin id (`tokenless`) pointing at the
-//! resource root and installs from there — mirroring the legacy script's
-//! private tempdir. The symlink is install-time only (qodercli copies the
-//! plugin into its own cache) and is removed immediately after install.
+//! stages a real copy of the bundle under a directory named after the
+//! plugin id (`tokenless`) and installs from there — mirroring the legacy
+//! script's private tempdir. The staged copy's `hooks.json` is patched
+//! first: qodercli copies the plugin into its cache verbatim, and
+//! consumers that load the cached `hooks.json` directly (the Qoder IDE
+//! shares `~/.qoder` with qodercli) never expand
+//! `${QODER_TOKENLESS_HOOKS}` — staging a symlink to the raw bundle would
+//! leave them with broken hook commands whose non-zero exit is treated as
+//! a tool-call block. Staging is install-time only and is removed
+//! immediately after install.
 //!
 //! **settings.json is merged, then atomically swapped in via rename.** All
 //! reads and writes go through the Manager's controlled
@@ -62,6 +68,7 @@ mod settings;
 use settings::{
     SettingsProbe, collect_expected_hook_names, collect_managed_hook_specs,
     load_settings_for_merge, merge_managed, probe_settings, prune_settings_via_ops,
+    render_resolved_hooks_text,
 };
 
 /// Default timeout for a `qodercli` invocation.
@@ -209,7 +216,7 @@ impl FrameworkDriver for QoderDriver {
         );
         let actions = vec![
             format!(
-                "stage qoder plugin dir {staging_display} -> {}",
+                "stage qoder plugin copy {staging_display} from {} (hooks.json placeholder expanded)",
                 bundle.resource_root.display()
             ),
             format!("register qoder plugin '{plugin}' via `qodercli plugins install`"),
@@ -333,11 +340,16 @@ impl FrameworkDriver for QoderDriver {
             }
         })?;
 
-        // 1. Stage a directory named after the plugin id (qodercli derives
-        //    the id from the dir name) and install from it. The staging
-        //    symlink is install-time only — remove it whether install
-        //    succeeds or not.
-        ctx.ops.create_symlink(&staging, &claim.resource_root)?;
+        // 1. Stage a real copy of the bundle named after the plugin id
+        //    (qodercli derives the id from the dir name), patching its
+        //    hooks.json so the verbatim copy qodercli drops into its
+        //    plugin cache is loadable by consumers that never expand the
+        //    placeholder. Staging is install-time only — remove it
+        //    whether install succeeds or not.
+        if let Err(err) = stage_plugin_copy(ctx, &claim.resource_root, &staging) {
+            let _ = ctx.ops.remove_tree(&staging);
+            return Err(err);
+        }
         let install_cmd = build_install_cmd(&program, &staging);
         let cli_program = install_cmd.program.clone();
         let install = ctx.ops.run_framework_cli(install_cmd);
@@ -613,9 +625,29 @@ fn plugin_staging_root(user_home: Option<&Path>) -> Option<PathBuf> {
     anolisa_data_base(user_home).map(|base| base.join("qoder-plugins"))
 }
 
-/// Install-time staging symlink: `<staging root>/<plugin>`.
+/// Install-time staging directory: `<staging root>/<plugin>`.
 fn staging_symlink(user_home: Option<&Path>, plugin: &str) -> Option<PathBuf> {
     plugin_staging_root(user_home).map(|root| root.join(plugin))
+}
+
+/// Stage a real copy of the bundle at `staging`, patching the copied
+/// `hooks.json` so the placeholder expands to the absolute sibling
+/// `common/hooks` dir — the same resolution the `settings.json` merge
+/// applies. A symlink to the raw bundle would let qodercli cache the
+/// unexpanded placeholder, which the Qoder IDE (sharing `~/.qoder` with
+/// qodercli) then loads verbatim, breaking every matching tool call.
+/// Any pre-existing staging tree from an interrupted run is removed
+/// first so the staged content always matches the current bundle.
+fn stage_plugin_copy(
+    ctx: &DriverCtx,
+    resource_root: &Path,
+    staging: &Path,
+) -> Result<(), AdapterError> {
+    ctx.ops.remove_tree(staging)?;
+    ctx.ops.copy_tree(resource_root, staging)?;
+    let resolved = render_resolved_hooks_text(resource_root)?;
+    ctx.ops
+        .write_file(&staging.join(QODER_HOOKS_FILE), resolved.as_bytes())
 }
 
 /// Absolute hook-scripts directory the [`HOOKS_PLACEHOLDER`] resolves to:

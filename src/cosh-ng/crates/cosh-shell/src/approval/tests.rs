@@ -177,14 +177,14 @@ fn provider_shell_permission_approval_records_foreground_metadata() {
 }
 
 #[test]
-fn duplicate_provider_permission_tool_use_id_is_not_recorded_twice() {
+fn replayed_control_request_with_same_request_id_is_recorded_once() {
     let mut state = InlineState::default();
     let first = governed_provider_tool_permission("ctrl-1", "toolu-1");
-    let duplicate = governed_provider_tool_permission("ctrl-2", "toolu-1");
+    let replay = governed_provider_tool_permission("ctrl-1", "toolu-1");
 
     let ids = record_approval_requests(
         &mut state,
-        &[first, duplicate],
+        &[first, replay],
         None,
         AgentRunOrigin::Standard,
         false,
@@ -200,6 +200,100 @@ fn duplicate_provider_permission_tool_use_id_is_not_recorded_twice() {
         state.approvals.requests[0].tool_use_id.as_deref(),
         Some("toolu-1")
     );
+}
+
+#[test]
+fn distinct_control_requests_reusing_tool_use_id_are_recorded_separately() {
+    // A follow-up approval (e.g. sandbox-bypass retry) reuses the failed
+    // tool call's tool_use_id under a fresh request_id; collapsing them
+    // leaves the provider waiting forever for a response (#1920).
+    let mut state = InlineState::default();
+    let first = governed_provider_tool_permission("ctrl-1", "toolu-1");
+    let followup = governed_provider_tool_permission("ctrl-2", "toolu-1");
+
+    let ids = record_approval_requests(
+        &mut state,
+        &[first, followup],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+
+    assert_eq!(ids, vec!["req-1", "req-2"]);
+    assert_eq!(state.approvals.requests.len(), 2);
+    assert_eq!(
+        state.approvals.requests[1].request_id.as_deref(),
+        Some("ctrl-2")
+    );
+    assert_eq!(
+        state.approvals.requests[1].tool_use_id.as_deref(),
+        Some("toolu-1")
+    );
+    assert_eq!(
+        state.approvals.requests[1].status,
+        ApprovalRequestStatus::Pending
+    );
+}
+
+#[test]
+fn hook_followup_control_request_after_resolved_fallback_is_recorded() {
+    // #1920 regression: a trust-mode auto-approved fallback entry
+    // (request_id=None) for the same tool_use_id must not swallow the
+    // control-protocol approval that arrives after the tool failed.
+    let mut state = InlineState::default();
+    let fallback_ids = record_approval_requests(
+        &mut state,
+        &[governed_shell_tool_call("echo ok")],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+    assert_eq!(fallback_ids, vec!["req-1"]);
+    assert!(state.approvals.requests[0].request_id.is_none());
+    assert_eq!(
+        state.approvals.requests[0].tool_use_id.as_deref(),
+        Some("tool-1")
+    );
+    state.approvals.requests[0].status = ApprovalRequestStatus::Approved;
+
+    let followup = governed_provider_tool_permission("ctrl-9", "tool-1");
+    let ids = record_approval_requests(
+        &mut state,
+        &[followup],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+
+    assert_eq!(ids, vec!["req-2"]);
+    assert_eq!(state.approvals.requests.len(), 2);
+    assert_eq!(
+        state.approvals.requests[1].request_id.as_deref(),
+        Some("ctrl-9")
+    );
+    assert_eq!(
+        state.approvals.requests[1].status,
+        ApprovalRequestStatus::Pending
+    );
+}
+
+#[test]
+fn duplicate_fallback_tool_call_with_same_tool_use_id_is_recorded_once() {
+    let mut state = InlineState::default();
+    let ids = record_approval_requests(
+        &mut state,
+        &[
+            governed_shell_tool_call("echo ok"),
+            governed_shell_tool_call("echo ok"),
+        ],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+
+    assert_eq!(ids, vec!["req-1"]);
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert!(state.approvals.requests[0].request_id.is_none());
 }
 
 #[test]

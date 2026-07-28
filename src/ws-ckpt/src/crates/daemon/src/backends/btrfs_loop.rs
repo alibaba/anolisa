@@ -470,9 +470,18 @@ impl StorageBackend for BtrfsLoopBackend {
                 .await
                 .context("Failed to setup loop device")?;
             let loop_device = loop_device.trim().to_string();
-            run_command_checked("mount", &[&loop_device, &mount_path_str])
-                .await
-                .context("Failed to mount btrfs image")?;
+            if let Err(e) = run_command_checked("mount", &[&loop_device, &mount_path_str]).await {
+                // Mount failed after the loop device was attached; detach it so
+                // repeated failures don't leak/exhaust loop devices.
+                if let Err(detach_err) = run_command_checked("losetup", &["-d", &loop_device]).await
+                {
+                    warn!(
+                        "Failed to detach loop device {} after mount failure: {:#}",
+                        loop_device, detach_err
+                    );
+                }
+                return Err(e).context("Failed to mount btrfs image");
+            }
             info!("Mounted {} at {}", loop_device, mount_path_str);
         } else {
             info!("Already mounted at {:?}", self.mount_path);
@@ -885,9 +894,18 @@ async fn create_sparse_image(
     run_command_checked("truncate", &["-s", &img_size.to_string(), img_path])
         .await
         .context("Failed to create sparse image file")?;
-    run_command_checked("mkfs.btrfs", &["-f", img_path])
-        .await
-        .context("Failed to format btrfs image")?;
+    // If mkfs fails, drop the just-truncated (zeroed) file. Leaving it behind
+    // would let the next bootstrap skip formatting (it only checks existence)
+    // and then fail `mount` forever on a superblock-less image.
+    if let Err(e) = run_command_checked("mkfs.btrfs", &["-f", img_path]).await {
+        if let Err(rm_err) = tokio::fs::remove_file(img_path).await {
+            warn!(
+                "Failed to remove half-created image {} after mkfs failure: {:#}",
+                img_path, rm_err
+            );
+        }
+        return Err(e).context("Failed to format btrfs image");
+    }
     Ok(())
 }
 

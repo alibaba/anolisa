@@ -1,4 +1,4 @@
-%define anolis_release 1
+%define anolis_release 2
 %global debug_package %{nil}
 %global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
 
@@ -18,7 +18,7 @@ Requires(post):   lua
 Requires(postun): lua
 Requires:       openssl-libs
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh
-Provides:       anolisa-component(cosh)
+Provides:       anolisa-component(cosh-ng)
 Conflicts:      copilot-shell
 
 %description
@@ -84,8 +84,8 @@ install -m 0644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 
 # Install anolisa component manifest
-install -d %{buildroot}%{_datadir}/anolisa/components/cosh
-install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh/component.toml
+install -d %{buildroot}%{_datadir}/anolisa/components/cosh-ng
+install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-ng/component.toml
 
 %files
 %license %{_docdir}/%{name}/LICENSE
@@ -96,7 +96,7 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh/c
 %dir %{_libexecdir_cosh}
 %{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-shell
-%{_datadir}/anolisa/components/cosh/component.toml
+%{_datadir}/anolisa/components/cosh-ng/component.toml
 
 %post -p <lua>
 nl        = '\n'

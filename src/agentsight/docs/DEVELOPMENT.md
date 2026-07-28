@@ -55,6 +55,56 @@ make install
 make rpm    # 或使用 scripts/rpm-build.sh
 ```
 
+## macOS 构建
+
+macOS 上 AgentSight 编译为轻量二进制：仅包含 `agentsight serve`（Agent 看板 + 本地会话查看器），不含 eBPF 追踪功能。通过 `#[cfg(target_os = "linux")]` 条件编译实现，同一份源码在 Linux 上编译出完整功能。
+
+### macOS 依赖
+
+| 依赖 | 最低版本 | 用途 |
+|------|----------|------|
+| Rust | >= 1.80 | 编译 Rust 代码 |
+| Node.js | >= 16 | 前端构建 |
+| npm | >= 8 | 前端依赖管理 |
+
+> macOS 不需要 libbpf、clang/llvm、内核头文件等 eBPF 相关依赖。
+
+### macOS 构建步骤
+
+```bash
+cd src/agentsight
+
+# 构建 agentsight-local 前端和 macOS serve-only 二进制
+make build-mac
+# 产物：target/release/agentsight
+```
+
+`make build-mac` 会先在 `crates/agentsight-local/dashboard` 中构建本地查看器前端，再执行 `cargo build --release --bin agentsight`。macOS 产物只包含 `serve` 子命令，不会构建或加载 eBPF 代码。
+
+### macOS 使用
+
+```bash
+# 启动 Agent 看板 + 本地会话查看器
+target/release/agentsight serve
+# 打开 http://127.0.0.1:7396
+
+# 自定义 host/port
+target/release/agentsight serve --host 0.0.0.0 --port 8080
+```
+
+### macOS 限制
+
+| 不可用命令 | 原因 |
+|-----------|------|
+| `trace` | 需要 eBPF 内核探针 |
+| `token` / `audit` / `metrics` | 依赖 eBPF 采集的 SQLite 数据 |
+| `discover` / `interruption` / `skill-metrics` / `summary` | 依赖 eBPF 追踪数据 |
+| `--db` / `--config` 参数 | `serve` 在 macOS 上使用轻量服务器，无 SQLite |
+
+macOS 上 `serve` 提供的功能：
+- **Agent 看板** — 扫描本机运行的 AI Agent 进程
+- **本地会话查看器** — 读取 `~/.agentsight/sessions/` 下的 ATIF 轨迹文件
+
 ## Development Workflow
 
 ### 启动追踪 + 服务器
@@ -245,5 +295,5 @@ AGENTSIGHT_CHROME_TRACE=1 sudo agentsight trace
 |------|------|----------|
 | `Failed to create probes` | 内核不支持 BTF | 检查 `/sys/kernel/btf/vmlinux` 是否存在 |
 | `Failed to attach probes` | 权限不足 | 使用 `sudo` 或 `setcap cap_bpf,cap_perfmon=ep` |
-| `Frontend not embedded` | 未构建前端 | `cd dashboard && npm run build:embed && make build` |
+| `Frontend not embedded` | 未构建对应前端 | Linux: `make build-all`；macOS: `make build-mac` |
 | `Tokenizer not found` | 未下载 tokenizer | 设置 `AGENTSIGHT_TOKENIZER_PATH` 或自动下载 |

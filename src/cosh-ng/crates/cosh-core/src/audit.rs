@@ -522,6 +522,22 @@ impl CoreAuditRecorder {
         }
     }
 
+    /// Captured event types for one tool call, in emission order.
+    ///
+    /// Lets a test assert the per-call lifecycle rather than only that some event
+    /// of a type exists somewhere in the run.
+    #[cfg(test)]
+    pub(crate) fn captured_tool_event_types(&self, tool_use_id: &str) -> Vec<&str> {
+        match &self.sink {
+            CoreAuditSink::Capture(events) => events
+                .iter()
+                .filter(|event| event.identity.tool_use_id.as_deref() == Some(tool_use_id))
+                .map(|event| event.event_type.as_str())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn captured_event_types(&self) -> Vec<&str> {
         match &self.sink {

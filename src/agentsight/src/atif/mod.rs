@@ -8,6 +8,8 @@
 //! This module is independent from the `genai` module — it only depends on
 //! storage query result types and `genai::semantic` types for deserialization.
 
+#[cfg(target_os = "linux")]
 pub mod converter;
 
+#[cfg(target_os = "linux")]
 pub use converter::{convert_session_to_atif, convert_trace_to_atif};

@@ -243,6 +243,36 @@ fn delegated_install_writes_a_managed_record() {
 }
 
 #[test]
+fn delegated_cosh_ng_install_preserves_stable_identity() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let fake = FakeInstaller::new(
+        "cosh-ng",
+        pkg_info("cosh-ng", "0.13.0", Some("1.al8"), "x86_64"),
+    )
+    .with_origin("anolisa");
+    let mut install_args = args("cosh-ng");
+    install_args.backend = Some("rpm".to_string());
+
+    install_component_with_deps("cosh-ng", &install_args, &ctx, &fake, &fake, true)
+        .expect("delegated cosh-ng install");
+
+    let store = load_store(&ctx);
+    let record = store
+        .find(ObjectKind::Component, "cosh-ng")
+        .expect("cosh-ng component recorded");
+    assert!(
+        store.find(ObjectKind::Component, "cosh").is_none(),
+        "cosh-ng must not be recorded as the legacy cosh identity"
+    );
+    match &record.binding {
+        ProviderBinding::Delegated { package, .. } => {
+            assert_eq!(package.resolved_name(), Some("cosh-ng"));
+        }
+        other => panic!("expected a delegated binding, got {other:?}"),
+    }
+}
+
+#[test]
 fn delegated_install_lock_failure_precedes_dnf() {
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let layout = common::resolve_layout(&ctx);

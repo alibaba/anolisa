@@ -1243,8 +1243,21 @@ export async function fetchSkillMetrics(
 
 // ─── Authentication API ──────────────────────────────────────────────────────
 
+export type AppCapability =
+  | 'agent_observability'
+  | 'sessions'
+  | 'token_savings'
+  | 'optimization'
+  | 'skills'
+  | 'security'
+  | 'atif'
+  | 'settings'
+  | 'agent_health';
+
 export interface AuthStatusResponse {
   auth_enabled: boolean;
+  mode?: 'linux' | 'local' | string;
+  capabilities?: AppCapability[];
 }
 
 export interface AuthVerifyResponse {

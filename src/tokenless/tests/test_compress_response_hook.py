@@ -12,6 +12,8 @@ Uses subprocess to invoke the hook with a mock tokenless binary,
 avoiding Python version issues with the hook_utils module.
 """
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import stat
@@ -20,7 +22,9 @@ import sys
 import shutil
 import tempfile
 import textwrap
+import types
 import unittest
+from unittest import mock
 
 
 def _make_large_json_payload(char_target: int = 500) -> dict:
@@ -153,6 +157,143 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
 
 
 _needs_py39 = sys.version_info < (3, 9)
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestBinaryFallbackPaths(unittest.TestCase):
+    @staticmethod
+    def _hook_utils() -> types.ModuleType:
+        hooks_dir = os.path.normpath(os.path.join(
+            os.path.dirname(__file__),
+            os.pardir, "adapters", "tokenless", "common", "hooks",
+        ))
+        sys.path.insert(0, hooks_dir)
+        try:
+            import hook_utils
+        finally:
+            sys.path.pop(0)
+        return hook_utils
+
+    @staticmethod
+    def _codex_check_tokenless() -> types.ModuleType:
+        script_path = os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                os.pardir,
+                "adapters",
+                "tokenless",
+                "codex",
+                "scripts",
+                "check-tokenless",
+            )
+        )
+        loader = importlib.machinery.SourceFileLoader(
+            "codex_check_tokenless", script_path
+        )
+        spec = importlib.util.spec_from_loader("codex_check_tokenless", loader)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("unable to load codex check-tokenless")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_supported_install_layouts_are_covered(self) -> None:
+        paths = self._hook_utils()._known_binary_paths("rtk", "/home/alice")
+        expected = (
+            "/home/alice/.local/bin/rtk",
+            "/home/alice/.local/lib/anolisa/libexec/tokenless/rtk",
+            "/home/alice/.local/libexec/anolisa/tokenless/rtk",
+            "/usr/local/bin/rtk",
+            "/usr/local/libexec/anolisa/tokenless/rtk",
+            "/usr/bin/rtk",
+            "/usr/libexec/anolisa/tokenless/rtk",
+            "/usr/lib/anolisa/tokenless/rtk",
+            "/home/alice/.local/share/anolisa/tokenless/rtk",
+            "/home/alice/.local/lib/anolisa/tokenless/rtk",
+        )
+        self.assertEqual(paths, expected)
+
+    def test_generic_binaries_skip_tokenless_helper_dirs(self) -> None:
+        paths = self._hook_utils()._known_binary_paths("docker", "/home/alice")
+        self.assertIn("/home/alice/.local/bin/docker", paths)
+        self.assertIn("/usr/local/bin/docker", paths)
+        self.assertIn("/usr/bin/docker", paths)
+        self.assertFalse(any("tokenless" in path for path in paths))
+
+    def test_user_layouts_require_an_absolute_home(self) -> None:
+        hook_utils = self._hook_utils()
+        for home in ("", "relative/home"):
+            with self.subTest(home=home):
+                paths = hook_utils._known_binary_paths("rtk", home)
+                self.assertTrue(all(os.path.isabs(path) for path in paths))
+                self.assertFalse(any(".local" in path for path in paths))
+
+    def test_codex_check_tokenless_uses_canonical_order(self) -> None:
+        paths = self._codex_check_tokenless()._known_tokenless_paths("/home/alice")
+        self.assertEqual(
+            paths,
+            (
+                "/home/alice/.local/bin/tokenless",
+                "/usr/local/bin/tokenless",
+                "/usr/bin/tokenless",
+                "/home/alice/.local/share/anolisa/tokenless/tokenless",
+                "/home/alice/.local/lib/anolisa/tokenless/tokenless",
+            ),
+        )
+
+    def test_codex_check_tokenless_rejects_invalid_home(self) -> None:
+        check_tokenless = self._codex_check_tokenless()
+        for home in ("", "relative/home"):
+            with self.subTest(home=home):
+                paths = check_tokenless._known_tokenless_paths(home)
+                self.assertEqual(
+                    paths,
+                    ("/usr/local/bin/tokenless", "/usr/bin/tokenless"),
+                )
+
+    def test_resolver_finds_makefile_user_helper_without_path(self) -> None:
+        hook_utils = self._hook_utils()
+        with tempfile.TemporaryDirectory() as home:
+            helper_dir = os.path.join(
+                home, ".local", "libexec", "anolisa", "tokenless"
+            )
+            os.makedirs(helper_dir)
+            rtk_path = os.path.join(helper_dir, "rtk")
+            with open(rtk_path, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(rtk_path, 0o755)
+
+            hook_utils._resolved_cache.clear()
+            with (
+                mock.patch.dict(os.environ, {"HOME": home}),
+                mock.patch.object(hook_utils.shutil, "which", return_value=None),
+            ):
+                self.assertEqual(hook_utils.resolve_binary("rtk"), rtk_path)
+            hook_utils._resolved_cache.clear()
+
+    def test_resolver_prefers_user_layout_to_explicit_legacy_fallback(self) -> None:
+        hook_utils = self._hook_utils()
+        with tempfile.TemporaryDirectory() as home:
+            local_bin = os.path.join(home, ".local", "bin")
+            legacy_bin = os.path.join(home, "legacy")
+            os.makedirs(local_bin)
+            os.makedirs(legacy_bin)
+            user_rtk = os.path.join(local_bin, "rtk")
+            legacy_rtk = os.path.join(legacy_bin, "rtk")
+            for path in (user_rtk, legacy_rtk):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("#!/bin/sh\n")
+                os.chmod(path, 0o755)
+
+            hook_utils._resolved_cache.clear()
+            with (
+                mock.patch.dict(os.environ, {"HOME": home}),
+                mock.patch.object(hook_utils.shutil, "which", return_value=None),
+            ):
+                self.assertEqual(
+                    hook_utils.resolve_binary("rtk", legacy_rtk), user_rtk
+                )
+            hook_utils._resolved_cache.clear()
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

@@ -233,6 +233,36 @@ async fn project_context_reaches_the_provider_boundary() {
         .contains("## Project Context\nprovider-visible marker"));
 }
 
+#[tokio::test]
+async fn user_provided_secret_reaches_the_provider_boundary() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+    let secret = "sk-user-provided-secret-value";
+
+    core.handle_user_message(
+        &format!("write api_key={secret} to the config"),
+        &mut reader,
+        &mut output,
+    )
+    .await
+    .unwrap();
+
+    let messages = captured.lock().unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("provider user message");
+    assert!(user_message.content.as_text().contains(secret));
+}
+
 fn find_declaration<'a>(
     declarations: &'a [crate::provider::ToolDeclaration],
     name: &str,
@@ -1645,6 +1675,225 @@ async fn thinking_delta_emits_stream_event() {
         v.pointer("/event/delta/thinking").and_then(|t| t.as_str()),
         Some("Step 1: analyze...")
     );
+}
+
+// ---------------------------------------------------------------------------
+// malformed tool arguments: visibility and retry budget
+// ---------------------------------------------------------------------------
+
+/// One turn calling `shell` with arguments that are terminated but unparseable.
+///
+/// Each turn uses a fresh id, as a real provider would: the retry budget must
+/// count the tool and the failure, not the call id.
+fn unparseable_shell_turn(call_id: &str) -> Vec<GenerateEvent> {
+    vec![
+        GenerateEvent::ToolCallStart {
+            index: 0,
+            id: call_id.to_string(),
+            name: "shell".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 0,
+            arguments_delta: r#"{"command":"echo hello"#.to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 0 },
+        GenerateEvent::MessageEnd,
+    ]
+}
+
+async fn run_shell_turns(turns: Vec<Vec<GenerateEvent>>) -> (Result<(), String>, String) {
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let tools = ToolRegistry::with_defaults_for_test();
+    let mut core = CoshCore::new(config, Box::new(MockProvider::new(turns)), tools);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    let result = core
+        .handle_user_message("write the file", &mut reader, &mut output)
+        .await;
+
+    (result, String::from_utf8(output).unwrap())
+}
+
+#[tokio::test]
+async fn rejected_tool_arguments_are_reported_to_the_shell_as_a_failed_tool() {
+    let (result, output) = run_shell_turns(vec![
+        unparseable_shell_turn("call-1"),
+        vec![
+            GenerateEvent::TextDelta("I will stop here.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ])
+    .await;
+
+    result.expect("one rejection is recoverable");
+    // Without this the Shell keeps a pending tool on screen forever: the
+    // rejection only ever reached the model's context.
+    assert!(
+        output.contains(r#""type":"tool_result""#),
+        "the rejection must close the pending tool in the UI: {output}"
+    );
+    assert!(output.contains("attempt 1/3"), "{output}");
+    assert!(output.contains("code=invalid_json"), "{output}");
+    // The rejected payload can hold session content, so the result the user sees
+    // must describe the failure without quoting any of it.
+    let rejection = output
+        .lines()
+        .find(|line| line.contains(r#""type":"tool_result""#))
+        .expect("a tool result on the wire");
+    assert!(!rejection.contains("echo hello"), "{rejection}");
+}
+
+#[tokio::test]
+async fn three_consecutive_argument_rejections_stop_the_run() {
+    let (result, output) = run_shell_turns(vec![
+        unparseable_shell_turn("call-1"),
+        unparseable_shell_turn("call-2"),
+        unparseable_shell_turn("call-3"),
+        unparseable_shell_turn("call-4"),
+    ])
+    .await;
+
+    let error = result.expect_err("the run stops once the budget is spent");
+    assert!(error.contains("shell"), "{error}");
+    assert!(error.contains("code=invalid_json"), "{error}");
+    assert!(error.contains("never executed"), "{error}");
+
+    // The third rejection is still delivered, so the last thing on screen is a
+    // failed tool rather than one that looks like it is still generating.
+    assert!(output.contains("attempt 3/3"), "{output}");
+    assert_eq!(
+        output.matches(r#""type":"tool_result""#).count(),
+        3,
+        "exactly three attempts may be spent: {output}"
+    );
+    assert!(
+        !output.contains("call-4"),
+        "the fourth turn must never be requested: {output}"
+    );
+}
+
+/// The assistant message declares every call in the batch up front, so ending
+/// the run on the third rejection must not leave a later call unanswered:
+/// headless persists the session and reuses it for the next user message, and an
+/// unpaired `tool_use` id makes that request malformed.
+#[tokio::test]
+async fn stopping_on_exhaustion_still_answers_every_call_in_the_batch() {
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let tools = ToolRegistry::with_defaults_for_test();
+    let mut core = CoshCore::new(
+        config,
+        Box::new(MockProvider::new(vec![
+            unparseable_shell_turn("call-1"),
+            unparseable_shell_turn("call-2"),
+            // The fatal third rejection shares its message with a second call.
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-fatal".to_string(),
+                    name: "shell".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"command":"echo hello"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::ToolCallStart {
+                    index: 1,
+                    id: "call-trailing".to_string(),
+                    name: "shell".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 1,
+                    arguments_delta: r#"{"command":"echo trailing"}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 1 },
+                GenerateEvent::MessageEnd,
+            ],
+        ])),
+        tools,
+    );
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("write the file", &mut reader, &mut output)
+        .await
+        .expect_err("the run stops once the budget is spent");
+
+    for call_id in ["call-1", "call-2", "call-fatal", "call-trailing"] {
+        let results = core
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "tool" && message.tool_call_id.as_deref() == Some(call_id)
+            })
+            .count();
+        assert_eq!(results, 1, "{call_id} must have exactly one tool result");
+    }
+
+    // The trailing call was answered, not run: nothing may execute after the
+    // budget is spent.
+    let trailing = tool_result_text(&core, "call-trailing");
+    assert!(trailing.contains("was not executed"), "{trailing}");
+
+    // A skipped call is still part of the transcript, so it owes the audit trace
+    // one `tool.requested` and one terminal event like any other call — and it is
+    // counted, so the turn metrics do not under-report the failures.
+    assert_eq!(
+        core.audit.captured_tool_event_types("call-trailing"),
+        vec!["tool.requested", "tool.failed"]
+    );
+    assert_eq!(core.metrics.tool_calls_total, 4);
+    assert_eq!(core.metrics.tool_calls_fail, 4);
+    assert!(!core
+        .audit
+        .captured_tool_event_types("call-trailing")
+        .contains(&"tool.execution.started"));
+
+    // And the Shell was told, so its pending tool closes instead of hanging.
+    let output = String::from_utf8(output).unwrap();
+    let emitted = output
+        .lines()
+        .find(|line| line.contains(r#""tool_use_id":"call-trailing""#))
+        .expect("a tool result for the trailing call on the wire");
+    assert!(emitted.contains(r#""is_error":true"#), "{emitted}");
+    assert!(emitted.contains("was not executed"), "{emitted}");
+}
+
+#[tokio::test]
+async fn a_recovered_tool_call_clears_the_rejection_budget() {
+    let (result, output) = run_shell_turns(vec![
+        unparseable_shell_turn("call-1"),
+        unparseable_shell_turn("call-2"),
+        // The model recovers, which must forget the streak entirely...
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-good".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"echo recovered"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        // ...so this rejection is attempt 1 again, not the fatal third.
+        unparseable_shell_turn("call-3"),
+        vec![
+            GenerateEvent::TextDelta("Done.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ])
+    .await;
+
+    result.expect("a recovered call in between keeps the run alive");
+    assert!(output.contains("attempt 1/3"), "{output}");
+    assert!(!output.contains("attempt 3/3"), "{output}");
 }
 
 // ---------------------------------------------------------------------------

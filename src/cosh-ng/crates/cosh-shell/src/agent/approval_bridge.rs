@@ -743,6 +743,87 @@ mod tests {
     }
 
     #[test]
+    fn trust_mode_surfaces_hook_followup_approval_after_auto_approved_tool() {
+        // #1920 regression: after the trust path auto-approves the shell
+        // tool call, the sandbox-bypass follow-up approval reuses the same
+        // tool_use_id via the control protocol with hook_requires_approval
+        // set; it must surface as a pending card instead of being dropped.
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Trust,
+            ..InlineState::default()
+        };
+        let tool_call = GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+            event: AgentEvent::ToolCall {
+                run_id: "run-1".to_string(),
+                tool_id: Some("toolu-1".to_string()),
+                name: "Bash".to_string(),
+                input: r#"{"command":"echo ok"}"#.to_string(),
+            },
+            reason: "provider tool call".to_string(),
+            display_text: "provider tool call".to_string(),
+            auto_execute: false,
+        };
+        let mut output = Vec::new();
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &[tool_call],
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render trusted tool call");
+        assert_eq!(state.approvals.requests.len(), 1);
+        assert_eq!(
+            state.approvals.requests[0].status,
+            ApprovalRequestStatus::Approved
+        );
+
+        let followup = GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+            event: AgentEvent::ToolPermissionRequest {
+                run_id: "run-1".to_string(),
+                request_id: "ctrl-2".to_string(),
+                tool_name: "Bash".to_string(),
+                tool_input: serde_json::json!({ "command": "echo ok" }),
+                tool_use_id: "toolu-1".to_string(),
+                hook_requires_approval: true,
+                audit_ref: None,
+            },
+            reason: "sandbox bypass approval".to_string(),
+            display_text: "sandbox bypass approval".to_string(),
+            auto_execute: false,
+        };
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &[followup],
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render hook follow-up approval");
+
+        let pending = state
+            .approvals
+            .requests
+            .iter()
+            .find(|request| request.request_id.as_deref() == Some("ctrl-2"))
+            .expect("hook follow-up approval must be recorded");
+        assert_eq!(pending.status, ApprovalRequestStatus::Pending);
+        assert!(pending.hook_requires_approval);
+        assert_eq!(pending.tool_use_id.as_deref(), Some("toolu-1"));
+        assert_eq!(
+            state.approvals.active_panel_id.as_deref(),
+            Some(pending.id.as_str())
+        );
+    }
+
+    #[test]
     fn shell_request_policy_denies_duplicate_host_executed_request() {
         let mut state = InlineState::default();
         state

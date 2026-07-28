@@ -6,11 +6,13 @@
 
 use std::path::PathBuf;
 
-use anolisa_core::ObjectKind;
 use anolisa_core::adapter::manager::{AdapterManager, VisibleRoot};
-use anolisa_core::domain::InstallationScope;
+use anolisa_core::domain::{
+    Installation, InstallationScope, NativePm, PackageIdentity, ProviderBinding,
+};
 use anolisa_core::facts::{JournalEvidence, JournalInventory};
 use anolisa_core::state_store::StateStore;
+use anolisa_core::{ComponentManifest, ObjectKind};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::color::Palette;
@@ -393,6 +395,42 @@ pub fn installed_component_manifest_path(
     )
 }
 
+/// Legacy manifest directory eligible for cleanup after a record mutation.
+pub(crate) fn legacy_component_manifest_dir_for_installation(
+    layout: &FsLayout,
+    installation: &Installation,
+    command: &str,
+) -> Result<Option<PathBuf>, CliError> {
+    Ok(legacy_cosh_ng_manifest_path(layout, installation, command)?
+        .and_then(|path| path.parent().map(PathBuf::from)))
+}
+
+fn legacy_cosh_ng_manifest_path(
+    layout: &FsLayout,
+    installation: &Installation,
+    command: &str,
+) -> Result<Option<PathBuf>, CliError> {
+    if installation.name != "cosh-ng"
+        || !matches!(
+            &installation.binding,
+            ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Resolved { name },
+                ..
+            } if name == "cosh-ng"
+        )
+    {
+        return Ok(None);
+    }
+
+    let legacy = installed_component_manifest_path(layout, "cosh", command)?;
+    let matches_legacy_identity = legacy.is_file()
+        && ComponentManifest::from_file(&legacy).is_ok_and(|manifest| {
+            manifest.component.name == "cosh" && manifest.rpm_package() == Some("cosh-ng")
+        });
+    Ok(matches_legacy_identity.then_some(legacy))
+}
+
 /// Directory for the component manifest saved as part of an installed
 /// component's local state.
 pub fn installed_component_manifest_dir(
@@ -423,7 +461,7 @@ fn validate_component_path_segment(component: &str, command: &str) -> Result<(),
 }
 
 /// Wire-friendly status label for a v5
-/// [`Installation`](anolisa_core::domain::Installation), same vocabulary as
+/// [`Installation`], same vocabulary as
 /// [`installation_status_str`] vocabulary: a delegated adopted/observed row
 /// reports its management relation (the legacy state collapsed both into one
 /// `adopted` status), any other row reports its lifecycle health.

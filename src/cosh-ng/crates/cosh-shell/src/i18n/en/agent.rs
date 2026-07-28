@@ -29,6 +29,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentStatusWaitingUserAnswer => "waiting for user answer: {question}",
         MessageId::AgentStatusWaitingApprovalCommand => "waiting for approval: {command}",
         MessageId::AgentStatusTool => "tool",
+        MessageId::AgentStatusToolArguments => "tool arguments",
+        MessageId::AgentStatusGeneratingToolArguments => "generating {tool} arguments...",
         MessageId::AgentStatusCapturingToolOutput => "capturing output from {tool_id}",
         MessageId::AgentStatusToolCompleted => "{tool_id} completed with status {status}",
         MessageId::AgentStatusCompleted => "completed",

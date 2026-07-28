@@ -38,12 +38,10 @@ impl OpenAICompatProvider {
         tools: &[ToolDeclaration],
         config: &GenerateConfig,
     ) -> Value {
-        let mut safe_messages = messages.to_vec();
-        crate::redaction::redact_messages(&mut safe_messages);
         let max_tokens_field = self.profile.max_tokens_field();
         let mut body = serde_json::json!({
             "model": config.model,
-            "messages": safe_messages,
+            "messages": messages,
             max_tokens_field: config.max_tokens,
             "stream": true,
         });
@@ -1053,21 +1051,15 @@ mod tests {
     }
 
     #[test]
-    fn build_request_redacts_raw_message_literals_at_provider_boundary() {
+    fn build_request_preserves_user_provided_secrets() {
         let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
         let secret = "short-provider-secret";
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: super::super::MessageContent::Text(format!("api_key={secret}")),
-            tool_call_id: None,
-            name: None,
-            tool_calls: None,
-        }];
+        let messages = vec![Message::user(&format!("api_key={secret}"))];
 
         let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
         let payload = body.to_string();
 
-        assert!(!payload.contains(secret), "{payload}");
-        assert!(payload.contains("<redacted>"), "{payload}");
+        assert!(payload.contains(secret), "{payload}");
+        assert!(!payload.contains("<redacted>"), "{payload}");
     }
 }

@@ -1,13 +1,14 @@
-//! On-demand doctor orchestration shared by the `cosh-shell doctor` CLI and
-//! the `/health` slash command.
+//! On-demand doctor orchestration shared by the `cosh-shell doctor` CLI, the
+//! `/health` slash command, and the diagnostics bundle export.
 //!
-//! Both entry points call [`run_doctor_report`], which assembles a single
+//! All entry points call [`run_doctor_report`], which assembles a single
 //! [`HealthScanReport`] from the existing resource collectors plus the
 //! environment collectors (provider/config/hooks/PTY/permissions). The CLI
 //! additionally renders it with [`format_doctor_report_plain`]; the slash
-//! command renders the same report as an inline card.
+//! command renders the same report as an inline card; the diagnostics bundle
+//! projects it into the stable bundle schema.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::CoshConfig;
@@ -39,6 +40,18 @@ pub(crate) fn run_doctor_report(config: &CoshConfig, cwd: &Path) -> HealthScanRe
     }
 
     builder.finish(now_millis().max(started_at_ms))
+}
+
+/// Run the doctor report against the process working directory, falling back
+/// to `.` when it is unavailable.
+///
+/// Shared by the `cosh-shell doctor` CLI and the diagnostics bundle export so
+/// both process-launched entry points keep identical cwd semantics; the
+/// `/health` slash command instead passes the child shell cwd explicitly to
+/// [`run_doctor_report`].
+pub(crate) fn run_doctor_report_from_process_cwd(config: &CoshConfig) -> HealthScanReport {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    run_doctor_report(config, &cwd)
 }
 
 /// Render a report as human-readable plain-text lines for `cosh-shell doctor`.

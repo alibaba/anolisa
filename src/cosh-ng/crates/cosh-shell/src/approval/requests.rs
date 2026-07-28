@@ -82,17 +82,24 @@ fn same_approval_request_identity(
     if existing.run_id != request.run_id {
         return false;
     }
+    // The control-protocol request id is the primary identity: a follow-up
+    // approval (e.g. a sandbox-bypass retry after post_tool_use_failure)
+    // legitimately reuses the tool_use_id of the failed tool call, so the
+    // tool_use_id alone must never collapse two distinct requests (#1920).
+    // parse_control_request rejects can_use_tool payloads without a
+    // request_id, so a request with request_id=None is always a locally
+    // recorded fallback/host entry, never a control-protocol approval.
+    match (&existing.request_id, &request.request_id) {
+        (Some(existing_id), Some(request_id)) => return existing_id == request_id,
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
     if let (Some(existing_id), Some(request_id)) = (&existing.tool_use_id, &request.tool_use_id) {
         return existing_id == request_id;
     }
-    match (&existing.request_id, &request.request_id) {
-        (Some(existing_id), Some(request_id)) => existing_id == request_id,
-        _ => {
-            existing.kind == request.kind
-                && existing.subject == request.subject
-                && existing.preview == request.preview
-        }
-    }
+    existing.kind == request.kind
+        && existing.subject == request.subject
+        && existing.preview == request.preview
 }
 
 pub(crate) fn approval_request_from_governed_event(

@@ -4,6 +4,8 @@
 
 基于 eBPF 的 AI Agent 可观测性工具，在 Linux 系统上提供零侵入式的 LLM API 调用监控、Token 用量统计、进程行为追踪和 SSL/TLS 流量捕获。AgentSight 是 [ANOLISA](../../README_zh.md) 的可观测性组件。
 
+> **macOS 支持**：在 macOS 上，AgentSight 编译为两个命令 — `agentsight trace`（轨迹采集器，扫描本地 JSONL 会话文件 → ATIF → SQLite，无 eBPF）和 `agentsight serve`（Dashboard UI + 轨迹查看器）。同一份源码通过操作系统条件编译，在 Linux 上生成完整功能 eBPF 二进制，在 macOS 上生成轨迹采集+查看二进制。
+
 ## 特性
 
 - **零侵入式监控** — 通过 eBPF 内核探针捕获事件，无需修改 Agent 代码或配置。
@@ -58,6 +60,7 @@ agentsight/
 │   ├── storage/        # 基于 SQLite 的存储（审计、Token、HTTP、GenAI）
 │   ├── discovery/      # AI Agent 进程扫描器（/proc + eBPF）
 │   ├── tokenizer/      # HuggingFace tokenizer 集成，用于 Token 计数
+│   ├── local/          # macOS 专用：轨迹查看器服务器 + 采集器调度
 │   ├── bin/            # CLI 入口（agentsight 及子命令）
 │   ├── unified.rs      # 主流水线编排器
 │   ├── config.rs       # 统一配置管理
@@ -69,9 +72,15 @@ agentsight/
 
 ## CLI 命令
 
+> `token`、`audit`、`discover`、`metrics`、`interruption`、`skill-metrics`、`summary` 依赖 Linux eBPF，在 macOS 上不可用。`trace` 和 `serve` 跨平台可用：Linux 上 `trace` 运行完整 eBPF 管线，macOS 上仅运行轨迹采集器（无 eBPF）。
+
 ### `agentsight trace`
 
-启动基于 eBPF 的 AI Agent 活动追踪。
+启动 AI Agent 活动追踪。
+
+**Linux**：完整 eBPF 追踪（probes → parser → aggregator → storage）。若 `features.trajectory_collection.enabled` 开启，同时运行轨迹采集器。
+
+**macOS**：仅轨迹采集 — 扫描本地 JSONL 会话文件（Claude Code、Qoder、Codex、Cursor），转换为 ATIF v1.7 格式，存入 `trajectories.db`。无 eBPF。
 
 ```bash
 # 前台模式
@@ -121,6 +130,8 @@ agentsight audit --summary
 
 启动 HTTP API 服务器，同时提供嵌入式 Dashboard UI。
 
+> **macOS**：从 `trajectories.db` 读取数据（由 `agentsight trace` 写入）。`--db` 和 `--config` 参数仅 Linux 可用。
+
 ```bash
 # 使用默认配置启动（绑定到 127.0.0.1:7396）
 agentsight serve
@@ -128,7 +139,7 @@ agentsight serve
 # 绑定到所有网络接口并指定端口
 agentsight serve --host 0.0.0.0 --port 8080
 
-# 指定数据库文件路径
+# 指定数据库文件路径（仅 Linux）
 agentsight serve --db /path/to/genai_events.db
 ```
 
@@ -168,6 +179,8 @@ make build-all
 
 ### 场景一 — 同时采集数据并查看 Dashboard
 
+**Linux**（eBPF + 轨迹采集器）：
+
 在两个终端中分别运行追踪器和 API 服务器：
 
 ```bash
@@ -175,6 +188,16 @@ make build-all
 sudo agentsight trace
 
 # 终端 2：启动 API 服务器（读取同一 SQLite 文件）
+agentsight serve
+```
+
+**macOS**（仅轨迹采集）：
+
+```bash
+# 终端 1：启动轨迹采集（扫描 JSONL → trajectories.db）
+agentsight trace
+
+# 终端 2：启动 API 服务器（读取 trajectories.db）
 agentsight serve
 ```
 
@@ -252,6 +275,46 @@ cargo build --release
 ```
 
 二进制文件输出至 `target/release/agentsight`。
+
+### macOS 构建
+
+macOS 构建 `agentsight trace`（轨迹采集器）和 `agentsight serve`（Dashboard 查看器）。不需要 libbpf、clang/llvm、内核头文件、root 权限或 Linux BPF capabilities。
+
+**依赖要求：**
+
+| 组件 | 版本 | 用途 |
+|------|------|------|
+| Rust | >= 1.80 | 编译 Rust 代码 |
+| Node.js | >= 16 | 前端构建 |
+| npm | >= 8 | 前端依赖管理 |
+
+**构建步骤：**
+
+```bash
+cd src/agentsight
+
+# 构建前端和 macOS 二进制
+make build-mac
+```
+
+二进制文件输出至 `target/release/agentsight`。
+
+**macOS 使用：**
+
+```bash
+# 终端 1：采集轨迹（扫描 JSONL → trajectories.db）
+agentsight trace
+
+# 终端 2：启动 Dashboard + 轨迹查看器
+agentsight serve
+
+# 或自定义 host/port
+agentsight serve --host 0.0.0.0 --port 8080
+```
+
+打开 `http://127.0.0.1:7396` 查看 Dashboard。`trace` 扫描本地 AI Agent 会话文件（Claude Code、Qoder、Codex、Cursor），转换为 ATIF 轨迹存入 `trajectories.db`。`serve` 从同一数据库读取数据展示。
+
+> **macOS 限制**：eBPF 相关命令（`discover`、`token`、`audit`、`metrics`、`interruption`、`skill-metrics`、`summary`）仅 Linux 可用。`--db` 和 `--config` 参数也仅 Linux 可用。macOS 上 `trace` 仅采集轨迹（无 eBPF），`serve` 从 `trajectories.db` 读取数据。
 
 ### 通过 RPM 安装
 

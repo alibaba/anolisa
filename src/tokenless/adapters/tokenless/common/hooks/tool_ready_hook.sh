@@ -18,6 +18,12 @@ set -euo pipefail
 VERBOSE="${TOKENLESS_VERBOSE:-}"
 log_v() { [ -n "$VERBOSE" ] && echo "[tokenless:ready] $1" >&2 || true; }
 
+USER_HOME="${HOME:-}"
+case "$USER_HOME" in
+  /*) ;;
+  *) USER_HOME="" ;;
+esac
+
 # --- Dependency check (fail-open) ---
 if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
 
@@ -99,9 +105,10 @@ SPEC_FILE=""
 for candidate in \
     "${TOKENLESS_TOOL_READY_SPEC:-}" \
     "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tool-ready-spec.json}" \
-    "$HOME/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
+    "${USER_HOME:+$USER_HOME/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json}" \
+    "/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
     "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json" \
-    "$HOME/.tokenless/tool-ready-spec.json" \
+    "${USER_HOME:+$USER_HOME/.tokenless/tool-ready-spec.json}" \
     "${SCRIPT_DIR}/../tool-ready-spec.json"; do
     if [ -n "$candidate" ] && is_trusted_file "$candidate"; then
         SPEC_FILE="$candidate"
@@ -110,14 +117,17 @@ for candidate in \
 done
 
 FIX_SCRIPT=""
+# Fixers are installed as non-executable resources and always invoked through
+# bash, so trust and readability—not an execute bit—define usability.
 for candidate in \
     "${TOKENLESS_ENV_FIX_SCRIPT:-}" \
     "${ANOLISA_ADAPTER_DIR:+$ANOLISA_ADAPTER_DIR/common/tokenless-env-fix.sh}" \
-    "$HOME/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
+    "${USER_HOME:+$USER_HOME/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh}" \
+    "/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
     "/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh" \
-    "$HOME/.tokenless/tokenless-env-fix.sh" \
+    "${USER_HOME:+$USER_HOME/.tokenless/tokenless-env-fix.sh}" \
     "${SCRIPT_DIR}/../tokenless-env-fix.sh"; do
-    if [ -n "$candidate" ] && [ -x "$candidate" ] && is_trusted_file "$candidate"; then
+    if [ -n "$candidate" ] && [ -r "$candidate" ] && is_trusted_file "$candidate"; then
         FIX_SCRIPT="$candidate"
         break
     fi
@@ -259,13 +269,61 @@ version_ge() {
 
 # --- Resolve binary path ---
 # Tries command -v first, then known install paths.
+# KEEP IN SYNC with hook_utils.py::_known_binary_paths,
+# env_check.rs::binary_fallback_paths, OpenClaw's fallback constants, and the
+# Codex standalone scripts. Makefile and the Anolisa component manifest define
+# the supported layouts; the canonical order is user, /usr/local, /usr, legacy.
 resolve_binary() {
   local name="$1"
+  case "$name" in
+    ""|*/*|"."|"..") return 1 ;;
+  esac
   local found
   found=$(command -v "$name" 2>/dev/null || true)
   if [ -n "$found" ]; then echo "$found"; return 0; fi
-  for candidate in "$HOME/.local/bin/$name" "$HOME/.local/lib/anolisa/tokenless/$name"; do
-    if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
+
+  local candidates=()
+  if [ -n "$USER_HOME" ]; then
+    candidates+=("$USER_HOME/.local/bin/$name")
+  fi
+  case "$name" in
+    rtk|toon)
+      if [ -n "$USER_HOME" ]; then
+        candidates+=(
+          "$USER_HOME/.local/lib/anolisa/libexec/tokenless/$name"
+          "$USER_HOME/.local/libexec/anolisa/tokenless/$name"
+        )
+      fi
+      ;;
+  esac
+  candidates+=("/usr/local/bin/$name")
+  case "$name" in
+    rtk|toon)
+      candidates+=("/usr/local/libexec/anolisa/tokenless/$name")
+      ;;
+  esac
+  candidates+=("/usr/bin/$name")
+  case "$name" in
+    rtk|toon)
+      candidates+=(
+        "/usr/libexec/anolisa/tokenless/$name"
+        "/usr/lib/anolisa/tokenless/$name"
+      )
+      if [ -n "$USER_HOME" ]; then
+        candidates+=(
+          "$USER_HOME/.local/share/anolisa/tokenless/$name"
+          "$USER_HOME/.local/lib/anolisa/tokenless/$name"
+        )
+      fi
+      ;;
+  esac
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
   done
   return 1
 }
@@ -307,7 +365,7 @@ check_permissions() {
     case "$perm" in
       file_read)   [ ! -r / ] && perm_missing="${perm_missing} file_read" ;;
       file_write)  touch "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null; rc=$?; rm -f "${TMPDIR:-/tmp}/.tokenless-ready-test" 2>/dev/null; [ $rc -ne 0 ] && perm_missing="${perm_missing} file_write" ;;
-      exec_shell)  ! command -v bash &>/dev/null && perm_missing="${perm_missing} exec_shell" ;;
+      exec_shell)  ! resolve_binary bash >/dev/null 2>&1 && perm_missing="${perm_missing} exec_shell" ;;
       docker_socket) [ ! -S /var/run/docker.sock ] && [ ! -S /run/docker.sock ] && perm_missing="${perm_missing} docker_socket" ;;
     esac
   done
@@ -388,7 +446,10 @@ missing_count=$(echo "$MISSING_DEP_JSONS" | jq 'length' 2>/dev/null || echo 0)
 
 log_v "Phase 3 FIX: $missing_count missing deps, fix_script=$FIX_SCRIPT"
 
-if [ "$missing_count" -gt 0 ] && [ -n "$FIX_SCRIPT" ] && [ -x "$FIX_SCRIPT" ]; then
+if [ "$missing_count" -gt 0 ] \
+    && [ -n "$FIX_SCRIPT" ] \
+    && [ -r "$FIX_SCRIPT" ] \
+    && is_trusted_file "$FIX_SCRIPT"; then
     echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true
     hash -r 2>/dev/null || true
 

@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::config::{load_config, CoshConfig};
-use crate::diagnostics::health::run_health_scan;
+use crate::diagnostics::doctor::run_doctor_report_from_process_cwd;
 use crate::evidence::redact_sensitive_output;
 
 mod health;
@@ -174,7 +174,11 @@ fn export(options: &ExportOptions) -> io::Result<()> {
     }
 
     let config = load_config();
-    let health = run_health_scan(&config.health).map(health_json);
+    // Share the doctor engine so the bundle's health section carries the same
+    // resource + environment collector coverage and cwd semantics as
+    // `cosh-shell doctor`. Environment collectors run even when the resource
+    // scan is disabled, so the health section is always present.
+    let health = Some(health_json(run_doctor_report_from_process_cwd(&config)));
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let (logs, log_errors) = collect_named_files(
         home.as_deref().map(|path| path.join(".copilot-shell/logs")),

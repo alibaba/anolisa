@@ -1047,6 +1047,7 @@ fn install_owned(
             validated,
             &mut store,
             state_path,
+            journal_gate.inventory(),
         );
         let result = execute_owned_steps(steps, &mut ops, &mut journal);
         // Auto-provisioned system packages are retained on failure; the note

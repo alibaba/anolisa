@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.0
+
+### Features
+- Add optimization analysis workspace, APIs, persistent analysis history, and dashboard pages for accuracy, performance, and cost reviews.
+- Add Qoder trajectory collection, ATIF v1.7 export, batch analysis tooling, and subagent trajectory navigation with topology-style views.
+- Add command-line discovery rules for CoshNG and normalize LLM event attribution with command-line context.
+- Add six new interruption types and fallback capture for unparsable LLM HTTPS traffic.
+
+### Fixes
+- Fix Anthropic SSE parsing, system prompt injection, and cache token accounting.
+- Fix ATIF batch output to use the shared ATIF v1.7 schema and drop stale v1.6 paths.
+- Fix optimization and trajectory collection edge cases, including stale conversation anchors and syscall tracepoint probe attach.
+- Fix dashboard empty states, error banner wording, auth loopback handling, and session navigation behavior.
+- Make raw HTTPS FFI output opt-in and skip duplicate SSE message parsing for OpenAI and Anthropic streams.
+
+### Changed
+- Group optimization dimension analyses under per-target run roots and represent parallel LLM calls as ATIF subagent trajectories.
+- Slim and gate default SLS output so trace content is not uploaded unless explicitly enabled.
+
 ## 0.8.1
 
 ### Fixes

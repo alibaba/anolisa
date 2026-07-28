@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anolisa_core::domain::NativePm;
 #[cfg(test)]
 use anolisa_core::facts::JournalEvidence;
 use anolisa_core::facts::{JournalInventory, is_legacy_rpm_install_journal};
@@ -282,6 +283,75 @@ fn valid_component_name(component: &str) -> bool {
         && component != ".."
         && !component.contains('/')
         && !component.contains('\\')
+}
+
+/// One live pending fresh RPM install claim that reserves a package.
+#[derive(Debug)]
+pub(crate) struct PendingRpmPackageClaim {
+    /// Component the pending operation installs the package for.
+    pub(crate) component: String,
+    /// Package name the pending operation reserves.
+    pub(crate) package: String,
+    /// Journal that reserves the package.
+    pub(crate) journal_path: PathBuf,
+}
+
+/// Find the first live pending fresh RPM install journal reserving any of
+/// `packages`.
+///
+/// Modern subject journals carry the reserved package in their delegated
+/// recovery context; journals written before that field existed are decoded
+/// through [`parse_pending`], inheriting its fail-closed verdict for
+/// ambiguous live markers. Settled journals and non-install operations
+/// reserve nothing here.
+pub(crate) fn find_pending_rpm_claim_for_packages(
+    inventory: &JournalInventory,
+    layout: &FsLayout,
+    packages: &[&str],
+    command: &str,
+) -> Result<Option<PendingRpmPackageClaim>, CliError> {
+    for entry in inventory.entries() {
+        if !entry.is_effectively_pending() || entry.transaction().operation != "install" {
+            continue;
+        }
+        let transaction = entry.transaction();
+        if let Some(recovery) = &transaction.delegated_recovery {
+            let Some(package) = recovery.package.as_deref() else {
+                continue;
+            };
+            if recovery.pm != NativePm::Rpm || !packages.contains(&package) {
+                continue;
+            }
+            // A delegated journal without a subject cannot be routed to
+            // `repair <component>`; fail closed instead of guessing an owner.
+            let Some(component) = transaction.subject.as_deref() else {
+                return Err(CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "system package '{package}' is reserved by the pending RPM install journal {}, which has no component subject; inspect the journal and settle it before retrying",
+                        entry.path().display()
+                    ),
+                });
+            };
+            return Ok(Some(PendingRpmPackageClaim {
+                component: component.to_string(),
+                package: package.to_string(),
+                journal_path: entry.path().to_path_buf(),
+            }));
+        }
+        let Some(pending) = parse_pending(transaction.clone(), entry.path(), layout, command)?
+        else {
+            continue;
+        };
+        if packages.contains(&pending.package.as_str()) {
+            return Ok(Some(PendingRpmPackageClaim {
+                component: pending.component,
+                package: pending.package,
+                journal_path: entry.path().to_path_buf(),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn journal_error(command: &str, action: &str, err: TransactionError) -> CliError {

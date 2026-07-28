@@ -44,6 +44,12 @@ ws-ckpt/
 - btrfs filesystem
 - Rust 1.70+
 
+The workspace root must not be an active mount point. Initialization moves the
+original directory aside as a backup, and `rename(2)` fails with `EBUSY` on a
+directory that is itself a mount point — most often an in-place SkillFS mount.
+Unmount it (`skillfs stop <PATH>`, or `fusermount3 -u <PATH>`) before `init` or
+the first `checkpoint`.
+
 ### Build
 
 ```bash

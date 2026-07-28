@@ -168,9 +168,31 @@ ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 20
 > **警告**：ws-ckpt 配置的工作区路径**不能**是：
 > - 根路径（`/`）
 > - daemon mount_path 内部的路径
+> - 活跃的挂载点（见下文）
 > - Agent 启动目录或其父目录（在 plugin 层校验）
 >
 > 这些约束由 daemon 代码强制执行。使用无效路径将被拒绝。
+
+### 工作区根目录不能是挂载点
+
+初始化工作区时会把原目录改名后作为备份，而 `rename(2)` 对「自身是挂载点」的目录会返回
+`EBUSY`。这与文件系统类型无关，不只是 FUSE。
+
+最常见的情况是 in-place 模式的 SkillFS 挂载 —— 此时 source 和 mountpoint 是同一个目录。
+先卸载再操作：
+
+```bash
+skillfs stop /path/to/workspace      # in-place SkillFS 挂载
+fusermount3 -u /path/to/workspace    # 其他 FUSE 挂载
+```
+
+该约束作用于 `init`，以及在未纳管路径上首次执行的 `checkpoint`（会自动初始化）。工作区
+初始化完成之后，后续的 `checkpoint`、`rollback`、`list`、`diff` 都不受影响。
+
+被拒绝的只有工作区根目录本身。工作区**内部**的嵌套挂载不会阻止 `init`，但结果通常不是
+你想要的：挂载会留在 `init` 改名移走的备份目录上，新工作区里只有挂载内容的普通副本 ——
+后续写入落在副本上而不是挂载的文件系统里，两边会静默分叉。初始化前先卸载嵌套挂载，
+或让挂载点保持在工作区目录树之外。
 
 ---
 

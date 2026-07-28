@@ -7,7 +7,7 @@
 // document, which itself carries its own embedded subagents), so selecting a
 // node never needs a network round trip.
 
-import type { AtifDocument, SubagentTrajectoryRef } from '../types';
+import type { AtifDocument, AtifStep, SubagentTrajectoryRef } from '../types';
 
 /** One trajectory in the tree. `doc` is null for external (non-embedded) refs. */
 export interface TrajNode {
@@ -29,6 +29,22 @@ export interface TrajNode {
 
 const AGENT_NAME_PREFIX = 'agentsight-opt:';
 
+function stepsOf(doc: AtifDocument): AtifStep[] {
+  return Array.isArray(doc.steps) ? doc.steps : [];
+}
+
+function subagentsOf(doc: AtifDocument): AtifDocument[] {
+  return Array.isArray(doc.subagent_trajectories) ? doc.subagent_trajectories : [];
+}
+
+function observationResultsOf(step: AtifStep) {
+  return Array.isArray(step.observation?.results) ? step.observation.results : [];
+}
+
+function subagentRefsOf(result: { subagent_trajectory_ref?: SubagentTrajectoryRef[] }) {
+  return Array.isArray(result.subagent_trajectory_ref) ? result.subagent_trajectory_ref : [];
+}
+
 function displayLabel(doc: AtifDocument): string {
   const name = doc.agent?.name ?? 'subagent';
   return name.startsWith(AGENT_NAME_PREFIX) ? name.slice(AGENT_NAME_PREFIX.length) : name;
@@ -42,22 +58,22 @@ function subagentKey(doc: AtifDocument, index: number): string {
 function sumPromptTokens(doc: AtifDocument): number {
   const total = doc.final_metrics?.total_prompt_tokens;
   if (total != null) return total;
-  return (doc.steps ?? []).reduce((acc, s) => acc + (s.metrics?.prompt_tokens ?? 0), 0);
+  return stepsOf(doc).reduce((acc, s) => acc + (s.metrics?.prompt_tokens ?? 0), 0);
 }
 
 /** Every subagent ref appearing in a document's steps, in step order. */
 function collectRefs(doc: AtifDocument): SubagentTrajectoryRef[] {
   const refs: SubagentTrajectoryRef[] = [];
-  for (const step of doc.steps ?? []) {
-    for (const result of step.observation?.results ?? []) {
-      for (const ref of result.subagent_trajectory_ref ?? []) refs.push(ref);
+  for (const step of stepsOf(doc)) {
+    for (const result of observationResultsOf(step)) {
+      for (const ref of subagentRefsOf(result)) refs.push(ref);
     }
   }
   return refs;
 }
 
 function buildNode(doc: AtifDocument, path: string[], depth: number): TrajNode {
-  const embedded = doc.subagent_trajectories ?? [];
+  const embedded = subagentsOf(doc);
   const children: TrajNode[] = embedded.map((sub, i) => {
     const key = subagentKey(sub, i);
     return buildNode(sub, [...path, key], depth + 1);
@@ -98,7 +114,7 @@ function buildNode(doc: AtifDocument, path: string[], depth: number): TrajNode {
     detail: doc.notes,
     depth,
     doc,
-    stepCount: (doc.steps ?? []).length,
+    stepCount: stepsOf(doc).length,
     promptTokens: sumPromptTokens(doc),
     children,
   };

@@ -120,6 +120,14 @@ mod tests {
             MessageId::ApprovalTitle as usize,
             MessageId::QuestionNoPendingBody as usize + 1
         );
+        assert_eq!(
+            MessageId::AgentStatusToolArguments as usize,
+            MessageId::ALL.len() - 2
+        );
+        assert_eq!(
+            MessageId::AgentStatusGeneratingToolArguments as usize,
+            MessageId::ALL.len() - 1
+        );
     }
 
     #[test]

@@ -941,7 +941,7 @@ mod tests {
                 std::path::Path::new("/tmp"),
             )),
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         }
     }
 
