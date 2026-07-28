@@ -15,6 +15,7 @@ pub(super) fn slash_input(event: &ShellEvent) -> Option<&str> {
 pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
+    Draft,
     Auth,
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -58,6 +59,7 @@ impl<'a> SlashCommand<'a> {
         }
         Ok(match token {
             "/help" => Some(Self::Help),
+            "/draft" => Some(Self::Draft),
             "/auth" => Some(Self::Auth),
             "/hooks" => {
                 let sub = parts.next();

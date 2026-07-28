@@ -76,6 +76,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::SoftNewlineShortcutObserved => parser.push_soft_newline_shortcut_event(),
+            RawInputEvent::MultilinePasteObserved => parser.push_multiline_paste_event(),
             RawInputEvent::PromptDraftOpen { text } => {
                 let payload = serde_json::json!({ "text": text }).to_string();
                 parser.push_prompt_draft_event("open", Some(&payload));

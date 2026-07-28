@@ -11,12 +11,13 @@ use super::event_parser::{
     redact_extension_setting_value, starts_intercept_candidate, starts_native_cjk_candidate,
     starts_native_intercept_candidate, starts_native_partial_paste_opener,
     starts_native_paste_opener, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
+    BRACKETED_PASTE_END, BRACKETED_PASTE_START,
 };
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
 use super::soft_newline::{
     contains_soft_newline_sequence, draft_text_from_bytes, render_newline_markers,
-    render_soft_newline_markers,
+    render_soft_newline_markers, strip_soft_newline_sequences,
 };
 use super::{write_all_pty, MainPromptGate, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
@@ -126,6 +127,17 @@ fn relay_passthrough_input_with_activity(
     }
 
     observe_passthrough_soft_newline(bytes, relay.input_events);
+    // Soft-newline sequences on a bash-owned prompt line would echo as
+    // literal CSI garbage now that modifyOtherKeys is negotiated (#1932):
+    // strip them there, the tip above still educates. Gate down means a
+    // running command or continuation owns the tty (heredoc, vim) and may
+    // understand the sequence itself, so bytes pass through untouched.
+    let stripped = if relay.main_prompt_gate.is_at_prompt() {
+        strip_soft_newline_sequences(bytes)
+    } else {
+        None
+    };
+    let bytes = stripped.as_deref().unwrap_or(bytes);
     send_raw_input_events(bytes, relay.input_events);
     relay.native_line_state.observe_shell_bytes(bytes);
     if emit_activity && !bytes.is_empty() {
@@ -356,6 +368,14 @@ fn relay_native_passthrough(
     // Non-slash input: send directly to PTY. Shell marker's preexec/
     // command_not_found hooks handle NL/CJK intercept on the shell side.
     observe_passthrough_soft_newline(bytes, relay.input_events);
+    // Same stripping as the escape path (#1932): prompt-line only, a
+    // running command may understand the sequence itself (vim, heredoc).
+    let stripped = if relay.main_prompt_gate.is_at_prompt() {
+        strip_soft_newline_sequences(bytes)
+    } else {
+        None
+    };
+    let bytes = stripped.as_deref().unwrap_or(bytes);
     send_raw_input_events(bytes, relay.input_events);
     relay.native_line_state.observe_shell_bytes(bytes);
     if emit_activity && !bytes.is_empty() {
@@ -446,6 +466,20 @@ fn relay_candidate_line(
                         .send(RawInputEvent::UserIntercept(line, reason));
                     send_shell_input_state(true, relay.input_events);
                 }
+                if !remainder.is_empty() {
+                    relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
+                }
+                return Ok(true);
+            }
+            if line.trim() == "??" {
+                // A lone `??` submit opens an empty prompt draft (#1932):
+                // the terminal-agnostic entry into multi-line composition,
+                // mirroring the soft-newline upgrade in redraw_candidate_line.
+                let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
+                let _ = relay.input_events.send(RawInputEvent::PromptDraftOpen {
+                    text: String::new(),
+                });
+                send_shell_input_state(true, relay.input_events);
                 if !remainder.is_empty() {
                     relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
                 }
@@ -565,8 +599,14 @@ fn redraw_candidate_line(
     {
         // First soft newline upgrades the draft into the prompt card
         // (#1721 D13): erase the inline echo, hand the buffered text to the
-        // runtime, and let the capture own every following keystroke.
+        // runtime, and let the capture own every following keystroke. The
+        // leading `??` agent-marker is a routing gesture, not content
+        // (#1932): strip it so the card opens with the prompt itself.
         let text = draft_text_from_bytes(original);
+        let text = match text.strip_prefix("??") {
+            Some(rest) => rest.trim_start_matches(' ').to_string(),
+            None => text,
+        };
         let _ = input_events.send(RawInputEvent::CandidateClearLine);
         let _ = input_events.send(RawInputEvent::PromptDraftOpen { text });
         line_buffer.clear();
@@ -592,6 +632,31 @@ fn observe_passthrough_soft_newline(bytes: &[u8], input_events: &Sender<RawInput
     if contains_soft_newline_sequence(bytes) {
         let _ = input_events.send(RawInputEvent::SoftNewlineShortcutObserved);
     }
+    observe_passthrough_multiline_paste(bytes, input_events);
+}
+
+/// #1932 F5: a bracketed paste with embedded newlines relayed straight to
+/// bash line-executes on paste-unaware readline setups. Observe-only:
+/// best-effort single-chunk scan feeding the failure-insight hint; never
+/// touches the relayed bytes.
+fn observe_passthrough_multiline_paste(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
+    let Some(start) = bytes
+        .windows(BRACKETED_PASTE_START.len())
+        .position(|window| window == BRACKETED_PASTE_START)
+    else {
+        return;
+    };
+    let payload = &bytes[start + BRACKETED_PASTE_START.len()..];
+    let payload_end = payload
+        .windows(BRACKETED_PASTE_END.len())
+        .position(|window| window == BRACKETED_PASTE_END)
+        .unwrap_or(payload.len());
+    if payload[..payload_end]
+        .iter()
+        .any(|byte| matches!(byte, b'\r' | b'\n'))
+    {
+        let _ = input_events.send(RawInputEvent::MultilinePasteObserved);
+    }
 }
 
 fn held_input_requests_cancel(bytes: &[u8]) -> bool {
@@ -600,45 +665,8 @@ fn held_input_requests_cancel(bytes: &[u8]) -> bool {
         .any(|line| line.split_whitespace().next() == Some("/cancel"))
 }
 
-#[derive(Debug, Default)]
-pub(super) struct ExplicitExitTracker {
-    pending_line: Vec<u8>,
-    saw_explicit_exit: bool,
-}
-
-impl ExplicitExitTracker {
-    pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {
-        if self.saw_explicit_exit {
-            return;
-        }
-        self.pending_line.extend_from_slice(bytes);
-        while let Some(idx) = self
-            .pending_line
-            .iter()
-            .position(|byte| matches!(byte, b'\n' | b'\r'))
-        {
-            let line = self.pending_line.drain(..=idx).collect::<Vec<_>>();
-            if is_explicit_exit_line(&line) {
-                self.saw_explicit_exit = true;
-                self.pending_line.clear();
-                return;
-            }
-        }
-        if self.pending_line.len() > 4096 {
-            self.pending_line.clear();
-        }
-    }
-
-    pub(super) fn saw_explicit_exit(&self) -> bool {
-        self.saw_explicit_exit
-    }
-}
-
-fn is_explicit_exit_line(line: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(line);
-    let trimmed = text.trim();
-    trimmed == "exit" || trimmed.starts_with("exit ") || trimmed == "logout"
-}
+mod exit_tracker;
+pub(super) use exit_tracker::ExplicitExitTracker;
 
 #[cfg(test)]
 #[path = "relay_tests.rs"]

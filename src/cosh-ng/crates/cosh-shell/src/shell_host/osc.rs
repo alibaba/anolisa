@@ -683,6 +683,16 @@ impl OscParser {
         );
     }
 
+    /// #1932 F5: a multi-line bracketed paste was relayed straight to bash;
+    /// the runtime may attach a multi-line entry hint to a failure insight.
+    pub(super) fn push_multiline_paste_event(&mut self) {
+        self.push_self_session_input_event(
+            "multiline_paste",
+            "multi-line bracketed paste relayed to bash",
+            None,
+        );
+    }
+
     /// #1721 D13: forwards prompt-draft card lifecycle events (open/changed/
     /// submit/cancel) to the runtime as structured JSON payloads.
     pub(super) fn push_prompt_draft_event(&mut self, action: &str, payload: Option<&str>) {

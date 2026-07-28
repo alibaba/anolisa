@@ -15,6 +15,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::PromptDraftFooterSubmitted => "Sent to agent",
         MessageId::PromptDraftFooterCancelled => "Draft cancelled",
+        MessageId::HelpGroupPrompt => "Prompt",
+        MessageId::HelpSummaryDraft => "open the multi-line prompt draft card (same as ?? + Enter)",
+        MessageId::PromptMultilineEntryHint => {
+            "For multi-line prompts type ?? then Enter, or use /draft to open the draft card"
+        }
         MessageId::HelpGroupConfig => "Config",
         MessageId::HelpGroupHealth => "Health",
         MessageId::HelpGroupModes => "Modes",

@@ -93,6 +93,9 @@ pub(crate) enum RawInputEvent {
     /// relayed to the shell unchanged; downstream may surface a one-time
     /// discoverability tip at the next prompt-ready (#1721).
     SoftNewlineShortcutObserved,
+    /// A multi-line bracketed paste was relayed straight to bash (#1932):
+    /// feeds the failure-insight multi-line entry hint, observe-only.
+    MultilinePasteObserved,
     /// #1721 D13: the first soft newline in a candidate upgrades the draft
     /// into the multi-line prompt card; carries the buffered text.
     PromptDraftOpen {

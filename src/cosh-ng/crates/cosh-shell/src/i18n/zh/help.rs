@@ -15,6 +15,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::PromptDraftFooterSubmitted => "已发送给 Agent",
         MessageId::PromptDraftFooterCancelled => "草稿已取消",
+        MessageId::HelpGroupPrompt => "Prompt",
+        MessageId::HelpSummaryDraft => "打开多行 Prompt 草稿卡（?? 回车等效）",
+        MessageId::PromptMultilineEntryHint => {
+            "多行提问可输入 ?? 后回车，或使用 /draft 打开草稿卡"
+        }
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",

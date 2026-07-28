@@ -359,6 +359,14 @@ fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineSt
 }
 
 fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState) {
+    // #1932 F5: remember a straight-to-bash multi-line paste for the
+    // failure-insight hint; consumed by render_pending_command_insight.
+    if events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("multiline_paste")
+    }) {
+        state.multiline_paste_observed = true;
+    }
     if state.shown_soft_newline_tip {
         return;
     }

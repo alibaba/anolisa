@@ -5,8 +5,8 @@ use super::soft_newline::{
 };
 use super::{CTRL_C, CTRL_U};
 
-const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
-const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+pub(super) const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+pub(super) const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Debug, Default)]
 pub(super) struct CandidateLineBuffer {
@@ -385,9 +385,17 @@ pub(super) fn starts_native_intercept_candidate(
     // Line-start gate for the always-on native candidates: `/` (slash) and
     // `??` (agent marker). CJK line starts are handled separately because
     // they additionally require the main-prompt gate (#1721 D16).
-    native_line_state.is_at_line_start()
-        && (first_visible_input_byte(bytes) == Some(b'/')
-            || first_visible_input_bytes(bytes).starts_with(b"??"))
+    if !native_line_state.is_at_line_start() {
+        return false;
+    }
+    if first_visible_input_byte(bytes) == Some(b'/') {
+        return true;
+    }
+    let visible = first_visible_input_bytes(bytes);
+    // A lone `?` may be the first half of a `??` marker typed key by key
+    // (#1932): own the line now so the follow-up decides the route; any
+    // non-`??` continuation flushes back to bash byte-identically.
+    visible.starts_with(b"??") || visible == b"?"
 }
 
 /// The whole slice is a proper prefix of `\x1b[200~` / `\x1b[201~`

@@ -49,6 +49,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/draft",
+            usage: "/draft",
+            summary_id: MessageId::HelpSummaryDraft,
+            group: Some("Prompt"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/health",
             usage: "/health",
             summary_id: MessageId::HelpSummaryHealth,

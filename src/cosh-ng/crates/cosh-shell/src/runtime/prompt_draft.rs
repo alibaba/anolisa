@@ -24,6 +24,9 @@ pub(crate) struct PromptDraftCardState {
     pub(crate) hidden_below: usize,
     pub(crate) cursor: (usize, usize),
     pub(crate) panel_height: usize,
+    /// First paint opens on a fresh line below the bash prompt (relay
+    /// path); the slash path starts at a fresh column already (#1932).
+    pub(crate) line_break_before: bool,
 }
 
 /// Panel width aligned with every other card: the renderer's standard
@@ -37,6 +40,39 @@ enum CardPhase {
     Editing,
     Submitted,
     Cancelled,
+}
+
+/// Opens a fresh prompt-draft card immediately (#1932): shared by the
+/// relay-driven `open` lifecycle event and the `/draft` slash entry. The
+/// pending card capture picks the draft up on the next controller pass.
+/// `line_break_before` distinguishes the relay path (cursor still sits on
+/// the bash prompt line, the card must open on a fresh line) from the
+/// slash path (the dispatcher already left the cursor at a fresh column).
+pub(crate) fn open_prompt_draft<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+    text: String,
+    line_break_before: bool,
+) -> std::io::Result<()> {
+    state.prompt_draft_seq += 1;
+    let id = format!("draft-{}", state.prompt_draft_seq);
+    // The capture side owns the editor; mirror its initial viewport so the
+    // first paint happens before any Changed snapshot arrives.
+    let editor = crate::raw_input::PromptDraftEditor::from_text(&text);
+    let view = editor.viewport();
+    let mut card = PromptDraftCardState {
+        id,
+        text,
+        rows: view.rows,
+        hidden_above: view.hidden_above,
+        hidden_below: view.hidden_below,
+        cursor: view.cursor,
+        panel_height: 0,
+        line_break_before,
+    };
+    draw_card(&mut card, state, output, CardPhase::Editing)?;
+    state.prompt_draft = Some(card);
+    Ok(())
 }
 
 pub(crate) fn handle_prompt_draft_events<W: Write>(
@@ -55,24 +91,7 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
         match event.message.as_deref() {
             Some("open") => {
                 let text = value["text"].as_str().unwrap_or_default().to_string();
-                state.prompt_draft_seq += 1;
-                let id = format!("draft-{}", state.prompt_draft_seq);
-                // The capture side owns the editor; mirror its initial
-                // viewport so the first paint happens before any Changed
-                // snapshot arrives.
-                let editor = crate::raw_input::PromptDraftEditor::from_text(&text);
-                let view = editor.viewport();
-                let mut card = PromptDraftCardState {
-                    id,
-                    text,
-                    rows: view.rows,
-                    hidden_above: view.hidden_above,
-                    hidden_below: view.hidden_below,
-                    cursor: view.cursor,
-                    panel_height: 0,
-                };
-                draw_card(&mut card, state, output, CardPhase::Editing)?;
-                state.prompt_draft = Some(card);
+                open_prompt_draft(state, output, text, true)?;
             }
             Some("changed") => {
                 let Some(mut card) = state.prompt_draft.take() else {
@@ -227,11 +246,15 @@ fn draw_card<W: Write>(
     // frame may shrink (viewport, hidden markers), so clear the leftovers.
     if card.panel_height > 0 {
         write!(output, "\x1b[{}A", card.panel_height)?;
-    } else {
+    } else if card.line_break_before {
         // First paint: leave the bash prompt line untouched above the card
         // (the inline candidate echo was already erased by the relay) and
         // open the card on a fresh line.
         write!(output, "\x1b[?25l\r\n")?;
+    } else {
+        // First paint from the slash dispatcher: the cursor already sits
+        // at a fresh column, so only hide it (no extra blank line).
+        write!(output, "\x1b[?25l")?;
     }
     let repaint_rows = card.panel_height.max(lines.len());
     for index in 0..repaint_rows {
@@ -265,7 +288,31 @@ mod tests {
             hidden_below: 0,
             cursor,
             panel_height: 0,
+            line_break_before: true,
         }
+    }
+
+    #[test]
+    fn slash_first_paint_skips_the_extra_blank_line() {
+        let mut state = InlineState::default();
+        let mut card = card_with_rows(&[""], (0, 0));
+        card.line_break_before = false;
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut card, &mut state, &mut out, CardPhase::Editing).expect("draw");
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(
+            rendered.starts_with("\x1b[?25l\r\x1b[2K"),
+            "slash-opened card must not emit a leading blank line: {rendered:?}"
+        );
+
+        let mut relay_card = card_with_rows(&[""], (0, 0));
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut relay_card, &mut state, &mut out, CardPhase::Editing).expect("draw");
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(
+            rendered.starts_with("\x1b[?25l\r\n"),
+            "relay-opened card keeps the fresh-line break: {rendered:?}"
+        );
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub(super) fn render_slash_command<W: Write>(
             render_help(state, output)?;
             Ok(true)
         }
+        SlashCommand::Draft => {
+            // #1932: terminal-agnostic entry into multi-line composition;
+            // the pending card capture picks the draft up right after.
+            crate::runtime::prompt_draft::open_prompt_draft(state, output, String::new(), false)?;
+            Ok(true)
+        }
         SlashCommand::Hooks(sub, arg, extra) => {
             render_hooks_command(sub, arg, extra, blocks, adapter, state, output)?;
             Ok(true)

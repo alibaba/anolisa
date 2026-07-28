@@ -41,6 +41,28 @@ pub(super) fn contains_soft_newline_sequence(bytes: &[u8]) -> bool {
     (0..bytes.len()).any(|idx| soft_newline_sequence_len(&bytes[idx..]).is_some())
 }
 
+/// Removes whitelisted soft-newline sequences from passthrough bytes
+/// (#1932): with modifyOtherKeys negotiated the terminal emits them on any
+/// line, and bash renders the unknown CSI tail as literal garbage
+/// (`;2;13~`). The observe-only tip still fires; best-effort single-chunk
+/// scan like the tip itself. Returns `None` when nothing needs stripping.
+pub(super) fn strip_soft_newline_sequences(bytes: &[u8]) -> Option<Vec<u8>> {
+    if !contains_soft_newline_sequence(bytes) {
+        return None;
+    }
+    let mut stripped = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(len) = soft_newline_sequence_len(&bytes[index..]) {
+            index += len;
+            continue;
+        }
+        stripped.push(bytes[index]);
+        index += 1;
+    }
+    Some(stripped)
+}
+
 /// Returns the byte length of the soft-newline sequence terminating `bytes`,
 /// or `None`. Lets backspace delete a soft newline as one visible character
 /// even when the sequence arrived split across chunks (still raw in-buffer).

@@ -2450,10 +2450,11 @@ fn soft_newline_redraw_carries_marker_and_hint() {
     fs::remove_file(path).ok();
 }
 
-// Matrix #18 (#1721 T-c): a shortcut on the passthrough path is observed
-// without changing the bytes written to the shell (I1/I6).
+// Matrix #18: a shortcut on the passthrough path is observed for the
+// discoverability tip and stripped from the relayed bytes so bash never
+// echoes the negotiated CSI tail as literal garbage (#1932).
 #[test]
-fn passthrough_shortcut_is_observed_and_relayed_unchanged() {
+fn passthrough_shortcut_is_observed_and_stripped() {
     let (path, mut master) = output_file("soft-newline-observe");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -2486,8 +2487,8 @@ fn passthrough_shortcut_is_observed_and_relayed_unchanged() {
     assert!(events.contains(&RawInputEvent::SoftNewlineShortcutObserved));
     assert_eq!(
         fs::read(&path).expect("read test output"),
-        b"analyze load \x1b[13;2u tail",
-        "observe-only: bytes must be relayed unchanged"
+        b"analyze load  tail",
+        "negotiated soft-newline sequences are stripped from bash-owned lines"
     );
     fs::remove_file(path).ok();
 }
@@ -2619,7 +2620,7 @@ fn native_agent_marker_multiline_keeps_reason() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            RawInputEvent::PromptDraftOpen { text } if text == "?? deploy plan\n"
+            RawInputEvent::PromptDraftOpen { text } if text == "deploy plan\n"
         )),
         "?? soft newline must open the card with the marker intact: {events:?}"
     );
@@ -3044,5 +3045,200 @@ fn native_split_line_start_opener_opens_the_draft_card() {
         )),
         "split opener paste must open the card with both lines: {events:?}"
     );
+    fs::remove_file(path).ok();
+}
+
+// Typed `??` ownership (#1932): key-by-key `?` chunks must own the line so
+// a following multi-line paste composes in the draft card instead of
+// leaking to bash line by line.
+#[test]
+fn native_typed_qq_then_paste_composes_in_card() {
+    let (path, mut master) = output_file("native-typed-qq-paste");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"?", &mut relay).expect("first ? chunk");
+    relay_passthrough_input(b"?", &mut relay).expect("second ? chunk");
+    let mut paste = b"\x1b[200~Hello what can you do?\r".to_vec();
+    paste.extend_from_slice(b"What's your name?\r\x1b[201~");
+    relay_passthrough_input(&paste, &mut relay).expect("multi-line paste");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"",
+        "typed ?? + paste must never leak to the shell"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text }
+                if text == "Hello what can you do?\nWhat's your name?\n"
+        )),
+        "typed ?? paste must open the card with both lines: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Lone `?` fail-closed (#1932): a `?` followed by shell input flushes back
+// to bash byte-identically (glob usage stays native).
+#[test]
+fn native_lone_question_mark_flushes_back_to_shell() {
+    let (path, mut master) = output_file("native-lone-question");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"?", &mut relay).expect("lone ? chunk");
+    relay_passthrough_input(b"conf*\r", &mut relay).expect("glob tail");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"?conf*\r",
+        "glob line must reach the shell byte-identically"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftOpen { .. })),
+        "glob usage must not open the draft card: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Lone `??` + Enter (#1932): the terminal-agnostic entry opens an empty
+// draft card instead of submitting an empty agent prompt.
+#[test]
+fn native_lone_qq_enter_opens_empty_draft() {
+    let (path, mut master) = output_file("native-lone-qq-enter");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"?", &mut relay).expect("first ? chunk");
+    relay_passthrough_input(b"?", &mut relay).expect("second ? chunk");
+    relay_passthrough_input(b"\r", &mut relay).expect("enter");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"",
+        "?? + Enter must not reach the shell"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text.is_empty()
+        )),
+        "?? + Enter must open an empty draft card: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Negotiated shortcut on a bash-owned native line (#1932): the sequence is
+// stripped at the prompt (no literal CSI garbage) while the tip still fires;
+// the gate-down passthrough case is pinned separately above.
+#[test]
+fn native_prompt_line_shortcut_is_stripped() {
+    let (path, mut master) = output_file("native-shortcut-strip");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"Hello\x1b[13;2u", &mut relay).expect("shortcut on english line");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"Hello",
+        "the negotiated sequence must not reach bash on the prompt line"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events.contains(&RawInputEvent::SoftNewlineShortcutObserved));
     fs::remove_file(path).ok();
 }

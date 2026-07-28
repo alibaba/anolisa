@@ -77,6 +77,7 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
     let i18n = state.i18n();
     let mut groups = Vec::new();
     for (group, label_id) in [
+        ("Prompt", MessageId::HelpGroupPrompt),
         ("Status", MessageId::HelpGroupStatus),
         ("Config", MessageId::HelpGroupConfig),
         ("Health", MessageId::HelpGroupHealth),

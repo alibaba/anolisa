@@ -113,6 +113,12 @@ pub(crate) struct InlineState {
     /// prompt-ready boundary.
     pub(crate) pending_soft_newline_tip: bool,
     pub(crate) shown_soft_newline_tip: bool,
+    /// A multi-line bracketed paste was relayed straight to bash this
+    /// prompt cycle (#1932): arms the failure-insight multi-line entry hint.
+    pub(crate) multiline_paste_observed: bool,
+    /// Session-scoped cap for the multi-line entry hint (#1932): at most
+    /// two nudges per session to avoid nagging.
+    pub(crate) multiline_entry_hint_count: u8,
     /// #1721 D13: active multi-line prompt draft card, if any.
     pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
     pub(crate) prompt_draft_seq: u64,

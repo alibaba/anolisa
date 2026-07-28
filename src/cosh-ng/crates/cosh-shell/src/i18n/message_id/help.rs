@@ -142,6 +142,9 @@ macro_rules! prompt_soft_newline_ids {
             PromptDraftFooterEditing,
             PromptDraftFooterSubmitted,
             PromptDraftFooterCancelled,
+            HelpGroupPrompt,
+            HelpSummaryDraft,
+            PromptMultilineEntryHint,
         );
     };
 }
