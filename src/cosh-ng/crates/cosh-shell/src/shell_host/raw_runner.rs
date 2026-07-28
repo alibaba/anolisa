@@ -429,6 +429,16 @@ struct RawModeGuard {
 }
 
 impl RawModeGuard {
+    /// #1932 F4: modifyOtherKeys level 1 makes the terminal report
+    /// modifier-carrying editing keys (Shift+Enter -> `CSI 27;2;13~`)
+    /// that already sit on the soft-newline whitelist, with zero terminal
+    /// configuration. Level 1 leaves every conventionally-encoded key
+    /// (Esc, Alt+letter, Ctrl+letter) untouched, and terminals without
+    /// the feature ignore the sequence entirely. The enable is written on
+    /// the relay's ordered stdout path; this guard only owns the
+    /// withdrawal so the tty never keeps the mode after exit.
+    const MODIFY_OTHER_KEYS_DISABLE: &'static [u8] = b"\x1b[>4;0m";
+
     fn activate_stdin() -> io::Result<Option<Self>> {
         Self::activate_fd(0)
     }
@@ -481,7 +491,14 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.active {
             if let Some(original) = &self.original_termios {
+                // Withdraw the keyboard negotiation before handing the tty
+                // back (#1932 F4); paired with the enable in activate_fd.
                 unsafe {
+                    libc::write(
+                        self.fd,
+                        Self::MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
+                        Self::MODIFY_OTHER_KEYS_DISABLE.len(),
+                    );
                     libc::tcsetattr(self.fd, libc::TCSANOW, original);
                 }
             }

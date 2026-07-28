@@ -83,6 +83,12 @@ where
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut pending_prompt_restore = None;
     let mut input_readiness = RawInputReadinessProbe::from_env();
+    // #1932 F4: ask the outer terminal to report modifier-carrying editing
+    // keys (modifyOtherKeys level 1, e.g. Shift+Enter -> CSI 27;2;13~).
+    // Written on the ordered output path after startup rendering settled;
+    // unsupporting terminals ignore it, RawModeGuard withdraws it on exit.
+    output.write_all(b"\x1b[>4;1m")?;
+    output.flush()?;
     loop {
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
