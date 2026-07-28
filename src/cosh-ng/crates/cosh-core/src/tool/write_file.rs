@@ -1,4 +1,3 @@
-use std::path::Path;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -50,6 +49,22 @@ impl Tool for WriteFileTool {
 
         let path = resolve_path(path_str, &ctx.cwd);
 
+        // Refuse to write content containing placeholder/redacted markers.
+        // This prevents literal "<redacted>" or "YOUR_API_KEY" values from
+        // being persisted to disk. The LLM should use an interactive input
+        // path or obtain the real value instead.
+        let placeholders = placeholder_markers(content);
+        if !placeholders.is_empty() {
+            let msg = format!(
+                "Refusing to write {}: content contains placeholder marker(s): {}. \
+                 These indicate redacted or missing credentials. Use an interactive input \
+                 path (e.g. read from stdin) or provide the real value.",
+                path.display(),
+                placeholders.join(", "),
+            );
+            return Ok(ToolResult::error(msg));
+        }
+
         if let Some(parent) = path.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent)
@@ -64,7 +79,10 @@ impl Tool for WriteFileTool {
 
         let lines = content.lines().count();
         let bytes = content.len();
-        let output = write_result_output(content, bytes, lines, &path);
+        let output = format!(
+            "Wrote {bytes} bytes ({lines} lines) to {}",
+            path.display()
+        );
         Ok(ToolResult::success(output))
     }
 }
@@ -72,21 +90,6 @@ impl Tool for WriteFileTool {
 // resolve_path is provided by the parent module (super::resolve_path)
 // and supports ~ expansion.
 use super::resolve_path;
-
-fn write_result_output(content: &str, bytes: usize, lines: usize, path: &Path) -> String {
-    let base_message = format!("Wrote {bytes} bytes ({lines} lines) to {}", path.display());
-    let placeholders = placeholder_markers(content);
-
-    if placeholders.is_empty() {
-        return base_message;
-    }
-
-    format!(
-        "WARNING: placeholder(s) detected: {}. Credential configuration may be incomplete; use an \
-         interactive input path.\n\n{base_message}",
-        placeholders.join(", "),
-    )
-}
 
 fn placeholder_markers(content: &str) -> Vec<&'static str> {
     let upper = content.to_ascii_uppercase();
@@ -113,6 +116,7 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use super::*;
     fn test_ctx_in(dir: &Path) -> ToolContext {
         ToolContext {
@@ -176,27 +180,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_redacted_content_warns_without_refusing_the_write() {
+    async fn write_redacted_content_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool;
         let path = dir.path().join("settings.json");
-        let content = r#"{\"token\": \"<redacted>\"}"#;
+        let content = r#"{"token": "<redacted>"}"#;
 
         let result = tool
             .invoke(
-                serde_json::json!({"path": path, "content": content}),
+                serde_json::json!({"path": path.to_str().unwrap(), "content": content}),
                 &test_ctx_in(dir.path()),
             )
             .await
             .unwrap();
 
-        assert!(!result.is_error);
-        assert!(result.output.starts_with("WARNING:"));
-        assert!(result.output.contains("WARNING:"));
+        assert!(result.is_error);
+        assert!(result.output.contains("Refusing to write"));
         assert!(result.output.contains("<redacted>"));
-        assert!(result.output.contains("interactive input path"));
-        assert!(result.output.contains("Wrote"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        assert!(result.output.contains("interactive input"));
+        // File must NOT be created
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn write_your_api_key_content_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool;
+        let path = dir.path().join("config.env");
+        let content = "API_KEY=YOUR_API_KEY";
+
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": path.to_str().unwrap(), "content": content}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("YOUR_*_KEY/TOKEN/SECRET"));
+        assert!(!path.exists());
     }
 
     #[test]

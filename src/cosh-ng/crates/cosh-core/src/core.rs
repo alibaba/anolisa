@@ -195,7 +195,6 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
-        let content = crate::redaction::redact_text(content);
 
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
