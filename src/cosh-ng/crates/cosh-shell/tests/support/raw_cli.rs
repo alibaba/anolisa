@@ -548,6 +548,11 @@ fn run_raw_cli_marker_input_inner(
                 abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error)
             }
         }
+        // The panel output reaches the test reader before the relay loop installs
+        // the matching input capture; a short settle avoids racing the capture
+        // transition so ESC / back-navigation bytes land on the fresh capture
+        // instead of the Submitted→Draining window that drops them.
+        thread::sleep(Duration::from_millis(10));
         stdin.write_all(input).expect("write marker-gated input");
         stdin.flush().expect("flush marker-gated input");
     }
