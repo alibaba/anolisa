@@ -264,7 +264,7 @@ resolve_binary() {
   local found
   found=$(command -v "$name" 2>/dev/null || true)
   if [ -n "$found" ]; then echo "$found"; return 0; fi
-  for candidate in "$HOME/.local/bin/$name" "$HOME/.local/lib/anolisa/tokenless/$name"; do
+  for candidate in "$HOME/.local/bin/$name" "$HOME/.local/libexec/anolisa/tokenless/$name" "$HOME/.local/lib/anolisa/tokenless/$name"; do
     if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
   done
   return 1
