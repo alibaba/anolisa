@@ -3200,11 +3200,61 @@ fn native_lone_qq_enter_opens_empty_draft() {
     fs::remove_file(path).ok();
 }
 
-// Negotiated shortcut on a bash-owned native line (#1932): the sequence is
-// stripped at the prompt (no literal CSI garbage) while the tip still fires;
-// the gate-down passthrough case is pinned separately above.
+// Shift+Enter on a bash-owned english line (#1932 F6): the keypress is an
+// explicit multi-line intent. With a clean observed mirror the line
+// upgrades into the draft card and readline's copy is cleared with Ctrl-U.
 #[test]
-fn native_prompt_line_shortcut_is_stripped() {
+fn native_prompt_line_shortcut_upgrades_the_line() {
+    let (path, mut master) = output_file("native-shortcut-upgrade");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"Hello", &mut relay).expect("english prefix");
+    relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("shift+enter upgrade");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"Hello\x15\r",
+        "the upgrade clears readline's line and accepts it so bash repaints PS1"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "Hello\n"
+        )),
+        "the observed line must open the card with the cursor on line two: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Dirty mirror fail-closed (#1932 F6): after Tab the observed line no
+// longer matches readline, so the shortcut is stripped instead of
+// upgrading and the discoverability tip still fires.
+#[test]
+fn native_dirty_line_shortcut_is_stripped() {
     let (path, mut master) = output_file("native-shortcut-strip");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -3229,13 +3279,13 @@ fn native_prompt_line_shortcut_is_stripped() {
         &main_prompt_gate,
     );
 
-    relay_passthrough_input(b"Hello\x1b[13;2u", &mut relay).expect("shortcut on english line");
+    relay_passthrough_input(b"Hel\tlo\x1b[13;2u", &mut relay).expect("shortcut on edited line");
     let _ = relay;
     master.sync_all().expect("sync test output");
 
     assert_eq!(
         fs::read(&path).expect("read test output"),
-        b"Hello",
+        b"Hel\tlo",
         "the negotiated sequence must not reach bash on the prompt line"
     );
     let events = rx.try_iter().collect::<Vec<_>>();

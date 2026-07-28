@@ -38,7 +38,14 @@ pub(super) fn soft_newline_sequence_len(bytes: &[u8]) -> Option<usize> {
 /// Whether any whitelisted soft-newline sequence occurs in `bytes`. Used by
 /// the observe-only passthrough tip (#1721 T-c); never consumes bytes.
 pub(super) fn contains_soft_newline_sequence(bytes: &[u8]) -> bool {
-    (0..bytes.len()).any(|idx| soft_newline_sequence_len(&bytes[idx..]).is_some())
+    first_soft_newline_position(bytes).is_some()
+}
+
+/// Byte offset of the first whitelisted soft-newline sequence in `bytes`,
+/// if any (#1932 F6): lets the prompt-line upgrade split the chunk around
+/// the shortcut.
+pub(super) fn first_soft_newline_position(bytes: &[u8]) -> Option<usize> {
+    (0..bytes.len()).find(|&idx| soft_newline_sequence_len(&bytes[idx..]).is_some())
 }
 
 /// Removes whitelisted soft-newline sequences from passthrough bytes

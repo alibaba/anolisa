@@ -12,7 +12,7 @@ use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker};
 /// Terminal display columns of candidate echo bytes: ANSI escape sequences
 /// are zero-width; other content is measured per Unicode width (CJK = 2).
 /// Keeps native erase math correct for multi-byte drafts (#1721 G9).
-fn candidate_display_columns(bytes: &[u8]) -> usize {
+pub(super) fn candidate_display_columns(bytes: &[u8]) -> usize {
     // Sums real display widths (east-asian wide chars count 2), so the
     // erase loop backspaces once per terminal column. Any terminal-specific
     // wide-char overwrite quirk is covered by the `\x1b[K` clear plus the
@@ -77,6 +77,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::SoftNewlineShortcutObserved => parser.push_soft_newline_shortcut_event(),
             RawInputEvent::MultilinePasteObserved => parser.push_multiline_paste_event(),
+            RawInputEvent::SyntheticPromptRepaint => parser.arm_synthetic_prompt_repaint(),
             RawInputEvent::PromptDraftOpen { text } => {
                 let payload = serde_json::json!({ "text": text }).to_string();
                 parser.push_prompt_draft_event("open", Some(&payload));

@@ -71,6 +71,10 @@ pub(super) struct OscParser {
     intervention_display_cuts: Vec<(usize, DisplayCutKind)>,
     last_prompt_display_start: Option<usize>,
     prompt_ready_display_start: Option<usize>,
+    /// #1932: the soft-newline upgrade submitted a synthetic empty line so
+    /// bash repaints PS1; its visually blank accept echo is dropped at the
+    /// matching prompt boundary instead of surfacing as a blank line.
+    synthetic_prompt_repaint_armed: bool,
     pub(super) captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
     pending_handoff_echo: Option<PendingHandoffEcho>,
@@ -121,6 +125,7 @@ impl OscParser {
             intervention_display_cuts: Vec::new(),
             last_prompt_display_start: None,
             prompt_ready_display_start: None,
+            synthetic_prompt_repaint_armed: false,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
             pending_handoff_echo: None,
@@ -652,6 +657,17 @@ impl OscParser {
     pub(super) fn has_prompt_painted_since_ready(&self) -> bool {
         self.prompt_ready_display_start
             .is_some_and(|start| start < self.display.len())
+    }
+
+    /// Arms the one-shot blank-echo drop for the synthetic PS1 repaint
+    /// submitted by the soft-newline upgrade (#1932).
+    pub(super) fn arm_synthetic_prompt_repaint(&mut self) {
+        self.synthetic_prompt_repaint_armed = true;
+    }
+
+    /// Consumes the one-shot arm at the matching prompt boundary.
+    pub(super) fn take_synthetic_prompt_repaint(&mut self) -> bool {
+        std::mem::take(&mut self.synthetic_prompt_repaint_armed)
     }
 
     pub(super) fn push_intercept_event(

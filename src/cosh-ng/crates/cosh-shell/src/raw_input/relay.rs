@@ -17,7 +17,7 @@ use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
 use super::soft_newline::{
     contains_soft_newline_sequence, draft_text_from_bytes, render_newline_markers,
-    render_soft_newline_markers, strip_soft_newline_sequences,
+    render_soft_newline_markers,
 };
 use super::{write_all_pty, MainPromptGate, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
@@ -126,18 +126,18 @@ fn relay_passthrough_input_with_activity(
         return relay_candidate_line(relay, emit_activity);
     }
 
+    // A gated soft-newline shortcut upgrades the bash-owned line into the
+    // draft card; fallback strips the sequence (#1932 F6). The tip only
+    // fires when no upgrade happened.
+    let handled = handle_prompt_line_soft_newline(bytes, relay)?;
+    if matches!(handled, PromptLineSoftNewline::Upgraded) {
+        return Ok(true);
+    }
     observe_passthrough_soft_newline(bytes, relay.input_events);
-    // Soft-newline sequences on a bash-owned prompt line would echo as
-    // literal CSI garbage now that modifyOtherKeys is negotiated (#1932):
-    // strip them there, the tip above still educates. Gate down means a
-    // running command or continuation owns the tty (heredoc, vim) and may
-    // understand the sequence itself, so bytes pass through untouched.
-    let stripped = if relay.main_prompt_gate.is_at_prompt() {
-        strip_soft_newline_sequences(bytes)
-    } else {
-        None
+    let bytes = match &handled {
+        PromptLineSoftNewline::Stripped(stripped) => stripped.as_slice(),
+        _ => bytes,
     };
-    let bytes = stripped.as_deref().unwrap_or(bytes);
     send_raw_input_events(bytes, relay.input_events);
     relay.native_line_state.observe_shell_bytes(bytes);
     if emit_activity && !bytes.is_empty() {
@@ -367,15 +367,16 @@ fn relay_native_passthrough(
     }
     // Non-slash input: send directly to PTY. Shell marker's preexec/
     // command_not_found hooks handle NL/CJK intercept on the shell side.
+    // Same soft-newline handling as the escape path (#1932 F6).
+    let handled = handle_prompt_line_soft_newline(bytes, relay)?;
+    if matches!(handled, PromptLineSoftNewline::Upgraded) {
+        return Ok(true);
+    }
     observe_passthrough_soft_newline(bytes, relay.input_events);
-    // Same stripping as the escape path (#1932): prompt-line only, a
-    // running command may understand the sequence itself (vim, heredoc).
-    let stripped = if relay.main_prompt_gate.is_at_prompt() {
-        strip_soft_newline_sequences(bytes)
-    } else {
-        None
+    let bytes = match &handled {
+        PromptLineSoftNewline::Stripped(stripped) => stripped.as_slice(),
+        _ => bytes,
     };
-    let bytes = stripped.as_deref().unwrap_or(bytes);
     send_raw_input_events(bytes, relay.input_events);
     relay.native_line_state.observe_shell_bytes(bytes);
     if emit_activity && !bytes.is_empty() {
@@ -666,7 +667,9 @@ fn held_input_requests_cancel(bytes: &[u8]) -> bool {
 }
 
 mod exit_tracker;
+mod soft_newline_upgrade;
 pub(super) use exit_tracker::ExplicitExitTracker;
+use soft_newline_upgrade::{handle_prompt_line_soft_newline, PromptLineSoftNewline};
 
 #[cfg(test)]
 #[path = "relay_tests.rs"]

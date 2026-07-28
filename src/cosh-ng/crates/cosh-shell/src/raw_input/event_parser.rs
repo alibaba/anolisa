@@ -241,6 +241,10 @@ pub(super) enum CandidateLineStatus {
 #[derive(Debug, Default)]
 pub(super) struct NativeLineState {
     visible: Vec<u8>,
+    /// The mirror no longer matches readline's buffer: Tab completion or
+    /// cursor-moving sequences edit the line where we cannot see (#1932).
+    /// Reset together with the line (CR / Ctrl-C / Ctrl-U).
+    dirty: bool,
 }
 
 impl NativeLineState {
@@ -250,6 +254,16 @@ impl NativeLineState {
 
     pub(super) fn is_empty(&self) -> bool {
         self.visible.is_empty()
+    }
+
+    /// The observed prompt-line bytes, only while the mirror is trusted
+    /// (#1932 F6): `None` once an unobservable edit poisoned it.
+    pub(super) fn clean_visible_line(&self) -> Option<&[u8]> {
+        if self.dirty {
+            None
+        } else {
+            Some(&self.visible)
+        }
     }
 
     pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {
@@ -280,9 +294,11 @@ impl NativeLineState {
                     idx += 4;
                 }
                 b'\t' => {
+                    self.dirty = true;
                     idx += 1;
                 }
                 byte if byte < 0x20 || byte == 0x1b => {
+                    self.dirty = true;
                     idx += 1;
                 }
                 byte => {
@@ -298,6 +314,7 @@ impl NativeLineState {
 
     pub(super) fn clear(&mut self) {
         self.visible.clear();
+        self.dirty = false;
     }
 
     fn pop_visible_char(&mut self) {

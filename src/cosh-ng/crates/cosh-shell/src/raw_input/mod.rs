@@ -117,6 +117,10 @@ pub(crate) enum RawInputEvent {
     PromptDraftCancel {
         id: String,
     },
+    /// The soft-newline upgrade submitted a synthetic empty line so bash
+    /// repaints PS1 (#1932); its visually blank accept echo is dropped
+    /// at the next prompt boundary instead of surfacing as a blank line.
+    SyntheticPromptRepaint,
     CaptureSubmitted {
         kind: &'static str,
         target_id: String,

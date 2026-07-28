@@ -403,8 +403,12 @@ fn render_soft_newline_tip<W: Write>(
         return Ok(());
     }
     let tip = state.i18n().t(MessageId::PromptSoftNewlineTip);
-    write!(output, "\x1b[2m{tip}\x1b[0m\r\n")?;
+    // The cursor may sit anywhere on the echoed input line: move to a
+    // fresh line before the tip and repaint the prompt afterwards so the
+    // tip never splices into user input (#1932).
+    write!(output, "\r\n\x1b[2m{tip}\x1b[0m\r\n")?;
     output.flush()?;
+    state.trigger_pty_prompt = true;
     state.pending_soft_newline_tip = false;
     state.shown_soft_newline_tip = true;
     Ok(())

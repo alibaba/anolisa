@@ -28,7 +28,7 @@ mod pty_emit;
 mod terminal_recovery;
 mod terminal_size;
 
-use input_events::drain_raw_input_events;
+use input_events::{candidate_display_columns, drain_raw_input_events};
 use input_readiness::RawInputReadinessProbe;
 use pty_emit::resolve_pty_emit;
 #[cfg(test)]
@@ -149,17 +149,29 @@ where
                     last_pty_output = Some(Instant::now());
                     parser.feed(&buffer[..n])?;
                     for (cut, cut_kind) in parser.drain_intervention_display_cuts() {
+                        let cut = cut.min(parser.display.len());
                         // Only a real prompt boundary (precmd) confirms the
                         // shell finished responding to the relay writes seen
                         // so far; an intercepted line's remaining response is
                         // just the prompt repaint replay dedup strips.
                         match cut_kind {
                             DisplayCutKind::PromptBoundary => {
-                                prompt_replay.observe_prompt_boundary()
+                                prompt_replay.observe_prompt_boundary();
+                                // #1932: the soft-newline upgrade submitted a
+                                // synthetic empty line for this boundary; its
+                                // accept echo is visually blank, so drop it
+                                // instead of surfacing a stray blank line.
+                                if parser.take_synthetic_prompt_repaint()
+                                    && cut > display_start
+                                    && candidate_display_columns(
+                                        &parser.display[display_start..cut],
+                                    ) == 0
+                                {
+                                    display_start = cut;
+                                }
                             }
                             DisplayCutKind::Intercept => prompt_replay.observe_intercept_cut(),
                         }
-                        let cut = cut.min(parser.display.len());
                         if !hold_shell_output && cut > display_start {
                             write_display_slice(
                                 parser,
