@@ -1,4 +1,3 @@
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -79,10 +78,7 @@ impl Tool for WriteFileTool {
 
         let lines = content.lines().count();
         let bytes = content.len();
-        let output = format!(
-            "Wrote {bytes} bytes ({lines} lines) to {}",
-            path.display()
-        );
+        let output = format!("Wrote {bytes} bytes ({lines} lines) to {}", path.display());
         Ok(ToolResult::success(output))
     }
 }
@@ -116,8 +112,8 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use super::*;
+    use std::path::Path;
     fn test_ctx_in(dir: &Path) -> ToolContext {
         ToolContext {
             cwd: dir.to_path_buf(),

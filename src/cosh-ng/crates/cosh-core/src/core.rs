@@ -195,7 +195,6 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
-
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
