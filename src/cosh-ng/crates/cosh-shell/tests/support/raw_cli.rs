@@ -37,11 +37,26 @@ static RAW_CLI_RUN_GATE: OnceLock<RawCliRunGate> = OnceLock::new();
 /// In raw terminal mode the Enter key sends CR, not LF; the integration
 /// tests write to a pipe (no terminal driver), so we convert here to
 /// match real terminal behavior.
+///
+/// Use this for inputs where every `\n` means "submit" (the common case).
+/// For tests that need literal LF bytes — e.g. soft-newline (Ctrl+J) or
+/// bracketed-paste payloads containing `\n` — use [`raw_bytes_for_pipe`]
+/// instead, which passes bytes through unmodified.
 fn translate_enter_for_pipe(input: &[u8]) -> Vec<u8> {
     input
         .iter()
         .map(|&b| if b == b'\n' { b'\r' } else { b })
         .collect()
+}
+
+/// Pass bytes through to the pipe without LF→CR translation.
+///
+/// Use this when the test input contains literal LF (0x0a) that must
+/// reach the child process as-is — for example, Ctrl+J soft-newline
+/// sequences or bracketed-paste payloads with embedded newlines.
+#[allow(dead_code)]
+fn raw_bytes_for_pipe(input: &[u8]) -> Vec<u8> {
+    input.to_vec()
 }
 
 pub(crate) fn raw_cli_command(binary: &str) -> Command {

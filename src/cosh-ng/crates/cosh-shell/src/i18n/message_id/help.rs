@@ -48,7 +48,6 @@ macro_rules! help_core_ids {
             SlashInfoConfigAnalysisStrategyLine,
             SlashInfoConfigRenderFallbackLine,
             SlashInfoConfigFooter,
-            HelpSoftNewlineHint,
         );
     };
 }
@@ -143,6 +142,16 @@ macro_rules! prompt_soft_newline_ids {
             PromptDraftFooterEditing,
             PromptDraftFooterSubmitted,
             PromptDraftFooterCancelled,
+        );
+    };
+}
+
+macro_rules! help_soft_newline_hint_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSoftNewlineHint,
         );
     };
 }
