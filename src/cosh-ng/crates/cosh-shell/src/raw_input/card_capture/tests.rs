@@ -75,6 +75,25 @@ fn question_capture_clears_free_text_after_submit() {
 }
 
 #[test]
+fn text_question_backspaces_from_initial_text() {
+    let capture = RawInputCapture::TextQuestion {
+        id: "auth@field-0-1".to_string(),
+        initial_text: "qwen3.7-max".to_string(),
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x7f"),
+        vec![RawInputEvent::CardInput(
+            "auth@field-0-1".to_string(),
+            "qwen3.7-ma".to_string(),
+        )]
+    );
+}
+
+#[test]
 fn question_capture_emits_one_submission_per_input_batch() {
     let capture = RawInputCapture::Question {
         id: "q-burst".to_string(),
@@ -911,4 +930,78 @@ fn secret_submit_clears_free_text_for_next_capture() {
             "plain".to_string()
         ))
     );
+}
+
+fn draft_capture() -> RawInputCapture {
+    RawInputCapture::PromptDraft {
+        id: "draft-1".to_string(),
+        initial_text: "第一行".to_string(),
+    }
+}
+
+// Split legacy Alt+Enter (#1721): a trailing bare ESC is held (possible split legacy Alt+Enter);
+// a following CR resolves to a soft newline instead of a cancel.
+#[test]
+fn draft_bare_esc_then_cr_inserts_newline_across_chunks() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+        "bare ESC must be held, not cancel: {events:?}"
+    );
+    assert!(state.draft_escape_pending(), "ESC must be pending");
+
+    let (events, _) = state.consume_split(&capture, b"\r");
+    let changed = events
+        .iter()
+        .find_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("split ESC+CR must insert a newline");
+    assert_eq!(changed, "第一行\n");
+    assert!(!state.draft_escape_pending());
+}
+
+// Split legacy Alt+Enter (#1721): on timeout the relay injects a second ESC; the held ESC plus
+// the injected one resolve to the explicit cancel path.
+#[test]
+fn draft_bare_esc_timeout_injection_cancels() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (_, _) = state.consume_split(&capture, b"\x1b");
+    assert!(state.draft_escape_pending());
+    let (events, _) = state.consume_split(&capture, b"\x1b");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+        "injected second ESC must cancel: {events:?}"
+    );
+}
+
+// Pasted data integrity (#1721): tabs inside a bracketed paste are data, not completion keys.
+#[test]
+fn draft_pasted_tab_is_inserted_as_data() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[200~A\tB\x1b[201~");
+    let changed = events
+        .iter()
+        .filter_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("paste must report a draft change");
+    assert_eq!(changed, "第一行A\tB", "pasted tab must survive: {changed}");
 }

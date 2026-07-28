@@ -3,9 +3,57 @@
 use std::io::{self, Write};
 use std::sync::mpsc::Receiver;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::raw_input::RawInputEvent;
 
 use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker};
+
+/// Terminal display columns of candidate echo bytes: ANSI escape sequences
+/// are zero-width; other content is measured per Unicode width (CJK = 2).
+/// Keeps native erase math correct for multi-byte drafts (#1721 G9).
+fn candidate_display_columns(bytes: &[u8]) -> usize {
+    // Sums real display widths (east-asian wide chars count 2), so the
+    // erase loop backspaces once per terminal column. Any terminal-specific
+    // wide-char overwrite quirk is covered by the `\x1b[K` clear plus the
+    // full-line rewrite that always follow the erase.
+    let text = String::from_utf8_lossy(bytes);
+    let mut columns = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for terminator in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&terminator) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    for terminator in chars.by_ref() {
+                        if terminator == '\x07' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        columns += ch.width().unwrap_or(0);
+    }
+    columns
+}
+
+fn erase_native_columns<W: Write>(output: &mut W, columns: usize) -> io::Result<()> {
+    for _ in 0..columns {
+        write!(output, "\x08 \x08")?;
+    }
+    Ok(())
+}
 
 pub(super) fn drain_raw_input_events<W: Write>(
     input_events: &Receiver<RawInputEvent>,
@@ -27,17 +75,60 @@ pub(super) fn drain_raw_input_events<W: Write>(
             } => prompt_replay.observe_user_write(generation, line_submits),
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::Esc => parser.push_control_event("esc"),
+            RawInputEvent::SoftNewlineShortcutObserved => parser.push_soft_newline_shortcut_event(),
+            RawInputEvent::PromptDraftOpen { text } => {
+                let payload = serde_json::json!({ "text": text }).to_string();
+                parser.push_prompt_draft_event("open", Some(&payload));
+            }
+            RawInputEvent::PromptDraftChanged {
+                id,
+                text,
+                viewport,
+                line_count,
+            } => {
+                let payload = serde_json::json!({
+                    "id": id,
+                    "text": text,
+                    "line_count": line_count,
+                    "first_row": viewport.first_row,
+                    "hidden_above": viewport.hidden_above,
+                    "hidden_below": viewport.hidden_below,
+                    "rows": viewport.rows,
+                    "cursor_row": viewport.cursor.0,
+                    "cursor_col": viewport.cursor.1,
+                })
+                .to_string();
+                parser.push_prompt_draft_event("changed", Some(&payload));
+            }
+            RawInputEvent::PromptDraftSubmit { id, text } => {
+                let payload = serde_json::json!({ "id": id, "text": text }).to_string();
+                parser.push_prompt_draft_event("submit", Some(&payload));
+                // The submitted draft rides the existing intercept path into
+                // the agent turn (D10 reason rules: `??` keeps AgentMarker).
+                let session_id = parser.session_id.clone();
+                let reason = if text.trim_start().starts_with("??") {
+                    "agent_marker"
+                } else {
+                    "natural_language"
+                };
+                parser.push_intercept_event(&session_id, text, None, reason);
+            }
+            RawInputEvent::PromptDraftCancel { id } => {
+                let payload = serde_json::json!({ "id": id }).to_string();
+                parser.push_prompt_draft_event("cancel", Some(&payload));
+            }
             RawInputEvent::CandidateRedraw { input, hint } => {
                 if native_mode {
-                    if input.len() >= *native_candidate_echoed_len {
-                        output.write_all(&input[*native_candidate_echoed_len..])?;
-                    } else {
-                        let erased = *native_candidate_echoed_len - input.len();
-                        for _ in 0..erased {
-                            write!(output, "\x08 \x08")?;
-                        }
+                    // Erase by display columns and rewrite the whole draft:
+                    // byte-offset math breaks on CJK and marker bytes (#1721).
+                    // Erase-to-EOL clears any stale inline hint residue.
+                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    write!(output, "\x1b[K")?;
+                    output.write_all(&input)?;
+                    if let Some(hint) = hint {
+                        write!(output, "\x1b[s\x1b[2m {hint}\x1b[0m\x1b[u")?;
                     }
-                    *native_candidate_echoed_len = input.len();
+                    *native_candidate_echoed_len = candidate_display_columns(&input);
                 } else {
                     write!(output, "\r\x1b[2K{prompt}")?;
                     output.write_all(&input)?;
@@ -49,9 +140,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
             }
             RawInputEvent::CandidateCommit(input) => {
                 if native_mode {
-                    if input.len() > *native_candidate_echoed_len {
-                        output.write_all(&input[*native_candidate_echoed_len..])?;
-                    }
+                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    write!(output, "\x1b[K")?;
+                    output.write_all(&input)?;
                     *native_candidate_echoed_len = 0;
                 } else {
                     write!(output, "\r\x1b[2K{prompt}")?;
@@ -86,9 +177,8 @@ pub(super) fn drain_raw_input_events<W: Write>(
             }
             RawInputEvent::CandidateClearLine => {
                 if native_mode {
-                    for _ in 0..*native_candidate_echoed_len {
-                        write!(output, "\x08 \x08")?;
-                    }
+                    erase_native_columns(output, *native_candidate_echoed_len)?;
+                    write!(output, "\x1b[K")?;
                     *native_candidate_echoed_len = 0;
                 } else {
                     write!(output, "\r\x1b[2K{prompt}")?;

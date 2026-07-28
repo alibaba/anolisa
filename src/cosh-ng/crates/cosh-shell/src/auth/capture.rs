@@ -14,7 +14,10 @@ pub(super) fn auth_capture_id(auth: &RuntimeAuthState) -> String {
         AuthPhase::ProviderAction { provider_idx } => format!("action-{provider_idx}"),
         AuthPhase::ConfirmDelete { provider_idx } => format!("delete-{provider_idx}"),
         AuthPhase::SelectingProvider => "select".to_string(),
-        AuthPhase::FillingField => format!("field-{}", auth.current_field),
+        AuthPhase::FillingField => format!(
+            "field-{}-{}",
+            auth.current_field, auth.field_capture_revision
+        ),
         AuthPhase::AliyunEcsChallenge { .. } => "aliyun-challenge".to_string(),
     };
     format!("{}@{scope}", auth.id)
@@ -70,11 +73,9 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
                 .get(auth.selected_provider)
                 .and_then(|provider| provider.fields.get(auth.current_field))
                 .is_some_and(|field| field.secret);
-            Some(RawInputCapture::Question {
+            Some(RawInputCapture::TextQuestion {
                 id: auth_capture_id(auth),
-                option_count: 0,
-                allow_free_text: true,
-                multiple: false,
+                initial_text: auth.field_input.clone(),
                 secret,
             })
         }

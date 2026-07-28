@@ -87,7 +87,9 @@ pub(super) fn consume_captured_input(
 
 fn capture_target(capture: &RawInputCapture) -> (&'static str, &str) {
     match capture {
-        RawInputCapture::Question { id, .. } => ("question", id),
+        RawInputCapture::Question { id, .. } | RawInputCapture::TextQuestion { id, .. } => {
+            ("question", id)
+        }
         RawInputCapture::Approval { id, .. } => ("approval", id),
         RawInputCapture::Mode { id, .. } => ("mode", id),
         RawInputCapture::Config { id, .. } => ("config", id),
@@ -95,6 +97,7 @@ fn capture_target(capture: &RawInputCapture) -> (&'static str, &str) {
         RawInputCapture::Session { id, .. } => ("session", id),
         RawInputCapture::Consultation { id } => ("consultation", id),
         RawInputCapture::Evidence { id } => ("evidence", id),
+        RawInputCapture::PromptDraft { id, .. } => ("prompt_draft", id),
     }
 }
 

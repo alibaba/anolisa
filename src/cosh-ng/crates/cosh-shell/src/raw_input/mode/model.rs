@@ -157,6 +157,12 @@ pub enum RawInputCapture {
         multiple: bool,
         secret: bool,
     },
+    /// Editable text-only question whose input buffer starts with `initial_text`.
+    TextQuestion {
+        id: String,
+        initial_text: String,
+        secret: bool,
+    },
     Approval {
         id: String,
         action_set: crate::ui::ApprovalActionSet,
@@ -187,5 +193,12 @@ pub enum RawInputCapture {
     },
     Evidence {
         id: String,
+    },
+    /// Multi-line prompt draft card (#1721 D13): opened by the first soft
+    /// newline in a native/escape candidate; the capture owns every key
+    /// until submit (Enter) or cancel (Esc/Ctrl+C).
+    PromptDraft {
+        id: String,
+        initial_text: String,
     },
 }

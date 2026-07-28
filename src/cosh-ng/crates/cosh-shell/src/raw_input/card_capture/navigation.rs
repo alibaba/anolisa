@@ -28,6 +28,44 @@ impl CardInputState {
                     events.push(event);
                 }
             }
+            // Draft card editing keys (#1721 D14): Home/End, Delete, CSI-u
+            // Shift/Alt+Enter, keypad Home/End, and bracketed paste markers.
+            (b"", b'H') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft.move_line_start();
+                events.extend(self.input_event(capture));
+            }
+            (b"", b'F') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft.move_line_end();
+                events.extend(self.input_event(capture));
+            }
+            (b"13;2" | b"13;3", b'u') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft.insert_newline();
+                events.extend(self.input_event(capture));
+            }
+            (b"27;2;13" | b"27;3;13", b'~')
+                if matches!(capture, RawInputCapture::PromptDraft { .. }) =>
+            {
+                self.draft.insert_newline();
+                events.extend(self.input_event(capture));
+            }
+            (b"3", b'~') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft.delete_forward();
+                events.extend(self.input_event(capture));
+            }
+            (b"1" | b"7", b'~') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft.move_line_start();
+                events.extend(self.input_event(capture));
+            }
+            (b"4" | b"8", b'~') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft.move_line_end();
+                events.extend(self.input_event(capture));
+            }
+            (b"200", b'~') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft_paste = true;
+            }
+            (b"201", b'~') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                self.draft_paste = false;
+            }
             (_, b'~') => {
                 // Bracketed paste and keypad sequences such as Delete end with
                 // '~'. The sequence itself is terminal control data; any pasted
@@ -66,6 +104,7 @@ impl CardInputState {
                     None
                 }
             }
+            RawInputCapture::TextQuestion { .. } => None,
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 let max_idx = capture_action_set(capture).max_index();
                 let previous = self.selected;
@@ -124,6 +163,16 @@ impl CardInputState {
                 }
             }
             RawInputCapture::Evidence { .. } => None,
+            RawInputCapture::PromptDraft { .. } => {
+                match code {
+                    b'A' => self.draft.move_up(),
+                    b'B' => self.draft.move_down(),
+                    b'C' => self.draft.move_right(),
+                    b'D' => self.draft.move_left(),
+                    _ => return None,
+                }
+                self.input_event(capture)
+            }
         }
     }
 
@@ -141,6 +190,7 @@ impl CardInputState {
                     None
                 }
             }
+            RawInputCapture::TextQuestion { .. } => None,
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 let max_idx = capture_action_set(capture).max_index();
                 self.selected = (self.selected + 1).min(max_idx);
@@ -179,6 +229,8 @@ impl CardInputState {
                 }
             }
             RawInputCapture::Evidence { .. } => None,
+            // Tab completion has no meaning inside the draft card; swallow it.
+            RawInputCapture::PromptDraft { .. } => None,
         }
     }
 
@@ -193,6 +245,7 @@ impl CardInputState {
                     None
                 }
             }
+            RawInputCapture::TextQuestion { .. } => None,
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 self.selected = self.selected.saturating_sub(1);
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))
@@ -217,6 +270,7 @@ impl CardInputState {
                 Some(RawInputEvent::SessionFocus(id.clone(), self.selected))
             }
             RawInputCapture::Evidence { .. } => None,
+            RawInputCapture::PromptDraft { .. } => None,
         }
     }
 }

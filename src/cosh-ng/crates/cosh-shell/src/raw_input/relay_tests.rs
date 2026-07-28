@@ -157,6 +157,7 @@ impl SelectionRelay {
             InputClassifier::default(),
             input_mode.clone(),
             UserPtyInputGeneration::default(),
+            super::super::MainPromptGate::default(),
         );
         Self {
             path,
@@ -215,6 +216,7 @@ impl DelayRelay {
             InputClassifier::default(),
             input_mode.clone(),
             UserPtyInputGeneration::default(),
+            super::super::MainPromptGate::default(),
         );
         Self {
             path,
@@ -350,6 +352,7 @@ fn submitted_capture_discards_a_later_owned_read_when_the_chain_ends() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"first\n".to_vec()).expect("first answer");
@@ -448,6 +451,7 @@ fn input_obtained_before_capture_replacement_does_not_enter_the_new_capture() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"first\n".to_vec()).expect("first answer");
@@ -536,6 +540,7 @@ fn input_obtained_after_capture_install_enters_the_new_capture() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     read_started_rx
@@ -595,6 +600,7 @@ fn passthrough_owned_input_does_not_enter_a_later_capture() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"stale".to_vec()).expect("passthrough input");
@@ -658,6 +664,7 @@ fn delay_owned_escape_does_not_reach_a_later_capture_or_shell() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(vec![0x1b]).expect("delay escape");
@@ -723,6 +730,7 @@ fn capture_owned_input_does_not_enter_later_passthrough() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx
@@ -771,6 +779,7 @@ fn prompt_ghost_candidate_cycle_during_read_does_not_drop_input() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"x".to_vec()).expect("typed input");
@@ -832,6 +841,7 @@ fn tab_read_under_selection_is_not_reinterpreted_by_native_route() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"\t".to_vec()).expect("tab input");
@@ -889,6 +899,7 @@ fn tab_read_under_native_route_is_not_reinterpreted_by_agent_intercept() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"\t".to_vec()).expect("tab input");
@@ -949,6 +960,7 @@ fn enter_read_under_intercept_is_not_reinterpreted_by_selection() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"\r".to_vec()).expect("enter input");
@@ -1000,6 +1012,7 @@ fn tab_after_route_cutover_is_relayed_under_the_new_route() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"\t".to_vec()).expect("in-flight tab");
@@ -1122,6 +1135,7 @@ fn active_capture_eof_drains_the_generation_without_input() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     drop(input_tx);
@@ -1171,6 +1185,7 @@ fn selection_bare_escape_times_out_without_waiting_for_another_key() {
         InputClassifier::default(),
         input_mode.clone(),
         UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
     );
 
     input_tx.send(b"\x1b".to_vec()).expect("send escape");
@@ -1784,6 +1799,7 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
     let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -1794,6 +1810,7 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     assert!(relay_prompt_ghost_input(
@@ -1845,6 +1862,7 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
     let classifier = InputClassifier::conservative();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -1855,6 +1873,7 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     relay_passthrough_input(b"/ho", &mut relay).expect("buffer slash prefix");
@@ -1887,6 +1906,7 @@ fn native_shell_input_reports_editing_then_empty_without_content() {
     let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -1897,6 +1917,7 @@ fn native_shell_input_reports_editing_then_empty_without_content() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     relay_passthrough_input(b"partial", &mut relay).expect("type partial line");
@@ -1937,6 +1958,7 @@ fn agent_prompt_tab_stays_local_until_enter_and_keeps_suggestion_id() {
     let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -1947,6 +1969,7 @@ fn agent_prompt_tab_stays_local_until_enter_and_keeps_suggestion_id() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2008,6 +2031,7 @@ fn selection_enter_submits_the_active_prompt_without_shell_execution() {
     let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -2018,6 +2042,7 @@ fn selection_enter_submits_the_active_prompt_without_shell_execution() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     relay_prompt_ghost_input(b"\r", "inspect disk pressure", &route, &mut relay)
@@ -2058,6 +2083,7 @@ fn clearing_accepted_agent_prompt_emits_binding_dismissal() {
     let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -2068,6 +2094,7 @@ fn clearing_accepted_agent_prompt_emits_binding_dismissal() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2098,6 +2125,7 @@ fn unsupported_arrow_after_agent_prompt_tab_cancels_without_writing_to_shell() {
     let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -2108,6 +2136,7 @@ fn unsupported_arrow_after_agent_prompt_tab_cancels_without_writing_to_shell() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2149,6 +2178,7 @@ fn split_cursor_sequences_after_agent_prompt_tab_never_reach_shell() {
         let classifier = InputClassifier::default();
         let input_generation = UserPtyInputGeneration::default();
         let mut line_submits = LineSubmitCounter::default();
+        let main_prompt_gate = super::super::MainPromptGate::default();
         let mut relay = InputRelayContext {
             master: &mut master,
             input_classifier: &classifier,
@@ -2159,6 +2189,7 @@ fn split_cursor_sequences_after_agent_prompt_tab_never_reach_shell() {
             line_buffer: &mut line_buffer,
             native_line_state: &mut native_line_state,
             exit_tracker: &mut exit_tracker,
+            main_prompt_gate: &main_prompt_gate,
         };
 
         relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2196,6 +2227,7 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
     let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -2206,6 +2238,7 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
         line_buffer: &mut line_buffer,
         native_line_state: &mut native_line_state,
         exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2219,5 +2252,797 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
         .any(|event| matches!(event, RawInputEvent::PromptGhostIntercept { .. })));
     assert!(line_buffer.forced_agent_suggestion_id.is_none());
     assert_eq!(fs::read(&path).expect("read test output"), b"\n");
+    fs::remove_file(path).ok();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn passthrough_relay_fixture<'a>(
+    master: &'a mut File,
+    tx: &'a mpsc::Sender<RawInputEvent>,
+    input_mode: &'a Arc<Mutex<RawInputMode>>,
+    line_buffer: &'a mut CandidateLineBuffer,
+    native_line_state: &'a mut NativeLineState,
+    exit_tracker: &'a mut ExplicitExitTracker,
+    classifier: &'a InputClassifier,
+    input_generation: &'a UserPtyInputGeneration,
+    line_submits: &'a mut LineSubmitCounter,
+    main_prompt_gate: &'a super::super::MainPromptGate,
+) -> InputRelayContext<'a> {
+    InputRelayContext {
+        master,
+        input_classifier: classifier,
+        input_events: tx,
+        input_mode,
+        input_generation,
+        line_submits,
+        line_buffer,
+        native_line_state,
+        exit_tracker,
+        main_prompt_gate,
+    }
+}
+
+// Matrix #15 (#1721): a soft-newline draft submits as one multi-line agent
+// prompt; the commit echo shows markers and nothing reaches the shell.
+#[test]
+fn soft_newline_draft_routes_multiline_prompt_to_agent() {
+    let (path, mut master) = output_file("soft-newline-agent");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input("请帮我分析系统负载".as_bytes(), &mut relay)
+        .expect("buffer natural-language draft");
+    relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("soft newline");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    let clear_at = events
+        .iter()
+        .position(|event| matches!(event, RawInputEvent::CandidateClearLine))
+        .expect("clear inline echo before the card opens");
+    let open_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                RawInputEvent::PromptDraftOpen { text } if text == "请帮我分析系统负载\n"
+            )
+        })
+        .expect("soft newline must upgrade the draft to the prompt card");
+    assert!(clear_at < open_at, "erase first, then open: {events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::UserIntercept(..))),
+        "upgrade must not submit early: {events:?}"
+    );
+    assert!(!line_buffer.is_active(), "buffer hands off to the card");
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"",
+        "nothing may reach the shell"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Matrix #19 (#1721): a whitespace-only multi-line draft is consumed
+// without submitting an empty prompt.
+#[test]
+fn whitespace_only_soft_newline_draft_is_consumed() {
+    let (path, mut master) = output_file("soft-newline-empty");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    // Full-width space starts the intercept candidate (>= 0x80); the soft
+    // newline upgrades even a whitespace-only draft into the card, where
+    // Enter is inert on blank drafts (matrix #19 under D13).
+    relay_passthrough_input("\u{3000}".as_bytes(), &mut relay).expect("start draft");
+    relay_passthrough_input(b"\x1b\r", &mut relay).expect("soft newline");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::UserIntercept(..))),
+        "whitespace draft must not submit: {events:?}"
+    );
+    assert!(events.contains(&RawInputEvent::CandidateClearLine));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "\u{3000}\n"
+        )),
+        "whitespace draft still opens the card: {events:?}"
+    );
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    assert!(!line_buffer.is_active());
+    fs::remove_file(path).ok();
+}
+
+// Matrix #17 (#1721 T-b): composition-state hint appears once the draft
+// contains a soft newline, and the redraw shows the marker instead of raw
+// sequence bytes.
+#[test]
+fn soft_newline_redraw_carries_marker_and_hint() {
+    let (path, mut master) = output_file("soft-newline-hint");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input("请帮我分析".as_bytes(), &mut relay).expect("draft");
+    relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("soft newline");
+
+    // D13: no inline redraw survives the upgrade; the raw sequence must not
+    // leak into any event payload either.
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "请帮我分析\n"
+        )),
+        "soft newline opens the card: {events:?}"
+    );
+    for event in &events {
+        if let RawInputEvent::CandidateRedraw { input, .. } = event {
+            let display = String::from_utf8_lossy(input).into_owned();
+            assert!(!display.contains(";2u"), "no literal leak: {display}");
+        }
+    }
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    fs::remove_file(path).ok();
+}
+
+// Matrix #18 (#1721 T-c): a shortcut on the passthrough path is observed
+// without changing the bytes written to the shell (I1/I6).
+#[test]
+fn passthrough_shortcut_is_observed_and_relayed_unchanged() {
+    let (path, mut master) = output_file("soft-newline-observe");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"analyze load \x1b[13;2u tail", &mut relay)
+        .expect("english input stays bash-owned");
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events.contains(&RawInputEvent::SoftNewlineShortcutObserved));
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"analyze load \x1b[13;2u tail",
+        "observe-only: bytes must be relayed unchanged"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Matrix #21 (#1721 G9): a native CJK draft without soft newlines flushes
+// back to bash byte-for-byte (history/handoff unchanged).
+#[test]
+fn native_cjk_single_line_flushes_bytes_unchanged() {
+    let (path, mut master) = output_file("native-cjk-single");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input("请帮我分析".as_bytes(), &mut relay).expect("cjk draft");
+    relay_passthrough_input(b"\r", &mut relay).expect("submit single line");
+    master.sync_all().expect("sync test output");
+
+    let mut expected = "请帮我分析".as_bytes().to_vec();
+    expected.push(b'\r');
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        expected,
+        "single-line CJK must flush to bash byte-for-byte (G9 invariant)"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::UserIntercept(..))),
+        "single line must not intercept: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Matrix #22 (#1721 G9): a native CJK draft with a soft newline submits one
+// multi-line NL prompt and never reaches bash.
+#[test]
+fn native_cjk_multiline_draft_intercepts_as_prompt() {
+    let (path, mut master) = output_file("native-cjk-multi");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input("请帮我分析".as_bytes(), &mut relay).expect("cjk draft");
+    relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("soft newline");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "请帮我分析\n"
+        )),
+        "native CJK soft newline must open the card: {events:?}"
+    );
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    fs::remove_file(path).ok();
+}
+
+// Matrix #20 (#1721 G8): a native `??` draft keeps AgentMarker semantics
+// when submitted as multi-line.
+#[test]
+fn native_agent_marker_multiline_keeps_reason() {
+    let (path, mut master) = output_file("native-marker-multi");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"?? deploy plan", &mut relay).expect("marker draft");
+    relay_passthrough_input(b"\x1b\r", &mut relay).expect("soft newline");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "?? deploy plan\n"
+        )),
+        "?? soft newline must open the card with the marker intact: {events:?}"
+    );
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    fs::remove_file(path).ok();
+}
+
+// Matrix #24 (#1721): mid-line CJK (not at line start) stays bash-owned.
+#[test]
+fn native_midline_cjk_stays_passthrough() {
+    let (path, mut master) = output_file("native-cjk-midline");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"echo ", &mut relay).expect("ascii prefix");
+    relay_passthrough_input("中文".as_bytes(), &mut relay).expect("midline cjk");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let mut expected = b"echo ".to_vec();
+    expected.extend_from_slice("中文".as_bytes());
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
+    assert!(!line_buffer.is_active());
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::CandidateRedraw { .. })),
+        "mid-line CJK must not start a candidate: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Matrix #23 (#1721): Tab inside a native CJK draft returns the draft to
+// bash so native completion still works.
+#[test]
+fn native_cjk_tab_returns_draft_to_shell() {
+    let (path, mut master) = output_file("native-cjk-tab");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input("分析 /tm".as_bytes(), &mut relay).expect("cjk draft");
+    relay_passthrough_input(b"\t", &mut relay).expect("tab returns to shell");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let mut expected = "分析 /tm".as_bytes().to_vec();
+    expected.push(b'\t');
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        expected,
+        "tab must flush the draft so bash completion works"
+    );
+    assert!(!line_buffer.is_active());
+    drop(rx);
+    fs::remove_file(path).ok();
+}
+
+// Matrix #25/#26 (#1721 D16/I7): while bash owns a PS2 continuation or a
+// heredoc body the main-prompt gate is down, so CJK line starts stay
+// byte-for-byte passthrough exactly like before the fix.
+#[test]
+fn cjk_line_start_stays_passthrough_when_gate_is_down() {
+    let (path, mut master) = output_file("cjk-gate-down");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    // Gate stays down: bash is inside a heredoc / PS2 continuation.
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input("中文配置内容".as_bytes(), &mut relay).expect("heredoc body");
+    relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("shortcut observed only");
+    relay_passthrough_input(b"\r", &mut relay).expect("newline passthrough");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let mut expected = "中文配置内容".as_bytes().to_vec();
+    expected.extend_from_slice(b"\x1b[13;2u\r");
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        expected,
+        "gate-down CJK bytes must pass through unchanged (I7)"
+    );
+    assert!(!line_buffer.is_active());
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::CandidateRedraw { .. } | RawInputEvent::UserIntercept(..)
+        )),
+        "gate-down CJK must not open a candidate: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// #1721 D16: submitting a line lowers the gate until the next prompt_ready,
+// so follow-up CJK bytes (e.g. heredoc body after `cat <<EOF`) pass through.
+#[test]
+fn submit_lowers_gate_until_next_prompt_ready() {
+    let (path, mut master) = output_file("gate-lowered-by-submit");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"cat <<EOF\n", &mut relay).expect("start heredoc");
+    assert!(
+        !main_prompt_gate.is_at_prompt(),
+        "a submitted line must lower the gate"
+    );
+    relay_passthrough_input("中文正文".as_bytes(), &mut relay).expect("heredoc body");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let mut expected = b"cat <<EOF\n".to_vec();
+    expected.extend_from_slice("中文正文".as_bytes());
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
+    assert!(!line_buffer.is_active());
+    drop(rx);
+    fs::remove_file(path).ok();
+}
+// Matrix #6 under D13: a CJK bracketed paste opens the draft card even when
+// the terminal splits the paste into opener / payload / closer chunks.
+#[test]
+fn native_split_paste_chunks_open_the_draft_card() {
+    let (path, mut master) = output_file("native-paste-split");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"\x1b[200~", &mut relay).expect("paste opener");
+    relay_passthrough_input("分析负载".as_bytes(), &mut relay).expect("payload head");
+    relay_passthrough_input(b"\r\n", &mut relay).expect("pasted newline");
+    relay_passthrough_input("给出建议".as_bytes(), &mut relay).expect("payload tail");
+    relay_passthrough_input(b"\x1b[201~", &mut relay).expect("paste closer");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "分析负载\n给出建议"
+        )),
+        "split paste must open the card with both lines: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::UserIntercept(..))),
+        "paste must not submit early: {events:?}"
+    );
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"",
+        "nothing may reach the shell"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Regression (raw_cli_pasted_trust_confirm_sets_trust_mode): a pasted slash
+// command with a trailing newline submits like before the fix and never
+// upgrades into the draft card (matrix #17 scope: slash never composes).
+#[test]
+fn escape_pasted_slash_command_submits_without_card() {
+    let (path, mut master) = output_file("escape-slash-paste");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    let mut paste = b"\x1b[200~".to_vec();
+    paste.extend_from_slice(b"/mode approval trust confirm\n");
+    paste.extend_from_slice(b"\x1b[201~");
+    relay_passthrough_input(&paste, &mut relay).expect("pasted slash command");
+    // The opener itself may split across reads (#1721): the held partial
+    // must join the classification input so the slash prefix stays visible.
+    relay_passthrough_input(b"\x1b[2", &mut relay).expect("split opener head");
+    let mut tail = b"00~".to_vec();
+    tail.extend_from_slice(b"/mode approval trust confirm\n\x1b[201~");
+    relay_passthrough_input(&tail, &mut relay).expect("split opener tail");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                RawInputEvent::UserIntercept(input, InterceptReason::Slash)
+                    if input == "/mode approval trust confirm"
+            ))
+            .count(),
+        2,
+        "both pastes must submit as slash: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftOpen { .. })),
+        "slash paste must never open the draft card: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// ASCII paste routing (#1721): an ASCII paste whose opener arrives as its own chunk must not
+// leak the payload to the PTY bare — the candidate stays open across the
+// split and the flush replays the bracketed-paste wrapper so bash inserts
+// the bytes instead of executing embedded newlines.
+#[test]
+fn native_split_ascii_paste_replays_wrapper_to_shell() {
+    let (path, mut master) = output_file("native-paste-ascii-split");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"\x1b[200~", &mut relay).expect("paste opener");
+    relay_passthrough_input(b"touch probe\r\n", &mut relay).expect("payload");
+    relay_passthrough_input(b"\x1b[201~", &mut relay).expect("paste closer");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    let written = fs::read(&path).expect("read test output");
+    if !written.is_empty() {
+        assert!(
+            written.starts_with(b"\x1b[200~"),
+            "flushed paste must replay the wrapper so bash defers execution: {:?}",
+            String::from_utf8_lossy(&written)
+        );
+    }
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftOpen { .. })),
+        "ASCII paste must not open the draft card: {events:?}"
+    );
+    fs::remove_file(path).ok();
+}
+
+// Split line-start opener (#1721): the line-start opener itself may split across
+// reads; the partial delimiter must be held at the relay entry instead of
+// leaking to bash, and the joined paste routes exactly like an unsplit one.
+#[test]
+fn native_split_line_start_opener_opens_the_draft_card() {
+    let (path, mut master) = output_file("native-split-opener");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::conservative();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = passthrough_relay_fixture(
+        &mut master,
+        &tx,
+        &input_mode,
+        &mut line_buffer,
+        &mut native_line_state,
+        &mut exit_tracker,
+        &classifier,
+        &input_generation,
+        &mut line_submits,
+        &main_prompt_gate,
+    );
+
+    relay_passthrough_input(b"\x1b[2", &mut relay).expect("split opener head");
+    let mut tail = b"00~".to_vec();
+    tail.extend_from_slice("分析负载".as_bytes());
+    tail.extend_from_slice(b"\r\n");
+    tail.extend_from_slice("给出建议".as_bytes());
+    tail.extend_from_slice(b"\x1b[201~");
+    relay_passthrough_input(&tail, &mut relay).expect("opener tail + payload");
+    let _ = relay;
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"",
+        "split opener must never leak payload to the shell"
+    );
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::PromptDraftOpen { text } if text == "分析负载\n给出建议"
+        )),
+        "split opener paste must open the card with both lines: {events:?}"
+    );
     fs::remove_file(path).ok();
 }

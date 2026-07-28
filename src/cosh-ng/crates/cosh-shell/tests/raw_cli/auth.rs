@@ -25,7 +25,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"auth-inline","
 
 /// A dotted Provider ID must be rejected on the spot instead of at the final `configure`.
 #[test]
-fn raw_cli_auth_dotted_provider_id_stays_on_provider_id_field() {
+fn raw_cli_auth_dotted_provider_id_can_be_corrected() {
     let home = temp_shell_home("auth-dotted-provider-id");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
@@ -49,21 +49,33 @@ fn raw_cli_auth_dotted_provider_id_stays_on_provider_id_field() {
             ("cosh-osc$", b"/auth\n".as_slice()),
             ("Left/Right move | Enter send", b"\n".as_slice()),
             ("Type answer | Enter send", b"qwen3.7-max\n".as_slice()),
-            ("Provider ID allows letters", b"".as_slice()),
+            ("Provider ID allows letters", b"\x7f".as_slice()),
+            ("> qwen3.7-ma", b"\x7f".as_slice()),
+            ("> qwen3.7-m", b"\x7f".as_slice()),
+            ("> qwen3.7-", b"\x7f".as_slice()),
+            ("> qwen3.7", b"\x7f".as_slice()),
+            ("> qwen3.", b"\x7f".as_slice()),
+            ("> qwen3", b"\x7f".as_slice()),
+            ("> qwen", b"\x7f".as_slice()),
+            ("> qwe", b"\x7f".as_slice()),
+            ("> qw", b"\x7f".as_slice()),
+            ("> q", b"\x7fqwen-prod\n".as_slice()),
+            ("Enter Base URL", b"\x03".as_slice()),
+            ("Auth cancelled", b"".as_slice()),
         ],
     );
     let requests = fs::read_to_string(&registry_log).unwrap_or_default();
     let _ = fs::remove_dir_all(&home);
 
     let compact = compact_terminal_words(&output);
-    // The rejected field keeps the focus: Base URL is never reached.
+    // The rejected field stays editable and accepts a corrected value.
     assert!(
         compact.contains("Enter Provider ID"),
         "expected Provider ID prompt: {output}"
     );
     assert!(
-        !compact.contains("Enter Base URL"),
-        "flow advanced past Provider ID: {output}"
+        compact.contains("Enter Base URL"),
+        "corrected Provider ID did not advance: {output}"
     );
     assert!(
         compact.contains("Provider ID allows letters, digits, '-' and '_' only (no '.')"),
@@ -73,6 +85,10 @@ fn raw_cli_auth_dotted_provider_id_stays_on_provider_id_field() {
     assert!(
         compact.contains("Config name (not model name; letters, digits, '-' and '_' only)"),
         "expected character rule in hint: {output}"
+    );
+    assert!(
+        compact.contains("Auth cancelled"),
+        "Ctrl+C did not cancel the corrected flow: {output}"
     );
     // Nothing reached cosh-core: no configure round-trip, no late failure panel.
     assert!(

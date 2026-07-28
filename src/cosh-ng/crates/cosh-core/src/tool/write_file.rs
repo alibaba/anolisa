@@ -46,23 +46,16 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or("missing 'content' parameter")?;
 
-        let path = resolve_path(path_str, &ctx.cwd);
-
-        // Refuse to write content containing placeholder/redacted markers.
-        // This prevents literal "<redacted>" or "YOUR_API_KEY" values from
-        // being persisted to disk. The LLM should use an interactive input
-        // path or obtain the real value instead.
         let placeholders = placeholder_markers(content);
         if !placeholders.is_empty() {
-            let msg = format!(
-                "Refusing to write {}: content contains placeholder marker(s): {}. \
-                 These indicate redacted or missing credentials. Use an interactive input \
-                 path (e.g. read from stdin) or provide the real value.",
-                path.display(),
+            return Ok(ToolResult::error(format!(
+                "Write refused: placeholder(s) detected: {}. The file was not modified; use an \
+                 interactive input path for credentials.",
                 placeholders.join(", "),
-            );
-            return Ok(ToolResult::error(msg));
+            )));
         }
+
+        let path = resolve_path(path_str, &ctx.cwd);
 
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -78,8 +71,10 @@ impl Tool for WriteFileTool {
 
         let lines = content.lines().count();
         let bytes = content.len();
-        let output = format!("Wrote {bytes} bytes ({lines} lines) to {}", path.display());
-        Ok(ToolResult::success(output))
+        Ok(ToolResult::success(format!(
+            "Wrote {bytes} bytes ({lines} lines) to {}",
+            path.display()
+        )))
     }
 }
 
@@ -112,8 +107,10 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
+    use super::*;
+
     fn test_ctx_in(dir: &Path) -> ToolContext {
         ToolContext {
             cwd: dir.to_path_buf(),
@@ -176,38 +173,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_redacted_content_is_refused() {
+    async fn write_redacted_content_is_refused_before_fs_side_effects() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool;
-        let path = dir.path().join("settings.json");
-        let content = r#"{"token": "<redacted>"}"#;
+        let parent = dir.path().join("new");
+        let path = parent.join("settings.json");
+        let content = r#"{\"token\": \"<redacted>\"}"#;
 
         let result = tool
             .invoke(
-                serde_json::json!({"path": path.to_str().unwrap(), "content": content}),
+                serde_json::json!({"path": path, "content": content}),
                 &test_ctx_in(dir.path()),
             )
             .await
             .unwrap();
 
         assert!(result.is_error);
-        assert!(result.output.contains("Refusing to write"));
+        assert!(result.output.starts_with("Write refused:"));
         assert!(result.output.contains("<redacted>"));
-        assert!(result.output.contains("interactive input"));
-        // File must NOT be created
+        assert!(result.output.contains("interactive input path"));
+        assert!(result.output.contains("file was not modified"));
         assert!(!path.exists());
+        assert!(!parent.exists());
     }
 
     #[tokio::test]
-    async fn write_your_api_key_content_is_refused() {
+    async fn refused_write_does_not_overwrite_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool;
-        let path = dir.path().join("config.env");
-        let content = "API_KEY=YOUR_API_KEY";
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "valid configuration").unwrap();
 
         let result = tool
             .invoke(
-                serde_json::json!({"path": path.to_str().unwrap(), "content": content}),
+                serde_json::json!({"path": path, "content": "token=YOUR_API_TOKEN"}),
                 &test_ctx_in(dir.path()),
             )
             .await
@@ -215,7 +214,10 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.output.contains("YOUR_*_KEY/TOKEN/SECRET"));
-        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "valid configuration"
+        );
     }
 
     #[test]

@@ -493,3 +493,180 @@ fn raw_cli_non_ascii_candidate_input_supports_backspace() {
     );
     assert!(!output.contains("bash: \u{4f60}\u{5417}"), "{output}");
 }
+
+#[test]
+fn raw_cli_soft_newline_shortcut_composes_multiline_prompt() {
+    // #1721 matrix #4/#15: Shift+Enter (CSI-u) inserts a soft newline inside
+    // the natural-language draft; Enter submits one multi-line prompt.
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (
+                "\u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}"
+                    .as_bytes()
+                    .to_vec(),
+                Duration::ZERO,
+            ),
+            (b"\x1b[13;2u".to_vec(), Duration::from_millis(50)),
+            (
+                "\u{7ed9}\u{51fa}\u{5efa}\u{8bae}\n".as_bytes().to_vec(),
+                Duration::from_millis(50),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    // Panel rendering flattens the newline for display, so assert one single
+    // aggregated request carrying both segments instead of the raw LF.
+    assert_eq!(
+        output.matches("Received shell prompt request:").count(),
+        1,
+        "draft must submit exactly one aggregated request: {output}"
+    );
+    assert!(
+        output.contains("\u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}")
+            && output.contains("\u{7ed9}\u{51fa}\u{5efa}\u{8bae}"),
+        "both draft segments must reach the agent: {output}"
+    );
+    assert!(!output.contains(";2u"), "no CSI-u leak: {output}");
+    assert!(
+        !output.contains("bash: \u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}"),
+        "draft must not flush to bash: {output}"
+    );
+}
+
+#[test]
+fn raw_cli_bracketed_paste_newlines_do_not_submit_early() {
+    // #1721 matrix #7: pasted newlines stay soft; the whole paste submits as
+    // one prompt only when the user presses Enter.
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (
+                {
+                    let mut paste = b"\x1b[200~".to_vec();
+                    paste.extend_from_slice(
+                        "\u{5206}\u{6790}\u{8d1f}\u{8f7d}\r\n\u{7ed9}\u{51fa}\u{5efa}\u{8bae}"
+                            .as_bytes(),
+                    );
+                    paste.extend_from_slice(b"\x1b[201~");
+                    paste
+                },
+                Duration::ZERO,
+            ),
+            (b"\n".to_vec(), Duration::from_millis(100)),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert_eq!(
+        output.matches("Received shell prompt request:").count(),
+        1,
+        "paste must submit exactly one aggregated request: {output}"
+    );
+    assert!(
+        output.contains("\u{5206}\u{6790}\u{8d1f}\u{8f7d}")
+            && output.contains("\u{7ed9}\u{51fa}\u{5efa}\u{8bae}"),
+        "both pasted lines must reach the agent together: {output}"
+    );
+}
+
+#[test]
+fn raw_cli_split_paste_opener_composes_in_card() {
+    // #1721 #1721: the bracketed-paste opener itself may
+    // split across PTY reads at line start; the partial delimiter is held
+    // at the relay entry so no payload line ever executes in bash.
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"\x1b[2".to_vec(), Duration::ZERO),
+            (
+                {
+                    let mut tail = b"00~".to_vec();
+                    tail.extend_from_slice(
+                        "\u{5206}\u{6790}\u{8d1f}\u{8f7d}\r\n\u{7ed9}\u{51fa}\u{5efa}\u{8bae}"
+                            .as_bytes(),
+                    );
+                    tail.extend_from_slice(b"\x1b[201~");
+                    tail
+                },
+                Duration::from_millis(400),
+            ),
+            (b"\x1b".to_vec(), Duration::from_millis(500)),
+            (b"exit\n".to_vec(), Duration::from_millis(400)),
+        ],
+    );
+
+    assert!(
+        output.contains("Prompt draft"),
+        "split opener paste must open the draft card: {output}"
+    );
+    assert!(
+        !output.contains("command not found"),
+        "no payload line may execute in bash: {output}"
+    );
+}
+
+#[test]
+fn raw_cli_soft_newline_draft_shows_composition_hint() {
+    // #1721 matrix #17 (D13): the first soft newline upgrades the draft into
+    // the prompt card; the card frame and its footer replace the old inline
+    // hint. Esc cancels and freezes the card (D15).
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (
+                "\u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}"
+                    .as_bytes()
+                    .to_vec(),
+                Duration::ZERO,
+            ),
+            (b"\x1b[13;2u".to_vec(), Duration::from_millis(50)),
+            (b"\x1b".to_vec(), Duration::from_millis(400)),
+            (b"exit\n".to_vec(), Duration::from_millis(400)),
+        ],
+    );
+
+    assert!(
+        output.contains("Prompt draft"),
+        "the draft card must open on soft newline: {output}"
+    );
+    assert!(
+        output.contains("Enter send \u{b7} Shift+Enter newline \u{b7} Esc cancel"),
+        "card footer must carry the key guidance: {output}"
+    );
+    assert!(
+        output.contains("Draft cancelled"),
+        "Esc must freeze the card as cancelled: {output}"
+    );
+}
+
+#[test]
+fn raw_cli_passthrough_shortcut_shows_one_time_tip() {
+    // #1721 matrix #18 (T-c): a shortcut pressed while bash owns the input is
+    // relayed unchanged and surfaces a one-time discoverability tip at the
+    // next prompt.
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"echo tip-probe".to_vec(), Duration::ZERO),
+            (b"\x1b[13;2u".to_vec(), Duration::from_millis(50)),
+            (b"\n".to_vec(), Duration::from_millis(100)),
+            (b"echo tip-once\n".to_vec(), Duration::from_millis(400)),
+            (b"exit\n".to_vec(), Duration::from_millis(400)),
+        ],
+    );
+
+    assert!(
+        output.contains("Tip: start with ?? to compose multi-line prompts"),
+        "one-time tip must appear after prompt-ready: {output}"
+    );
+    assert_eq!(
+        output
+            .matches("Tip: start with ?? to compose multi-line prompts")
+            .count(),
+        1,
+        "tip must render exactly once per session: {output}"
+    );
+    assert!(output.contains("tip-probe"), "{output}");
+}
