@@ -183,10 +183,8 @@ fn at_mention_query(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
     let mut at_pos = None;
     for (i, &byte) in bytes.iter().enumerate() {
-        if byte == b'@' {
-            if i == 0 || bytes[i - 1] != b'\\' {
-                at_pos = Some(i);
-            }
+        if byte == b'@' && (i == 0 || bytes[i - 1] != b'\\') {
+            at_pos = Some(i);
         }
     }
     let at_pos = at_pos?;
