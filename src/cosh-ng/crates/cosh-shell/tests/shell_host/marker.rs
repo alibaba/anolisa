@@ -1529,64 +1529,114 @@ fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() 
     assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
 }
 
-#[test]
-fn shell_host_bash_prompt_hook_keeps_err_trap_inheritance_and_survives_debug_trap() {
-    if Command::new("bash").arg("--version").output().is_err() {
-        return;
-    }
+fn bash_extdebug_clears_trace_options() -> bool {
     // `shopt -u extdebug` also clears errtrace/functrace on every bash that
     // implements the implication (4.4 through 5.x); skip only where bash is
     // too old to link the flags at all.
-    let implication_probe = Command::new("bash")
+    Command::new("bash")
         .args([
             "--noprofile",
             "--norc",
             "-c",
-            "set -E; shopt -s extdebug; shopt -u extdebug; [[ -o errtrace ]]",
+            "set -E; set -T; shopt -s extdebug; shopt -u extdebug; \
+             [[ ! -o errtrace && ! -o functrace ]]",
         ])
         .status()
         .map(|status| status.success())
-        .unwrap_or(true);
-    if implication_probe {
+        .unwrap_or(false)
+}
+
+#[test]
+fn shell_host_bash_prompt_hook_preserves_trace_option_inheritance() {
+    if !bash_extdebug_clears_trace_options() {
         return;
     }
 
     let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-prompt-hook-traps-test-{}-{}",
+        "cosh-shell-prompt-hook-trace-options-test-{}-{}",
         std::process::id(),
         unique_suffix()
     ));
     let home_dir = work_dir.join("home");
     std::fs::create_dir_all(&home_dir).expect("home dir");
-    let err_log = work_dir.join("err-trap.log");
-    // Hook regression pair from the PR discussion:
-    // - an ERR trap with `set -E` must still fire inside a hook function
-    //   (the extdebug-off window re-asserts errtrace/functrace), and
-    // - a hook that installs a DEBUG trap ending in `return 0` unwinds every
-    //   function frame past the in-function extdebug restore. The session
-    //   must stay usable (native-bash degradation, no command skipping) and
-    //   extdebug must self-heal on the first clean prompt cycle after the
-    //   user clears the trap; the hook poisons only once so that cycle
-    //   exists.
+    let trace_log = work_dir.join("trace-options.log");
     std::fs::write(
         home_dir.join(".bashrc"),
         format!(
-            "trap 'echo err-fired >> {err_log}' ERR\n\
-             set -E\n\
+            "trap 'printf \"ERR\\t%s\\t%s\\n\" \"$BASH_COMMAND\" \
+             \"${{FUNCNAME[*]}}\" >> {trace_log}' ERR\n\
+             trap 'printf \"DEBUG\\t%s\\t%s\\n\" \"$BASH_COMMAND\" \
+             \"${{FUNCNAME[*]}}\" >> {trace_log}' DEBUG\n\
              _user_hook() {{\n\
                false\n\
-               if [[ -z \"${{_poisoned:-}}\" ]]; then\n\
-                 _poisoned=1\n\
-                 trap 'return 0' DEBUG\n\
-               fi\n\
              }}\n\
              PROMPT_COMMAND=_user_hook\n",
-            err_log = err_log.display()
+            trace_log = trace_log.display()
         ),
     )
     .expect("bashrc");
 
-    let config = ShellHostConfig::new("prompt-hook-traps-test", &work_dir)
+    let config = ShellHostConfig::new("prompt-hook-trace-options-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line("echo trace-options-preserved")],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    let trace_log = std::fs::read_to_string(&trace_log).unwrap_or_default();
+    let has_hook_trace = |event: &str| {
+        let prefix = format!("{event}\tfalse\t");
+        trace_log.lines().any(|line| {
+            let Some(functions) = line.strip_prefix(&prefix) else {
+                return false;
+            };
+            functions
+                .split_whitespace()
+                .any(|function| function == "_user_hook")
+        })
+    };
+    assert!(
+        has_hook_trace("ERR"),
+        "ERR trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+    );
+    assert!(
+        has_hook_trace("DEBUG"),
+        "DEBUG trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+    );
+    assert!(terminal.contains("trace-options-preserved"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_prompt_hook_survives_debug_trap_and_self_heals() {
+    if !bash_extdebug_clears_trace_options() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-debug-trap-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    // A hook that installs a DEBUG trap ending in `return 0` unwinds every
+    // function frame past the in-function extdebug restore. The session must
+    // stay usable and extdebug must self-heal after the user clears the trap.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "_user_hook() {\n\
+           if [[ -z \"${_poisoned:-}\" ]]; then\n\
+             _poisoned=1\n\
+             trap 'return 0' DEBUG\n\
+           fi\n\
+         }\n\
+         PROMPT_COMMAND=_user_hook\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-debug-trap-test", &work_dir)
         .with_env("HOME", home_dir.display().to_string());
     let output = run_scripted_bash(
         &config,
@@ -1603,9 +1653,6 @@ fn shell_host_bash_prompt_hook_keeps_err_trap_inheritance_and_survives_debug_tra
     .expect("scripted bash pty");
 
     let terminal = String::from_utf8_lossy(&output.terminal_output);
-    // The ERR trap must have reached the hook function body (`false`).
-    let err_fired = std::fs::read_to_string(&err_log).unwrap_or_default();
-    assert!(err_fired.contains("err-fired"), "{terminal}");
     assert!(terminal.contains("session-usable"), "{terminal}");
     assert!(terminal.contains("post-heal-extdebug-rc=0"), "{terminal}");
 }
