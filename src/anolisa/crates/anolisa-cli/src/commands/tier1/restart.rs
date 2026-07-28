@@ -4,8 +4,8 @@
 //! unit), routing each through the [`anolisa_core::ServiceManager`] for its
 //! scope. The handler:
 //!
-//!   1. Loads `installed.toml` and locates the component. Unknown →
-//!      `INVALID_ARGUMENT`.
+//!   1. Loads `installed.toml` and locates the component. Absent →
+//!      `NOT_INSTALLED`.
 //!   2. Collects the component's restartable `.service` units, by backend:
 //!      - **raw** installs: the recorded `ServiceRef`s — ANOLISA drove the
 //!        activation, so state is the source of truth;
@@ -84,7 +84,7 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
         .writable
         .state
         .find(ObjectKind::Component, &resolved)
-        .ok_or_else(|| CliError::InvalidArgument {
+        .ok_or_else(|| CliError::NotInstalled {
             command: command.clone(),
             reason: format!(
                 "component '{resolved}' is not installed — nothing to restart (run `anolisa status` to see what is installed)"
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_unknown_component_returns_invalid_argument() {
+    fn restart_unknown_component_returns_not_installed() {
         let tmp = tempdir().expect("tmpdir");
         let err = handle(
             RestartArgs {
@@ -603,7 +603,7 @@ mod tests {
             &ctx_with_prefix(InstallMode::System, Some(tmp.path().to_path_buf())),
         )
         .expect_err("must error");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert_eq!(err.exit_code(), 2);
         assert!(
             err.reason().contains("not installed"),

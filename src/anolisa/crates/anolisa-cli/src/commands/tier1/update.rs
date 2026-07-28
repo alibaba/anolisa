@@ -1012,7 +1012,7 @@ fn plan_error_to_cli(
 ) -> CliError {
     let command = command.to_string();
     match err {
-        PlanError::NotInstalled => CliError::InvalidArgument {
+        PlanError::NotInstalled => CliError::NotInstalled {
             command,
             reason: format!(
                 "component '{target}' is not installed — nothing to update (run `anolisa status` to see what is installed, or `anolisa install {target}` to install it)"
@@ -2968,16 +2968,16 @@ pub(crate) mod tests {
         );
     }
 
-    /// A component absent from state routes to INVALID_ARGUMENT (exit 2), not a
+    /// A component absent from state routes to NOT_INSTALLED (exit 2), not a
     /// runtime failure, and never runs dnf.
     #[test]
-    fn unknown_component_routes_to_invalid_argument() {
+    fn unknown_component_routes_to_not_installed() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let rpm = FakeRpm::new("copilot-shell", None);
         let err = update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
             .expect_err("absent component must error");
-        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.code(), "NOT_INSTALLED");
         assert_eq!(err.exit_code(), 2);
         assert!(err.reason().contains("not installed"));
         assert_eq!(rpm.update_calls.get(), 0);

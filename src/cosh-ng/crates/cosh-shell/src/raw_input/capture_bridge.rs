@@ -95,6 +95,7 @@ fn capture_target(capture: &RawInputCapture) -> (&'static str, &str) {
         RawInputCapture::Session { id, .. } => ("session", id),
         RawInputCapture::Consultation { id } => ("consultation", id),
         RawInputCapture::Evidence { id } => ("evidence", id),
+        RawInputCapture::PromptDraft { id, .. } => ("prompt_draft", id),
     }
 }
 
@@ -118,6 +119,7 @@ fn releases_mode_capture(event: &RawInputEvent) -> bool {
             | RawInputEvent::SessionClearConfirm(_)
             | RawInputEvent::SessionCancel(_)
             | RawInputEvent::QuestionCancel(_)
+            | RawInputEvent::QuestionAbort(_)
             | RawInputEvent::EvidenceSend(_)
             | RawInputEvent::EvidenceIgnore(_)
             | RawInputEvent::EvidenceCancel(_)

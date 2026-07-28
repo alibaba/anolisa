@@ -1,3 +1,4 @@
+use super::draft_editor::PromptDraftEditor;
 use super::{RawInputCapture, RawInputEvent, CTRL_C};
 use crate::question::choices::toggle_question_option;
 
@@ -10,6 +11,7 @@ use events::{
 
 mod events;
 mod navigation;
+mod prompt_draft;
 
 #[derive(Debug, Default)]
 pub(super) struct CardInputState {
@@ -18,6 +20,11 @@ pub(super) struct CardInputState {
     active_kind: Option<CardInputKind>,
     selected_options: Vec<usize>,
     pending_input: Vec<u8>,
+    /// Multi-line draft state while a PromptDraft capture is active (#1721).
+    draft: PromptDraftEditor,
+    /// Bracketed paste passthrough inside the draft card: newlines paste as
+    /// draft newlines instead of submitting.
+    draft_paste: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +58,9 @@ enum CardInputKind {
         confirming_clear: bool,
     },
     Evidence {
+        id: String,
+    },
+    PromptDraft {
         id: String,
     },
 }
@@ -108,6 +118,9 @@ impl CardInputState {
                 confirming_clear: *confirming_clear,
             },
             RawInputCapture::Evidence { id } => CardInputKind::Evidence { id: id.clone() },
+            RawInputCapture::PromptDraft { id, .. } => {
+                CardInputKind::PromptDraft { id: id.clone() }
+            }
         };
         if self.active_kind.as_ref() != Some(&kind) {
             // Same approval card switching action sets (Standard <-> TurnConsent
@@ -164,6 +177,13 @@ impl CardInputState {
             self.free_text.clear();
             self.selected_options.clear();
             self.pending_input.clear();
+            self.draft = match capture {
+                RawInputCapture::PromptDraft { initial_text, .. } => {
+                    PromptDraftEditor::from_text(initial_text)
+                }
+                _ => PromptDraftEditor::default(),
+            };
+            self.draft_paste = false;
         }
     }
 
@@ -173,6 +193,8 @@ impl CardInputState {
         self.free_text.clear();
         self.selected_options.clear();
         self.pending_input.clear();
+        self.draft = PromptDraftEditor::default();
+        self.draft_paste = false;
     }
 
     pub(super) fn consume(
@@ -217,16 +239,26 @@ impl CardInputState {
                         RawInputCapture::Session { id, .. } => {
                             events.push(RawInputEvent::SessionCancel(id.clone()))
                         }
+                        // Ctrl+C abandons the prompt outright. A capture is all that reaches the
+                        // relay here, so this is the only place the interrupt can be told apart
+                        // from the ESC arms below.
                         RawInputCapture::Question { id, .. } => {
-                            events.push(RawInputEvent::QuestionCancel(id.clone()))
+                            events.push(RawInputEvent::QuestionAbort(id.clone()))
                         }
                         RawInputCapture::Evidence { id } => {
                             events.push(RawInputEvent::EvidenceCancel(id.clone()))
+                        }
+                        RawInputCapture::PromptDraft { id, .. } => {
+                            events.push(RawInputEvent::PromptDraftCancel { id: id.clone() })
                         }
                     }
                     idx += 1;
                 }
                 b'\r' | b'\n' => {
+                    if matches!(capture, RawInputCapture::PromptDraft { .. }) && self.draft_paste {
+                        idx = self.draft_pasted_newline(capture, &input, idx, &mut events);
+                        continue;
+                    }
                     let event = self.submit(capture);
                     let submitted = event.is_some();
                     if let Some(event) = event {
@@ -248,16 +280,27 @@ impl CardInputState {
                     }
                 }
                 0x7f | 0x08 => {
-                    if self.free_text.pop().is_some() {
+                    if matches!(capture, RawInputCapture::PromptDraft { .. }) {
+                        self.draft.backspace();
+                        if let Some(event) = self.input_event(capture) {
+                            events.push(event);
+                        }
+                    } else if self.free_text.pop().is_some() {
                         if let Some(event) = self.input_event(capture) {
                             events.push(event);
                         }
                     }
                     idx += 1;
                 }
+                0x01 | 0x05 | 0x15 if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
+                    self.draft_control_key(capture, input[idx], &mut events);
+                    idx += 1;
+                }
                 0x09 => {
-                    if let Some(event) = self.apply_tab(capture) {
-                        events.push(event);
+                    if !self.draft_pasted_tab(capture, &mut events) {
+                        if let Some(event) = self.apply_tab(capture) {
+                            events.push(event);
+                        }
                     }
                     idx += 1;
                 }
@@ -304,10 +347,17 @@ impl CardInputState {
                         RawInputCapture::Evidence { id } => {
                             events.push(RawInputEvent::EvidenceCancel(id.clone()))
                         }
+                        RawInputCapture::PromptDraft { id, .. } => {
+                            events.push(RawInputEvent::PromptDraftCancel { id: id.clone() })
+                        }
                     }
                     idx += 2;
                 }
                 0x1b if input.get(idx + 1).is_none() => {
+                    if self.draft_hold_bare_escape(capture) {
+                        idx += 1;
+                        break;
+                    }
                     events.push(cancel_event(capture));
                     idx += 1;
                     break;
@@ -348,8 +398,20 @@ impl CardInputState {
                         idx += 1;
                         break;
                     }
+                    RawInputCapture::PromptDraft { id, .. } => {
+                        let (next, cancelled) =
+                            self.draft_escape_sequence(capture, id, &input, idx, &mut events);
+                        idx = next;
+                        if cancelled {
+                            break;
+                        }
+                    }
                 },
                 byte if !byte.is_ascii_control() => match capture {
+                    RawInputCapture::PromptDraft { .. } => {
+                        idx = self.draft_insert_visible(capture, &input, idx, &mut events);
+                        continue;
+                    }
                     RawInputCapture::Evidence { id } => {
                         if byte == b'i' || byte == b'I' {
                             events.push(RawInputEvent::EvidenceIgnore(id.clone()));
@@ -599,6 +661,7 @@ impl CardInputState {
                 Some(RawInputEvent::SessionResume(id.clone(), self.selected))
             }
             RawInputCapture::Evidence { id } => Some(RawInputEvent::EvidenceSend(id.clone())),
+            RawInputCapture::PromptDraft { id, .. } => self.draft_submit_event(id),
         }
     }
 
@@ -622,6 +685,7 @@ impl CardInputState {
                     Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
                 }
             }
+            RawInputCapture::PromptDraft { id, .. } => Some(self.draft_changed_event(id)),
             _ => None,
         }
     }

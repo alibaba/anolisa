@@ -3,7 +3,18 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> Option<&'static str> {
     Some(match id {
         MessageId::HelpTitle => "Slash 命令",
-        MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}. 按 Alt+Enter 在提示符中换行.",
+        MessageId::HelpFooter => {
+            "模式: {mode}. 策略: {strategy}. Shift+Enter / Alt+Enter 在 prompt 内插入换行；以 ?? 开头可多行组稿。"
+        }
+        MessageId::PromptSoftNewlineTip => {
+            "提示：以 ?? 开头可组稿多行 prompt（Shift+Enter 换行）。"
+        }
+        MessageId::PromptDraftTitle => "Prompt 草稿",
+        MessageId::PromptDraftFooterEditing => {
+            "Enter 发送 · Shift+Enter 换行 · Esc 取消"
+        }
+        MessageId::PromptDraftFooterSubmitted => "已发送给 Agent",
+        MessageId::PromptDraftFooterCancelled => "草稿已取消",
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
@@ -64,13 +75,54 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "渲染降级: 启动 cosh-shell 前设置 COSH_SHELL_RENDER=plain。"
         }
         MessageId::SlashInfoConfigFooter => {
-            "使用 /config language [auto|en-US|zh-CN]。保存的语言会在下次启动时生效。"
+            "使用 /config language [auto|en-US|zh-CN]。设置立即生效；Agent 回复跟随你的提问语言。"
         }
         MessageId::HelpGroupSessions => "会话",
         MessageId::HelpSummarySession => "查找、恢复和清理智能体会话",
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",
         MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",
+        MessageId::HelpGroupStatus => "状态",
+        MessageId::HelpSummaryStatus => "显示版本、服务商、模型和运行状态",
+        MessageId::HelpSummaryStats => "显示模型和工具的会话统计",
+        MessageId::SlashValueUnavailable => "不可用",
+        MessageId::SlashValueNotStarted => "未启动",
+        MessageId::SlashValueIdle => "空闲",
+        MessageId::SlashValueActive => "运行中",
+        MessageId::SlashStatusTitle => "状态",
+        MessageId::SlashStatusVersionLine => "cosh-shell: {version}",
+        MessageId::SlashStatusBackendLine => "后端: {backend}",
+        MessageId::SlashStatusProviderLine => "服务商: {provider}",
+        MessageId::SlashStatusModelLine => "模型: {model}",
+        MessageId::SlashStatusSessionLine => "会话: {session}",
+        MessageId::SlashStatusOsLine => "操作系统: {os}",
+        MessageId::SlashStatusModesLine => "模式: 审批={approval}，分析={analysis}",
+        MessageId::SlashStatusProviderUnavailableLine => {
+            "服务商详情: 当前后端未提供"
+        }
+        MessageId::SlashStatusFooter => {
+            "/about 是 /status 的别名。使用 /stats [model|tools] 查看会话统计。"
+        }
+        MessageId::SlashStatsTitle => "会话统计",
+        MessageId::SlashStatsModelTitle => "模型统计",
+        MessageId::SlashStatsToolsTitle => "工具统计",
+        MessageId::SlashStatsModelLine => "模型: {model}",
+        MessageId::SlashStatsBackendLine => "后端: {backend}",
+        MessageId::SlashStatsRunStateLine => "Agent 运行状态: {state}",
+        MessageId::SlashStatsToolTotalsLine => {
+            "工具: 调用 {calls} 次，成功 {successful} 次，失败 {failed} 次，待定 {pending} 次"
+        }
+        MessageId::SlashStatsNoToolCalls => "当前会话尚未记录工具调用。",
+        MessageId::SlashStatsToolRow => {
+            "{name}: 调用 {calls} 次，成功 {successful} 次，失败 {failed} 次，待定 {pending} 次"
+        }
+        MessageId::SlashStatsTelemetryUnavailable => {
+            "当前后端协议未提供 Token 数、API 错误和延迟数据。"
+        }
+        MessageId::SlashStatsUsageLine => "用法: /stats [model|tools]",
+        MessageId::SlashStatsFooter => {
+            "统计信息只读，覆盖当前 cosh-shell 进程已观测到的数据。"
+        }
         MessageId::SlashExtensionsTitle => "扩展",
         MessageId::SlashSkillsTitle => "技能",
         MessageId::SlashRegistryUnavailable => "此功能需要 cosh-core 后端支持。",

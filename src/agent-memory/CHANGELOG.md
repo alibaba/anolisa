@@ -1,5 +1,18 @@
 # Changelog
 
+[中文版](CHANGELOG_zh.md)
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.5] - 2026-07-27
+
+### Fixed
+
+- **agent-memory**: Updated to v0.2.5, derives focused recall queries from long English and CJK prompts and combines their results, agents can recall relevant memories from verbose prompts without silently dropping topics (#1574)
+
 ## 0.2.4
 
 - fix(memory): auto-recall returns empty results after observe — synchronously reindex after memory_observe so before_prompt_build hook finds new content (#1520)

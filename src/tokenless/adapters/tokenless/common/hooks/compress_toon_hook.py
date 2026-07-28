@@ -28,6 +28,7 @@ from hook_utils import (
     _TOKENLESS_LOCAL_SHARE,
     CONTENT_RETRIEVAL_TOOLS,
     is_skill_file,
+    resolve_agent_id,
     resolve_binary,
     skip,
     try_parse_json,
@@ -37,7 +38,7 @@ from hook_utils import (
 
 # -- constants ---------------------------------------------------------------
 
-_AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "tokenless")
+_AGENT_ID = resolve_agent_id()
 _MIN_RESPONSE_CHARS = 200
 
 

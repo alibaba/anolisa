@@ -13,14 +13,22 @@
 //!   exact value, so we pick a non-zero reserved code and document it
 //!   here for future tightening).
 //! - `INVALID_ARGUMENT` -> 2 (POSIX convention shared with clap).
+//! - `NOT_INSTALLED` -> 2 (shares `INVALID_ARGUMENT`'s exit code only so
+//!   shell callers already branching on 2 keep working; `--json` callers
+//!   read the distinction off `error.code`). Reports one fact and only
+//!   one: the target is absent from state, so the operation had nothing
+//!   to act on. It says nothing about whether the name was valid — an
+//!   unknown name resolves to itself and lands here identically. What to
+//!   do about it is the caller's call and depends on the command: an
+//!   absent `uninstall` target is already the desired end state, an
+//!   absent `restart` target is a stale assumption.
 //! - `EXECUTION_FAILED` -> 1 (generic non-zero "the command ran but the
 //!   underlying operation failed at runtime"). Distinct from
 //!   `INVALID_ARGUMENT` so callers can tell "I gave you bad input" apart
 //!   from "you tried and something on the machine refused": download
 //!   IO, install IO, state-write IO, log-write IO, lock IO. Plan-time
-//!   refusals (e.g. blocked plan, unknown component) stay
-//!   `INVALID_ARGUMENT` — they tell the caller to fix the input or the
-//!   environment before retrying.
+//!   refusals (e.g. a blocked plan) stay `INVALID_ARGUMENT` — they tell
+//!   the caller to fix the input or the environment before retrying.
 
 use std::process::ExitCode;
 
@@ -69,6 +77,26 @@ pub enum CliError {
     /// Caller-supplied arguments violated a contract.
     #[error("invalid argument: {reason}")]
     InvalidArgument { command: String, reason: String },
+
+    /// The target is absent from ANOLISA state, so the operation had
+    /// nothing to act on.
+    ///
+    /// Kept separate from [`CliError::InvalidArgument`] so a scripted
+    /// caller can tell a state precondition from a bad invocation —
+    /// enabled adapters, a quarantined record, or
+    /// `--remove-system-package` with several targets are all things the
+    /// caller got wrong, whereas this one may be nothing to fix at all.
+    ///
+    /// **Not** a claim about the name. Resolution falls back to the literal
+    /// input when the component index has no entry for it, so an unknown
+    /// name and a known-but-absent one arrive here indistinguishably.
+    /// Callers must not read this code as "the name was valid".
+    ///
+    /// Shares exit code 2 with [`CliError::InvalidArgument`] for backward
+    /// compatibility alone — shell callers already branch on 2. It does not
+    /// imply the two call for the same response; see the module docs.
+    #[error("not installed: {reason}")]
+    NotInstalled { command: String, reason: String },
 
     /// The command was well-formed but the underlying operation failed
     /// at runtime (download IO, install IO, state-write IO, log-write
@@ -119,6 +147,7 @@ impl CliError {
         match self {
             Self::NotImplemented { .. } => "NOT_IMPLEMENTED",
             Self::InvalidArgument { .. } => "INVALID_ARGUMENT",
+            Self::NotInstalled { .. } => "NOT_INSTALLED",
             Self::Runtime { .. } => "EXECUTION_FAILED",
             Self::Degraded { .. } => "DEGRADED",
             Self::PermissionDenied { .. } => "PERMISSION_DENIED",
@@ -131,6 +160,7 @@ impl CliError {
         match self {
             Self::NotImplemented { .. } => 64,
             Self::InvalidArgument { .. } => 2,
+            Self::NotInstalled { .. } => 2,
             Self::Runtime { .. } => 1,
             Self::Degraded { .. } => 2,
             Self::PermissionDenied { .. } => 5,
@@ -143,6 +173,7 @@ impl CliError {
         match self {
             Self::NotImplemented { command, .. } => command,
             Self::InvalidArgument { command, .. } => command,
+            Self::NotInstalled { command, .. } => command,
             Self::Runtime { command, .. } => command,
             Self::Degraded { command, .. } => command,
             Self::PermissionDenied { command, .. } => command,
@@ -155,6 +186,7 @@ impl CliError {
         match self {
             Self::NotImplemented { hint, .. } => hint.as_deref(),
             Self::InvalidArgument { .. } => None,
+            Self::NotInstalled { .. } => None,
             Self::Runtime { .. } => None,
             Self::Degraded { .. } => None,
             Self::PermissionDenied { hint, .. } => hint.as_deref(),
@@ -169,6 +201,7 @@ impl CliError {
                 format!("command '{command}' is not implemented")
             }
             Self::InvalidArgument { reason, .. } => reason.clone(),
+            Self::NotInstalled { reason, .. } => reason.clone(),
             Self::Runtime { reason, .. } => reason.clone(),
             Self::Degraded { reason, .. } => reason.clone(),
             Self::PermissionDenied { reason, .. } => reason.clone(),
@@ -202,6 +235,7 @@ impl CliError {
         match &mut self {
             Self::NotImplemented { command: c, .. }
             | Self::InvalidArgument { command: c, .. }
+            | Self::NotInstalled { command: c, .. }
             | Self::Runtime { command: c, .. }
             | Self::Degraded { command: c, .. }
             | Self::PermissionDenied { command: c, .. }
@@ -367,6 +401,45 @@ mod tests {
             }
             other => panic!("expected CliError::Runtime, got {other:?}"),
         }
+    }
+
+    /// `NOT_INSTALLED` is the whole point of the variant: a caller that
+    /// wants to skip an absent target must be able to key off `code`
+    /// alone. The exit code deliberately stays 2, shared with
+    /// `INVALID_ARGUMENT`, so existing shell callers keep working.
+    #[test]
+    fn not_installed_has_its_own_code_but_keeps_exit_two() {
+        let err = CliError::NotInstalled {
+            command: "uninstall cosh".to_string(),
+            reason: "component 'cosh' is not installed — nothing to uninstall".to_string(),
+        };
+
+        assert_eq!(err.code(), "NOT_INSTALLED");
+        assert_ne!(
+            err.code(),
+            CliError::InvalidArgument {
+                command: "uninstall".to_string(),
+                reason: "bad".to_string(),
+            }
+            .code(),
+            "an absent target must not be indistinguishable from a bad argument",
+        );
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.reason().contains("not installed"));
+    }
+
+    /// `with_command` re-stamps every variant; a missing arm would silently
+    /// leave the wrong command verb in the envelope.
+    #[test]
+    fn not_installed_survives_command_restamping() {
+        let err = CliError::NotInstalled {
+            command: "install".to_string(),
+            reason: "component 'cosh' is not installed".to_string(),
+        }
+        .with_command("update cosh");
+
+        assert_eq!(err.command(), "update cosh");
+        assert_eq!(err.code(), "NOT_INSTALLED");
     }
 
     #[test]

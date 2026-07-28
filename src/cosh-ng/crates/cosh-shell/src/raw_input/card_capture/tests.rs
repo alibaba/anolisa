@@ -733,9 +733,11 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
 
+    // Ctrl+C and ESC both abandon the capture, but stay distinguishable: a multi-step prompt
+    // lets ESC step back, and only Ctrl+C means "abandon the whole thing".
     assert_eq!(
         state.consume(&capture, &[0x03]),
-        vec![RawInputEvent::QuestionCancel("q-1".to_string())]
+        vec![RawInputEvent::QuestionAbort("q-1".to_string())]
     );
 
     state.apply_capture(&capture);
@@ -743,6 +745,30 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
         state.consume(&capture, b"\x1b"),
         vec![RawInputEvent::QuestionCancel("q-1".to_string())]
     );
+}
+
+/// Abandoning the capture also has to stop the consumer. Whatever follows the interrupt in the
+/// same read belongs to the shell, not to the question that just went away — otherwise the bytes
+/// are swallowed and reported as edits to a prompt that no longer exists.
+#[test]
+fn question_capture_ctrl_c_stops_consuming_and_returns_the_rest() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 2,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, remainder) = state.consume_split(&capture, b"\x03xnext");
+
+    assert_eq!(
+        events,
+        vec![RawInputEvent::QuestionAbort("q-1".to_string())]
+    );
+    assert_eq!(remainder, b"xnext");
 }
 
 #[test]
@@ -885,4 +911,78 @@ fn secret_submit_clears_free_text_for_next_capture() {
             "plain".to_string()
         ))
     );
+}
+
+fn draft_capture() -> RawInputCapture {
+    RawInputCapture::PromptDraft {
+        id: "draft-1".to_string(),
+        initial_text: "第一行".to_string(),
+    }
+}
+
+// Split legacy Alt+Enter (#1721): a trailing bare ESC is held (possible split legacy Alt+Enter);
+// a following CR resolves to a soft newline instead of a cancel.
+#[test]
+fn draft_bare_esc_then_cr_inserts_newline_across_chunks() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+        "bare ESC must be held, not cancel: {events:?}"
+    );
+    assert!(state.draft_escape_pending(), "ESC must be pending");
+
+    let (events, _) = state.consume_split(&capture, b"\r");
+    let changed = events
+        .iter()
+        .find_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("split ESC+CR must insert a newline");
+    assert_eq!(changed, "第一行\n");
+    assert!(!state.draft_escape_pending());
+}
+
+// Split legacy Alt+Enter (#1721): on timeout the relay injects a second ESC; the held ESC plus
+// the injected one resolve to the explicit cancel path.
+#[test]
+fn draft_bare_esc_timeout_injection_cancels() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (_, _) = state.consume_split(&capture, b"\x1b");
+    assert!(state.draft_escape_pending());
+    let (events, _) = state.consume_split(&capture, b"\x1b");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftCancel { .. })),
+        "injected second ESC must cancel: {events:?}"
+    );
+}
+
+// Pasted data integrity (#1721): tabs inside a bracketed paste are data, not completion keys.
+#[test]
+fn draft_pasted_tab_is_inserted_as_data() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[200~A\tB\x1b[201~");
+    let changed = events
+        .iter()
+        .filter_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("paste must report a draft change");
+    assert_eq!(changed, "第一行A\tB", "pasted tab must survive: {changed}");
 }

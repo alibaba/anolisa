@@ -496,10 +496,15 @@ fn question_input_from_event(event: &ShellEvent) -> Option<(String, String)> {
     Some((id.trim().to_string(), text.to_string()))
 }
 
+/// A single-step question has nothing to step back through, so ESC (`question_cancel`) and Ctrl+C
+/// (`question_abort`) both abandon it.
 fn question_cancel_from_event(event: &ShellEvent) -> Option<String> {
     if event.kind != ShellEventKind::UserInputIntercepted
         || event.component.as_deref() != Some("card")
-        || event.message.as_deref() != Some("question_cancel")
+        || !matches!(
+            event.message.as_deref(),
+            Some("question_cancel") | Some("question_abort")
+        )
     {
         return None;
     }

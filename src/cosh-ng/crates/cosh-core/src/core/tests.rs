@@ -25,8 +25,10 @@ struct CountingShellTool {
 
 struct ExternalTool;
 
+#[derive(Default)]
 struct RecordingProvider {
     messages: Arc<Mutex<Vec<crate::provider::Message>>>,
+    tools: Arc<Mutex<Vec<crate::provider::ToolDeclaration>>>,
 }
 
 #[async_trait]
@@ -34,10 +36,11 @@ impl crate::provider::ContentGenerator for RecordingProvider {
     async fn generate(
         &self,
         messages: &[crate::provider::Message],
-        _tools: &[crate::provider::ToolDeclaration],
+        tools: &[crate::provider::ToolDeclaration],
         _config: &crate::provider::GenerateConfig,
     ) -> Result<crate::provider::GenerateStream, String> {
         *self.messages.lock().unwrap() = messages.to_vec();
+        *self.tools.lock().unwrap() = tools.to_vec();
         Ok(Box::pin(futures::stream::iter([
             crate::provider::GenerateEvent::TextDelta("done".to_string()),
             crate::provider::GenerateEvent::MessageEnd,
@@ -203,6 +206,7 @@ async fn project_context_reaches_the_provider_boundary() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let provider = RecordingProvider {
         messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
     };
     let mut config = CoreConfig::default();
     config.agent.approval_mode = "trust".to_string();
@@ -227,6 +231,117 @@ async fn project_context_reaches_the_provider_boundary() {
         .content
         .as_text()
         .contains("## Project Context\nprovider-visible marker"));
+}
+
+fn find_declaration<'a>(
+    declarations: &'a [crate::provider::ToolDeclaration],
+    name: &str,
+) -> &'a crate::provider::ToolDeclaration {
+    declarations
+        .iter()
+        .find(|tool| tool.name == name)
+        .unwrap_or_else(|| panic!("missing '{name}' declaration"))
+}
+
+/// A BeforeModel hook that rewrites every tool `description` to `compressed`
+/// and strips schema properties, mirroring tokenless schema compression.
+fn compress_schema_hook(command: &str) -> crate::config::HookDefinition {
+    crate::config::HookDefinition {
+        command: command.to_string(),
+        name: Some("compress-schema".to_string()),
+        matcher: None,
+        timeout: Some(10_000),
+        sequential: None,
+        env: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn before_model_hook_rewrites_tool_declarations_for_one_provider_call() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        tools: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.before_model = vec![compress_schema_hook(
+        r#"python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+tools = payload["llm_request"]["config"]["tools"]
+for tool in tools:
+    tool["description"] = "compressed"
+    tool["parameters"] = {"type": "object", "properties": {"api_key": {"type": "string"}}}
+print(json.dumps({"hookSpecificOutput": {"llm_request": {"config": {"tools": tools}}}}))
+'"#,
+    )];
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("hello", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let recorded = captured.lock().unwrap();
+    let shell = find_declaration(&recorded, "shell");
+    assert_eq!(shell.description, "compressed");
+    // The schema property named `api_key` is a declaration, not a secret:
+    // redaction must not have collapsed it into a "<redacted>" string.
+    assert_eq!(shell.parameters["properties"]["api_key"]["type"], "string");
+
+    // The registry is the source of truth for the next turn and stays intact.
+    let declarations = core.tools.declarations();
+    let original = find_declaration(&declarations, "shell");
+    assert_eq!(original.description, "counting shell");
+    assert!(original.parameters["properties"].get("command").is_some());
+}
+
+#[tokio::test]
+async fn before_model_hook_rejecting_tool_set_changes_keeps_originals() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        tools: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    // Appending an undeclared tool changes tool-selection semantics, so the
+    // whole array is discarded rather than partially applied.
+    config.hooks.before_model = vec![compress_schema_hook(
+        r#"python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+tools = payload["llm_request"]["config"]["tools"]
+tools.append({"name": "smuggled", "description": "x", "parameters": {"type": "object"}})
+print(json.dumps({"hookSpecificOutput": {"llm_request": {"config": {"tools": tools}}}}))
+'"#,
+    )];
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("hello", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let recorded = captured.lock().unwrap();
+    assert_eq!(
+        find_declaration(&recorded, "shell").description,
+        "counting shell"
+    );
+    assert!(recorded.iter().all(|tool| tool.name != "smuggled"));
 }
 
 #[async_trait]
@@ -407,6 +522,45 @@ async fn provider_eof_without_terminal_fails_the_request_and_turn() {
     assert!(event_types.contains(&"provider.request.failed"));
     assert!(event_types.contains(&"turn.failed"));
     assert!(!event_types.contains(&"provider.request.completed"));
+}
+
+/// Pending-call state is sized from the provider's index, so an out-of-range
+/// index must fail the turn rather than allocate a slot per reported position.
+#[tokio::test]
+async fn out_of_range_tool_call_index_fails_the_turn() {
+    for index in [MAX_TOOL_CALL_INDEX + 1, u32::MAX] {
+        let provider = MockProvider::new(vec![vec![
+            GenerateEvent::ToolCallStart {
+                index,
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index,
+                arguments_delta: r#"{"command":"ls"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index },
+            GenerateEvent::MessageEnd,
+        ]]);
+        let mut core = make_core(provider);
+        core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+        let mut output = Vec::new();
+        let mut reader = empty_reader().await;
+
+        let error = core
+            .handle_user_message("hi", &mut reader, &mut output)
+            .await
+            .expect_err("index {index} must fail the turn");
+        assert!(error.contains(&index.to_string()), "{error}");
+        assert!(
+            error.contains(&MAX_TOOL_CALL_INDEX.to_string()),
+            "the limit must be named: {error}"
+        );
+        assert!(
+            core.audit.captured_event_types().contains(&"turn.failed"),
+            "index {index} must be audited as a failed turn"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1289,6 +1443,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: Default::default(),
         }],
         post_tool_use: vec![config::HookDefinition {
             command: "echo '{\"decision\":\"block\",\"reason\":\"post hook should not run\"}'"
@@ -1297,6 +1452,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            env: Default::default(),
         }],
         ..Default::default()
     };
@@ -1488,5 +1644,563 @@ async fn thinking_delta_emits_stream_event() {
     assert_eq!(
         v.pointer("/event/delta/thinking").and_then(|t| t.as_str()),
         Some("Step 1: analyze...")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ask_user_question argument validation
+// ---------------------------------------------------------------------------
+
+/// One malformed `ask_user_question` call, as it would arrive from a provider.
+struct AskUserRejectionCase {
+    label: &'static str,
+    /// `None` models a `ToolCallStart` that never received argument deltas.
+    arguments: Option<&'static str>,
+    expected_code: &'static str,
+}
+
+/// Drive one turn that issues `ask_user_question` with `arguments`, followed by
+/// a plain-text turn. Returns the emitted stdout and the resulting core.
+async fn run_ask_user_turn(arguments: Option<&str>) -> (String, CoshCore) {
+    let mut first_turn = vec![GenerateEvent::ToolCallStart {
+        index: 0,
+        id: "call-ask".to_string(),
+        name: "ask_user_question".to_string(),
+    }];
+    if let Some(arguments) = arguments {
+        first_turn.push(GenerateEvent::ToolCallDelta {
+            index: 0,
+            arguments_delta: arguments.to_string(),
+        });
+    }
+    first_turn.push(GenerateEvent::ToolCallEnd { index: 0 });
+    first_turn.push(GenerateEvent::MessageEnd);
+
+    let provider = MockProvider::new(vec![
+        first_turn,
+        vec![
+            GenerateEvent::TextDelta("Recovered without a question.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let tools = ToolRegistry::with_defaults_for_test();
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("what now?", &mut reader, &mut output)
+        .await
+        .expect("turn completes");
+
+    (String::from_utf8(output).unwrap(), core)
+}
+
+fn tool_result_text(core: &CoshCore, tool_call_id: &str) -> String {
+    core.messages
+        .iter()
+        .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(tool_call_id))
+        .expect("tool result appended to the provider conversation")
+        .content
+        .as_text()
+}
+
+#[tokio::test]
+async fn malformed_ask_user_arguments_never_reach_the_user() {
+    let cases = [
+        AskUserRejectionCase {
+            label: "no argument delta after tool call start",
+            arguments: None,
+            expected_code: "empty_arguments",
+        },
+        AskUserRejectionCase {
+            label: "empty arguments",
+            arguments: Some(""),
+            expected_code: "empty_arguments",
+        },
+        AskUserRejectionCase {
+            label: "truncated json",
+            arguments: Some(r#"{"question":"How should local chan"#),
+            expected_code: "invalid_json",
+        },
+        AskUserRejectionCase {
+            label: "non-object root",
+            arguments: Some(r#"["How should local changes be handled?"]"#),
+            expected_code: "root_not_object",
+        },
+        AskUserRejectionCase {
+            label: "empty object",
+            arguments: Some("{}"),
+            expected_code: "missing_question",
+        },
+        AskUserRejectionCase {
+            label: "null question",
+            arguments: Some(r#"{"question":null}"#),
+            expected_code: "question_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "null options",
+            arguments: Some(r#"{"question":"Pick one","options":null}"#),
+            expected_code: "options_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "null allow_free_text",
+            arguments: Some(r#"{"question":"Pick one","allow_free_text":null}"#),
+            expected_code: "allow_free_text_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "number question",
+            arguments: Some(r#"{"question":7}"#),
+            expected_code: "question_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "array question",
+            arguments: Some(r#"{"question":["one","two"]}"#),
+            expected_code: "question_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "object question",
+            arguments: Some(r#"{"question":{"text":"pick one"}}"#),
+            expected_code: "question_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "empty question string",
+            arguments: Some(r#"{"question":""}"#),
+            expected_code: "empty_question",
+        },
+        AskUserRejectionCase {
+            label: "whitespace question string",
+            arguments: Some(r#"{"question":"   "}"#),
+            expected_code: "empty_question",
+        },
+        AskUserRejectionCase {
+            label: "claude-style nested questions",
+            arguments: Some(
+                r#"{"questions":[{"question":"How should local changes be handled?","header":"Local changes","options":[{"label":"Stash"}],"multiSelect":false}]}"#,
+            ),
+            expected_code: "unsupported_nested_questions",
+        },
+        AskUserRejectionCase {
+            label: "options wrong type",
+            arguments: Some(r#"{"question":"Pick one","options":{"label":"Stash"}}"#),
+            expected_code: "options_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "option label wrong type",
+            arguments: Some(r#"{"question":"Pick one","options":[{"label":42}]}"#),
+            expected_code: "option_invalid",
+        },
+        AskUserRejectionCase {
+            label: "option description wrong type",
+            arguments: Some(
+                r#"{"question":"Pick one","options":[{"label":"Stash","description":[]}]}"#,
+            ),
+            expected_code: "option_invalid",
+        },
+        AskUserRejectionCase {
+            label: "allow_free_text wrong type",
+            arguments: Some(r#"{"question":"Pick one","allow_free_text":"true"}"#),
+            expected_code: "allow_free_text_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "multi_select wrong type",
+            arguments: Some(r#"{"question":"Pick one","multi_select":"no"}"#),
+            expected_code: "multi_select_wrong_type",
+        },
+        AskUserRejectionCase {
+            label: "no answer path",
+            arguments: Some(r#"{"question":"Pick one","allow_free_text":false,"options":[]}"#),
+            expected_code: "no_answer_path",
+        },
+    ];
+
+    for case in cases {
+        let (output, core) = run_ask_user_turn(case.arguments).await;
+
+        assert!(
+            !output.contains(r#""subtype":"ask_user""#),
+            "case {}: no ask_user control request may be emitted, got {output}",
+            case.label
+        );
+        assert!(
+            !output.contains("control_request"),
+            "case {}: rejected arguments must not open any control request, got {output}",
+            case.label
+        );
+        assert!(
+            !output.contains("Agent needs your input"),
+            "case {}: generic fallback leaked into output",
+            case.label
+        );
+
+        let tool_text = tool_result_text(&core, "call-ask");
+        assert!(
+            tool_text.contains(&format!("code={}", case.expected_code)),
+            "case {}: expected code={} in {tool_text}",
+            case.label,
+            case.expected_code
+        );
+
+        let event_types = core.audit.captured_event_types();
+        assert!(
+            event_types.contains(&"tool.requested"),
+            "case {}: rejection must still be audited as requested",
+            case.label
+        );
+        assert!(
+            event_types.contains(&"tool.failed"),
+            "case {}: rejection must be audited as failed",
+            case.label
+        );
+        assert!(
+            !event_types.contains(&"tool.execution.started"),
+            "case {}: rejected arguments must not start an execution",
+            case.label
+        );
+
+        assert_eq!(
+            (
+                core.metrics.tool_calls_total,
+                core.metrics.tool_calls_fail,
+                core.metrics.tool_calls_success
+            ),
+            (1, 1, 0),
+            "case {}: a rejected question counts once, as a failure",
+            case.label
+        );
+
+        let last = core.messages.last().expect("assistant reply");
+        assert_eq!(last.role, "assistant", "case {}", case.label);
+        assert!(
+            last.content
+                .as_text()
+                .contains("Recovered without a question."),
+            "case {}: the provider turn after the tool error must still run",
+            case.label
+        );
+    }
+}
+
+#[tokio::test]
+async fn valid_ask_user_arguments_still_produce_a_question_and_answer() {
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-ask".to_string(),
+                name: "ask_user_question".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"question":"How should local changes be handled?","options":[{"label":"Stash","description":"git stash"},{"label":"Discard"}],"allow_free_text":false,"multi_select":true}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("Stashing then.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let tools = ToolRegistry::with_defaults_for_test();
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    let input = "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"req-0\",\"response\":{\"answer\":\"Stash\"}}}\n";
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let mut output = Vec::new();
+
+    core.handle_user_message("what now?", &mut reader, &mut output)
+        .await
+        .expect("turn completes");
+
+    let output_str = String::from_utf8(output).unwrap();
+    let request_line = output_str
+        .lines()
+        .find(|line| line.contains("\"subtype\":\"ask_user\""))
+        .expect("ask_user control request");
+    let request: serde_json::Value = serde_json::from_str(request_line).unwrap();
+    assert_eq!(
+        request
+            .pointer("/request/question")
+            .and_then(|v| v.as_str()),
+        Some("How should local changes be handled?")
+    );
+    assert_eq!(
+        request
+            .pointer("/request/options/0/description")
+            .and_then(|v| v.as_str()),
+        Some("git stash")
+    );
+    assert_eq!(
+        request
+            .pointer("/request/allow_free_text")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        request
+            .pointer("/request/multi_select")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    assert_eq!(tool_result_text(&core, "call-ask"), "Stash");
+    let event_types = core.audit.captured_event_types();
+    assert!(event_types.contains(&"tool.execution.started"));
+    assert!(event_types.contains(&"tool.completed"));
+    // Answered questions count like any other tool call, so a single rejected
+    // question cannot make the tool look like it always fails.
+    assert_eq!(core.metrics.tool_calls_total, 1);
+    assert_eq!(core.metrics.tool_calls_success, 1);
+    assert_eq!(core.metrics.tool_calls_fail, 0);
+}
+
+#[tokio::test]
+async fn malformed_tool_arguments_fail_without_executing_the_tool() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-shell".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"ls -l"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("Retrying with valid arguments.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("list files", &mut reader, &mut output)
+        .await
+        .expect("turn completes");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "malformed arguments must not reach the tool"
+    );
+    let tool_text = tool_result_text(&core, "call-shell");
+    assert!(
+        tool_text.contains("code=invalid_json"),
+        "expected a diagnosable tool error, got {tool_text}"
+    );
+    let event_types = core.audit.captured_event_types();
+    assert!(event_types.contains(&"tool.requested"));
+    assert!(event_types.contains(&"tool.failed"));
+    assert!(!event_types.contains(&"tool.execution.started"));
+}
+
+/// Tools that take no parameters legitimately arrive with empty arguments, which
+/// must stay executable after the malformed-argument tightening.
+#[tokio::test]
+async fn empty_arguments_still_invoke_a_regular_tool() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-shell".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("Done.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("run it", &mut reader, &mut output)
+        .await
+        .expect("turn completes");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// The in-band `COSH_QUESTION:` text protocol shares the tool's validation, so a
+/// schema-incompatible payload must not become a question — and because the
+/// marker suppresses the assistant text, the turn must fail visibly instead of
+/// ending as an ordinary reply the user never saw.
+#[tokio::test]
+async fn cosh_question_text_with_unsupported_schema_fails_visibly() {
+    for (label, payload, expected_code) in [
+        (
+            "unsupported schema",
+            r#"{"prompt":"How should local changes be handled?"}"#,
+            "missing_question",
+        ),
+        (
+            "explicit null question",
+            r#"{"question":null}"#,
+            "question_wrong_type",
+        ),
+        ("truncated json", r#"{"question":"How sho"#, "invalid_json"),
+        ("no payload", "", "empty_arguments"),
+        (
+            "unanswerable question",
+            r#"{"question":"Pick one","allow_free_text":false,"options":[]}"#,
+            "no_answer_path",
+        ),
+    ] {
+        let provider = MockProvider::new(vec![vec![
+            GenerateEvent::TextDelta(format!("COSH_QUESTION:{payload}")),
+            GenerateEvent::MessageEnd,
+        ]]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = ToolRegistry::with_defaults_for_test();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+        core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+        let mut reader = empty_reader().await;
+        let mut output = Vec::new();
+
+        let error = core
+            .handle_user_message("what now?", &mut reader, &mut output)
+            .await
+            .expect_err("an invalid in-band question must fail the turn");
+
+        assert!(
+            error.contains(&format!("code={expected_code}")),
+            "case {label}: expected code={expected_code} in {error}"
+        );
+        assert!(
+            !error.contains(payload) || payload.is_empty(),
+            "case {label}: the rejected payload must not be echoed: {error}"
+        );
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            !output_str.contains(r#""subtype":"ask_user""#),
+            "case {label}: {output_str}"
+        );
+        assert!(
+            !output_str.contains("Agent needs your input"),
+            "case {label}: {output_str}"
+        );
+        // The marker suppressed the text, so nothing may be presented as a
+        // finished assistant answer either.
+        assert!(
+            !output_str.contains(r#""type":"assistant""#),
+            "case {label}: suppressed text must not surface as an answer: {output_str}"
+        );
+    }
+}
+
+/// With the question tool disabled the marker cannot become a question, so the
+/// text must stay visible instead of being suppressed with nothing to replace it.
+#[tokio::test]
+async fn cosh_question_text_stays_visible_when_questions_are_disabled() {
+    let provider = MockProvider::new(vec![vec![
+        GenerateEvent::TextDelta(
+            "COSH_QUESTION:{\"prompt\":\"How should local changes be handled?\"}".to_string(),
+        ),
+        GenerateEvent::MessageEnd,
+    ]]);
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::new(AtomicUsize::new(0)),
+    }));
+    tools
+        .retain_selected_tools("shell")
+        .expect("selection drops the question tool");
+    assert!(!tools.supports_ask_user_question());
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("what now?", &mut reader, &mut output)
+        .await
+        .expect("turn completes as an ordinary reply");
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains(r#""type":"assistant""#),
+        "the reply must not be swallowed: {output_str}"
+    );
+    assert!(
+        !output_str.contains(r#""subtype":"ask_user""#),
+        "{output_str}"
+    );
+}
+
+#[tokio::test]
+async fn cosh_question_text_with_valid_schema_still_asks() {
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::TextDelta(
+                "COSH_QUESTION:{\"question\":\"Which branch?\",\"options\":[{\"label\":\"main\"}]}"
+                    .to_string(),
+            ),
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("Using main.".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let tools = ToolRegistry::with_defaults_for_test();
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let input = "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"req-0\",\"response\":{\"answer\":\"main\"}}}\n";
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let mut output = Vec::new();
+
+    core.handle_user_message("what now?", &mut reader, &mut output)
+        .await
+        .expect("turn completes");
+
+    let output_str = String::from_utf8(output).unwrap();
+    let request_line = output_str
+        .lines()
+        .find(|line| line.contains(r#""subtype":"ask_user""#))
+        .expect("ask_user control request");
+    let request: serde_json::Value = serde_json::from_str(request_line).unwrap();
+    assert_eq!(
+        request
+            .pointer("/request/question")
+            .and_then(|v| v.as_str()),
+        Some("Which branch?")
     );
 }

@@ -325,6 +325,45 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+fn wait_for_raw_cli_input_ready(
+    receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+    observed: &mut Vec<u8>,
+    cursor: usize,
+    token: &str,
+    request: u64,
+) -> Result<(), String> {
+    let prefix = format!("\x1e{token}:{request}:");
+    let deadline = std::time::Instant::now() + RAW_CLI_TIMEOUT;
+    loop {
+        let window = &observed[cursor.min(observed.len())..];
+        if let Some(found) = find_subslice(window, prefix.as_bytes()) {
+            let frame = cursor + found + prefix.len();
+            if observed[frame..].contains(&b'\x1f') {
+                return Ok(());
+            }
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "raw CLI did not acknowledge input readiness request {request}"
+            ));
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(chunk) => observed.extend(chunk),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "raw CLI timed out before input readiness request {request}"
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "raw CLI closed before input readiness request {request}"
+                ));
+            }
+        }
+    }
+}
+
 fn wait_for_raw_cli_marker_or_retry(
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
     observed: &mut Vec<u8>,
@@ -520,6 +559,7 @@ fn run_raw_cli_marker_input_inner(
     run_mode: RawCliRunMode,
 ) -> String {
     let _run_guard = raw_cli_run_guard(run_mode);
+    let mut input_readiness = RawCliInputReadiness::new();
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut command = Command::new(binary);
     command
@@ -531,6 +571,7 @@ fn run_raw_cli_marker_input_inner(
         .stderr(Stdio::piped());
     configure_raw_cli_command(&mut command);
     apply_raw_cli_envs(&mut command, envs);
+    input_readiness.configure(&mut command);
     command.process_group(0);
     let mut child = RawCliChildGuard::new(command.spawn().expect("spawn cosh-shell raw"));
     let mut stdin = child.child_mut().stdin.take().expect("child stdin");
@@ -548,6 +589,19 @@ fn run_raw_cli_marker_input_inner(
                 abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error)
             }
         }
+        if !input.is_empty() {
+            let request = input_readiness.request();
+            if let Err(error) = wait_for_raw_cli_input_ready(
+                &output_receiver,
+                &mut observed,
+                cursor,
+                input_readiness.token(),
+                request,
+            ) {
+                abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
+            }
+            cursor = observed.len();
+        }
         stdin.write_all(input).expect("write marker-gated input");
         stdin.flush().expect("flush marker-gated input");
     }
@@ -562,7 +616,7 @@ fn run_raw_cli_marker_input_inner(
             "raw CLI timed out after marker-gated input",
         ),
     };
-    let stdout = join_reader(stdout_reader, "stdout");
+    let stdout = input_readiness.strip_frames(&join_reader(stdout_reader, "stdout"));
     let stderr = join_reader(stderr_reader, "stderr");
     assert!(
         status.success(),
@@ -573,6 +627,79 @@ fn run_raw_cli_marker_input_inner(
     let mut text = String::from_utf8_lossy(&stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&stderr));
     text
+}
+
+struct RawCliInputReadiness {
+    directory: PathBuf,
+    request_path: PathBuf,
+    token: String,
+    next_request: u64,
+}
+
+impl RawCliInputReadiness {
+    fn new() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "cosh-raw-cli-input-ready-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create raw CLI input readiness directory");
+        let request_path = directory.join("request");
+        let token = format!("cosh-input-ready-{}-{nanos}", std::process::id());
+        Self {
+            directory,
+            request_path,
+            token,
+            next_request: 0,
+        }
+    }
+
+    fn configure(&self, command: &mut Command) {
+        command
+            .env("COSH_RAW_CLI_TEST_INPUT_READY_REQUEST", &self.request_path)
+            .env("COSH_RAW_CLI_TEST_INPUT_READY_TOKEN", &self.token);
+    }
+
+    fn request(&mut self) -> u64 {
+        self.next_request = self.next_request.saturating_add(1);
+        fs::write(&self.request_path, self.next_request.to_string())
+            .expect("write raw CLI input readiness request");
+        self.next_request
+    }
+
+    fn token(&self) -> &str {
+        &self.token
+    }
+
+    fn strip_frames(&self, output: &[u8]) -> Vec<u8> {
+        let prefix = format!("\x1e{}:", self.token);
+        let mut stripped = Vec::with_capacity(output.len());
+        let mut cursor = 0;
+        while let Some(found) = find_subslice(&output[cursor..], prefix.as_bytes()) {
+            let frame_start = cursor + found;
+            stripped.extend_from_slice(&output[cursor..frame_start]);
+            let payload_start = frame_start + prefix.len();
+            let Some(frame_end) = output[payload_start..]
+                .iter()
+                .position(|byte| *byte == b'\x1f')
+            else {
+                stripped.extend_from_slice(&output[frame_start..]);
+                return stripped;
+            };
+            cursor = payload_start + frame_end + 1;
+        }
+        stripped.extend_from_slice(&output[cursor..]);
+        stripped
+    }
+}
+
+impl Drop for RawCliInputReadiness {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
 }
 
 fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(

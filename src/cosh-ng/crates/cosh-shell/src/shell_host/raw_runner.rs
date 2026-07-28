@@ -10,8 +10,8 @@ use nix::libc;
 
 use crate::input::InputClassifier;
 use crate::raw_input::{
-    spawn_raw_action_relay, spawn_raw_input_relay, RawInputEvent, RawInputMode, RawObserverAction,
-    RawRelayAction, UserPtyInputGeneration,
+    spawn_raw_action_relay, spawn_raw_input_relay, MainPromptGate, RawInputEvent, RawInputMode,
+    RawObserverAction, RawRelayAction, UserPtyInputGeneration,
 };
 use crate::types::ShellEvent;
 
@@ -69,7 +69,7 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation| {
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -77,6 +77,7 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
             )
         },
     )
@@ -100,7 +101,7 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation| {
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -108,6 +109,7 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
             )
         },
     )
@@ -139,7 +141,7 @@ where
         |_, _| Ok(RawObserverAction::Continue),
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
+        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -174,7 +176,7 @@ where
         },
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
+        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -205,7 +207,7 @@ where
         event_observer,
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation| {
+        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -238,6 +240,7 @@ where
         InputClassifier,
         Arc<Mutex<RawInputMode>>,
         UserPtyInputGeneration,
+        MainPromptGate,
     ) -> JoinHandle<io::Result<()>>,
 {
     let mut session = start_session(config)?;
@@ -261,6 +264,12 @@ where
     let (input_event_sender, input_event_receiver) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let input_generation = UserPtyInputGeneration::default();
+    // #1721 D16: prompt_ready raises the gate on the output side; submits
+    // and preexec lower it, keeping CJK drafts off PS2/heredoc continuations.
+    let main_prompt_gate = MainPromptGate::default();
+    session
+        .parser
+        .set_main_prompt_gate(main_prompt_gate.clone());
     let driver_thread = spawn_driver(
         input_master,
         session.child.id(),
@@ -268,6 +277,7 @@ where
         input_classifier,
         Arc::clone(&input_mode),
         input_generation.clone(),
+        main_prompt_gate,
     );
     let watchdog = action_watchdog.map(|grace| {
         let driver_done = Arc::new(Mutex::new(None));

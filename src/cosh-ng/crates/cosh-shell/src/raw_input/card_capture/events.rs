@@ -16,6 +16,9 @@ pub(super) fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
         RawInputCapture::Session { id, .. } => RawInputEvent::SessionCancel(id.clone()),
         RawInputCapture::Question { id, .. } => RawInputEvent::QuestionCancel(id.clone()),
         RawInputCapture::Evidence { id } => RawInputEvent::EvidenceCancel(id.clone()),
+        RawInputCapture::PromptDraft { id, .. } => {
+            RawInputEvent::PromptDraftCancel { id: id.clone() }
+        }
     }
 }
 
@@ -39,9 +42,12 @@ pub(super) fn releases_capture(event: &RawInputEvent) -> bool {
             | RawInputEvent::SessionClearConfirm(_)
             | RawInputEvent::SessionCancel(_)
             | RawInputEvent::QuestionCancel(_)
+            | RawInputEvent::QuestionAbort(_)
             | RawInputEvent::EvidenceSend(_)
             | RawInputEvent::EvidenceIgnore(_)
             | RawInputEvent::EvidenceCancel(_)
+            | RawInputEvent::PromptDraftSubmit { .. }
+            | RawInputEvent::PromptDraftCancel { .. }
     )
 }
 
@@ -115,6 +121,7 @@ pub(super) fn question_choice_count(capture: &RawInputCapture) -> usize {
         | RawInputCapture::Session { .. }
         | RawInputCapture::Mode { .. }
         | RawInputCapture::Config { .. }
-        | RawInputCapture::ConfigLanguage { .. } => 0,
+        | RawInputCapture::ConfigLanguage { .. }
+        | RawInputCapture::PromptDraft { .. } => 0,
     }
 }

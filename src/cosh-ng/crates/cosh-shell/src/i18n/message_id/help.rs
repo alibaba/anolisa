@@ -94,3 +94,55 @@ macro_rules! slash_parse_error_ids {
         );
     };
 }
+
+macro_rules! status_query_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpGroupStatus,
+            HelpSummaryStatus,
+            HelpSummaryStats,
+            SlashValueUnavailable,
+            SlashValueNotStarted,
+            SlashValueIdle,
+            SlashValueActive,
+            SlashStatusTitle,
+            SlashStatusVersionLine,
+            SlashStatusBackendLine,
+            SlashStatusProviderLine,
+            SlashStatusModelLine,
+            SlashStatusSessionLine,
+            SlashStatusOsLine,
+            SlashStatusModesLine,
+            SlashStatusProviderUnavailableLine,
+            SlashStatusFooter,
+            SlashStatsTitle,
+            SlashStatsModelTitle,
+            SlashStatsToolsTitle,
+            SlashStatsModelLine,
+            SlashStatsBackendLine,
+            SlashStatsRunStateLine,
+            SlashStatsToolTotalsLine,
+            SlashStatsNoToolCalls,
+            SlashStatsToolRow,
+            SlashStatsTelemetryUnavailable,
+            SlashStatsUsageLine,
+            SlashStatsFooter,
+        );
+    };
+}
+
+macro_rules! prompt_soft_newline_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            PromptSoftNewlineTip,
+            PromptDraftTitle,
+            PromptDraftFooterEditing,
+            PromptDraftFooterSubmitted,
+            PromptDraftFooterCancelled,
+        );
+    };
+}

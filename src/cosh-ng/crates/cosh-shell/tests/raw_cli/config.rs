@@ -120,7 +120,7 @@ fn raw_cli_config_language_direct_set_saves_after_confirmation() {
     assert!(output.contains("Save config?"), "{output}");
     assert!(output.contains("配置已保存"), "{output}");
     assert!(
-        output.contains("保存的设置会在下次启动时生效。"),
+        output.contains("保存的设置立即生效；Agent 回复跟随你的提问语言。"),
         "{output}"
     );
     assert!(output.contains("语言: zh-CN 来源: config"), "{output}");

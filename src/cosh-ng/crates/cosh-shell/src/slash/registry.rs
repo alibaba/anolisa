@@ -57,12 +57,36 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/status",
+            usage: "/status",
+            summary_id: MessageId::HelpSummaryStatus,
+            group: Some("Status"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/about",
+            usage: "/about",
+            summary_id: MessageId::HelpSummaryStatus,
+            group: None,
+            scope: "read-only",
+            state: SlashCommandState::Hidden,
+        },
+        SlashCommandSpec {
+            name: "/stats",
+            usage: "/stats [model|tools]",
+            summary_id: MessageId::HelpSummaryStats,
+            group: Some("Status"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/auth",
             usage: "/auth",
             summary_id: MessageId::HelpSummaryAuth,
-            group: None,
+            group: Some("Config"),
             scope: "config",
-            state: SlashCommandState::Contextual,
+            state: SlashCommandState::Public,
         },
         SlashCommandSpec {
             name: "/config",
@@ -347,6 +371,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(visible.contains(&"/config language [auto|en-US|zh-CN]"));
+        assert!(visible.contains(&"/auth"));
+        assert!(visible.contains(&"/status"));
+        assert!(visible.contains(&"/stats [model|tools]"));
         assert!(visible
             .iter()
             .any(|usage| usage.starts_with("/session [new|status|list|resume")));
@@ -365,16 +392,18 @@ mod tests {
     }
 
     #[test]
-    fn recommendations_is_public_local_config_control() {
-        let spec = slash_command_registry()
-            .iter()
-            .find(|spec| spec.name == "/recommendations")
-            .expect("recommendations spec");
+    fn recommendations_and_auth_are_public_config_controls() {
+        for name in ["/recommendations", "/auth"] {
+            let spec = slash_command_registry()
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("public config control spec");
 
-        assert_eq!(spec.group, Some("Config"));
-        assert_eq!(spec.scope, "config");
-        assert_eq!(spec.state, SlashCommandState::Public);
-        assert!(exact_slash_control_commands().any(|name| name == "/recommendations"));
+            assert_eq!(spec.group, Some("Config"), "{name}");
+            assert_eq!(spec.scope, "config", "{name}");
+            assert_eq!(spec.state, SlashCommandState::Public, "{name}");
+            assert!(exact_slash_control_commands().any(|candidate| candidate == name));
+        }
     }
 
     #[test]
@@ -400,6 +429,7 @@ mod tests {
             "/debug",
             "/resume",
             "/new",
+            "/about",
             "/skill",
             "/approval-mode",
             "/allow",

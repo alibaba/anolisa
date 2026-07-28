@@ -606,7 +606,14 @@ impl<'a> TokenQuery<'a> {
 
     /// Build result from records
     fn build_result(&self, records: Vec<TokenRecord>, period: String) -> TokenQueryResult {
-        let input_tokens: u64 = records.iter().map(|r| r.input_tokens).sum();
+        let input_tokens: u64 = records
+            .iter()
+            .map(|r| {
+                r.input_tokens
+                    + r.cache_creation_tokens.unwrap_or(0)
+                    + r.cache_read_tokens.unwrap_or(0)
+            })
+            .sum();
         let output_tokens: u64 = records.iter().map(|r| r.output_tokens).sum();
         let total_tokens = input_tokens + output_tokens;
         let request_count = records.len() as u64;
@@ -638,7 +645,9 @@ impl<'a> TokenQuery<'a> {
 
             let entry = agent_totals.entry(name).or_insert((0, 0, 0, 0));
             entry.0 += record.total_tokens();
-            entry.1 += record.input_tokens;
+            entry.1 += record.input_tokens
+                + record.cache_creation_tokens.unwrap_or(0)
+                + record.cache_read_tokens.unwrap_or(0);
             entry.2 += record.output_tokens;
             entry.3 += 1;
         }
@@ -973,9 +982,9 @@ mod tests {
 
         let query = TokenQuery::new(&store);
         let result = query.by_hours_with_compare(1);
-        assert_eq!(result.total_tokens, 150);
+        assert_eq!(result.total_tokens, 160);
         let comparison = result.comparison.expect("comparison should be populated");
-        assert_eq!(comparison.previous_total, 30);
+        assert_eq!(comparison.previous_total, 40);
         assert_eq!(comparison.change, 120);
         assert_eq!(comparison.trend, Trend::Up);
         cleanup_db(&path);
@@ -1008,18 +1017,18 @@ mod tests {
 
         let query = TokenQuery::new(&store);
         let compared = query.by_period_with_compare(TimePeriod::Today);
-        assert_eq!(compared.total_tokens, 220);
+        assert_eq!(compared.total_tokens, 250);
         let comparison = compared.comparison.expect("comparison should exist");
-        assert_eq!(comparison.previous_total, 30);
-        assert_eq!(comparison.change, 190);
+        assert_eq!(comparison.previous_total, 40);
+        assert_eq!(comparison.change, 210);
         assert_eq!(comparison.trend, Trend::Up);
 
         let with_breakdown = query.by_period_with_breakdown(TimePeriod::Today);
         assert_eq!(with_breakdown.breakdown.len(), 2);
         assert_eq!(with_breakdown.breakdown[0].name, "Agent-A");
-        assert_eq!(with_breakdown.breakdown[0].total_tokens, 200);
+        assert_eq!(with_breakdown.breakdown[0].total_tokens, 220);
         assert_eq!(with_breakdown.breakdown[0].request_count, 2);
-        assert!((with_breakdown.breakdown[0].percentage - 90.90).abs() < 0.1);
+        assert!((with_breakdown.breakdown[0].percentage - 88.0).abs() < 0.1);
 
         let full = query.full_query(TimePeriod::Today);
         assert!(full.comparison.is_some());

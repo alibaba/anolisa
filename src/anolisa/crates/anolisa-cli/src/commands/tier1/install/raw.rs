@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use anolisa_core::download::DownloadCache;
+use anolisa_core::download::{DownloadCache, DownloadError};
 use anolisa_core::install_runner::{
     ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES, read_embedded_component_manifest_text,
 };
@@ -15,6 +15,7 @@ use anolisa_core::{
     resolve_manifest_hooks,
 };
 use anolisa_platform::fs_layout::FsLayout;
+use sha2::{Digest, Sha256};
 
 use crate::context::CliContext;
 use crate::repo_config::{
@@ -246,8 +247,109 @@ impl InstallContractSource {
     fn label(self) -> &'static str {
         match self {
             Self::EmbeddedArtifact => "embedded artifact manifest",
+            Self::SidecarMeta => "sidecar meta.toml",
         }
     }
+}
+
+/// Load the published lightweight install contract without fetching the full
+/// artifact, so dry-run can enforce manifest-backed refusals such as component
+/// conflicts.
+pub(crate) fn load_dry_run_install_contract(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    resolution: &RawResolution,
+) -> Result<Option<LoadedInstallContract>, CliError> {
+    let Some(meta_url) = sidecar_meta_url(
+        &resolution.artifact_url,
+        &resolution.entry.component,
+        &resolution.entry.version,
+    ) else {
+        return Ok(None);
+    };
+    let expected_sha = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?;
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let downloaded = match cache.fetch(&meta_url, expected_sha) {
+        Ok(downloaded) => downloaded,
+        Err(DownloadError::HttpStatus { status: 404, .. }) => return Ok(None),
+        Err(DownloadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!("failed to fetch sidecar metadata {meta_url}: {err}"),
+            });
+        }
+    };
+    let toml =
+        std::fs::read_to_string(&downloaded.cached_path).map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "failed to read sidecar metadata {} from cache: {err}",
+                downloaded.cached_path.display()
+            ),
+        })?;
+    let manifest = ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
+    })?;
+    validate_manifest_contract_header(
+        &manifest,
+        resolution,
+        ctx.install_mode.as_str(),
+        InstallContractSource::SidecarMeta,
+    )?;
+    Ok(Some(LoadedInstallContract {
+        manifest,
+        source: InstallContractSource::SidecarMeta,
+        toml,
+    }))
+}
+
+fn sidecar_meta_url(artifact_url: &str, component: &str, version: &str) -> Option<String> {
+    let version_marker = format!("/{component}/{version}/");
+    if let Some(index) = artifact_url.rfind(&version_marker) {
+        return Some(format!(
+            "{}meta.toml",
+            &artifact_url[..index + version_marker.len()]
+        ));
+    }
+
+    artifact_url
+        .rfind('/')
+        .map(|index| format!("{}/meta.toml", &artifact_url[..index]))
+}
+
+fn manifest_digest_sha256(digest: Option<&str>) -> Result<Option<&str>, CliError> {
+    match digest {
+        None => Ok(None),
+        Some(value) => value
+            .strip_prefix("sha256:")
+            .map(Some)
+            .ok_or_else(|| CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!("unsupported manifest_digest '{value}' in the distribution index"),
+            }),
+    }
+}
+
+fn validate_manifest_digest(toml: &str, resolution: &RawResolution) -> Result<(), CliError> {
+    let Some(expected) = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?
+    else {
+        return Ok(());
+    };
+    let actual = format!("{:x}", Sha256::digest(toml.as_bytes()));
+    if expected.eq_ignore_ascii_case(&actual) {
+        return Ok(());
+    }
+    Err(CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!(
+            "embedded component manifest digest for '{}' {} does not match the distribution index: expected {expected}, got {actual}",
+            resolution.component, resolution.entry.version
+        ),
+    })
 }
 
 pub(crate) fn prepare_raw_execution(
@@ -324,6 +426,7 @@ fn load_execution_install_contract(
                         resolution.artifact_url
                     ),
                 })?;
+            validate_manifest_digest(&toml, resolution)?;
             Ok(LoadedInstallContract {
                 manifest,
                 source: InstallContractSource::EmbeddedArtifact,
@@ -356,6 +459,40 @@ fn resolve_manifest_contract(
     mode: &str,
     source: InstallContractSource,
 ) -> Result<ResolvedContract, CliError> {
+    validate_manifest_contract_header(manifest, resolution, mode, source)?;
+
+    let mut files = resolve_manifest_files(manifest, layout, &resolution.component)?;
+    if files.is_empty() {
+        return Err(CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{}' declares no [install.files] — nothing to install",
+                resolution.component
+            ),
+        });
+    }
+    // Adapter resources are laid alongside the component's own files, from
+    // the same artifact. Install only *places* them under the standard
+    // `{datadir}/adapters/<component>/<framework>/` tree — enabling them
+    // against a framework is the separate `anolisa adapter enable` step.
+    files.extend(resolve_adapter_files(
+        manifest,
+        layout,
+        &resolution.component,
+    )?);
+
+    let services = resolve_manifest_services(manifest, &resolution.component, mode)?;
+    let capabilities = resolve_manifest_capabilities(manifest, layout, &resolution.component)?;
+
+    Ok((files, services, capabilities))
+}
+
+fn validate_manifest_contract_header(
+    manifest: &ComponentManifest,
+    resolution: &RawResolution,
+    mode: &str,
+    source: InstallContractSource,
+) -> Result<(), CliError> {
     if manifest.component.name.as_str() != resolution.component {
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
@@ -392,31 +529,7 @@ fn resolve_manifest_contract(
             ),
         });
     }
-
-    let mut files = resolve_manifest_files(manifest, layout, &resolution.component)?;
-    if files.is_empty() {
-        return Err(CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!(
-                "component '{}' declares no [install.files] — nothing to install",
-                resolution.component
-            ),
-        });
-    }
-    // Adapter resources are laid alongside the component's own files, from
-    // the same artifact. Install only *places* them under the standard
-    // `{datadir}/adapters/<component>/<framework>/` tree — enabling them
-    // against a framework is the separate `anolisa adapter enable` step.
-    files.extend(resolve_adapter_files(
-        manifest,
-        layout,
-        &resolution.component,
-    )?);
-
-    let services = resolve_manifest_services(manifest, &resolution.component, mode)?;
-    let capabilities = resolve_manifest_capabilities(manifest, layout, &resolution.component)?;
-
-    Ok((files, services, capabilities))
+    Ok(())
 }
 
 /// Render the manifest's `[[component.services]]` into activation requests:

@@ -14,6 +14,7 @@ fn raw_cli_help_renders_slash_command_reference() {
     assert!(normalized.contains("Slash commands"), "{output}");
     // Group headers sit at column zero inside the panel.
     assert!(normalized.contains("│ Config"), "{output}");
+    assert!(normalized.contains("│ Status"), "{output}");
     assert!(normalized.contains("│ Modes"), "{output}");
     assert!(normalized.contains("│ Hooks"), "{output}");
     assert!(normalized.contains("│ Registry"), "{output}");
@@ -32,6 +33,16 @@ fn raw_cli_help_renders_slash_command_reference() {
         normalized.contains("/config language [auto|en-US|zh-CN]"),
         "{output}"
     );
+    assert!(normalized.contains("/status"), "{output}");
+    // /auth renders as an indented group entry with its own summary line; the
+    // contextual /audit stays hidden below. Config-group membership is pinned
+    // by the registry unit test recommendations_and_auth_are_public_config_controls.
+    assert!(normalized.contains("│   /auth"), "{output}");
+    assert!(
+        normalized.contains("│       configure AI provider credentials"),
+        "{output}"
+    );
+    assert!(normalized.contains("/stats [model|tools]"), "{output}");
     assert!(
         normalized.contains("/mode approval [recommend|auto|trust]"),
         "{output}"
@@ -70,6 +81,77 @@ fn raw_cli_help_renders_slash_command_reference() {
     assert!(output.contains("Mode: auto."), "{output}");
     assert!(output.contains("after-help"), "{output}");
     assert!(!output.contains("bash: /help"), "{output}");
+}
+
+#[test]
+fn raw_cli_status_about_and_stats_render_without_reaching_bash() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/status\n\
+         /about\n\
+         /stats\n\
+         /stats model\n\
+         /stats tools\n\
+         echo after-status-queries\n\
+         exit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    assert!(output.contains("cosh-shell:"), "{output}");
+    assert!(output.contains("Backend: fake"), "{output}");
+    assert!(output.contains("Provider: fake (test)"), "{output}");
+    assert!(output.contains("Model: fake"), "{output}");
+    assert!(output.contains("Session stats"), "{output}");
+    assert!(output.contains("Model stats"), "{output}");
+    assert!(output.contains("Tool stats"), "{output}");
+    assert!(
+        output.contains("No tool calls have been recorded in this session."),
+        "{output}"
+    );
+    assert!(output.contains("after-status-queries"), "{output}");
+    for command in ["/status", "/about", "/stats"] {
+        assert!(
+            !output.contains(&format!("bash: {command}:")),
+            "{command} reached bash: {output}"
+        );
+        assert!(
+            !output.contains(&format!("bash: {command}: No such file or directory")),
+            "{command} reached bash: {output}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_zsh_status_about_and_stats_render_without_reaching_zsh() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"/status\n".to_vec(), Duration::ZERO),
+            (b"/about\n".to_vec(), Duration::from_millis(100)),
+            (b"/stats tools\n".to_vec(), Duration::from_millis(100)),
+            (
+                b"echo after-zsh-status-queries\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+
+    assert!(output.contains("Backend: fake"), "{output}");
+    assert!(output.contains("Tool stats"), "{output}");
+    assert!(output.contains("after-zsh-status-queries"), "{output}");
+    for command in ["/status", "/about", "/stats"] {
+        assert!(
+            !output.contains(&format!("zsh: no such file or directory: {command}")),
+            "{command} reached zsh: {output}"
+        );
+    }
 }
 
 #[test]
