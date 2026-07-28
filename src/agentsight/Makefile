@@ -22,6 +22,10 @@ build-frontend: ## Build and embed frontend into frontend-dist/
 .PHONY: build-all
 build-all: build-frontend build ## Build frontend then Rust binary (with embedded UI)
 
+.PHONY: build-mac
+build-mac: build-frontend ## Build macOS local viewer (serve only; no eBPF)
+	cargo build --release --bin agentsight
+
 .PHONY: example
 example: build ## Build C FFI example (requires libagentsight)
 	gcc -o target/release/agentsight_example examples/agentsight_example.c \

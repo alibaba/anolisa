@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 agentsight-atif = { path = "../agentsight-atif" }
 anyhow = { workspace = true }
+dirs = { workspace = true }
 log = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

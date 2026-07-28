@@ -27,6 +27,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentStatusWaitingUserAnswer => "正在等待用户回答: {question}",
         MessageId::AgentStatusWaitingApprovalCommand => "正在等待审批: {command}",
         MessageId::AgentStatusTool => "tool",
+        MessageId::AgentStatusToolArguments => "工具参数",
+        MessageId::AgentStatusGeneratingToolArguments => "正在生成 {tool} 参数...",
         MessageId::AgentStatusCapturingToolOutput => "正在捕获 {tool_id} 的输出",
         MessageId::AgentStatusToolCompleted => "{tool_id} 已完成，状态 {status}",
         MessageId::AgentStatusCompleted => "已完成",

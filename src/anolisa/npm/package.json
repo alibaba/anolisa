@@ -22,6 +22,7 @@
   },
   "files": [
     "bin/",
+    "scripts/",
     "README.md",
     "LICENSE"
   ],
@@ -32,10 +33,12 @@
     "node": ">=16.0.0"
   },
   "os": [
-    "linux"
+    "linux",
+    "darwin"
   ],
   "optionalDependencies": {
     "@anolisa/cli-linux-x64": "0.2.12",
-    "@anolisa/cli-linux-arm64": "0.2.12"
+    "@anolisa/cli-linux-arm64": "0.2.12",
+    "@anolisa/cli-darwin-arm64": "0.2.12"
   }
 }

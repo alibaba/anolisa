@@ -1,12 +1,15 @@
 //! Runtime-dependency preflight and auto-provisioning for the `install`
 //! command.
 
+use anolisa_core::facts::JournalInventory;
 use anolisa_core::{
     ComponentManifest, DependencyResolver, DependencyStatus, ProvisionPlan, ProvisionStrategy,
     ResolverEnv,
 };
-use anolisa_platform::package_manager::detect_package_manager;
+use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::package_manager::{PackageManager, detect_package_manager};
 
+use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
 use crate::response::CliError;
 
@@ -66,8 +69,14 @@ pub(crate) fn run_runtime_preflight(
 ///   manager, then re-verify only the provisioned deps. Manual-only deps
 ///   (e.g. `language-runtime` without a `packages` mapping) remain
 ///   non-blocking warnings. Unresolvable platform capabilities fail fast.
+///   Packages reserved by a live pending fresh RPM install journal are
+///   refused before the package manager runs.
 /// - **User**: report missing deps with remediation commands and return an
 ///   error (the caller should exit without modifying the host).
+///
+/// `journals` is the inventory validated under the install lock; it guards
+/// the auto-install against packages a pending RPM install still reserves
+/// for another component.
 ///
 /// Returns the list of package names that were auto-installed (empty in user
 /// mode or when all deps were already satisfied).
@@ -77,6 +86,8 @@ pub(crate) fn run_provision(
     ctx: &CliContext,
     command: &str,
     warnings: &mut Vec<String>,
+    journals: &JournalInventory,
+    layout: &FsLayout,
 ) -> Result<Vec<String>, CliError> {
     if manifest.runtime_deps.is_empty() {
         return Ok(Vec::new());
@@ -182,11 +193,9 @@ pub(crate) fn run_provision(
                 ),
             })?;
 
-            // Execute the install.
-            mgr.install(&pkg_names).map_err(|err| CliError::Runtime {
-                command: command.to_string(),
-                reason: format!("failed to install system dependencies: {err}"),
-            })?;
+            // Execute the install, refusing packages a pending RPM install
+            // journal still reserves for another component.
+            install_unreserved_packages(&pkg_names, journals, layout, &*mgr, command)?;
 
             // Re-verify only the provisioned deps (manual deps stay as warnings).
             let recheck = DependencyResolver::system()
@@ -237,6 +246,41 @@ pub(crate) fn run_provision(
     }
 }
 
+/// Install missing system packages, refusing the whole batch when any
+/// package is reserved by a live pending fresh RPM install journal.
+///
+/// Installing a reserved package would record it under the new component's
+/// `provisioned_packages` while the pending operation still owns it, so a
+/// later repair or uninstall of that component could remove a package the
+/// new component depends on. The caller must hold the install lock that
+/// protects `journals`.
+fn install_unreserved_packages(
+    pkg_names: &[&str],
+    journals: &JournalInventory,
+    layout: &FsLayout,
+    mgr: &dyn PackageManager,
+    command: &str,
+) -> Result<(), CliError> {
+    if let Some(claim) =
+        rpm_install::find_pending_rpm_claim_for_packages(journals, layout, pkg_names, command)?
+    {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "system package '{}' is reserved by component '{}', which has a pending RPM install journal at {}; run `anolisa repair {}` before retrying",
+                claim.package,
+                claim.component,
+                claim.journal_path.display(),
+                claim.component
+            ),
+        });
+    }
+    mgr.install(pkg_names).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to install system dependencies: {err}"),
+    })
+}
+
 /// Build the note suffix appended to error messages when system packages were
 /// provisioned but the install did not complete. Returns an empty string when
 /// no packages were installed.
@@ -263,6 +307,129 @@ pub(crate) fn select_provision_strategy(ctx: &CliContext) -> ProvisionStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::tier1::rpm_install;
+    use anolisa_core::domain::NativePm;
+    use anolisa_core::facts::JournalEvidence;
+    use anolisa_core::manifest::{DependencyKind, PackageNames, RuntimeDependency};
+    use anolisa_core::state::OperationRecord;
+    use anolisa_core::transaction::{
+        DelegatedRecordAction, DelegatedRecoveryContext, Transaction, TransactionOutcomeStatus,
+        TransactionStep,
+    };
+    use anolisa_core::{DependencyResolution, ResolutionPlan};
+    use anolisa_platform::package_manager::PkgError;
+    use std::cell::RefCell;
+
+    /// Records install calls instead of touching the host.
+    #[derive(Default)]
+    struct FakePackageManager {
+        installs: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl FakePackageManager {
+        fn install_calls(&self) -> Vec<Vec<String>> {
+            self.installs.borrow().clone()
+        }
+    }
+
+    impl PackageManager for FakePackageManager {
+        fn install(&self, packages: &[&str]) -> Result<(), PkgError> {
+            self.installs
+                .borrow_mut()
+                .push(packages.iter().map(|package| package.to_string()).collect());
+            Ok(())
+        }
+
+        fn remove(&self, _packages: &[&str]) -> Result<(), PkgError> {
+            Ok(())
+        }
+
+        fn is_installed(&self, _package: &str) -> bool {
+            false
+        }
+    }
+
+    fn layout_under(tmp: &tempfile::TempDir) -> FsLayout {
+        FsLayout::system(Some(tmp.path().to_path_buf()))
+    }
+
+    fn inventory_for(layout: &FsLayout, operations: &[OperationRecord]) -> JournalInventory {
+        let journal_dir = rpm_install::journal_dir(layout);
+        JournalInventory::load(JournalEvidence::new(&journal_dir, operations))
+            .expect("journal inventory must load")
+    }
+
+    fn rpm_env() -> ResolverEnv {
+        ResolverEnv {
+            pkg_base: Some("rpm".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn system_dep(name: &str, package_name: &str) -> RuntimeDependency {
+        RuntimeDependency {
+            name: name.to_string(),
+            kind: DependencyKind::SystemPackage,
+            version: None,
+            probe: None,
+            source: None,
+            packages: PackageNames {
+                rpm: Some(package_name.to_string()),
+                deb: None,
+            },
+            check: None,
+            min_kernel: None,
+        }
+    }
+
+    fn unresolved(name: &str, package_name: &str) -> DependencyResolution {
+        DependencyResolution {
+            name: name.to_string(),
+            kind: DependencyKind::SystemPackage,
+            status: DependencyStatus::Unresolved {
+                remediation: format!("sudo dnf install {package_name}"),
+            },
+            detail: None,
+        }
+    }
+
+    fn resolved(name: &str) -> DependencyResolution {
+        DependencyResolution {
+            name: name.to_string(),
+            kind: DependencyKind::SystemPackage,
+            status: DependencyStatus::Resolved,
+            detail: None,
+        }
+    }
+
+    /// Leave an in-flight delegated fresh RPM install journal reserving
+    /// `package` for `component` (the modern subject-journal shape).
+    fn drop_pending_delegated_journal(layout: &FsLayout, component: &str, package: &str) {
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            Some(component),
+            layout.state_dir.join("installed.toml"),
+            &rpm_install::journal_dir(layout),
+        )
+        .expect("begin delegated journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some(package.to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: None,
+                },
+                [TransactionStep::planned(
+                    "native-txn",
+                    package,
+                    "install",
+                    None,
+                )],
+            )
+            .expect("record delegated steps");
+        // Dropped in flight: the journal stays pending.
+    }
 
     #[test]
     fn retained_packages_note_empty_when_no_packages() {
@@ -276,5 +443,277 @@ mod tests {
         assert!(note.contains("system packages were installed and retained"));
         assert!(note.contains("nodejs"));
         assert!(note.contains("jq"));
+    }
+
+    #[test]
+    fn pending_delegated_rpm_journal_blocks_dependency_provisioning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        drop_pending_delegated_journal(&layout, "component-b", "libfoo");
+        let inventory = inventory_for(&layout, &[]);
+
+        // A missing runtime dependency of component-a maps to the reserved
+        // package.
+        let dep = system_dep("foo", "libfoo");
+        let resolution = ResolutionPlan {
+            resolutions: vec![unresolved("foo", "libfoo")],
+            warnings: Vec::new(),
+        };
+        let plan = ProvisionPlan::from_resolution(&resolution, &[dep], &rpm_env());
+        let pkg_names = plan.installable_package_names();
+        assert_eq!(pkg_names, vec!["libfoo"]);
+
+        let mgr = FakePackageManager::default();
+        let err = install_unreserved_packages(
+            &pkg_names,
+            &inventory,
+            &layout,
+            &mgr,
+            "install component-a",
+        )
+        .expect_err("a reserved package must block provisioning");
+
+        let reason = err.reason();
+        assert!(reason.contains("component-b"), "{reason}");
+        assert!(reason.contains("libfoo"), "{reason}");
+        assert!(reason.contains("anolisa repair component-b"), "{reason}");
+        assert!(
+            mgr.install_calls().is_empty(),
+            "package manager must not run"
+        );
+    }
+
+    #[test]
+    fn pending_legacy_rpm_journal_blocks_dependency_provisioning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        let pending = rpm_install::begin_fresh_install(
+            &layout,
+            "component-b",
+            "libfoo",
+            "install component-b",
+        )
+        .expect("begin legacy journal");
+        drop(pending);
+        let inventory = inventory_for(&layout, &[]);
+
+        let dep = system_dep("foo", "libfoo");
+        let resolution = ResolutionPlan {
+            resolutions: vec![unresolved("foo", "libfoo")],
+            warnings: Vec::new(),
+        };
+        let plan = ProvisionPlan::from_resolution(&resolution, &[dep], &rpm_env());
+        let pkg_names = plan.installable_package_names();
+
+        let mgr = FakePackageManager::default();
+        let err = install_unreserved_packages(
+            &pkg_names,
+            &inventory,
+            &layout,
+            &mgr,
+            "install component-a",
+        )
+        .expect_err("a legacy reserved package must block provisioning");
+
+        let reason = err.reason();
+        assert!(reason.contains("component-b"), "{reason}");
+        assert!(reason.contains("libfoo"), "{reason}");
+        assert!(reason.contains("anolisa repair component-b"), "{reason}");
+        assert!(
+            mgr.install_calls().is_empty(),
+            "package manager must not run"
+        );
+    }
+
+    #[test]
+    fn terminal_rpm_journal_does_not_block_provisioning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            Some("component-b"),
+            layout.state_dir.join("installed.toml"),
+            &rpm_install::journal_dir(&layout),
+        )
+        .expect("begin delegated journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("libfoo".to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: None,
+                },
+                [TransactionStep::planned(
+                    "native-txn",
+                    "libfoo",
+                    "install",
+                    None,
+                )],
+            )
+            .expect("record delegated steps");
+        journal
+            .finish(TransactionOutcomeStatus::Ok)
+            .expect("finish journal");
+        let inventory = inventory_for(&layout, &[]);
+
+        let mgr = FakePackageManager::default();
+        install_unreserved_packages(
+            &["libfoo"],
+            &inventory,
+            &layout,
+            &mgr,
+            "install component-a",
+        )
+        .expect("a settled journal must not block provisioning");
+
+        assert_eq!(mgr.install_calls(), vec![vec!["libfoo".to_string()]]);
+    }
+
+    #[test]
+    fn committed_legacy_rpm_journal_does_not_block_provisioning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        let pending = rpm_install::begin_fresh_install(
+            &layout,
+            "component-b",
+            "libfoo",
+            "install component-b",
+        )
+        .expect("begin legacy journal");
+        let operation_id = pending.transaction.operation_id.clone();
+        drop(pending);
+        let operations = vec![OperationRecord {
+            id: operation_id,
+            command: "install component-b".to_string(),
+            status: "ok".to_string(),
+            started_at: "2026-07-27T00:00:00Z".to_string(),
+            finished_at: Some("2026-07-27T00:00:01Z".to_string()),
+            parent_operation_id: None,
+        }];
+        let inventory = inventory_for(&layout, &operations);
+
+        let mgr = FakePackageManager::default();
+        install_unreserved_packages(
+            &["libfoo"],
+            &inventory,
+            &layout,
+            &mgr,
+            "install component-a",
+        )
+        .expect("a committed legacy journal must not block provisioning");
+
+        assert_eq!(mgr.install_calls(), vec![vec!["libfoo".to_string()]]);
+    }
+
+    #[test]
+    fn provisioning_proceeds_without_pending_claims() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        let inventory = inventory_for(&layout, &[]);
+
+        let dep = system_dep("foo", "libfoo");
+        let resolution = ResolutionPlan {
+            resolutions: vec![unresolved("foo", "libfoo")],
+            warnings: Vec::new(),
+        };
+        let plan = ProvisionPlan::from_resolution(&resolution, &[dep], &rpm_env());
+        let pkg_names = plan.installable_package_names();
+
+        let mgr = FakePackageManager::default();
+        install_unreserved_packages(&pkg_names, &inventory, &layout, &mgr, "install component-a")
+            .expect("no pending claim means provisioning proceeds");
+
+        assert_eq!(mgr.install_calls(), vec![vec!["libfoo".to_string()]]);
+    }
+
+    #[test]
+    fn satisfied_dependency_is_not_rejected_by_its_reserved_package() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        // libfoo is reserved by a pending journal for component-b, but
+        // component-a's dependency on it is already satisfied; only the
+        // missing dependency's package is installable.
+        drop_pending_delegated_journal(&layout, "component-b", "libfoo");
+        let inventory = inventory_for(&layout, &[]);
+
+        let deps = vec![system_dep("foo", "libfoo"), system_dep("bar", "libbar")];
+        let resolution = ResolutionPlan {
+            resolutions: vec![resolved("foo"), unresolved("bar", "libbar")],
+            warnings: Vec::new(),
+        };
+        let plan = ProvisionPlan::from_resolution(&resolution, &deps, &rpm_env());
+        assert_eq!(plan.satisfied_count, 1);
+        let pkg_names = plan.installable_package_names();
+        assert_eq!(pkg_names, vec!["libbar"]);
+
+        let mgr = FakePackageManager::default();
+        install_unreserved_packages(&pkg_names, &inventory, &layout, &mgr, "install component-a")
+            .expect("a reserved package that is not being installed must not block");
+
+        assert_eq!(mgr.install_calls(), vec![vec!["libbar".to_string()]]);
+    }
+
+    #[test]
+    fn pending_rpm_journal_for_another_package_does_not_block() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        drop_pending_delegated_journal(&layout, "component-b", "libother");
+        let inventory = inventory_for(&layout, &[]);
+
+        let mgr = FakePackageManager::default();
+        install_unreserved_packages(
+            &["libfoo"],
+            &inventory,
+            &layout,
+            &mgr,
+            "install component-a",
+        )
+        .expect("a claim on another package must not block");
+
+        assert_eq!(mgr.install_calls(), vec![vec!["libfoo".to_string()]]);
+    }
+
+    #[test]
+    fn malformed_live_legacy_journal_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = layout_under(&tmp);
+        let mut pending = rpm_install::begin_fresh_install(
+            &layout,
+            "component-b",
+            "libfoo",
+            "install component-b",
+        )
+        .expect("begin legacy journal");
+        // Reverse the steps so the live journal keeps legacy markers but no
+        // longer matches the safe two-step shape.
+        pending.transaction.steps.reverse();
+        std::fs::write(
+            &pending.transaction.journal_path,
+            toml::to_string_pretty(&pending.transaction).expect("serialize journal"),
+        )
+        .expect("rewrite journal");
+        drop(pending);
+        let inventory = inventory_for(&layout, &[]);
+
+        let mgr = FakePackageManager::default();
+        let err = install_unreserved_packages(
+            &["libfoo"],
+            &inventory,
+            &layout,
+            &mgr,
+            "install component-a",
+        )
+        .expect_err("an ambiguous live journal must fail closed");
+
+        assert!(
+            err.reason().contains("automatic recovery is unsafe"),
+            "{}",
+            err.reason()
+        );
+        assert!(
+            mgr.install_calls().is_empty(),
+            "package manager must not run"
+        );
     }
 }

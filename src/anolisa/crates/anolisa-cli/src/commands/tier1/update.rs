@@ -3594,16 +3594,27 @@ sha256 = "{sha}"
     }
 
     /// A failure while installing the new version compensates back: the old
-    /// files are restored from backup and the recorded version is unchanged.
+    /// files are restored from backup — bytes *and* mode — and the recorded
+    /// version is unchanged. Restoring an owned binary without its
+    /// executable bit leaves the component unusable after a rollback the
+    /// CLI called clean, so the mode is part of what "restored" means.
     #[test]
     fn raw_update_rolls_back_on_install_failure() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
         let body: &[u8] = b"original v1 binary\n";
         seed_installed_raw(&c, "foo", "0.1.0", body);
+        let layout = common::resolve_layout(&c);
+        let bin = layout.bin_dir.join("foo");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+                .expect("seed the binary executable, as an install would");
+        }
         publish_raw_repo(
             &tmp.path().join("repo"),
-            &common::resolve_layout(&c),
+            &layout,
             "foo",
             "0.2.0",
             &raw_artifact_missing_binary("foo", "0.2.0"),
@@ -3619,16 +3630,133 @@ sha256 = "{sha}"
             err.reason()
         );
 
-        let layout = common::resolve_layout(&c);
         assert_eq!(
-            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            std::fs::read(&bin).expect("read bin"),
             body,
             "old binary must be restored from backup"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&bin)
+                    .expect("stat bin")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o755,
+                "restored binary must keep the executable bit it had before the update"
+            );
+        }
         assert_eq!(
             owned_artifact(&find_component(&c, "foo")).version,
             "0.1.0",
             "failed update must not change the recorded version"
+        );
+    }
+
+    /// Restoring a file writes a new inode, which carries no capability
+    /// xattr — so the rollback has to re-apply the capabilities the *prior*
+    /// contract declared, or the restored binary comes back stripped of them
+    /// exactly like it used to come back stripped of its executable bit.
+    ///
+    /// User mode is deliberate: `capability_for_install_mode` always answers
+    /// with the unsupported manager there, so the assertion is about which
+    /// capabilities the rollback resolved and attempted, not about whether
+    /// this machine happens to have `setcap`.
+    #[test]
+    fn raw_update_rollback_reapplies_prior_capabilities() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("home"), InstallMode::User, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"original v1 binary\n");
+        let layout = common::resolve_layout(&c);
+        let bin = layout.bin_dir.join("foo");
+
+        // Re-state the installed contract with a capability row. The record
+        // keeps no digest for the manifest, so rewriting it in place is what
+        // an installation of a cap-declaring component would have left.
+        let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
+            .expect("manifest path");
+        let with_caps = format!(
+            "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\n",
+            raw_manifest("foo", "0.1.0")
+        );
+        std::fs::write(&manifest_path, &with_caps).expect("rewrite installed manifest");
+
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &raw_artifact_missing_binary("foo", "0.2.0"),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("install of the new version must fail");
+        assert!(
+            err.reason().contains("the previous files were restored"),
+            "the failure must report the compensation honestly: {}",
+            err.reason()
+        );
+
+        // The forward path never reached SetCapabilities, so any capability
+        // record in the log was written by the rollback.
+        let log = std::fs::read_to_string(&layout.central_log).expect("read central log");
+        let applied: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| record["command"] == "capability:apply")
+            .collect();
+        assert_eq!(
+            applied.len(),
+            1,
+            "rollback must re-apply the prior contract's capabilities exactly once: {log}"
+        );
+        assert_eq!(applied[0]["details"]["path"], bin.display().to_string());
+        assert_eq!(applied[0]["details"]["caps"][0], "cap_net_bind_service");
+    }
+
+    /// A contract the rollback cannot read is the one case where capabilities
+    /// go missing without anyone applying them, so it must not degrade to a
+    /// silent skip: the operator has to learn from the failure itself that the
+    /// restored files may be short their capabilities.
+    #[test]
+    fn raw_update_rollback_reports_an_unreadable_prior_contract() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("home"), InstallMode::User, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"original v1 binary\n");
+        let layout = common::resolve_layout(&c);
+
+        let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
+            .expect("manifest path");
+        std::fs::write(&manifest_path, "this is not = valid toml [[[").expect("corrupt manifest");
+
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &raw_artifact_missing_binary("foo", "0.2.0"),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("install of the new version must fail");
+        let reason = err.reason();
+        assert!(
+            reason.contains("restoring the previous files reported problems"),
+            "an unreadable contract must downgrade the honest-rollback claim: {reason}"
+        );
+        assert!(
+            reason.contains(&manifest_path.display().to_string())
+                && reason.contains("file capabilities"),
+            "the warning must name the snapshot it could not use: {reason}"
+        );
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            b"original v1 binary\n",
+            "an unreadable contract must not stop the files themselves coming back"
         );
     }
 

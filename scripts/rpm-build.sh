@@ -813,6 +813,32 @@ build_cosh_ng() {
 
     local pkg_name
     pkg_name=$(parse_spec_name "$spec_in")
+    local component_name
+    component_name=$(awk '
+        $0 == "[component]" { in_component = 1; next }
+        in_component && /^\[/ { exit }
+        in_component && /^name = / {
+            value = $0
+            sub(/^name = "/, "", value)
+            sub(/"$/, "", value)
+            print value
+            exit
+        }
+    ' "${COSH_DIR}/component.toml")
+    if [ "$component_name" != "$pkg_name" ]; then
+        err "cosh-ng identity mismatch: RPM name '${pkg_name}', component name '${component_name}'"
+        return 1
+    fi
+    if ! grep -Fqx "Provides:       anolisa-component(${component_name})" "$spec_in"; then
+        err "cosh-ng spec must provide anolisa-component(${component_name})"
+        return 1
+    fi
+    local manifest_path="%{_datadir}/anolisa/components/${component_name}/component.toml"
+    if ! grep -Fq "install -m 0644 component.toml %{buildroot}${manifest_path}" "$spec_in" \
+        || ! grep -Fqx "$manifest_path" "$spec_in"; then
+        err "cosh-ng spec must install and own ${manifest_path}"
+        return 1
+    fi
     local tarball_name="${pkg_name}-${version}.tar.gz"
 
     local spec_file

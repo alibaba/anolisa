@@ -707,11 +707,10 @@ fn record_from_object(
     // installed manifest snapshot (the same per-installation copy consumed
     // by uninstall hooks, adapter discovery, and contract reconciliation).
     //
-    // Delegated rows are exempt regardless of relation: their file layout is
-    // selected by RPM macros rather than ANOLISA's raw-backend layout, so the
-    // manifest health checks (which assume that layout) would spuriously
-    // escalate a valid package. Delegated health remains adjudicated by the
-    // rpmdb drift probe after this projection.
+    // Delegated rows are exempt: their file layout is selected by RPM macros
+    // rather than ANOLISA's raw backend, so manifest checks against the raw
+    // layout can spuriously escalate a valid package. Delegated health is
+    // adjudicated by the rpmdb drift probe after this projection.
     let manifest_status = match manifest_probe {
         Some(service_backends) if !installation.binding.is_delegated() => {
             let (manifest_entries, escalated) = manifest_health_probe(
@@ -1942,6 +1941,48 @@ mod tests {
             .find(|h| h.name.starts_with("agentsight:file_exists"))
             .expect("snapshot health entry present");
         assert_eq!(entry.status, "ok");
+    }
+
+    #[test]
+    fn repaired_cosh_ng_status_skips_the_legacy_snapshot_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(dir.path());
+        write_manifest_snapshot(
+            &layout,
+            "cosh",
+            r#"
+                [component]
+                name = "cosh"
+                version = "0.13.0"
+
+                [component.health_check]
+                type = "file_exists"
+                path = "{bindir}/cosh-cli"
+
+                [backends.rpm]
+                package = "cosh-ng"
+            "#,
+        );
+
+        let mut state = InstalledState::default();
+        state.upsert_object(rpm_observed_object("cosh-ng", "cosh-ng", "0.13.0-1.al8"));
+
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            "system",
+            Some("cosh-ng"),
+            None,
+        );
+
+        assert_eq!(records[0].status, "adopted");
+        assert!(
+            records[0]
+                .health
+                .iter()
+                .all(|entry| !entry.name.starts_with("cosh-ng:file_exists")),
+            "delegated RPM must not run raw-layout manifest checks"
+        );
     }
 
     /// Failing snapshot check escalates the wire status to `failed` with

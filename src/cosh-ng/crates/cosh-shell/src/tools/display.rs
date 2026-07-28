@@ -2,6 +2,38 @@ use serde_json::Value;
 
 use super::classification::is_shell_tool_name;
 
+/// Longest tool name drawn on a status surface.
+const MAX_DISPLAY_TOOL_NAME_CHARS: usize = 64;
+
+/// A provider-supplied tool name, made safe to draw on a terminal.
+///
+/// Mirrors cosh-core's terminal-facing sanitizer because cosh-shell is a
+/// standalone crate; keep the filtering and length contract aligned in both.
+///
+/// Tool names are model output, not validated identifiers: `"[2J"` in the
+/// stream JSON arrives here as a real ESC byte, and the status animation writes
+/// its label straight to the terminal. Stripping the control characters leaves
+/// any escape body as inert text; the length cap keeps one status line from
+/// flooding the surface.
+pub(crate) fn display_tool_name(tool_name: &str) -> String {
+    let safe: String = tool_name
+        .chars()
+        .filter(|character| {
+            !character.is_control() && !matches!(character, '\u{2028}' | '\u{2029}')
+        })
+        .take(MAX_DISPLAY_TOOL_NAME_CHARS)
+        .collect();
+    let trimmed = safe.trim();
+    if trimmed.is_empty() {
+        return "tool".to_string();
+    }
+    let mut display = trimmed.to_string();
+    if tool_name.chars().count() > MAX_DISPLAY_TOOL_NAME_CHARS {
+        display.push('…');
+    }
+    display
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolColor {
     ReadOnly,

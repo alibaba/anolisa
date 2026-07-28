@@ -48,7 +48,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from hook_utils import (
-    TOKENLESS_CANDIDATES,
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_LIB,
+    _TOKENLESS_LOCAL_SHARE,
     SKIP_TOOLS,
     classify_env_error,
     detect_cosh_ng_runtime,
@@ -218,7 +220,7 @@ def main() -> None:
 
     # 3. Resolve binaries
     tokenless_bin = resolve_binary(
-        "tokenless", *TOKENLESS_CANDIDATES
+        "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
     )
     if not tokenless_bin:
         warn("tokenless is not installed. Response compression hook disabled.")

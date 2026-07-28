@@ -1387,6 +1387,276 @@ fn shell_host_bash_debug_trap_children_never_see_exported_extdebug() {
     assert!(terminal.contains("shell-alive-ok"), "{terminal}");
 }
 
+// bash re-execs shebang-less scripts with --debugger only when built with
+// debugger support, and the startup failure is only visible on hosts without
+// the bashdb package. Probe the exact re-exec path so tests can skip
+// anywhere the regression cannot manifest (e.g. macOS bash 3.2).
+fn bash_reexecs_shebang_less_with_debugger(work_dir: &std::path::Path) -> bool {
+    let probe_path = work_dir.join("shebang-less-probe");
+    std::fs::write(&probe_path, "true\n").expect("probe script");
+    make_executable(&probe_path);
+    let probe = Command::new("bash")
+        .args(["--noprofile", "--norc", "-c"])
+        .arg(format!("shopt -s extdebug; {}", probe_path.display()))
+        .output()
+        .expect("debugger probe");
+    let stderr = String::from_utf8_lossy(&probe.stderr);
+    stderr.contains("bashdb") || stderr.contains("cannot start debugger")
+}
+
+#[test]
+fn shell_host_bash_shebang_less_prompt_hook_avoids_debugger_reexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-debugger-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    if !bash_reexecs_shebang_less_with_debugger(&work_dir) {
+        return;
+    }
+
+    // Hook mirroring Alinux /etc/sysconfig/bash-prompt-history: inherited
+    // PROMPT_COMMAND points at a shebang-less executable script, so the
+    // marker's eval can only run it through the ENOEXEC re-exec fallback.
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hook_log = work_dir.join("hook-ran.log");
+    let hook_path = work_dir.join("bash-prompt-history");
+    std::fs::write(
+        &hook_path,
+        format!("echo prompt-hook-ran >> {}\n", hook_log.display()),
+    )
+    .expect("hook script");
+    make_executable(&hook_path);
+
+    let config = ShellHostConfig::new("prompt-hook-debugger-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("PROMPT_COMMAND", hook_path.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo ok"),
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-hook-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    // The hook must still run — the fix silences the debugger re-exec,
+    // not the user prompt command.
+    let hook_ran = std::fs::read_to_string(&hook_log).unwrap_or_default();
+    assert!(hook_ran.contains("prompt-hook-ran"), "{terminal}");
+    assert!(!terminal.contains("bashdb"), "{terminal}");
+    assert!(!terminal.contains("cannot start debugger"), "{terminal}");
+    // extdebug must be back on for the next real command: the DEBUG trap
+    // return-1 suppression depends on it.
+    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    // Array PROMPT_COMMAND only exists since bash 5.1.
+    let version_probe = Command::new("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"])
+        .output();
+    let Ok(version_probe) = version_probe else {
+        return;
+    };
+    let version = String::from_utf8_lossy(&version_probe.stdout);
+    let mut parts = version
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok());
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if (major, minor) < (5, 1) {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-array-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    if !bash_reexecs_shebang_less_with_debugger(&work_dir) {
+        return;
+    }
+
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hook_log = work_dir.join("hook-ran.log");
+    let hook_path = work_dir.join("bash-prompt-history");
+    std::fs::write(
+        &hook_path,
+        format!("echo array-hook-ran >> {}\n", hook_log.display()),
+    )
+    .expect("hook script");
+    make_executable(&hook_path);
+    // Array-form PROMPT_COMMAND captured from the user rcfile. The leading
+    // `return 0` element pins the eval helper frame: an early-returning hook
+    // must not skip the remaining elements or the extdebug restore.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!("PROMPT_COMMAND=('return 0' '{}')\n", hook_path.display()),
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-array-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo ok"),
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-hook-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    let hook_ran = std::fs::read_to_string(&hook_log).unwrap_or_default();
+    assert!(hook_ran.contains("array-hook-ran"), "{terminal}");
+    assert!(!terminal.contains("bashdb"), "{terminal}");
+    assert!(!terminal.contains("cannot start debugger"), "{terminal}");
+    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+}
+
+fn bash_extdebug_clears_trace_options() -> bool {
+    // `shopt -u extdebug` also clears errtrace/functrace on every bash that
+    // implements the implication (4.4 through 5.x); skip only where bash is
+    // too old to link the flags at all.
+    Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "set -E; set -T; shopt -s extdebug; shopt -u extdebug; \
+             [[ ! -o errtrace && ! -o functrace ]]",
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn shell_host_bash_prompt_hook_preserves_trace_option_inheritance() {
+    if !bash_extdebug_clears_trace_options() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-trace-options-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let trace_log = work_dir.join("trace-options.log");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!(
+            "trap 'printf \"ERR\\t%s\\t%s\\n\" \"$BASH_COMMAND\" \
+             \"${{FUNCNAME[*]}}\" >> {trace_log}' ERR\n\
+             trap 'printf \"DEBUG\\t%s\\t%s\\n\" \"$BASH_COMMAND\" \
+             \"${{FUNCNAME[*]}}\" >> {trace_log}' DEBUG\n\
+             _user_hook() {{\n\
+               false\n\
+             }}\n\
+             PROMPT_COMMAND=_user_hook\n",
+            trace_log = trace_log.display()
+        ),
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-trace-options-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line("echo trace-options-preserved")],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    let trace_log = std::fs::read_to_string(&trace_log).unwrap_or_default();
+    let has_hook_trace = |event: &str| {
+        let prefix = format!("{event}\tfalse\t");
+        trace_log.lines().any(|line| {
+            let Some(functions) = line.strip_prefix(&prefix) else {
+                return false;
+            };
+            functions
+                .split_whitespace()
+                .any(|function| function == "_user_hook")
+        })
+    };
+    assert!(
+        has_hook_trace("ERR"),
+        "ERR trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+    );
+    assert!(
+        has_hook_trace("DEBUG"),
+        "DEBUG trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+    );
+    assert!(terminal.contains("trace-options-preserved"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_prompt_hook_survives_debug_trap_and_self_heals() {
+    if !bash_extdebug_clears_trace_options() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-debug-trap-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    // A hook that installs a DEBUG trap ending in `return 0` unwinds every
+    // function frame past the in-function extdebug restore. The session must
+    // stay usable and extdebug must self-heal after the user clears the trap.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "_user_hook() {\n\
+           if [[ -z \"${_poisoned:-}\" ]]; then\n\
+             _poisoned=1\n\
+             trap 'return 0' DEBUG\n\
+           fi\n\
+         }\n\
+         PROMPT_COMMAND=_user_hook\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-debug-trap-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            // Executes natively while the poisoned trap is live: with
+            // extdebug off the top-level `return` only prints an error and
+            // the command still runs — the session is not bricked.
+            ScriptedInput::user_line("trap - DEBUG; echo session-usable"),
+            // The prompt cycle after the trap removal ran the in-function
+            // restore again, so extdebug must be back on.
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-heal-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("session-usable"), "{terminal}");
+    assert!(terminal.contains("post-heal-extdebug-rc=0"), "{terminal}");
+}
+
 #[test]
 fn shell_host_bash_alias_expanded_commands_keep_preexec_markers() {
     // BASH_ALIASES (bash 4+) is required for the alias-aware guard; on
@@ -1587,4 +1857,161 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
         })
         .count();
     assert_eq!(intercepts, 2, "{:?}", output.events);
+}
+
+// Issue #1919: a natural-language prompt whose IFS first token contains a
+// slash never reaches command_not_found_handle (bash executes the token as
+// a path), so the DEBUG trap reclassifies it with the missing-path context
+// and intercepts before execution.
+#[test]
+fn shell_host_bash_missing_path_natural_language_intercepts() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    // Pin a UTF-8 locale: a real terminal typing Chinese is UTF-8, while CI
+    // runners default to C, where readline mangles multi-byte input bytes
+    // before they ever reach the DEBUG trap (same precedent as
+    // governance.rs raw-hook-test).
+    let mut config = ShellHostConfig::new("missing-path-nl", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1919-probe/SKILL.md";
+    let output =
+        run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
+
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "missing-path natural-language intercept: {:?}",
+                output.events
+            )
+        });
+    // Pre-execution intercepts are shaped like slash/agent-marker intercepts
+    // (no top_level_missing correlation: the command never started, so there
+    // is no in-flight attempt to correlate with).
+    assert!(intercept.routing.is_none(), "{:?}", output.events);
+    // Interception must prevent execution: no command block and no native
+    // bash path error may appear for the prompt (I4).
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        !terminal.contains("No such file or directory"),
+        "{terminal}"
+    );
+}
+
+// Issue #1919 fail-closed counterproofs: the missing-path branch must never
+// fire for existing paths (I1/D6), plain-English typo paths (I2/D3), or
+// secret-bearing input (I3) — bash native behavior stays byte-identical.
+#[test]
+fn shell_host_bash_missing_path_counterproofs_stay_native() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-native-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    // I1: existing executable script keeps running natively.
+    let probe_path = work_dir.join("probe-1919.sh");
+    let executed_path = work_dir.join("probe-1919-executed");
+    std::fs::write(
+        &probe_path,
+        format!("#!/bin/sh\ntouch {}\n", executed_path.display()),
+    )
+    .expect("probe script");
+    make_executable(&probe_path);
+    // D6: existing but non-executable file as first word stays native.
+    let data_path = work_dir.join("data-1919.txt");
+    std::fs::write(&data_path, "plain data\n").expect("data file");
+    // Review counterproofs: dangling symlink and permission-opaque paths
+    // are not provably ENOENT, so the missing-path branch must stand down
+    // and leave the native 126/127 outcome untouched.
+    let dangling_path = work_dir.join("dangling-1919");
+    std::os::unix::fs::symlink(work_dir.join("no-such-target"), &dangling_path)
+        .expect("dangling symlink");
+    let opaque_dir = work_dir.join("opaque-1919");
+    std::fs::create_dir_all(&opaque_dir).expect("opaque dir");
+    let opaque_file = opaque_dir.join("real-file");
+    std::fs::write(&opaque_file, "x\n").expect("opaque file");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod opaque");
+    }
+
+    // UTF-8 locale for the same readline multi-byte reason as the positive
+    // intercept case above.
+    let mut config = ShellHostConfig::new("missing-path-native", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+    let existing_exec = probe_path.display().to_string();
+    let existing_data = format!("{} 帮我读一下", data_path.display());
+    let dangling_input = format!("{} 帮我读一下", dangling_path.display());
+    let opaque_input = format!("{} 帮我读一下", opaque_file.display());
+    let secret_input = "打开./conf-1919.toml password=secretvalue";
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(existing_exec.clone()),
+            ScriptedInput::user_line("/usr/bin/nonexistent-cosh-1919-probe"),
+            ScriptedInput::user_line(secret_input),
+            ScriptedInput::user_line(existing_data.clone()),
+            ScriptedInput::user_line(dangling_input.clone()),
+            ScriptedInput::user_line(opaque_input.clone()),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    // I1: the existing script actually executed.
+    assert!(
+        executed_path.exists(),
+        "existing script must run natively: {:?}",
+        output.events
+    );
+    // No missing-path input may surface as a natural-language intercept.
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // I2: the plain-English typo path keeps the native bash error.
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("No such file or directory"), "{terminal}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore opaque");
+    }
 }

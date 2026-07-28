@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { HashRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { NavBar } from './components/NavBar';
 import { AgentHealthSidebar } from './components/AgentHealthSidebar';
 import { ConversationList } from './pages/ConversationList';
@@ -12,10 +12,46 @@ import { AgentSessionsPage } from './pages/AgentSessionsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LoginPage } from './pages/LoginPage';
 import { fetchAuthStatus, fetchAuthVerify, login } from './utils/apiClient';
+import type { AppCapability, AuthStatusResponse } from './utils/apiClient';
+
+const DEFAULT_CAPABILITIES: AppCapability[] = [
+  'agent_observability',
+  'sessions',
+  'token_savings',
+  'optimization',
+  'skills',
+  'security',
+  'atif',
+  'settings',
+  'agent_health',
+];
+
+const LOCAL_DEFAULT_PATH = '/sessions';
+
+function capabilitiesFromStatus(status: AuthStatusResponse | null): AppCapability[] {
+  return Array.isArray(status?.capabilities) ? status.capabilities : DEFAULT_CAPABILITIES;
+}
+
+function pathAllowed(pathname: string, capabilities: AppCapability[]): boolean {
+  if (pathname === '/') return capabilities.includes('agent_observability');
+  if (pathname.startsWith('/sessions')) return capabilities.includes('sessions');
+  if (pathname.startsWith('/savings')) return capabilities.includes('token_savings');
+  if (pathname.startsWith('/optimization')) return capabilities.includes('optimization');
+  if (pathname.startsWith('/skills')) return capabilities.includes('skills');
+  if (pathname.startsWith('/security')) return capabilities.includes('security');
+  if (pathname.startsWith('/atif')) return capabilities.includes('atif');
+  if (pathname.startsWith('/settings')) return capabilities.includes('settings');
+  return true;
+}
+
+function defaultPath(capabilities: AppCapability[]): string {
+  return capabilities.includes('agent_observability') ? '/' : LOCAL_DEFAULT_PATH;
+}
 
 /** Auth gate: checks auth status and renders LoginPage when needed. */
-const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+const AuthGate: React.FC<{ children: (status: AuthStatusResponse | null) => React.ReactNode }> = ({ children }) => {
   const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated' | 'disabled'>('loading');
+  const [status, setStatus] = useState<AuthStatusResponse | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -55,8 +91,9 @@ const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
     (async () => {
       try {
-        const status = await fetchAuthStatus();
-        if (!status.auth_enabled) {
+        const nextStatus = await fetchAuthStatus();
+        setStatus(nextStatus);
+        if (!nextStatus.auth_enabled) {
           setAuthState('disabled');
           return;
         }
@@ -67,7 +104,8 @@ const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
           setAuthState('unauthenticated');
         }
       } catch {
-        // Server unreachable — skip auth check
+        // Server unreachable — skip auth check and assume full capabilities for compatibility.
+        setStatus(null);
         setAuthState('disabled');
       }
     })();
@@ -75,7 +113,7 @@ const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
   const handleAuthenticated = () => {
     setAuthState('authenticated');
-    navigate('/');
+    navigate(defaultPath(capabilitiesFromStatus(status)));
   };
 
   if (authState === 'loading') {
@@ -90,7 +128,47 @@ const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     return <LoginPage onAuthenticated={handleAuthenticated} />;
   }
 
-  return <>{children}</>;
+  return <>{children(status)}</>;
+};
+
+const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) => {
+  const location = useLocation();
+  const capabilities = capabilitiesFromStatus(status);
+  const fallbackPath = defaultPath(capabilities);
+
+  if (!pathAllowed(location.pathname, capabilities)) {
+    return <Navigate to={fallbackPath} replace />;
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      <NavBar capabilities={capabilities} />
+      <div className="flex flex-1 overflow-hidden">
+        <main className="flex-1 overflow-auto">
+          <Routes>
+            <Route
+              path="/"
+              element={
+                capabilities.includes('agent_observability')
+                  ? <ConversationList />
+                  : <Navigate to={fallbackPath} replace />
+              }
+            />
+            <Route path="/sessions" element={<AgentSessionsPage />} />
+            <Route path="/savings" element={<TokenSavingsPage />} />
+            <Route path="/optimization" element={<OptimizationPage />} />
+            <Route path="/optimization/:sessionId" element={<OptimizationPage />} />
+            <Route path="/skills" element={<SkillMetricsPage />} />
+            <Route path="/security" element={<SecurityObservabilityPage />} />
+            <Route path="/atif" element={<AtifViewerPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to={fallbackPath} replace />} />
+          </Routes>
+        </main>
+        {capabilities.includes('agent_health') && <AgentHealthSidebar />}
+      </div>
+    </div>
+  );
 };
 
 const App: React.FC = () => {
@@ -100,25 +178,7 @@ const App: React.FC = () => {
         <Route path="/login" element={<LoginPage onAuthenticated={() => { window.location.hash = '#/'; window.location.reload(); }} />} />
         <Route path="/*" element={
           <AuthGate>
-            <div className="min-h-screen bg-gray-50 flex flex-col">
-              <NavBar />
-              <div className="flex flex-1 overflow-hidden">
-                <main className="flex-1 overflow-auto">
-                  <Routes>
-                    <Route path="/" element={<ConversationList />} />
-                    <Route path="/sessions" element={<AgentSessionsPage />} />
-                    <Route path="/savings" element={<TokenSavingsPage />} />
-                    <Route path="/optimization" element={<OptimizationPage />} />
-                    <Route path="/optimization/:sessionId" element={<OptimizationPage />} />
-                    <Route path="/skills" element={<SkillMetricsPage />} />
-                    <Route path="/security" element={<SecurityObservabilityPage />} />
-                    <Route path="/atif" element={<AtifViewerPage />} />
-                    <Route path="/settings" element={<SettingsPage />} />
-                  </Routes>
-                </main>
-                <AgentHealthSidebar />
-              </div>
-            </div>
+            {(status) => <AppShell status={status} />}
           </AuthGate>
         } />
       </Routes>

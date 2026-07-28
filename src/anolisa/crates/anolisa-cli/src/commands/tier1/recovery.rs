@@ -53,6 +53,14 @@ impl<'lock> LockedJournalGate<'lock> {
         })
     }
 
+    /// Validated journal snapshot loaded under the lock.
+    ///
+    /// The snapshot predates any journal this gate began, so executors can
+    /// check earlier recovery claims without seeing their own journal.
+    pub(crate) fn inventory(&self) -> &JournalInventory {
+        &self.inventory
+    }
+
     /// Pending journal attributed to `subject`, including an unattributed
     /// legacy journal whose scope is unknown.
     pub(crate) fn pending_path(&self, subject: &str) -> Option<&Path> {

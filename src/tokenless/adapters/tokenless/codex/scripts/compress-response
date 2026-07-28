@@ -95,6 +95,13 @@ try:
     _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
 except (ImportError, KeyError):
     _REAL_HOME = ""
+if not os.path.isabs(_REAL_HOME):
+    _REAL_HOME = ""
+
+
+def _user_path(*parts: str) -> str:
+    return os.path.join(_REAL_HOME, *parts) if _REAL_HOME else ""
+
 
 _HOOK_UTILS_CANDIDATES = [
     os.path.join(_HERE, "..", "..", "common", "hooks"),                   # source-tree / FHS
@@ -176,13 +183,17 @@ SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
 COMPRESSED_CONTENT_CAP: int = 32_768
 
 # -- tokenless binary search paths (ANOLISA FHS spec) ------------------------
+# Codex can cache this script without common/hooks. Keep this standalone list
+# aligned with hook_utils.py::_known_binary_paths.
 
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOKENLESS_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless"
+_TOKENLESS_SYSTEM_FALLBACK = "/usr/local/bin/tokenless"
+_TOKENLESS_LOCAL_BIN = _user_path(".local", "bin", "tokenless")
+_TOKENLESS_LOCAL_SHARE = _user_path(
+    ".local", "share", "anolisa", "tokenless", "tokenless"
 )
-_TOKENLESS_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless"
+_TOKENLESS_LOCAL_LIB = _user_path(
+    ".local", "lib", "anolisa", "tokenless", "tokenless"
 )
 
 # ---------------------------------------------------------------------------
@@ -200,7 +211,13 @@ def _find_tokenless() -> Optional[str]:
     if path:
         return path
 
-    for fp in (_TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB):
+    for fp in (
+        _TOKENLESS_LOCAL_BIN,
+        _TOKENLESS_SYSTEM_FALLBACK,
+        _TOKENLESS_FALLBACK,
+        _TOKENLESS_LOCAL_SHARE,
+        _TOKENLESS_LOCAL_LIB,
+    ):
         if os.path.isfile(fp) and os.access(fp, os.X_OK):
             return fp
     return None

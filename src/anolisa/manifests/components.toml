@@ -42,6 +42,12 @@ summary = "Computable Operating System Harness (cosh-ng) - a deterministic Agent
 kind = "raw"
 package = "cosh-ng"
 
+[[components.backends]]
+kind = "rpm"
+package = "cosh-ng"
+provides = "anolisa-component(cosh-ng)"
+legacy_adopt = true
+
 [[components]]
 name = "agentsight"
 display_name = "AgentSight"

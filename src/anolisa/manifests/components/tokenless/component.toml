@@ -14,9 +14,10 @@ schema_version = "1.0"
 min_anolisa_version = "0.1.16"
 
 [component.platform]
-os = ["linux"]
+# min_kernel is intentionally omitted: tokenless has no kernel capability
+# dependency, and the schema would apply the constraint to Linux and macOS.
+os = ["linux", "macos"]
 arch = ["x86_64", "aarch64"]
-min_kernel = "5.4"
 
 [[component.dependencies]]
 name = "python3"
@@ -65,6 +66,13 @@ type = "symlink"
 source = "{libexecdir}/tokenless/toon"
 target = "{bindir}/toon"
 type = "symlink"
+
+# Shared hooks are interpreter-loaded resources, so the common tree stays
+# non-executable. Cosh uses its separately staged extension bundle.
+[[component.layout.files]]
+source = "adapters/common/"
+target = "{datadir}/adapters/{component}/common/"
+mode = "0644"
 
 [component.health_check]
 type = "binary_version"
@@ -134,12 +142,18 @@ entry = ".codex-plugin/plugin.json"
 framework = "cosh"
 adapter_type = "extension"
 plugin_id = "tokenless"
-source = "adapters/common"
+source = "extensions/tokenless"
 dest = "{datadir}/extensions/{component}/"
 
 [adapters.bundle]
 entry = "cosh-extension.json"
 
+# Qwencode extension adapter. Coexists independently with the other
+# adapters above — each adapter is scoped to its own framework driver,
+# and the anolisa CLI selects exactly one framework per session based on
+# the active agent runtime. Enabling qwencode has no effect on openclaw,
+# hermes, qoder, claude-code, codex, or cosh adapters. The qwencode
+# driver loads this extension only when the framework is qwencode.
 [[adapters]]
 framework = "qwencode"
 adapter_type = "extension"

@@ -19,7 +19,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from hook_utils import (
-    TOKENLESS_CANDIDATES,
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_LIB,
+    _TOKENLESS_LOCAL_SHARE,
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
@@ -50,7 +52,9 @@ def main() -> None:
     # 1. Check tokenless binary
     tokenless_bin = resolve_binary(
         "tokenless",
-        *TOKENLESS_CANDIDATES,
+        _TOKENLESS_FALLBACK,
+        _TOKENLESS_LOCAL_SHARE,
+        _TOKENLESS_LOCAL_LIB,
     )
     if not tokenless_bin:
         warn(

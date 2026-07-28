@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -48,6 +46,15 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or("missing 'content' parameter")?;
 
+        let placeholders = placeholder_markers(content);
+        if !placeholders.is_empty() {
+            return Ok(ToolResult::error(format!(
+                "Write refused: placeholder(s) detected: {}. The file was not modified; use an \
+                 interactive input path for credentials.",
+                placeholders.join(", "),
+            )));
+        }
+
         let path = resolve_path(path_str, &ctx.cwd);
 
         if let Some(parent) = path.parent() {
@@ -64,29 +71,16 @@ impl Tool for WriteFileTool {
 
         let lines = content.lines().count();
         let bytes = content.len();
-        let output = write_result_output(content, bytes, lines, &path);
-        Ok(ToolResult::success(output))
+        Ok(ToolResult::success(format!(
+            "Wrote {bytes} bytes ({lines} lines) to {}",
+            path.display()
+        )))
     }
 }
 
 // resolve_path is provided by the parent module (super::resolve_path)
 // and supports ~ expansion.
 use super::resolve_path;
-
-fn write_result_output(content: &str, bytes: usize, lines: usize, path: &Path) -> String {
-    let base_message = format!("Wrote {bytes} bytes ({lines} lines) to {}", path.display());
-    let placeholders = placeholder_markers(content);
-
-    if placeholders.is_empty() {
-        return base_message;
-    }
-
-    format!(
-        "WARNING: placeholder(s) detected: {}. Credential configuration may be incomplete; use an \
-         interactive input path.\n\n{base_message}",
-        placeholders.join(", "),
-    )
-}
 
 fn placeholder_markers(content: &str) -> Vec<&'static str> {
     let upper = content.to_ascii_uppercase();
@@ -113,7 +107,10 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
     fn test_ctx_in(dir: &Path) -> ToolContext {
         ToolContext {
             cwd: dir.to_path_buf(),
@@ -176,10 +173,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_redacted_content_warns_without_refusing_the_write() {
+    async fn write_redacted_content_is_refused_before_fs_side_effects() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool;
-        let path = dir.path().join("settings.json");
+        let parent = dir.path().join("new");
+        let path = parent.join("settings.json");
         let content = r#"{\"token\": \"<redacted>\"}"#;
 
         let result = tool
@@ -190,13 +188,36 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error);
-        assert!(result.output.starts_with("WARNING:"));
-        assert!(result.output.contains("WARNING:"));
+        assert!(result.is_error);
+        assert!(result.output.starts_with("Write refused:"));
         assert!(result.output.contains("<redacted>"));
         assert!(result.output.contains("interactive input path"));
-        assert!(result.output.contains("Wrote"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        assert!(result.output.contains("file was not modified"));
+        assert!(!path.exists());
+        assert!(!parent.exists());
+    }
+
+    #[tokio::test]
+    async fn refused_write_does_not_overwrite_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool;
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "valid configuration").unwrap();
+
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": path, "content": "token=YOUR_API_TOKEN"}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("YOUR_*_KEY/TOKEN/SECRET"));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "valid configuration"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::io::Write;
 use crate::config::{
     detect_language_from_env, load_config, parse_language_setting, resolve_language_setting,
 };
-use crate::diagnostics::doctor::{format_doctor_report_plain, run_doctor_report};
+use crate::diagnostics::doctor::{format_doctor_report_plain, run_doctor_report_from_process_cwd};
 use crate::diagnostics::health::report_exit_code;
 use crate::I18n;
 
@@ -20,8 +20,7 @@ pub(crate) fn run_doctor() -> i32 {
         .unwrap_or_else(detect_language_from_env);
     let i18n = I18n::new(language);
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let report = run_doctor_report(&config, &cwd);
+    let report = run_doctor_report_from_process_cwd(&config);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();

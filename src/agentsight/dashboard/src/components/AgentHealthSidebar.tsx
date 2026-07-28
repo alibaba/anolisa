@@ -238,9 +238,10 @@ export const AgentHealthSidebar: React.FC = () => {
     try {
       // 一次拉全部（包含 client/worker），后续按 agent_name 分组挂到各自主卡下面
       const data = await fetchAgentHealth({ includeClients: true });
+      const agentRows = Array.isArray(data?.agents) ? data.agents : [];
 
       // 检测新增异常退出（仅 has_crash=true 的才通知）和卡顿 agent
-      data.agents.forEach(a => {
+      agentRows.forEach(a => {
         if (a.status === 'offline' && a.has_crash && !notifiedOfflineRef.current.has(a.pid)) {
           notifiedOfflineRef.current.add(a.pid);
           addToast(`⚠️ Agent "${a.agent_name}" (PID ${a.pid}) 异常退出，影响了进行中的对话`);
@@ -251,20 +252,20 @@ export const AgentHealthSidebar: React.FC = () => {
         }
       });
       // 清理不再存在的 PID
-      const currentPids = new Set(data.agents.map(a => a.pid));
+      const currentPids = new Set(agentRows.map(a => a.pid));
       notifiedOfflineRef.current.forEach(pid => {
         const absPid = Math.abs(pid);
         if (!currentPids.has(absPid)) notifiedOfflineRef.current.delete(pid);
       });
       // 如果 hung 进程恢复正常，清除其 hung 通知记录
-      data.agents.forEach(a => {
+      agentRows.forEach(a => {
         if (a.status !== 'hung') notifiedOfflineRef.current.delete(-a.pid);
       });
 
       // gateway = 主卡列表；others = client/worker，按 agent_name 挂到各主卡下
-      setAgents(data.agents.filter(a => a.role === 'gateway'));
-      setClientAgents(data.agents.filter(a => a.role !== 'gateway'));
-      setLastScan(data.last_scan_time);
+      setAgents(agentRows.filter(a => a.role === 'gateway'));
+      setClientAgents(agentRows.filter(a => a.role !== 'gateway'));
+      setLastScan(data.last_scan_time ?? 0);
       setError(null);
     } catch (e: any) {
       if (agents.length === 0) {

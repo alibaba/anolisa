@@ -18,6 +18,7 @@ use crate::integrity::{IntegrityStatus, check_owned_file};
 use crate::planner::{Facts, NativeProbe, RecordFacts};
 use crate::providers::{DelegatedProvider, ProviderError};
 use crate::state::{ObjectKind, OperationRecord};
+use crate::state_identity::repair_known_transaction_identity;
 use crate::state_store::StateStore;
 use crate::transaction::{Transaction, TransactionError};
 
@@ -216,7 +217,7 @@ impl JournalInventory {
         let entries = paths
             .into_iter()
             .map(|path| {
-                let transaction =
+                let mut transaction =
                     Transaction::load_journal(&path).map_err(|source| FactsError::JournalLoad {
                         path: path.clone(),
                         source,
@@ -227,6 +228,7 @@ impl JournalInventory {
                         source,
                     }
                 })?;
+                repair_known_transaction_identity(&mut transaction);
                 let effective_pending = transaction.is_pending()
                     && !legacy_rpm_install_is_committed(&transaction, evidence.operations);
                 Ok(JournalEntry {
@@ -510,6 +512,33 @@ mod tests {
         journal
     }
 
+    fn begin_legacy_cosh_ng_journal(operation: &str, root: &Path) {
+        let mut journal = Transaction::begin_with_subject(
+            operation,
+            Some("cosh"),
+            root.join("installed.toml"),
+            &root.join("journal"),
+        )
+        .expect("begin delegated journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("cosh-ng".to_string()),
+                    record_action: if operation == "install" {
+                        DelegatedRecordAction::WriteManaged
+                    } else {
+                        DelegatedRecordAction::Refresh
+                    },
+                    pinned: None,
+                },
+                [TransactionStep::planned(
+                    "native", "cosh-ng", operation, None,
+                )],
+            )
+            .expect("record delegated recovery");
+    }
+
     fn operation(operation_id: &str, status: &str) -> OperationRecord {
         OperationRecord {
             id: operation_id.to_string(),
@@ -660,6 +689,57 @@ mod tests {
             .expect("load inventory");
         assert!(inventory.blocking_for("anything").is_some());
         assert!(inventory.recoverable_for("anything").is_none());
+    }
+
+    #[test]
+    fn legacy_cosh_ng_journals_follow_the_repaired_subject() {
+        for operation in ["install", "update"] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            begin_legacy_cosh_ng_journal(operation, tmp.path());
+
+            let inventory =
+                JournalInventory::load(JournalEvidence::new(&tmp.path().join("journal"), &[]))
+                    .expect("load inventory");
+
+            assert!(inventory.blocking_for("cosh-ng").is_some());
+            assert!(inventory.recoverable_for("cosh-ng").is_some());
+            assert!(inventory.blocking_for("cosh").is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_cosh_journal_for_another_rpm_keeps_its_subject() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            tmp.path().join("installed.toml"),
+            &tmp.path().join("journal"),
+        )
+        .expect("begin delegated journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("copilot-shell".to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                    pinned: None,
+                },
+                [TransactionStep::planned(
+                    "native",
+                    "copilot-shell",
+                    "install",
+                    None,
+                )],
+            )
+            .expect("record delegated recovery");
+
+        let inventory =
+            JournalInventory::load(JournalEvidence::new(&tmp.path().join("journal"), &[]))
+                .expect("load inventory");
+
+        assert!(inventory.recoverable_for("cosh").is_some());
+        assert!(inventory.blocking_for("cosh-ng").is_none());
     }
 
     #[test]

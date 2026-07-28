@@ -219,7 +219,7 @@ export interface SubagentTrajectoryRef {
 }
 
 export interface AtifObservation {
-  results: AtifObservationResult[];
+  results?: AtifObservationResult[];
 }
 
 export interface AtifStepMetrics {
@@ -265,8 +265,8 @@ export interface AtifDocument {
   trajectory_id?: string;
   /** Free-form description, e.g. the opt run root's target session. */
   notes?: string;
-  agent: AtifAgent;
-  steps: AtifStep[];
+  agent?: AtifAgent;
+  steps?: AtifStep[];
   final_metrics?: AtifFinalMetrics;
   subagent_trajectories?: AtifDocument[];
   extra?: any;
