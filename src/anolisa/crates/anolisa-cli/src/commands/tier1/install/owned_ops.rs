@@ -21,6 +21,7 @@ use anolisa_core::central_log::CentralLog;
 use anolisa_core::domain::{
     Installation, InstallationScope, LifecycleStatus, OwnedArtifact, ProviderBinding,
 };
+use anolisa_core::facts::JournalInventory;
 use anolisa_core::install_runner::{InstallRunner, InstalledFile, PreparedFileSet};
 use anolisa_core::lifecycle::prepare_backup;
 use anolisa_core::owned_executor::{OwnedOpError, OwnedOps, StepSuccess};
@@ -972,6 +973,9 @@ pub(crate) struct RawInstallOps<'a> {
     /// System packages auto-installed by `provision_runtime_deps`.
     /// Intentionally never rolled back.
     provisioned_packages: Vec<String>,
+    /// Journal inventory validated under the install lock; provisioning
+    /// refuses packages a pending RPM install journal reserves.
+    journals: &'a JournalInventory,
     /// Files this run placed, set by `place_files`.
     placed: Vec<InstalledFile>,
     /// Manifest snapshot this run wrote, set by `place_files`.
@@ -994,6 +998,7 @@ impl<'a> RawInstallOps<'a> {
         validated: ValidatedInstall,
         store: &'a mut StateStore,
         state_path: &'a Path,
+        journals: &'a JournalInventory,
     ) -> Self {
         let ValidatedInstall {
             prepared,
@@ -1014,6 +1019,7 @@ impl<'a> RawInstallOps<'a> {
             manifest: Some(manifest),
             hooks: Some(hooks),
             provisioned_packages: Vec::new(),
+            journals,
             placed: Vec::new(),
             manifest_path: None,
             service_run: None,
@@ -1082,9 +1088,16 @@ impl OwnedOps for RawInstallOps<'_> {
             OwnedOpError("internal: provisioning ran before the download-verify step".to_string())
         })?;
         let mut warnings = Vec::new();
-        self.provisioned_packages =
-            run_provision(manifest, &self.env, self.ctx, super::COMMAND, &mut warnings)
-                .map_err(|err| OwnedOpError(err.reason()))?;
+        self.provisioned_packages = run_provision(
+            manifest,
+            &self.env,
+            self.ctx,
+            super::COMMAND,
+            &mut warnings,
+            self.journals,
+            self.layout,
+        )
+        .map_err(|err| OwnedOpError(err.reason()))?;
         Ok(StepSuccess::with_warnings(warnings))
     }
 
