@@ -15,6 +15,8 @@ macro_rules! help_core_ids {
             HelpSummaryRecommendations,
             HelpSummaryModeApproval,
             HelpSummaryModeAnalysis,
+            HelpSummaryModePlan,
+            HelpSummaryPlan,
             HelpSummaryAgent,
             HelpSummaryExplain,
             HelpSummaryCancel,

@@ -29,6 +29,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryModeAnalysis => {
             "选择建议模式、自动分析或关闭主动介入；控制被动建议与失败命令 Insight"
         }
+        MessageId::HelpSummaryModePlan => "切换 plan 模式（只调研，不执行副作用操作）",
+        MessageId::HelpSummaryPlan => {
+            "切换 plan 模式：Agent 只调研和制定计划；不执行有副作用的 tool call"
+        }
         MessageId::HelpSummaryAgent => "发起明确的 Agent 请求",
         MessageId::HelpSummaryExplain => "分析上一个失败命令",
         MessageId::HelpSummaryCancel => "取消正在运行的 Agent 工作",
@@ -95,7 +99,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashStatusModelLine => "模型: {model}",
         MessageId::SlashStatusSessionLine => "会话: {session}",
         MessageId::SlashStatusOsLine => "操作系统: {os}",
-        MessageId::SlashStatusModesLine => "模式: 审批={approval}，分析={analysis}",
+        MessageId::SlashStatusModesLine => "模式: 审批={approval}，分析={analysis}，plan={plan}",
         MessageId::SlashStatusProviderUnavailableLine => {
             "服务商详情: 当前后端未提供"
         }

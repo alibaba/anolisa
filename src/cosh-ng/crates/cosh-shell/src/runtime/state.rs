@@ -99,6 +99,10 @@ pub(crate) struct InlineState {
     pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,
     pub(crate) analysis_mode: AnalysisMode,
+    /// Plan mode: the agent researches only. While active every provider run
+    /// is forced onto the read-only recommend/plan path regardless of the
+    /// configured approval mode; the configured mode is restored on exit.
+    pub(crate) plan_mode: bool,
     pub(crate) debug: bool,
     pub(crate) analysis_throttle: AnalysisThrottle,
     pub(crate) trigger_pty_prompt: bool,
@@ -827,6 +831,18 @@ impl InlineState {
     }
     pub(crate) fn i18n(&self) -> I18n {
         I18n::new(self.language)
+    }
+
+    /// The approval mode governing provider runs and tool governance right
+    /// now. Plan mode forces the read-only recommend path (mapped to the
+    /// provider-level plan permission mode by the adapters) without touching
+    /// the user's configured approval mode.
+    pub(crate) fn effective_approval_mode(&self) -> CoshApprovalMode {
+        if self.plan_mode {
+            CoshApprovalMode::Recommend
+        } else {
+            self.approval_mode
+        }
     }
 }
 

@@ -19,6 +19,7 @@ pub(super) enum SlashCommand<'a> {
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Mode(Option<&'a str>, Option<&'a str>, Option<&'a str>),
+    Plan(Option<&'a str>),
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
     #[allow(dead_code)]
@@ -71,6 +72,7 @@ impl<'a> SlashCommand<'a> {
                 let third = parts.next();
                 Some(Self::Mode(first, second, third))
             }
+            "/plan" => Some(Self::Plan(parts.next())),
             "/approval-mode" => Some(Self::Removed(RemovedCommand::ApprovalMode(parts.next()))),
             "/allow" | "/approve" | "/deny" => {
                 Some(Self::Removed(RemovedCommand::ApprovalDecision(token)))
@@ -142,6 +144,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/auth"
             | "/hooks"
             | "/mode"
+            | "/plan"
             | "/approval-mode"
             | "/allow"
             | "/approve"
@@ -294,6 +297,36 @@ mod tests {
         match SlashCommand::parse("/mode approval trust confirm") {
             Ok(Some(SlashCommand::Mode(Some("approval"), Some("trust"), Some("confirm")))) => {}
             _ => panic!("unquoted trust confirmation did not parse"),
+        }
+    }
+
+    #[test]
+    fn plan_command_parses_with_optional_argument() {
+        match SlashCommand::parse("/plan") {
+            Ok(Some(SlashCommand::Plan(None))) => {}
+            _ => panic!("/plan did not parse as the plan command"),
+        }
+        for (command, expected) in [
+            ("/plan on", "on"),
+            ("/plan off", "off"),
+            ("/plan status", "status"),
+        ] {
+            match SlashCommand::parse(command) {
+                Ok(Some(SlashCommand::Plan(Some(argument)))) => assert_eq!(argument, expected),
+                _ => panic!("{command} did not parse as the plan command"),
+            }
+        }
+        assert!(matches!(
+            SlashCommand::parse("/plan \"on\""),
+            Err(SlashParseError::QuotedArgumentsUnsupported)
+        ));
+    }
+
+    #[test]
+    fn mode_plan_keeps_the_generic_mode_token_contract() {
+        match SlashCommand::parse("/mode plan on") {
+            Ok(Some(SlashCommand::Mode(Some("plan"), Some("on"), None))) => {}
+            _ => panic!("/mode plan on did not parse as a mode command"),
         }
     }
 

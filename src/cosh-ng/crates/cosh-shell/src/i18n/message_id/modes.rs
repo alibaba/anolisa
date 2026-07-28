@@ -18,6 +18,7 @@ macro_rules! mode_ids {
             ModesTitle,
             ModeApprovalLine,
             ModeAnalysisLine,
+            ModePlanLine,
             ModeSummaryFooter,
             ModeRemovedTitle,
             ModeRemovedBody,
@@ -61,6 +62,17 @@ macro_rules! mode_ids {
             AnalysisModeRemainsBody,
             AnalysisModeCancelBody,
             AnalysisModeCancelFooter,
+            PlanModeTitle,
+            PlanModeEnabledBody,
+            PlanModeDisabledBody,
+            PlanModeStatusOnBody,
+            PlanModeStatusOffBody,
+            PlanModeEnabledFooter,
+            PlanModeDisabledFooter,
+            PlanModeAlreadyOnBody,
+            PlanModeAlreadyOffBody,
+            PlanModeUnknownBody,
+            PlanModeUsageFooter,
         );
     };
 }

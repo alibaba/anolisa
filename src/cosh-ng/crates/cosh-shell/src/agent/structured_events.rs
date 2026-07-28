@@ -81,7 +81,7 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     if render_auto_approved_tool(state, governed_events, run_request, origin, output, adapter)? {
         return Ok(());
     }
-    if state.approval_mode == CoshApprovalMode::Recommend {
+    if state.effective_approval_mode() == CoshApprovalMode::Recommend {
         return Ok(());
     }
     let approval_ids = record_approval_requests(

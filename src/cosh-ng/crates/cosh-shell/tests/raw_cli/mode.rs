@@ -319,6 +319,154 @@ fn raw_cli_mode_analysis_card_cancel_keeps_current_session_mode() {
 }
 
 #[test]
+fn raw_cli_plan_slash_toggles_plan_mode_with_feedback() {
+    let output = run_raw_cli_with_input(
+        "fake",
+        "/plan\n\
+         /mode plan status\n\
+         /mode plan on\n\
+         /plan off\n\
+         /mode plan bogus\n\
+         /mode\n\
+         echo after-plan\n\
+         exit\n",
+    );
+
+    assert!(output.contains("Plan mode"), "{output}");
+    assert!(output.contains("plan mode: ON"), "{output}");
+    assert!(
+        output.contains("Agent researches and plans only; no side-effecting tool calls run."),
+        "{output}"
+    );
+    assert!(
+        output.contains("plan mode is ON (approval mode auto is paused)."),
+        "{output}"
+    );
+    assert!(output.contains("plan mode is already ON."), "{output}");
+    assert!(output.contains("plan mode: OFF"), "{output}");
+    assert!(
+        output.contains("Agent resumes normal execution under the configured approval mode."),
+        "{output}"
+    );
+    assert!(
+        output.contains("Unknown plan mode option: bogus"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Use /plan or /mode plan [on|off|status]."),
+        "{output}"
+    );
+    assert!(output.contains("plan: off"), "{output}");
+    assert!(output.contains("after-plan"), "{output}");
+    assert!(!output.contains("bash: /plan"), "{output}");
+    assert!(!output.contains("bash: /mode"), "{output}");
+}
+
+#[test]
+fn raw_cli_mode_plan_reports_status_without_toggling() {
+    let output = run_raw_cli_with_input(
+        "fake",
+        "/mode plan\n\
+         /mode plan off\n\
+         echo after-plan-status\n\
+         exit\n",
+    );
+
+    assert!(
+        output.contains("plan mode is OFF (approval mode: auto)."),
+        "{output}"
+    );
+    assert!(output.contains("plan mode is already OFF."), "{output}");
+    assert!(!output.contains("plan mode: ON"), "{output}");
+    assert!(output.contains("after-plan-status"), "{output}");
+    assert!(!output.contains("bash: /mode"), "{output}");
+}
+
+#[test]
+fn raw_cli_plan_mode_uses_zh_language_env() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/plan\n/mode plan status\n/plan off\nexit\n",
+        &[("COSH_SHELL_LANG", "zh-CN")],
+    );
+
+    assert!(output.contains("Plan 模式"), "{output}");
+    assert!(output.contains("plan mode: ON"), "{output}");
+    assert!(
+        output.contains("Agent 只调研和制定计划；不会执行有副作用的 tool call。"),
+        "{output}"
+    );
+    assert!(
+        output.contains("plan 模式已开启（审批模式 auto 暂停生效）。"),
+        "{output}"
+    );
+    assert!(output.contains("plan mode: OFF"), "{output}");
+    assert!(
+        output.contains("Agent 恢复按当前审批模式正常执行。"),
+        "{output}"
+    );
+    assert!(!output.contains("bash: /plan"), "{output}");
+}
+
+#[test]
+fn raw_cli_plan_mode_keeps_tool_requests_display_only_under_auto_mode() {
+    // Keep delayed input: in the plan-forced recommend path `??` routes into
+    // the tool-details flow whose session teardown races marker-gated stdin.
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (b"/plan\n".to_vec(), Duration::from_millis(200)),
+            (
+                b"?? request tool approval\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(3_000)),
+        ],
+    );
+
+    assert!(output.contains("Mode set to auto."), "{output}");
+    assert!(output.contains("plan mode: ON"), "{output}");
+    assert!(output.contains("Received shell prompt request"), "{output}");
+    assert!(!output.contains("Approval req-"), "{output}");
+    assert!(!output.contains("Auto-approved"), "{output}");
+    assert!(!output.contains("Deferred req-"), "{output}");
+    assert!(
+        !output.contains("touch /tmp/cosh-shell-fake-action-should-not-run"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_plan_mode_off_restores_configured_auto_mode_behavior() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (b"/plan on\n".to_vec(), Duration::from_millis(200)),
+            (b"/plan off\n".to_vec(), Duration::from_millis(200)),
+            (
+                b"?? request tool approval\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(3_000)),
+        ],
+    );
+
+    assert!(output.contains("Mode set to auto."), "{output}");
+    assert!(output.contains("plan mode: ON"), "{output}");
+    assert!(output.contains("plan mode: OFF"), "{output}");
+    assert!(output.contains("Deferred req-1"), "{output}");
+    assert!(output.contains("$ git status"), "{output}");
+    assert!(!output.contains("Approval req-1"), "{output}");
+    assert!(!output.contains("[ Allow once ]"), "{output}");
+}
+
+#[test]
 fn raw_cli_mode_slash_updates_approval_mode_with_feedback() {
     let output = run_raw_cli_with_input(
         "fake",

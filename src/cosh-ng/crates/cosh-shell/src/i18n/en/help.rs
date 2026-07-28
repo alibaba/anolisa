@@ -29,6 +29,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryModeAnalysis => {
             "choose suggested mode, automatic analysis, or no proactive assistance; controls passive suggestions and failure insights after failed commands"
         }
+        MessageId::HelpSummaryModePlan => "toggle plan mode (research only, no side effects)",
+        MessageId::HelpSummaryPlan => {
+            "toggle plan mode: agent researches and plans only; no side-effecting tool calls run"
+        }
         MessageId::HelpSummaryAgent => "start an explicit Agent request",
         MessageId::HelpSummaryExplain => "analyze the last failed command",
         MessageId::HelpSummaryCancel => "cancel active Agent work",
@@ -102,7 +106,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashStatusSessionLine => "Session: {session}",
         MessageId::SlashStatusOsLine => "OS: {os}",
         MessageId::SlashStatusModesLine => {
-            "Modes: approval={approval}, analysis={analysis}"
+            "Modes: approval={approval}, analysis={analysis}, plan={plan}"
         }
         MessageId::SlashStatusProviderUnavailableLine => {
             "Provider details: unavailable from the current backend"

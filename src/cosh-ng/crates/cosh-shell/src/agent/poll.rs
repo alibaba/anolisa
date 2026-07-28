@@ -125,6 +125,7 @@ fn poll_active_agent_run_with_policy<W: Write>(
         } else {
             Duration::from_millis(0)
         };
+        let effective_approval_mode = state.effective_approval_mode();
         let Some(active_run) = state.agent_run.active.as_mut() else {
             return Ok(());
         };
@@ -226,7 +227,7 @@ fn poll_active_agent_run_with_policy<W: Write>(
                     if recently_delivered {
                         crate::runtime::shell_evidence::shell_evidence_read_unavailable_guard(
                             &state.session_blocks,
-                            state.approval_mode,
+                            effective_approval_mode,
                             output_id,
                             direction.as_str(),
                             *lines,
@@ -241,7 +242,7 @@ fn poll_active_agent_run_with_policy<W: Write>(
                     } else {
                         crate::runtime::shell_evidence::read_shell_evidence_output(
                             &state.session_blocks,
-                            state.approval_mode,
+                            effective_approval_mode,
                             output_id,
                             direction.as_str(),
                             *lines,

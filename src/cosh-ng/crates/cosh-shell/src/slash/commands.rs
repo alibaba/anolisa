@@ -45,6 +45,9 @@ pub(super) fn render_slash_command<W: Write>(
         SlashCommand::Mode(arg, sub, confirm) => {
             render_mode_command(arg, sub, confirm, state, output)
         }
+        SlashCommand::Plan(arg) => {
+            crate::runtime::mode::render_plan_mode_command(arg, true, state, output)
+        }
         SlashCommand::Config(sub, value) => render_config_command(sub, value, state, output),
         SlashCommand::Debug(sub) => {
             render_debug_command(sub, adapter, state, output)?;
