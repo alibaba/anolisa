@@ -38,6 +38,8 @@ anolisa list
 ```bash
 # Token 优化
 anolisa install tokenless
+# 或通过 npm：
+# npm install -g anolisa-tokenless
 
 # 工作区快照（基于 btrfs COW）
 sudo anolisa --install-mode system install ws-ckpt

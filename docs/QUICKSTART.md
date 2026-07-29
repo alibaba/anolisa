@@ -41,8 +41,10 @@ Install components on demand. The current `agentsight`, `agent-sec-core`,
 below support user mode.
 
 ```bash
-# Token optimization
+# Token optimization (via anolisa CLI)
 anolisa install tokenless
+# Or via npm:
+# npm install -g anolisa-tokenless
 
 # Workspace checkpoints (btrfs COW)
 sudo anolisa --install-mode system install ws-ckpt

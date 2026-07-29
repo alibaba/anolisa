@@ -69,6 +69,16 @@ make setup
 
 安装完成后 `tokenless` 命令位于 `~/.local/bin`，RTK/TOON 辅助二进制同目录。
 
+
+## npm 安装
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+自动安装适合您平台的预编译二进制文件（`tokenless`、`rtk`、`toon`）。
+支持 Linux 和 macOS 的 x86_64 和 arm64 架构。
+
 ## 架构
 
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor

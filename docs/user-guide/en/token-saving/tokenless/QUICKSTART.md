@@ -18,8 +18,9 @@ AI Agent interactions typically include large volumes of tool schema definitions
 
 ## Prerequisites
 
-- Linux (x86_64 or aarch64)
-- One of: cosh, OpenClaw, Hermes, claude-code, codex, qwencode (as the host Agent framework)
+- Linux (x86_64 or aarch64, glibc 2.17+) — full support: all install methods and framework adapter integration; source builds are also Linux-only
+- macOS (x86_64 or Apple Silicon) — via npm only; the npm package ships the CLI binaries (cross-compiled from Linux and verified for architecture) together with the framework adapters (adapter hooks are OS-independent bash/python scripts)
+- One of: cosh, OpenClaw, Hermes, claude-code, codex, qwencode (as the host Agent framework; the frameworks are cross-platform and run on macOS)
 
 ---
 
@@ -37,11 +38,22 @@ anolisa install tokenless
 sudo yum install tokenless
 ```
 
-### Option 3: Source build (developers)
+### Option 3: npm (Node.js users)
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+Prebuilt binaries for Linux (glibc) and macOS (x86_64, aarch64) are installed automatically, and the framework adapters are installed to `~/.local/share/anolisa/adapters/tokenless/` on both Linux and macOS. Register an adapter with your framework via its install script, e.g. `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`.
+
+### Option 4: Source build (developers, Linux only)
 
 ```bash
 cd src/tokenless && cargo build --release
 ```
+
+> Source builds are only supported on Linux. macOS users should use the npm
+> package, which provides cross-compiled macOS binaries.
 
 ---
 

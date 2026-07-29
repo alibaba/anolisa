@@ -365,6 +365,16 @@ The plugin registers hooks at four Codex events, covering four strategies:
 make codex-install
 ```
 
+
+## npm Install
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+This automatically installs the correct prebuilt binaries (`tokenless`, `rtk`, `toon`) for your platform.
+Supports Linux and macOS on x86_64 and arm64.
+
 ## Build
 
 | Target | Description |

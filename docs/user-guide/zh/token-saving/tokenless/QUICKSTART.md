@@ -18,8 +18,9 @@ AI Agent 交互中通常包含大量工具 Schema 定义和冗长的 CLI 输出�
 
 ## 前置条件
 
-- Linux（x86_64 或 aarch64）
-- 已安装 cosh、OpenClaw、Hermes、claude-code、codex 或 qwencode 之一（作为宿主 Agent 框架）
+- Linux（x86_64 或 aarch64，glibc 2.17+）— 完整支持：所有安装方式及框架适配器集成；源码编译也仅限 Linux
+- macOS（x86_64 或 Apple Silicon）— 仅通过 npm 安装；npm 包同时提供 CLI 二进制（由 Linux 交叉编译并经架构校验）和框架适配器（适配器 hook 为 OS 无关的 bash/python 脚本）
+- 已安装 cosh、OpenClaw、Hermes、claude-code、codex 或 qwencode 之一（作为宿主 Agent 框架；这些框架跨平台，可运行于 macOS）
 
 ---
 
@@ -37,11 +38,21 @@ anolisa install tokenless
 sudo yum install tokenless
 ```
 
-### 方式三：源码编译（开发者）
+### 方式三：npm（Node.js 用户）
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+自动安装 Linux（glibc）和 macOS（x86_64、aarch64）的预编译二进制，并将框架适配器安装到 `~/.local/share/anolisa/adapters/tokenless/`（Linux 与 macOS 均支持）。通过对应的安装脚本将适配器注册到框架，例如 `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`。
+
+### 方式四：源码编译（开发者，仅限 Linux）
 
 ```bash
 cd src/tokenless && cargo build --release
 ```
+
+> 源码编译仅支持 Linux。macOS 用户请使用 npm 包，其中包含交叉编译的 macOS 二进制。
 
 ---
 
