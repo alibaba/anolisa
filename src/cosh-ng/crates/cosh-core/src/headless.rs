@@ -17,6 +17,13 @@ mod auth;
 
 use auth::request_auth;
 
+/// Exit code for a session that lost the JSONL control transport.
+///
+/// The Shell owns recovery: it already replaces a missing terminal result when
+/// the child exits non-zero, and stderr carries the reason. Staying alive on a
+/// transport we cannot write to would only reproduce the #1994 hang.
+const EXIT_CONTROL_TRANSPORT_FAILURE: i32 = 74;
+
 pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> {
     apply_cli_overrides(args, &mut config);
 
@@ -165,8 +172,13 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
                 engine.emit(&mut writer, &err_msg);
             }
         }
+        let transport_failed = engine.control_transport_failure().is_some();
         engine.shutdown_extension_runtime().await;
-        return Ok(0);
+        return Ok(if transport_failed {
+            EXIT_CONTROL_TRANSPORT_FAILURE
+        } else {
+            0
+        });
     }
 
     let mut extensions = HeadlessExtensionRuntime {
@@ -197,6 +209,10 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
                 return Ok(1);
             }
         }
+        if engine.control_transport_failure().is_some() {
+            engine.shutdown_extension_runtime().await;
+            return Ok(EXIT_CONTROL_TRANSPORT_FAILURE);
+        }
     }
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -225,6 +241,12 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
                 engine.shutdown_extension_runtime().await;
                 return Ok(1);
             }
+        }
+        // Checked after every line, not only after a turn: once the transport
+        // is gone the process can neither answer nor be answered.
+        if engine.control_transport_failure().is_some() {
+            engine.shutdown_extension_runtime().await;
+            return Ok(EXIT_CONTROL_TRANSPORT_FAILURE);
         }
     }
     engine.shutdown_extension_runtime().await;

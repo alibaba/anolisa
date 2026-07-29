@@ -76,6 +76,7 @@ impl CoshCore {
             request_counter: AtomicU32::new(0),
             truncator: OutputTruncator::default(),
             loop_detector: LoopDetector::new(),
+            control_transport_failure: std::sync::OnceLock::new(),
         }
     }
 
