@@ -54,6 +54,41 @@ class TestCodeScanPreToolCall:
         assert result is None
 
     @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
+    def test_hook_enabled_false_skips_cli(self, mock_cli, monkeypatch):
+        """CODE_SCANNER_HOOK_ENABLED=false disables the capability scan."""
+        monkeypatch.setenv("CODE_SCANNER_HOOK_ENABLED", "false")
+        cap = CodeScanCapability()
+        cap._timeout = 5.0
+        cap._on_register({"enable_block": True})
+
+        result = cap._on_pre_tool_call("terminal", {"command": "rm -rf /"})
+
+        assert result is None
+        mock_cli.assert_not_called()
+
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
+    def test_invalid_hook_enabled_value_defaults_to_enabled_silently(
+        self,
+        mock_cli,
+        monkeypatch,
+    ):
+        """Invalid CODE_SCANNER_HOOK_ENABLED values keep scanning enabled."""
+        monkeypatch.setenv("CODE_SCANNER_HOOK_ENABLED", "maybe")
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps({"verdict": "pass", "findings": []}),
+            stderr="",
+            exit_code=0,
+        )
+        cap = CodeScanCapability()
+        cap._timeout = 5.0
+        cap._on_register({"enable_block": True})
+
+        result = cap._on_pre_tool_call("terminal", {"command": "echo hello"})
+
+        assert result is None
+        mock_cli.assert_called_once()
+
+    @patch("hermes_plugin_src.capabilities.code_scan.call_agent_sec_cli")
     def test_verdict_pass_returns_none(self, mock_cli, capability):
         """verdict=pass should return None (allow)."""
         mock_cli.return_value = CliResult(

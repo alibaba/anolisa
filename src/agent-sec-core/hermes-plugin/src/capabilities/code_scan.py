@@ -6,6 +6,7 @@ import json
 import logging
 
 from ..cli_runner import call_agent_sec_cli, trace_context
+from ..hook_config import env_flag_enabled
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -30,12 +31,16 @@ class CodeScanCapability(AgentSecCoreCapability):
     def _on_register(self, config: dict) -> None:
         """Read code-scan specific config."""
         self._enable_block = config.get("enable_block", False)
+        self._hook_enabled = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 
     def get_hooks_define(self) -> dict:
         return {"pre_tool_call": self._on_pre_tool_call}
 
     def _on_pre_tool_call(self, tool_name, args, **kwargs):
         """Hook handler: scan terminal/execute_code for security risks."""
+        if not getattr(self, "_hook_enabled", True):
+            return None
+
         # 1. Only intercept known tools
         tool_info = _TOOL_LANGUAGE_MAP.get(tool_name)
         if tool_info is None:
