@@ -143,7 +143,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Tue Jul 28 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Jul 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Status and doctor now detect managed file mode and capability drift.
+- Repair now restores declared metadata without granting unconfirmed capabilities.
+
+* Tue Jul 28 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.13-1
 - Raw installs now protect packages reserved by pending RPM operations.
 - `cosh-ng` RPM installations now keep their stable component identity.
 - Raw rollback now restores file permissions and capabilities.
