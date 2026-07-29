@@ -7,8 +7,10 @@ import subprocess
 import sys
 from typing import Any
 
+from hook_config import env_flag_enabled
 from trace_context import with_trace_context
 
+_HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 _MODE = os.environ.get("CODE_SCANNER_MODE", "observe").strip().lower()
 _VALID_MODES = {"observe", "ask", "deny"}
 try:
@@ -149,6 +151,10 @@ def _format_decision(scan: dict[str, Any]) -> str | None:
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        print(_noop())
+        return
+
     input_data = _load_input()
     if input_data is None:
         print(_noop())
