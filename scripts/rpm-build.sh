@@ -860,7 +860,47 @@ build_cosh_ng() {
         --exclude='node_modules' \
         . | tar -xf - -C "$pkg_dir"
 
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    # Vendor ws-ckpt-common source into the tarball as a sibling top-level dir.
+    # cosh-types/Cargo.toml has a dev-dependency path
+    # `../../../ws-ckpt/src/crates/common` that escapes the cosh-ng workspace
+    # root. During `cargo build --workspace --release` rpmbuild resolves the
+    # path (cargo loads manifests for ALL workspace dev-dependencies when
+    # computing the lockfile) and fails because the path points outside the
+    # extracted tarball. Vendoring the source lets the path resolve inside
+    # the tarball without changing Cargo.toml. The dev-dep is only used by
+    # `tests/checkpoint_wire_conformance.rs` and is not compiled into the
+    # release binaries, but cargo still needs to load its manifest.
+    #
+    # ws-ckpt-common's Cargo.toml inherits version/edition/etc. from its
+    # workspace root at ws-ckpt/src/Cargo.toml — vendor the workspace root
+    # too so cargo can resolve the inheritance. Use original workspace
+    # Cargo.toml with members filtered to only `crates/common` (avoid pulling
+    # daemon/cli member manifests which would trigger further deps).
+    local wsckpt_src_root="${ROOT_DIR}/src/ws-ckpt/src"
+    if [ -d "${wsckpt_src_root}/crates/common" ]; then
+        mkdir -p "${tmp_dir}/ws-ckpt/src/crates/common"
+        tar -cf - -C "${wsckpt_src_root}/crates/common" \
+            --exclude='target' \
+            --exclude='.git' \
+            . | tar -xf - -C "${tmp_dir}/ws-ckpt/src/crates/common"
+        # Copy original workspace Cargo.toml, replace `members = [...]` line
+        # with only `crates/common` (avoid pulling daemon/cli member manifests
+        # which would trigger further deps). This preserves all [workspace.package]
+        # keys (version/edition/license/authors/repository/...) so if ws-ckpt-common
+        # later adds `.workspace = true` inheritance for new fields, cargo still
+        # resolves (a hand-written trimmed manifest would silently break — Issue 4
+        # from code-review).
+        if [ -f "${wsckpt_src_root}/Cargo.toml" ]; then
+            sed -E 's|^members[[:space:]]*=.*|members = ["crates/common"]|' \
+                "${wsckpt_src_root}/Cargo.toml" > "${tmp_dir}/ws-ckpt/src/Cargo.toml"
+        else
+            warn "ws-ckpt workspace Cargo.toml not found at ${wsckpt_src_root}/Cargo.toml"
+        fi
+    else
+        warn "ws-ckpt-common source not found at ${wsckpt_src_root}/crates/common; cosh-types wire-conformance dev-dependency path will not resolve during rpmbuild"
+    fi
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}" ws-ckpt
     rm -rf "$tmp_dir"
 
     log "Step 2/2: Running rpmbuild..."
