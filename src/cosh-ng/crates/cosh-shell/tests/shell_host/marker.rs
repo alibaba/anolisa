@@ -373,6 +373,154 @@ fn shell_host_zsh_missing_natural_language_closes_started_command() {
     }
 }
 
+// Issue #1992: prose punctuation must not reroute a natural-language line
+// into the shell. The quote inputs also exercise the narrow token fallback:
+// bash hands `command_not_found_handle` the de-quoted word
+// `子曰三人行必有我师`, which no longer equals the recorded first token.
+#[test]
+fn shell_host_bash_prose_punctuation_routes_to_agent() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-prose-punctuation-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config =
+        with_raw_byte_readline(ShellHostConfig::new("bash-prose-punctuation", &work_dir));
+    config.native_mode = false;
+
+    for input in [
+        "你好，我是李华",
+        "你还好吗？ 我想问问",
+        "你还好吗?我想问问",
+        "你还好吗? 我想问问",
+        "子曰“三人行必有我师”",
+        "子曰\"三人行必有我师\"",
+        "子曰\" 三人行必有我师\"",
+        "子曰'三人行必有我师'",
+    ] {
+        let output =
+            run_scripted_bash(&config, &[ScriptedInput::user_line(input)]).expect("scripted bash");
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+                    && event.component.as_deref() == Some("natural_language")
+            }),
+            "{input:?}: {:?}\n{terminal}",
+            output.events
+        );
+        assert!(
+            !terminal.contains("command not found"),
+            "{input:?}: {terminal}"
+        );
+    }
+}
+
+// Counterpart to the above: real commands carrying the same punctuation keep
+// running in bash. Their first word resolves, so the classifier never sees
+// them — pin that so the veto downgrade cannot start stealing shell syntax.
+#[test]
+fn shell_host_bash_quoted_shell_syntax_stays_in_shell() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-quoted-shell-syntax-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(home_dir.join("glob1.txt"), "x\n").expect("glob file");
+    let mut config =
+        with_raw_byte_readline(ShellHostConfig::new("bash-quoted-shell-syntax", &work_dir))
+            .with_env("HOME", home_dir.display().to_string());
+    config.native_mode = false;
+
+    let inputs = [
+        "printf '%s\\n' \"hello?\"",
+        "printf '%s\\n' 'hello'",
+        // quoted expansion plus an unquoted `?` glob on the same line
+        "printf '%s\\n' \"$HOME\"/glob?.txt",
+    ];
+    let output = run_scripted_bash(
+        &config,
+        &inputs
+            .iter()
+            .map(|input| ScriptedInput::user_line(*input))
+            .collect::<Vec<_>>(),
+    )
+    .expect("scripted bash");
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+    assert!(terminal.contains("hello?"), "{terminal}");
+    assert!(terminal.contains("glob1.txt"), "{terminal}");
+    for input in inputs {
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+            }),
+            "{input:?}: {:?}",
+            output.events
+        );
+    }
+}
+
+// zsh shares the classifier and has NOMATCH unset, so an unmatched `?` glob
+// reaches `command_not_found_handler` instead of erroring out (#1992).
+#[test]
+fn shell_host_zsh_prose_punctuation_routes_to_agent() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-prose-punctuation-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-prose-punctuation", &work_dir);
+    config.native_mode = false;
+
+    for input in [
+        "你好，我是李华",
+        "你还好吗？ 我想问问",
+        "你还好吗?我想问问",
+        "你还好吗? 我想问问",
+        "子曰“三人行必有我师”",
+        "子曰\"三人行必有我师\"",
+        "子曰\" 三人行必有我师\"",
+        "子曰'三人行必有我师'",
+    ] {
+        let output =
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(input)]).expect("scripted zsh");
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+                    && event.component.as_deref() == Some("natural_language")
+            }),
+            "{input:?}: {:?}\n{terminal}",
+            output.events
+        );
+        assert!(
+            !terminal.contains("command not found"),
+            "{input:?}: {terminal}"
+        );
+    }
+}
+
 #[test]
 fn shell_host_zsh_ambiguous_phrase_stays_in_shell() {
     if Command::new("zsh").arg("--version").output().is_err() {

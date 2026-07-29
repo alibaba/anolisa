@@ -331,7 +331,15 @@ command_not_found_handler() {
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
-  if [[ "${_COSH_ATTEMPT_TOKEN:-}" != "$command" || -z "$original" ]]; then
+  if [[ -z "$original" ]]; then
+    _cosh_delegate_zsh_command_not_found "$command" "$@"
+    return $?
+  fi
+  # The recorded first token must be the word zsh failed to run. Quotes are
+  # the one shape where the two legitimately differ (#1992), and only when the
+  # quote-stripped input provably *is* that single command word.
+  if [[ "${_COSH_ATTEMPT_TOKEN:-}" != "$command" ]] \
+     && ! _cosh_quote_stripped_token_match "$original" "$command" "$(($# + 1))"; then
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi

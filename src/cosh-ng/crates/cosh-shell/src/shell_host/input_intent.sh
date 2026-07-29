@@ -110,12 +110,24 @@ _cosh_command_veto() {
       ;;
   esac
 
+  # Neutral punctuation (#1992): a question mark and a bare ASCII quote are
+  # ordinary prose in every language cosh sees, so neither may veto the
+  # natural-language evidence on its own. Erase them from the scan instead of
+  # counting them as Shell syntax; everything a quote could have wrapped
+  # ($, |, backtick, redirection, ...) stays in the scan and still vetoes, so
+  # real Shell constructs such as `帮我看看 "$PATH"` remain command-owned.
+  # A doubled `??` keeps its existing agent-marker meaning and still vetoes.
   case "$scan" in
-    *'?') scan="${scan%\?}" ;;
-    *'？') scan="${scan%？}" ;;
+    *'??'*)
+      return 0
+      ;;
   esac
+  scan="${scan//\?/}"
+  scan="${scan//？/}"
+  scan="${scan//\'/}"
+  scan="${scan//\"/}"
   case "$scan" in
-    *"'"*|*'"'*|*'\'*|*'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*'('*|*')'*|*'{'*|*'}'*|*'['*|*']'*|*'*'*|*'?'*|*'？'*|*'~'*|*[[:cntrl:]]*)
+    *'\'*|*'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*'('*|*')'*|*'{'*|*'}'*|*'['*|*']'*|*'*'*|*'~'*|*[[:cntrl:]]*)
       return 0
       ;;
   esac
@@ -138,6 +150,41 @@ _cosh_command_veto() {
     esac
   done
   return 1
+}
+
+# Quote-stripped token match (#1992): both shells remove ASCII quotes while
+# parsing, so `子曰"三人行必有我师"` arrives at the missing-command handler as
+# the single command word `子曰三人行必有我师` while cosh recorded the raw
+# first token with the quotes still attached. The strict token guard rejects
+# that pair and the input is delegated before the classifier ever runs.
+#
+# This is an equality proof, not a quoting parser: reaching the handler at all
+# already proves the shell accepted the quoting, so the only thing left to
+# show is that the raw input and the command word describe the *same single*
+# word. Erasing every ASCII quote from the raw input must reproduce the
+# command word byte for byte, and the shell must have reported exactly one
+# command word (argc 1). A second word, an escape, a command substitution or
+# any other construct that would make the two differ keeps the strict path.
+#
+# The builtin-only guards run first so the ordinary mismatch (no quote in the
+# input) still returns without forking a subshell.
+_cosh_quote_stripped_token_match() {
+  local input="$1"
+  local command="$2"
+  local argc="$3"
+  local stripped
+  (( argc == 1 )) || return 1
+  case "$input" in
+    *"'"*|*'"'*) ;;
+    *) return 1 ;;
+  esac
+  case "$input" in
+    *'\'*) return 1 ;;
+  esac
+  input="$(_cosh_ascii_trim "$input")"
+  stripped="${input//\'/}"
+  stripped="${stripped//\"/}"
+  [[ "$stripped" == "$command" ]]
 }
 
 # Proves the path is missing with ENOENT semantics: walk the components

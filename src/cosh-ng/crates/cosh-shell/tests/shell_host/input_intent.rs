@@ -268,6 +268,122 @@ fn composed_natural_language_matrix_is_consistent() {
     }
 }
 
+// Issue #1992: a question mark or a bare ASCII quote is prose punctuation,
+// not Shell syntax, and must not flip an otherwise natural-language line to
+// command. `top_token` mirrors what the shells actually report (verified
+// against bash/zsh: quotes are stripped from the command word, an unmatched
+// `?` survives because cosh unsets NOMATCH in zsh).
+#[test]
+fn prose_punctuation_does_not_veto_natural_language() {
+    for (input, top_token) in [
+        // full-width question mark mid-line, followed by more prose
+        ("你还好吗？ 我想问问", "你还好吗？"),
+        // only ASCII `??` is a control marker; full-width and mixed pairs
+        // remain ordinary prose punctuation
+        ("你还好吗？？ 我想问问", "你还好吗？？"),
+        ("你还好吗？? 我想问问", "你还好吗？?"),
+        ("你还好吗?？ 我想问问", "你还好吗?？"),
+        // ASCII question mark, glued and spaced variants
+        ("你还好吗?我想问问", "你还好吗?我想问问"),
+        ("你还好吗? 我想问问", "你还好吗?"),
+        // control prompt from the issue: no target punctuation at all
+        ("你好，我是李华", "你好，我是李华"),
+        // Chinese curly quotes already worked; keep them pinned
+        ("子曰“三人行必有我师”", "子曰“三人行必有我师”"),
+        // paired ASCII quotes: the shells hand over the de-quoted word
+        ("子曰\"三人行必有我师\"", "子曰三人行必有我师"),
+        ("子曰\" 三人行必有我师\"", "子曰 三人行必有我师"),
+        ("子曰'三人行必有我师'", "子曰三人行必有我师"),
+        // English prose keeps its punctuation neutral too
+        ("is this safe? really", "is"),
+        ("what is 'this' file", "what"),
+    ] {
+        assert_bash_zsh(input, top_token, "natural_language");
+    }
+}
+
+// The downgrade is limited to `?`/`？`/`'`/`"`. Everything a quote could have
+// wrapped stays in the veto scan, so quoted Shell constructs, options and
+// assignments remain command-owned; `??` keeps its agent-marker veto.
+#[test]
+fn quoted_shell_constructs_still_veto() {
+    for (input, top_token) in [
+        // doubled question mark keeps the existing agent-marker semantics
+        ("Who are you??", "Who"),
+        ("你还好吗?? 我想问问", "你还好吗??"),
+        // quoting a metacharacter does not hide it from the veto
+        ("帮我看看 \"$PATH\"", "帮我看看"),
+        ("帮我看看 '$PATH'", "帮我看看"),
+        ("帮我看看 \"a;b\"", "帮我看看"),
+        ("帮我看看 \"a`id`\"", "帮我看看"),
+        ("帮我看看 \"a|b\"", "帮我看看"),
+        ("帮我看看 \"a>b\"", "帮我看看"),
+        ("帮我看看 \"$(id)\"", "帮我看看"),
+        // an escape is still strong Shell evidence
+        ("帮我看看 a\\?b", "帮我看看"),
+        // quoted option / assignment tokens still veto
+        ("帮我看看 \"--all\"", "帮我看看"),
+        ("帮我看看 \"FOO=bar\"", "帮我看看"),
+        // glob metacharacters other than `?` are untouched
+        ("帮我看看 ./*.log", "帮我看看"),
+    ] {
+        assert_bash_zsh(input, top_token, "command");
+    }
+}
+
+// Quote-stripped token match (#1992): the narrow fallback that lets the
+// missing-command handlers reach the classifier when the shell de-quoted the
+// single command word. `argc` is the command-word count the shell reported.
+fn quote_stripped_token_match(shell: &str, input: &str, command: &str, argc: u32) -> Option<bool> {
+    let mut process = Process::new(shell);
+    if shell == "bash" {
+        process.args(["--noprofile", "--norc"]);
+    } else {
+        process.arg("-f");
+    }
+    let script = format!(
+        "{}\n_cosh_quote_stripped_token_match \"$1\" \"$2\" \"$3\"",
+        shell_intent_helpers(),
+    );
+    let output = process
+        .args(["-c", &script, "cosh-intent-test"])
+        .args([input, command, &argc.to_string()])
+        .output()
+        .ok()?;
+    Some(output.status.success())
+}
+
+#[test]
+fn quote_stripped_token_match_proves_single_command_word() {
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for (input, command, argc, expected) in [
+            // the issue's inputs, exactly as bash/zsh report them
+            ("子曰\"三人行必有我师\"", "子曰三人行必有我师", 1, true),
+            ("子曰\" 三人行必有我师\"", "子曰 三人行必有我师", 1, true),
+            ("子曰'三人行必有我师'", "子曰三人行必有我师", 1, true),
+            // surrounding blanks are removed by word splitting anyway
+            ("  子曰\"三人行必有我师\"  ", "子曰三人行必有我师", 1, true),
+            // no quote in the raw input: the strict guard already covers it
+            ("子曰三人行必有我师", "子曰三人行必有我师", 1, false),
+            // a second command word means the raw line is not one word
+            ("子曰\"三人行\" 必有我师", "子曰三人行", 2, false),
+            // the equality proof must fail when the words differ
+            ("子曰\"三人行必有我师\"啊", "子曰三人行必有我师", 1, false),
+            // escapes keep the strict path: quoting is not re-implemented here
+            ("子曰\\\"三人行", "子曰\"三人行", 1, false),
+        ] {
+            assert_eq!(
+                quote_stripped_token_match(shell, input, command, argc),
+                Some(expected),
+                "{shell}: {input:?} vs {command:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn command_veto_matrix_is_consistent() {
     for (input, top_token) in [
