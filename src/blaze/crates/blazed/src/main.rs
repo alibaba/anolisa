@@ -15,6 +15,7 @@ mod failpoint;
 mod failpoint;
 mod file_provider;
 mod metrics;
+mod sandbox;
 mod spawner;
 mod state;
 
