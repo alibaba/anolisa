@@ -484,12 +484,13 @@ fn path_provably_missing_requires_enoent_proof() {
     use crate::unique_suffix;
     use std::os::unix::fs::PermissionsExt;
 
-    let base = std::env::temp_dir().join(format!(
+    let requested_base = std::env::temp_dir().join(format!(
         "cosh-path-proof-{}-{}",
         std::process::id(),
         unique_suffix()
     ));
-    std::fs::create_dir_all(&base).expect("base dir");
+    std::fs::create_dir_all(&requested_base).expect("base dir");
+    let base = requested_base.canonicalize().expect("canonical base dir");
     let existing = base.join("existing.txt");
     std::fs::write(&existing, "x\n").expect("existing file");
     let dangling = base.join("dangling-link");

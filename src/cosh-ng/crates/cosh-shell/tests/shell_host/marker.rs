@@ -1826,6 +1826,10 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
+    if !bash_supports_command_not_found_handler() {
+        eprintln!("SKIP: bash command_not_found_handle capability is unavailable");
+        return;
+    }
 
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-bash-histdedup-test-{}-{}",

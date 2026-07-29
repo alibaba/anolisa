@@ -238,9 +238,9 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::line("/skills detail xlsx"),
-            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::wait(Duration::from_millis(600)),
             RawRelayAction::write(b"\x1b[A".to_vec()),
-            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::write(b"\n".to_vec()),
             RawRelayAction::wait(Duration::from_millis(300)),
             RawRelayAction::line("exit"),
@@ -301,7 +301,7 @@ fn raw_relay_bash_routed_slash_enters_native_history_file() {
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::line("/skills detail xlsx"),
-            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::wait(Duration::from_millis(600)),
             RawRelayAction::line("exit"),
         ],
         &mut rendered,

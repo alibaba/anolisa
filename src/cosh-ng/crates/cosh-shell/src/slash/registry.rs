@@ -483,70 +483,35 @@ mod tests {
     #[test]
     fn shell_marker_exact_tokens_match_registry() {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
-        // Marker scripts live in per-shell owner files under shell_host/marker/.
-        let marker = concat!(
-            include_str!("../shell_host/marker/bash.rs"),
-            "\n",
-            include_str!("../shell_host/marker/zsh.rs")
-        );
-        let marker_tokens = marker
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with('/'))
-            .flat_map(|line| line.trim_end_matches(')').split('|'))
-            .map(str::trim)
-            .filter(|token| {
-                token
-                    .as_bytes()
-                    .get(1)
-                    .is_some_and(|byte| byte.is_ascii_alphabetic())
-            })
-            .collect::<BTreeSet<_>>();
-
-        for token in &registry {
-            assert!(
-                marker_tokens.contains(token),
-                "shell marker is missing registry token {token}"
-            );
-        }
-        for token in &marker_tokens {
-            assert!(
-                registry.contains(token),
-                "shell marker has unregistered slash token {token}"
-            );
-        }
-
-        // Shell routing of exact slash submissions (issue #1718) is only
-        // safe when the shell side can intercept every routed token, so
-        // both bash case lists (_cosh_should_intercept_unknown and
-        // _cosh_is_slash_control_candidate) must each carry the full
-        // registry set, not merely the bash+zsh union checked above.
-        // Case-arm lines end with `)` and every alternative starts with
-        // `/`, which keeps slash-leading comment lines out of the match.
-        let bash_case_lines = include_str!("../shell_host/marker/bash.rs")
-            .lines()
-            .map(str::trim)
-            .filter(|line| {
-                line.ends_with(')')
-                    && line
-                        .trim_end_matches(')')
-                        .split('|')
-                        .all(|token| token.trim().starts_with('/'))
-            })
-            .filter(|line| line.contains('|'))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            bash_case_lines.len(),
-            2,
-            "expected exactly the two bash slash case lists"
-        );
-        for line in bash_case_lines {
-            let tokens = line
-                .trim_end_matches(')')
-                .split('|')
+        for (shell, marker, expected_lists) in [
+            ("bash", include_str!("../shell_host/marker/bash.rs"), 2),
+            ("zsh", include_str!("../shell_host/marker/zsh.rs"), 2),
+        ] {
+            let case_lines = marker
+                .lines()
                 .map(str::trim)
-                .collect::<BTreeSet<_>>();
-            assert_eq!(tokens, registry, "bash case list diverged from registry");
+                .filter(|line| {
+                    line.ends_with(')')
+                        && line
+                            .trim_end_matches(')')
+                            .split('|')
+                            .all(|token| token.trim().starts_with('/'))
+                })
+                .filter(|line| line.contains('|'))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                case_lines.len(),
+                expected_lists,
+                "expected {expected_lists} {shell} slash case lists"
+            );
+            for line in case_lines {
+                let tokens = line
+                    .trim_end_matches(')')
+                    .split('|')
+                    .map(str::trim)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(tokens, registry, "{shell} case list diverged from registry");
+            }
         }
     }
 }
