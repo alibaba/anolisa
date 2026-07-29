@@ -83,7 +83,9 @@
       {"rule": ["node*", "*openclaw*"], "agent_name": "OpenClaw"},
       {"rule": ["*node*", "*openclaw*", "gatewa*"], "agent_name": "OpenClaw"},
       {"rule": ["openclaw"], "agent_name": "OpenClaw"},
-      {"rule": ["claude*"], "agent_name": "Claude"}
+      {"rule": ["claude*"], "agent_name": "Claude"},
+      {"rule": ["*/claude*"], "agent_name": "Claude"},
+      {"rule": ["*node*", "*claude*"], "agent_name": "Claude"}
     ]
   },
   "codex_offsets": {

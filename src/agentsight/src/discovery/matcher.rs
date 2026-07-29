@@ -267,4 +267,99 @@ mod tests {
         };
         assert!(CmdlineGlobMatcher::from_deny_rule(&rule).is_none());
     }
+
+    /// Match a cmdline against the embedded default rules and return the
+    /// first matching agent name (mirrors `AgentScanner::find_match`).
+    fn match_default_rules(args: &[&str], exe_path: &str) -> Option<String> {
+        let ctx = ProcessContext {
+            comm: String::new(),
+            cmdline_args: args.iter().map(|s| s.to_string()).collect(),
+            exe_path: exe_path.to_string(),
+        };
+        crate::config::default_cmdline_rules()
+            .iter()
+            .filter_map(CmdlineGlobMatcher::from_config)
+            .find(|m| m.matches(&ctx))
+            .map(|m| m.info().name.clone())
+    }
+
+    #[test]
+    fn test_default_rules_capture_claude_code_bare_name() {
+        // Launched from a shell as `claude`
+        assert_eq!(
+            match_default_rules(&["claude"], "").as_deref(),
+            Some("Claude")
+        );
+    }
+
+    #[test]
+    fn test_default_rules_capture_claude_code_absolute_path() {
+        // Launched via absolute path (native binary install)
+        assert_eq!(
+            match_default_rules(&["/usr/local/bin/claude"], "").as_deref(),
+            Some("Claude")
+        );
+        assert_eq!(
+            match_default_rules(
+                &["/home/user/.local/share/claude/versions/2.0.14/claude"],
+                ""
+            )
+            .as_deref(),
+            Some("Claude")
+        );
+    }
+
+    #[test]
+    fn test_default_rules_capture_claude_code_node_wrapper() {
+        // npm global install: `claude` is a shebang script, the kernel rewrites
+        // argv to `node <script>` so argv[0] is node, not claude
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "node",
+                    "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+                ],
+                ""
+            )
+            .as_deref(),
+            Some("Claude")
+        );
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "/usr/bin/node",
+                    "/home/user/.claude/local/node_modules/.bin/claude"
+                ],
+                ""
+            )
+            .as_deref(),
+            Some("Claude")
+        );
+    }
+
+    #[test]
+    fn test_default_rules_no_false_positive_for_unrelated_process() {
+        assert_eq!(match_default_rules(&["vim", "main.rs"], ""), None);
+    }
+
+    #[test]
+    fn test_default_rules_match_with_exe_path_set() {
+        // Verify matching works when exe_path carries a real path,
+        // as it does in production eBPF-captured ProcessContext.
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "node",
+                    "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+                ],
+                "/usr/bin/node"
+            )
+            .as_deref(),
+            Some("Claude")
+        );
+        assert_eq!(
+            match_default_rules(&["/usr/local/bin/claude"], "/usr/local/bin/claude").as_deref(),
+            Some("Claude")
+        );
+    }
 }
