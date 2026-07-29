@@ -481,11 +481,11 @@ mod tests {
     }
 
     #[test]
-    fn shell_marker_exact_tokens_match_registry() {
+    fn shell_marker_exact_tokens_match_registry_routing_c4_per_shell_registry() {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
-        for (shell, marker, expected_lists) in [
-            ("bash", include_str!("../shell_host/marker/bash.rs"), 2),
-            ("zsh", include_str!("../shell_host/marker/zsh.rs"), 2),
+        for (shell, marker) in [
+            ("bash", include_str!("../shell_host/marker/bash.rs")),
+            ("zsh", include_str!("../shell_host/marker/zsh.rs")),
         ] {
             let case_lines = marker
                 .lines()
@@ -501,8 +501,8 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 case_lines.len(),
-                expected_lists,
-                "expected {expected_lists} {shell} slash case lists"
+                1,
+                "expected one authoritative {shell} slash case list"
             );
             for line in case_lines {
                 let tokens = line
@@ -513,5 +513,24 @@ mod tests {
                 assert_eq!(tokens, registry, "{shell} case list diverged from registry");
             }
         }
+    }
+
+    #[test]
+    fn routing_c4_zsh_stubs_match_registry() {
+        let registry = exact_slash_control_commands()
+            .map(|name| name.trim_start_matches('/'))
+            .collect::<BTreeSet<_>>();
+        let marker = include_str!("../shell_host/marker/zsh.rs");
+        let line = marker
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("for _cosh_sc in "))
+            .expect("zsh slash stub loop");
+        let stubs = line
+            .trim_start_matches("for _cosh_sc in ")
+            .trim_end_matches("; do")
+            .split_whitespace()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(stubs, registry, "zsh slash stubs diverged from registry");
     }
 }

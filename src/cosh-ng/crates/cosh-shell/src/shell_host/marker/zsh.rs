@@ -147,12 +147,6 @@ _cosh_emit_top_level_missing_marker() {
 }
 _cosh_should_intercept_unknown() {
   local command="$1"
-  case "$command" in
-    /about|/agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/draft|/explain|/extensions|/health|/help|/hooks|/mcp|/mode|/new|/recommendations|/resume|/select|/send-to-shell|/session|/shell|/skills|/stats|/status)
-      printf '%s' "slash"
-      return 0
-      ;;
-  esac
   if _cosh_is_slash_control_candidate "$command"; then
     printf '%s' "slash"
     return 0
@@ -559,7 +553,7 @@ _cosh_precmd_marker() {
 # Slash command function stubs — prevent "zsh: no such file or directory" for
 # commands starting with / that zsh would try to exec as an absolute path.
 # The actual interception and marker emission happens in _cosh_preexec_marker.
-for _cosh_sc in about agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions health help hooks mcp mode new recommendations select send-to-shell shell skills stats status; do
+for _cosh_sc in about agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details draft explain extensions health help hooks mcp mode new recommendations resume select send-to-shell session shell skills stats status; do
   functions[/$_cosh_sc]=':'
 done
 unset _cosh_sc

@@ -1159,6 +1159,36 @@ fn shell_host_zsh_adapter_emits_shared_command_events() {
 }
 
 #[test]
+fn routing_c4_zsh_stubs_intercept_bypass_only_commands() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c4-zsh-stubs-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c4-zsh-stubs", &work_dir);
+    let inputs = ["/draft", "/resume", "/session"];
+    let steps = inputs
+        .iter()
+        .map(|input| ScriptedInput::user_line(*input))
+        .collect::<Vec<_>>();
+    let output = run_scripted_zsh(&config, &steps).expect("scripted zsh slash stubs");
+
+    for input in inputs {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("slash")
+        }));
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandStarted && event.command.as_deref() == Some(input)
+        }));
+    }
+}
+
+#[test]
 fn shell_host_zsh_later_preexec_hook_fails_closed_for_path_generation() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;

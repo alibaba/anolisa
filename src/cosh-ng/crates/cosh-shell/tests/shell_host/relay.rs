@@ -43,7 +43,7 @@ fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
 }
 
 #[test]
-fn raw_relay_zsh_adapter_uses_shared_event_contract() {
+fn routing_c4_zsh_rust_route_uses_shared_event_contract() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
     }
@@ -98,6 +98,33 @@ fn raw_relay_zsh_adapter_uses_shared_event_contract() {
     assert!(ledger.blocks.iter().any(|block| {
         block.command.contains("/path/that/does/not/exist") && block.exit_code != 0
     }));
+}
+
+#[test]
+fn routing_c4_draft_grammar_no_drift_preserves_raw_arguments() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c4-draft-grammar-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c4-draft-grammar", &work_dir);
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line("/draft extra"),
+            RawRelayAction::line("/draft 'extra'"),
+        ],
+        Vec::new(),
+    )
+    .expect("draft grammar routing");
+
+    for input in ["/draft extra", "/draft 'extra'"] {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("slash")
+        }));
+    }
 }
 
 #[test]
@@ -275,7 +302,7 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
 }
 
 #[test]
-fn raw_relay_bash_routed_slash_enters_native_history_file() {
+fn routing_c4_bash_route_enters_native_history_file() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-histfile-{}-{}",
         std::process::id(),
@@ -301,7 +328,7 @@ fn raw_relay_bash_routed_slash_enters_native_history_file() {
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::line("/skills detail xlsx"),
-            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::wait(Duration::from_millis(1200)),
             RawRelayAction::line("exit"),
         ],
         &mut rendered,
@@ -386,7 +413,7 @@ fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
 }
 
 #[test]
-fn raw_relay_bash_routed_slash_with_secret_never_persists_in_history() {
+fn routing_c4_history_privacy_secret_slash_never_persists() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-secret-{}-{}",
         std::process::id(),

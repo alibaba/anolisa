@@ -198,6 +198,18 @@ mod tests {
     use super::{RemovedCommand, SlashCommand, SlashCommandSpec, SlashParseError};
 
     #[test]
+    fn routing_c4_draft_grammar_no_drift() {
+        assert!(matches!(
+            SlashCommand::parse("/draft extra"),
+            Ok(Some(SlashCommand::Draft))
+        ));
+        assert!(matches!(
+            SlashCommand::parse("/draft 'extra'"),
+            Ok(Some(SlashCommand::Draft))
+        ));
+    }
+
+    #[test]
     fn removed_decision_commands_parse_as_removed_not_unknown() {
         for command in ["/allow 1", "/approve 1", "/deny 1"] {
             match SlashCommand::parse(command) {
