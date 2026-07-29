@@ -11,6 +11,11 @@ publish.workspace = true
 name = "blazed"
 path = "src/main.rs"
 
+[features]
+default = []
+# Compiles deterministic fault hooks used only by integration verification.
+test-failpoints = []
+
 [dependencies]
 blaze-core = { workspace = true }
 clap = { workspace = true }

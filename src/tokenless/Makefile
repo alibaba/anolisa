@@ -50,6 +50,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
         codex-install codex-uninstall \
         qwencode-install qwencode-uninstall \
         setup help \
+        npm-package npm-package-all npm-publish \
         test-hooks
 
 # Default target
@@ -366,6 +367,45 @@ setup: install adapter-install
 	@echo "  toon --version"
 	@echo "  make adapter-scan"
 
+# --- npm Packaging ---
+# Package for current platform only
+npm-package:
+	@echo "==> Packaging anolisa-tokenless for npm (current platform)..."
+	node npm/scripts/package-npm.js
+
+# Package for all supported targets (requires cross-compilation toolchain)
+npm-package-all:
+	@echo "==> Packaging anolisa-tokenless for npm (all platforms)..."
+	node npm/scripts/package-npm.js --all
+
+# Publish all packages to npm registry
+# IMPORTANT: Platform packages must be published BEFORE the root package,
+# because the root package declares them as optionalDependencies.
+# If the root package is published first and a platform package fails,
+# npm will have a package referencing non-existent dependencies.
+#
+# The registry is pinned explicitly: the nested npm/dist/* package roots do
+# NOT inherit npm/.npmrc, so without --registry a user-level registry
+# override could silently win. Already-published name@version pairs are
+# skipped, so a partially failed publish run can simply be re-executed
+# (npm forbids republishing the same version).
+NPM_REGISTRY ?= https://registry.npmjs.org/
+
+npm-publish: npm-package-all
+	@echo "==> Publishing anolisa-tokenless packages to $(NPM_REGISTRY) (platform packages first, root last)..."
+	@set -e; \
+	for pkg in tokenless-linux-x64 tokenless-linux-arm64 tokenless-darwin-x64 tokenless-darwin-arm64 tokenless; do \
+		dir=npm/dist/$$pkg; \
+		name=$$(node -p "require('./$$dir/package.json').name"); \
+		ver=$$(node -p "require('./$$dir/package.json').version"); \
+		if npm view "$$name@$$ver" version --registry=$(NPM_REGISTRY) >/dev/null 2>&1; then \
+			echo "  $$name@$$ver already published — skipping"; \
+		else \
+			echo "  publishing $$name@$$ver..."; \
+			(cd $$dir && npm publish --access public --registry=$(NPM_REGISTRY)); \
+		fi; \
+	done
+
 # Help
 help:
 	@echo "Token-Less Build System"
@@ -399,6 +439,9 @@ help:
 	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
+	@echo "  npm-package       Package for npm (current platform)"
+	@echo "  npm-package-all   Package for npm (all platforms)"
+	@echo "  npm-publish       Build and publish all npm packages"
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"

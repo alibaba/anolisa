@@ -17,11 +17,12 @@ use blaze_core::policy::PolicyEngine;
 use blaze_core::pool::PoolManager;
 use blaze_core::storage::StorageProvider;
 use blaze_core::template::TemplateRegistry;
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::error::Result;
 use crate::metrics::Metrics;
-use crate::spawner::{DynSpawner, SpawnHandle};
+use crate::spawner::{DynBackendInstance, DynSpawner, SpawnerRegistry};
 
 /// All daemon mutable state. Cloning is via `Arc` (see the `state.clone()`
 /// idiom in `daemon.rs`); the struct itself is never `Clone`.
@@ -32,8 +33,9 @@ pub struct ServerState {
     pub template: Mutex<TemplateRegistry>,
     pub hook: Mutex<HookRegistry>,
     pub instances: Mutex<HashMap<Uuid, SandboxInstance>>,
-    pub spawn_handles: Mutex<HashMap<Uuid, SpawnHandle>>,
-    pub spawner: DynSpawner,
+    pub backend_instances: Mutex<HashMap<Uuid, DynBackendInstance>>,
+    operation_locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
+    pub spawners: SpawnerRegistry,
     /// The backend kind that `build_spawner` actually probed and selected.
     /// API handlers use this to constrain availability to the single active
     /// backend rather than reporting all configured binaries.
@@ -54,7 +56,7 @@ impl ServerState {
         pool: PoolManager,
         template: TemplateRegistry,
         hook: HookRegistry,
-        spawner: DynSpawner,
+        spawners: SpawnerRegistry,
         active_backend: BackendKind,
         storage: Arc<dyn StorageProvider>,
     ) -> Self {
@@ -63,6 +65,11 @@ impl ServerState {
             tracing::warn!(error = %err, "failed to scan state_dir, starting empty");
             HashMap::new()
         });
+        let operation_locks = instances
+            .keys()
+            .copied()
+            .map(|id| (id, Arc::new(AsyncMutex::new(()))))
+            .collect();
 
         Self {
             config: Mutex::new(config),
@@ -71,13 +78,34 @@ impl ServerState {
             template: Mutex::new(template),
             hook: Mutex::new(hook),
             instances: Mutex::new(instances),
-            spawn_handles: Mutex::new(HashMap::new()),
-            spawner,
+            backend_instances: Mutex::new(HashMap::new()),
+            operation_locks: Mutex::new(operation_locks),
+            spawners,
             active_backend,
             storage,
             state_dir,
             metrics: Metrics::new(),
         }
+    }
+
+    /// Return the async operation lock that serializes one sandbox mutation.
+    pub fn operation_lock(&self, id: Uuid) -> Arc<AsyncMutex<()>> {
+        match self.operation_locks.lock() {
+            Ok(mut locks) => locks
+                .entry(id)
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .entry(id)
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone(),
+        }
+    }
+
+    /// Return the implementation responsible for a persisted backend kind.
+    pub fn spawner_for(&self, kind: BackendKind) -> Option<DynSpawner> {
+        self.spawners.get(kind)
     }
 }
 

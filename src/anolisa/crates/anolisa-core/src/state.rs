@@ -238,6 +238,16 @@ pub struct OwnedFile {
     /// the referent stays within ANOLISA-owned roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referent: Option<PathBuf>,
+    /// Expected Unix permission bits, normalized as a four-digit octal
+    /// string (for example, `"0755"`). Older v5 records omit this field and
+    /// are enriched from their saved component manifest before probing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Linux file capabilities that were successfully applied at install
+    /// time. Each name uses the manifest vocabulary (for example,
+    /// `"CAP_BPF"`); an empty list means no capability contract is known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// External (non-ANOLISA) file that an operation modified. Linked back to
@@ -817,6 +827,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn owned_file_metadata_defaults_and_round_trips() {
+        let legacy: OwnedFile = toml::from_str(
+            r#"
+path = "/usr/local/bin/tool"
+owner = "anolisa"
+sha256 = "deadbeef"
+"#,
+        )
+        .expect("legacy owned file");
+        assert!(legacy.mode.is_none());
+        assert!(legacy.capabilities.is_empty());
+
+        let mut current = legacy;
+        current.mode = Some("0755".to_string());
+        current.capabilities = vec!["CAP_BPF".to_string()];
+        let encoded = toml::to_string(&current).expect("serialize");
+        let decoded: OwnedFile = toml::from_str(&encoded).expect("deserialize");
+
+        assert_eq!(decoded, current);
+        assert!(encoded.contains("mode = \"0755\""));
+        assert!(encoded.contains("capabilities = [\"CAP_BPF\"]"));
+    }
+
+    #[test]
     fn service_ref_scope_defaults_to_system_when_absent() {
         // State files written before `scope` existed must load as System so
         // uninstall keeps driving them through the (root) system manager.
@@ -858,6 +892,8 @@ mod tests {
                 sha256: Some("deadbeef".to_string()),
                 kind: OwnedFileKind::File,
                 referent: None,
+                mode: None,
+                capabilities: Vec::new(),
             }],
             external_modified_files: Vec::new(),
             services: vec![ServiceRef {

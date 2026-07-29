@@ -1,268 +1,136 @@
+//! Byte-level golden lock for the ws-ckpt IPC wire protocol.
+//!
+//! The golden fixture was captured while these types were verified
+//! byte-identical to the authoritative `ws-ckpt-common` crate, so any
+//! local edit that changes the bincode layout (variant reorder, field
+//! reorder, type change) fails against the recorded bytes without
+//! needing a cross-workspace dev-dependency.
+//!
+//! Regenerate only for intentional protocol changes coordinated with
+//! the ws-ckpt daemon:
+//!
+//! ```text
+//! UPDATE_WIRE_GOLDENS=1 cargo test -p cosh-types --test checkpoint_wire_conformance
+//! ```
+
 use chrono::{TimeZone, Utc};
 use cosh_types::checkpoint as local;
-use ws_ckpt_common as wire;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
-fn assert_same_bincode<L: serde::Serialize, R: serde::Serialize>(left: &L, right: &R) {
-    assert_eq!(
-        bincode::serialize(left).unwrap(),
-        bincode::serialize(right).unwrap()
+const PROTOCOL_VERSION: u64 = 1;
+const REGEN_ENV: &str = "UPDATE_WIRE_GOLDENS";
+
+#[derive(Serialize, Deserialize)]
+struct Fixture {
+    protocol_version: u64,
+    cases: Vec<FixtureCase>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FixtureCase {
+    name: String,
+    hex: String,
+}
+
+fn fixture_path() -> PathBuf {
+    // Derive the file name from PROTOCOL_VERSION so a version bump cannot
+    // leave the constant and the fixture file out of sync.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "tests/fixtures/checkpoint-wire-v{PROTOCOL_VERSION}.json"
+    ))
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(name: &str, hex: &str) -> Vec<u8> {
+    assert!(
+        hex.len().is_multiple_of(2),
+        "case {name}: odd-length hex string"
     );
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .unwrap_or_else(|e| panic!("case {name}: invalid hex byte at offset {i}: {e}"))
+        })
+        .collect()
 }
 
-fn local_retention(value: &wire::CleanupRetention) -> local::CleanupRetention {
+// The exhaustive matches below are the compile-time drift guard: adding,
+// removing, or renaming a variant on any wire enum forces an update here,
+// which in turn forces a deliberate fixture regeneration.
+
+fn request_case_name(value: &local::WsCkptRequest) -> &'static str {
     match value {
-        wire::CleanupRetention::Count(count) => local::CleanupRetention::Count(*count),
-        wire::CleanupRetention::Age { raw, secs } => local::CleanupRetention::Age {
-            raw: raw.clone(),
-            secs: *secs,
-        },
+        local::WsCkptRequest::Init { .. } => "request/init",
+        local::WsCkptRequest::Checkpoint { .. } => "request/checkpoint",
+        local::WsCkptRequest::Rollback { .. } => "request/rollback",
+        local::WsCkptRequest::Delete { .. } => "request/delete",
+        local::WsCkptRequest::List { .. } => "request/list",
+        local::WsCkptRequest::Diff { .. } => "request/diff",
+        local::WsCkptRequest::Status { .. } => "request/status",
+        local::WsCkptRequest::Cleanup { .. } => "request/cleanup",
+        local::WsCkptRequest::Config => "request/config",
+        local::WsCkptRequest::ReloadConfig => "request/reload_config",
+        local::WsCkptRequest::ReloadGlobalConfig => "request/reload_global_config",
+        local::WsCkptRequest::ReloadWorkspacePolicy { .. } => "request/reload_workspace_policy",
+        local::WsCkptRequest::ConfigOverview => "request/config_overview",
+        local::WsCkptRequest::Recover { .. } => "request/recover",
+        local::WsCkptRequest::HealthAdvisory => "request/health_advisory",
+        local::WsCkptRequest::GetWorkspacePolicy { .. } => "request/get_workspace_policy",
+        local::WsCkptRequest::ResetWorkspacePolicy { .. } => "request/reset_workspace_policy",
+        local::WsCkptRequest::PatchWorkspacePolicy { .. } => "request/patch_workspace_policy",
+        local::WsCkptRequest::RollbackPreview { .. } => "request/rollback_preview",
     }
 }
 
-fn wire_retention(value: &local::CleanupRetention) -> wire::CleanupRetention {
+fn error_case_name(value: &local::WsCkptErrorCode) -> &'static str {
     match value {
-        local::CleanupRetention::Count(count) => wire::CleanupRetention::Count(*count),
-        local::CleanupRetention::Age { raw, secs } => wire::CleanupRetention::Age {
-            raw: raw.clone(),
-            secs: *secs,
-        },
+        local::WsCkptErrorCode::WorkspaceNotFound => "error/workspace_not_found",
+        local::WsCkptErrorCode::SnapshotNotFound => "error/snapshot_not_found",
+        local::WsCkptErrorCode::AlreadyInitialized => "error/already_initialized",
+        local::WsCkptErrorCode::BtrfsError => "error/btrfs_error",
+        local::WsCkptErrorCode::IoError => "error/io_error",
+        local::WsCkptErrorCode::InvalidPath => "error/invalid_path",
+        local::WsCkptErrorCode::ConfirmationRequired => "error/confirmation_required",
+        local::WsCkptErrorCode::InternalError => "error/internal_error",
+        local::WsCkptErrorCode::SnapshotAlreadyExists => "error/snapshot_already_exists",
+        local::WsCkptErrorCode::WriteLockConflict => "error/write_lock_conflict",
+        local::WsCkptErrorCode::DiskSpaceInsufficient => "error/disk_space_insufficient",
+        local::WsCkptErrorCode::CwdOccupied => "error/cwd_occupied",
+        local::WsCkptErrorCode::CwdScanFailed => "error/cwd_scan_failed",
     }
 }
 
-fn local_bool_op(value: &wire::PolicyFieldOp<bool>) -> local::PolicyFieldOp<bool> {
+fn response_case_name(value: &local::WsCkptResponse) -> &'static str {
     match value {
-        wire::PolicyFieldOp::Unchanged => local::PolicyFieldOp::Unchanged,
-        wire::PolicyFieldOp::Set(value) => local::PolicyFieldOp::Set(*value),
+        local::WsCkptResponse::InitOk { .. } => "response/init_ok",
+        local::WsCkptResponse::CheckpointOk { .. } => "response/checkpoint_ok",
+        local::WsCkptResponse::RollbackOk { .. } => "response/rollback_ok",
+        local::WsCkptResponse::DeleteOk { .. } => "response/delete_ok",
+        local::WsCkptResponse::Error { .. } => "response/error",
+        local::WsCkptResponse::ListOk { .. } => "response/list_ok",
+        local::WsCkptResponse::DiffOk { .. } => "response/diff_ok",
+        local::WsCkptResponse::StatusOk { .. } => "response/status_ok",
+        local::WsCkptResponse::CleanupOk { .. } => "response/cleanup_ok",
+        local::WsCkptResponse::ConfigOk { .. } => "response/config_ok",
+        local::WsCkptResponse::ReloadConfigOk { .. } => "response/reload_config_ok",
+        local::WsCkptResponse::CheckpointSkipped { .. } => "response/checkpoint_skipped",
+        local::WsCkptResponse::RecoverOk { .. } => "response/recover_ok",
+        local::WsCkptResponse::HealthAdvisoryOk { .. } => "response/health_advisory_ok",
+        local::WsCkptResponse::WorkspacePolicyOk { .. } => "response/workspace_policy_ok",
+        local::WsCkptResponse::ConfigOverviewOk { .. } => "response/config_overview_ok",
+        local::WsCkptResponse::RollbackPreviewOk { .. } => "response/rollback_preview_ok",
     }
 }
 
-fn wire_bool_op(value: &local::PolicyFieldOp<bool>) -> wire::PolicyFieldOp<bool> {
-    match value {
-        local::PolicyFieldOp::Unchanged => wire::PolicyFieldOp::Unchanged,
-        local::PolicyFieldOp::Set(value) => wire::PolicyFieldOp::Set(*value),
-    }
-}
-
-fn local_retention_op(
-    value: &wire::PolicyFieldOp<wire::CleanupRetention>,
-) -> local::PolicyFieldOp<local::CleanupRetention> {
-    match value {
-        wire::PolicyFieldOp::Unchanged => local::PolicyFieldOp::Unchanged,
-        wire::PolicyFieldOp::Set(value) => local::PolicyFieldOp::Set(local_retention(value)),
-    }
-}
-
-fn wire_retention_op(
-    value: &local::PolicyFieldOp<local::CleanupRetention>,
-) -> wire::PolicyFieldOp<wire::CleanupRetention> {
-    match value {
-        local::PolicyFieldOp::Unchanged => wire::PolicyFieldOp::Unchanged,
-        local::PolicyFieldOp::Set(value) => wire::PolicyFieldOp::Set(wire_retention(value)),
-    }
-}
-
-fn wire_request(value: &local::WsCkptRequest) -> wire::Request {
-    match value {
-        local::WsCkptRequest::Init { workspace } => wire::Request::Init {
-            workspace: workspace.clone(),
-        },
-        local::WsCkptRequest::Checkpoint {
-            workspace,
-            id,
-            message,
-            metadata,
-            pin,
-        } => wire::Request::Checkpoint {
-            workspace: workspace.clone(),
-            id: id.clone(),
-            message: message.clone(),
-            metadata: metadata.clone(),
-            pin: *pin,
-        },
-        local::WsCkptRequest::Rollback {
-            workspace,
-            to,
-            num_ancestors,
-        } => wire::Request::Rollback {
-            workspace: workspace.clone(),
-            to: to.clone(),
-            num_ancestors: *num_ancestors,
-        },
-        local::WsCkptRequest::Delete {
-            workspace,
-            snapshot,
-            force,
-        } => wire::Request::Delete {
-            workspace: workspace.clone(),
-            snapshot: snapshot.clone(),
-            force: *force,
-        },
-        local::WsCkptRequest::List { workspace, format } => wire::Request::List {
-            workspace: workspace.clone(),
-            format: format.clone(),
-        },
-        local::WsCkptRequest::Diff {
-            workspace,
-            from,
-            to,
-        } => wire::Request::Diff {
-            workspace: workspace.clone(),
-            from: from.clone(),
-            to: to.clone(),
-        },
-        local::WsCkptRequest::Status { workspace } => wire::Request::Status {
-            workspace: workspace.clone(),
-        },
-        local::WsCkptRequest::Cleanup { workspace, keep } => wire::Request::Cleanup {
-            workspace: workspace.clone(),
-            keep: *keep,
-        },
-        local::WsCkptRequest::Config => wire::Request::Config,
-        local::WsCkptRequest::ReloadConfig => wire::Request::ReloadConfig,
-        local::WsCkptRequest::ReloadGlobalConfig => wire::Request::ReloadGlobalConfig,
-        local::WsCkptRequest::ReloadWorkspacePolicy { workspace } => {
-            wire::Request::ReloadWorkspacePolicy {
-                workspace: workspace.clone(),
-            }
-        }
-        local::WsCkptRequest::ConfigOverview => wire::Request::ConfigOverview,
-        local::WsCkptRequest::Recover { workspace } => wire::Request::Recover {
-            workspace: workspace.clone(),
-        },
-        local::WsCkptRequest::HealthAdvisory => wire::Request::HealthAdvisory,
-        local::WsCkptRequest::GetWorkspacePolicy { workspace } => {
-            wire::Request::GetWorkspacePolicy {
-                workspace: workspace.clone(),
-            }
-        }
-        local::WsCkptRequest::ResetWorkspacePolicy { workspace } => {
-            wire::Request::ResetWorkspacePolicy {
-                workspace: workspace.clone(),
-            }
-        }
-        local::WsCkptRequest::PatchWorkspacePolicy {
-            workspace,
-            auto_cleanup,
-            auto_cleanup_keep,
-        } => wire::Request::PatchWorkspacePolicy {
-            workspace: workspace.clone(),
-            auto_cleanup: wire_bool_op(auto_cleanup),
-            auto_cleanup_keep: wire_retention_op(auto_cleanup_keep),
-        },
-        local::WsCkptRequest::RollbackPreview {
-            workspace,
-            to,
-            num_ancestors,
-        } => wire::Request::RollbackPreview {
-            workspace: workspace.clone(),
-            to: to.clone(),
-            num_ancestors: *num_ancestors,
-        },
-    }
-}
-
-fn local_request(value: &wire::Request) -> local::WsCkptRequest {
-    match value {
-        wire::Request::Init { workspace } => local::WsCkptRequest::Init {
-            workspace: workspace.clone(),
-        },
-        wire::Request::Checkpoint {
-            workspace,
-            id,
-            message,
-            metadata,
-            pin,
-        } => local::WsCkptRequest::Checkpoint {
-            workspace: workspace.clone(),
-            id: id.clone(),
-            message: message.clone(),
-            metadata: metadata.clone(),
-            pin: *pin,
-        },
-        wire::Request::Rollback {
-            workspace,
-            to,
-            num_ancestors,
-        } => local::WsCkptRequest::Rollback {
-            workspace: workspace.clone(),
-            to: to.clone(),
-            num_ancestors: *num_ancestors,
-        },
-        wire::Request::Delete {
-            workspace,
-            snapshot,
-            force,
-        } => local::WsCkptRequest::Delete {
-            workspace: workspace.clone(),
-            snapshot: snapshot.clone(),
-            force: *force,
-        },
-        wire::Request::List { workspace, format } => local::WsCkptRequest::List {
-            workspace: workspace.clone(),
-            format: format.clone(),
-        },
-        wire::Request::Diff {
-            workspace,
-            from,
-            to,
-        } => local::WsCkptRequest::Diff {
-            workspace: workspace.clone(),
-            from: from.clone(),
-            to: to.clone(),
-        },
-        wire::Request::Status { workspace } => local::WsCkptRequest::Status {
-            workspace: workspace.clone(),
-        },
-        wire::Request::Cleanup { workspace, keep } => local::WsCkptRequest::Cleanup {
-            workspace: workspace.clone(),
-            keep: *keep,
-        },
-        wire::Request::Config => local::WsCkptRequest::Config,
-        wire::Request::ReloadConfig => local::WsCkptRequest::ReloadConfig,
-        wire::Request::ReloadGlobalConfig => local::WsCkptRequest::ReloadGlobalConfig,
-        wire::Request::ReloadWorkspacePolicy { workspace } => {
-            local::WsCkptRequest::ReloadWorkspacePolicy {
-                workspace: workspace.clone(),
-            }
-        }
-        wire::Request::ConfigOverview => local::WsCkptRequest::ConfigOverview,
-        wire::Request::Recover { workspace } => local::WsCkptRequest::Recover {
-            workspace: workspace.clone(),
-        },
-        wire::Request::HealthAdvisory => local::WsCkptRequest::HealthAdvisory,
-        wire::Request::GetWorkspacePolicy { workspace } => {
-            local::WsCkptRequest::GetWorkspacePolicy {
-                workspace: workspace.clone(),
-            }
-        }
-        wire::Request::ResetWorkspacePolicy { workspace } => {
-            local::WsCkptRequest::ResetWorkspacePolicy {
-                workspace: workspace.clone(),
-            }
-        }
-        wire::Request::PatchWorkspacePolicy {
-            workspace,
-            auto_cleanup,
-            auto_cleanup_keep,
-        } => local::WsCkptRequest::PatchWorkspacePolicy {
-            workspace: workspace.clone(),
-            auto_cleanup: local_bool_op(auto_cleanup),
-            auto_cleanup_keep: local_retention_op(auto_cleanup_keep),
-        },
-        wire::Request::RollbackPreview {
-            workspace,
-            to,
-            num_ancestors,
-        } => local::WsCkptRequest::RollbackPreview {
-            workspace: workspace.clone(),
-            to: to.clone(),
-            num_ancestors: *num_ancestors,
-        },
-    }
-}
-
-fn local_request_samples() -> Vec<local::WsCkptRequest> {
-    vec![
+fn request_cases() -> Vec<(&'static str, local::WsCkptRequest)> {
+    let samples = vec![
         local::WsCkptRequest::Init {
             workspace: "/ws".into(),
         },
@@ -326,62 +194,15 @@ fn local_request_samples() -> Vec<local::WsCkptRequest> {
             to: None,
             num_ancestors: Some(3),
         },
-    ]
+    ];
+    samples
+        .into_iter()
+        .map(|value| (request_case_name(&value), value))
+        .collect()
 }
 
-fn wire_request_samples() -> Vec<wire::Request> {
-    local_request_samples().iter().map(wire_request).collect()
-}
-
-#[test]
-fn every_request_variant_matches_authoritative_bincode() {
-    for value in local_request_samples() {
-        assert_same_bincode(&value, &wire_request(&value));
-    }
-    for value in wire_request_samples() {
-        assert_same_bincode(&local_request(&value), &value);
-    }
-}
-
-fn wire_error(value: &local::WsCkptErrorCode) -> wire::ErrorCode {
-    match value {
-        local::WsCkptErrorCode::WorkspaceNotFound => wire::ErrorCode::WorkspaceNotFound,
-        local::WsCkptErrorCode::SnapshotNotFound => wire::ErrorCode::SnapshotNotFound,
-        local::WsCkptErrorCode::AlreadyInitialized => wire::ErrorCode::AlreadyInitialized,
-        local::WsCkptErrorCode::BtrfsError => wire::ErrorCode::BtrfsError,
-        local::WsCkptErrorCode::IoError => wire::ErrorCode::IoError,
-        local::WsCkptErrorCode::InvalidPath => wire::ErrorCode::InvalidPath,
-        local::WsCkptErrorCode::ConfirmationRequired => wire::ErrorCode::ConfirmationRequired,
-        local::WsCkptErrorCode::InternalError => wire::ErrorCode::InternalError,
-        local::WsCkptErrorCode::SnapshotAlreadyExists => wire::ErrorCode::SnapshotAlreadyExists,
-        local::WsCkptErrorCode::WriteLockConflict => wire::ErrorCode::WriteLockConflict,
-        local::WsCkptErrorCode::DiskSpaceInsufficient => wire::ErrorCode::DiskSpaceInsufficient,
-        local::WsCkptErrorCode::CwdOccupied => wire::ErrorCode::CwdOccupied,
-        local::WsCkptErrorCode::CwdScanFailed => wire::ErrorCode::CwdScanFailed,
-    }
-}
-
-fn local_error(value: &wire::ErrorCode) -> local::WsCkptErrorCode {
-    match value {
-        wire::ErrorCode::WorkspaceNotFound => local::WsCkptErrorCode::WorkspaceNotFound,
-        wire::ErrorCode::SnapshotNotFound => local::WsCkptErrorCode::SnapshotNotFound,
-        wire::ErrorCode::AlreadyInitialized => local::WsCkptErrorCode::AlreadyInitialized,
-        wire::ErrorCode::BtrfsError => local::WsCkptErrorCode::BtrfsError,
-        wire::ErrorCode::IoError => local::WsCkptErrorCode::IoError,
-        wire::ErrorCode::InvalidPath => local::WsCkptErrorCode::InvalidPath,
-        wire::ErrorCode::ConfirmationRequired => local::WsCkptErrorCode::ConfirmationRequired,
-        wire::ErrorCode::InternalError => local::WsCkptErrorCode::InternalError,
-        wire::ErrorCode::SnapshotAlreadyExists => local::WsCkptErrorCode::SnapshotAlreadyExists,
-        wire::ErrorCode::WriteLockConflict => local::WsCkptErrorCode::WriteLockConflict,
-        wire::ErrorCode::DiskSpaceInsufficient => local::WsCkptErrorCode::DiskSpaceInsufficient,
-        wire::ErrorCode::CwdOccupied => local::WsCkptErrorCode::CwdOccupied,
-        wire::ErrorCode::CwdScanFailed => local::WsCkptErrorCode::CwdScanFailed,
-    }
-}
-
-#[test]
-fn every_wire_error_variant_matches_authoritative_bincode() {
-    let local_values = [
+fn error_cases() -> Vec<(&'static str, local::WsCkptErrorCode)> {
+    let samples = vec![
         local::WsCkptErrorCode::WorkspaceNotFound,
         local::WsCkptErrorCode::SnapshotNotFound,
         local::WsCkptErrorCode::AlreadyInitialized,
@@ -396,27 +217,10 @@ fn every_wire_error_variant_matches_authoritative_bincode() {
         local::WsCkptErrorCode::CwdOccupied,
         local::WsCkptErrorCode::CwdScanFailed,
     ];
-    for value in local_values {
-        assert_same_bincode(&value, &wire_error(&value));
-    }
-    let wire_values = [
-        wire::ErrorCode::WorkspaceNotFound,
-        wire::ErrorCode::SnapshotNotFound,
-        wire::ErrorCode::AlreadyInitialized,
-        wire::ErrorCode::BtrfsError,
-        wire::ErrorCode::IoError,
-        wire::ErrorCode::InvalidPath,
-        wire::ErrorCode::ConfirmationRequired,
-        wire::ErrorCode::InternalError,
-        wire::ErrorCode::SnapshotAlreadyExists,
-        wire::ErrorCode::WriteLockConflict,
-        wire::ErrorCode::DiskSpaceInsufficient,
-        wire::ErrorCode::CwdOccupied,
-        wire::ErrorCode::CwdScanFailed,
-    ];
-    for value in wire_values {
-        assert_same_bincode(&local_error(&value), &value);
-    }
+    samples
+        .into_iter()
+        .map(|value| (error_case_name(&value), value))
+        .collect()
 }
 
 fn local_snapshot() -> local::SnapshotEntry {
@@ -424,22 +228,6 @@ fn local_snapshot() -> local::SnapshotEntry {
         id: "s1".into(),
         workspace: "/ws".into(),
         meta: local::SnapshotMeta {
-            message: Some("message".into()),
-            metadata: Some(serde_json::json!({"k": 1})),
-            pinned: true,
-            created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            missing: true,
-            parent_id: Some("s0".into()),
-            child_ids: vec!["s2".into()],
-        },
-    }
-}
-
-fn wire_snapshot() -> wire::SnapshotEntry {
-    wire::SnapshotEntry {
-        id: "s1".into(),
-        workspace: "/ws".into(),
-        meta: wire::SnapshotMeta {
             message: Some("message".into()),
             metadata: Some(serde_json::json!({"k": 1})),
             pinned: true,
@@ -459,31 +247,10 @@ fn local_change() -> local::DiffEntry {
     }
 }
 
-fn wire_change() -> wire::DiffEntry {
-    wire::DiffEntry {
-        path: "src/lib.rs".into(),
-        change_type: wire::ChangeType::Renamed,
-        detail: Some("old.rs".into()),
-    }
-}
-
 fn local_status() -> local::StatusReport {
     local::StatusReport {
         uptime_secs: 9,
         workspaces: vec![local::WorkspaceInfo {
-            ws_id: "id".into(),
-            path: "/ws".into(),
-            snapshot_count: 2,
-        }],
-        fs_total_bytes: 100,
-        fs_used_bytes: 30,
-    }
-}
-
-fn wire_status() -> wire::StatusReport {
-    wire::StatusReport {
-        uptime_secs: 9,
-        workspaces: vec![wire::WorkspaceInfo {
             ws_id: "id".into(),
             path: "/ws".into(),
             snapshot_count: 2,
@@ -510,243 +277,8 @@ fn local_config() -> local::ConfigReport {
     }
 }
 
-fn wire_config() -> wire::ConfigReport {
-    wire::ConfigReport {
-        mount_path: "/mnt".into(),
-        socket_path: "/run/x".into(),
-        log_level: "debug".into(),
-        auto_cleanup: true,
-        auto_cleanup_keep: wire::CleanupRetention::Age {
-            raw: "2d".into(),
-            secs: 172_800,
-        },
-        auto_cleanup_interval_secs: 11,
-        health_check_interval_secs: 12,
-        img_size: 13,
-        img_max_percent: 0.4,
-    }
-}
-
-fn wire_response(value: &local::WsCkptResponse) -> wire::Response {
-    match value {
-        local::WsCkptResponse::InitOk { ws_id } => wire::Response::InitOk {
-            ws_id: ws_id.clone(),
-        },
-        local::WsCkptResponse::CheckpointOk { snapshot_id } => wire::Response::CheckpointOk {
-            snapshot_id: snapshot_id.clone(),
-        },
-        local::WsCkptResponse::RollbackOk { from, to } => wire::Response::RollbackOk {
-            from: from.clone(),
-            to: to.clone(),
-        },
-        local::WsCkptResponse::DeleteOk { target } => wire::Response::DeleteOk {
-            target: target.clone(),
-        },
-        local::WsCkptResponse::Error { code, message } => wire::Response::Error {
-            code: wire_error(code),
-            message: message.clone(),
-        },
-        local::WsCkptResponse::ListOk { snapshots } => {
-            assert_eq!(snapshots.len(), 1);
-            wire::Response::ListOk {
-                snapshots: vec![wire_snapshot()],
-            }
-        }
-        local::WsCkptResponse::DiffOk { changes } => {
-            assert_eq!(changes.len(), 1);
-            wire::Response::DiffOk {
-                changes: vec![wire_change()],
-            }
-        }
-        local::WsCkptResponse::StatusOk { report } => {
-            assert_eq!(report.uptime_secs, 9);
-            wire::Response::StatusOk {
-                report: wire_status(),
-            }
-        }
-        local::WsCkptResponse::CleanupOk { removed } => wire::Response::CleanupOk {
-            removed: removed.clone(),
-        },
-        local::WsCkptResponse::ConfigOk { config } => {
-            assert_eq!(config.img_size, 13);
-            wire::Response::ConfigOk {
-                config: wire_config(),
-            }
-        }
-        local::WsCkptResponse::ReloadConfigOk { config } => {
-            assert_eq!(config.img_size, 13);
-            wire::Response::ReloadConfigOk {
-                config: wire_config(),
-            }
-        }
-        local::WsCkptResponse::CheckpointSkipped { reason } => wire::Response::CheckpointSkipped {
-            reason: reason.clone(),
-        },
-        local::WsCkptResponse::RecoverOk { workspace } => wire::Response::RecoverOk {
-            workspace: workspace.clone(),
-        },
-        local::WsCkptResponse::HealthAdvisoryOk {
-            over_limit_workspace_count,
-            fs_total_bytes,
-            fs_used_bytes,
-        } => wire::Response::HealthAdvisoryOk {
-            over_limit_workspace_count: *over_limit_workspace_count,
-            fs_total_bytes: *fs_total_bytes,
-            fs_used_bytes: *fs_used_bytes,
-        },
-        local::WsCkptResponse::WorkspacePolicyOk {
-            ws_id,
-            effective,
-            local,
-            global,
-        } => wire::Response::WorkspacePolicyOk {
-            ws_id: ws_id.clone(),
-            effective: wire::EffectivePolicy {
-                auto_cleanup: effective.auto_cleanup,
-                auto_cleanup_keep: wire_retention(&effective.auto_cleanup_keep),
-            },
-            local: wire::WorkspacePolicy {
-                auto_cleanup: local.auto_cleanup,
-                auto_cleanup_keep: local.auto_cleanup_keep.as_ref().map(wire_retention),
-            },
-            global: wire::GlobalPolicySnapshot {
-                auto_cleanup: global.auto_cleanup,
-                auto_cleanup_keep: wire_retention(&global.auto_cleanup_keep),
-            },
-        },
-        local::WsCkptResponse::ConfigOverviewOk {
-            config,
-            ws_total,
-            ws_with_override,
-        } => {
-            assert_eq!(config.img_size, 13);
-            wire::Response::ConfigOverviewOk {
-                config: wire_config(),
-                ws_total: *ws_total,
-                ws_with_override: *ws_with_override,
-            }
-        }
-        local::WsCkptResponse::RollbackPreviewOk { to, changes } => {
-            assert_eq!(changes.len(), 1);
-            wire::Response::RollbackPreviewOk {
-                to: to.clone(),
-                changes: vec![wire_change()],
-            }
-        }
-    }
-}
-
-fn local_response(value: &wire::Response) -> local::WsCkptResponse {
-    match value {
-        wire::Response::InitOk { ws_id } => local::WsCkptResponse::InitOk {
-            ws_id: ws_id.clone(),
-        },
-        wire::Response::CheckpointOk { snapshot_id } => local::WsCkptResponse::CheckpointOk {
-            snapshot_id: snapshot_id.clone(),
-        },
-        wire::Response::RollbackOk { from, to } => local::WsCkptResponse::RollbackOk {
-            from: from.clone(),
-            to: to.clone(),
-        },
-        wire::Response::DeleteOk { target } => local::WsCkptResponse::DeleteOk {
-            target: target.clone(),
-        },
-        wire::Response::Error { code, message } => local::WsCkptResponse::Error {
-            code: local_error(code),
-            message: message.clone(),
-        },
-        wire::Response::ListOk { snapshots } => {
-            assert_eq!(snapshots.len(), 1);
-            local::WsCkptResponse::ListOk {
-                snapshots: vec![local_snapshot()],
-            }
-        }
-        wire::Response::DiffOk { changes } => {
-            assert_eq!(changes.len(), 1);
-            local::WsCkptResponse::DiffOk {
-                changes: vec![local_change()],
-            }
-        }
-        wire::Response::StatusOk { report } => {
-            assert_eq!(report.uptime_secs, 9);
-            local::WsCkptResponse::StatusOk {
-                report: local_status(),
-            }
-        }
-        wire::Response::CleanupOk { removed } => local::WsCkptResponse::CleanupOk {
-            removed: removed.clone(),
-        },
-        wire::Response::ConfigOk { config } => {
-            assert_eq!(config.img_size, 13);
-            local::WsCkptResponse::ConfigOk {
-                config: local_config(),
-            }
-        }
-        wire::Response::ReloadConfigOk { config } => {
-            assert_eq!(config.img_size, 13);
-            local::WsCkptResponse::ReloadConfigOk {
-                config: local_config(),
-            }
-        }
-        wire::Response::CheckpointSkipped { reason } => local::WsCkptResponse::CheckpointSkipped {
-            reason: reason.clone(),
-        },
-        wire::Response::RecoverOk { workspace } => local::WsCkptResponse::RecoverOk {
-            workspace: workspace.clone(),
-        },
-        wire::Response::HealthAdvisoryOk {
-            over_limit_workspace_count,
-            fs_total_bytes,
-            fs_used_bytes,
-        } => local::WsCkptResponse::HealthAdvisoryOk {
-            over_limit_workspace_count: *over_limit_workspace_count,
-            fs_total_bytes: *fs_total_bytes,
-            fs_used_bytes: *fs_used_bytes,
-        },
-        wire::Response::WorkspacePolicyOk {
-            ws_id,
-            effective,
-            local,
-            global,
-        } => local::WsCkptResponse::WorkspacePolicyOk {
-            ws_id: ws_id.clone(),
-            effective: local::EffectivePolicy {
-                auto_cleanup: effective.auto_cleanup,
-                auto_cleanup_keep: local_retention(&effective.auto_cleanup_keep),
-            },
-            local: local::WorkspacePolicy {
-                auto_cleanup: local.auto_cleanup,
-                auto_cleanup_keep: local.auto_cleanup_keep.as_ref().map(local_retention),
-            },
-            global: local::GlobalPolicySnapshot {
-                auto_cleanup: global.auto_cleanup,
-                auto_cleanup_keep: local_retention(&global.auto_cleanup_keep),
-            },
-        },
-        wire::Response::ConfigOverviewOk {
-            config,
-            ws_total,
-            ws_with_override,
-        } => {
-            assert_eq!(config.img_size, 13);
-            local::WsCkptResponse::ConfigOverviewOk {
-                config: local_config(),
-                ws_total: *ws_total,
-                ws_with_override: *ws_with_override,
-            }
-        }
-        wire::Response::RollbackPreviewOk { to, changes } => {
-            assert_eq!(changes.len(), 1);
-            local::WsCkptResponse::RollbackPreviewOk {
-                to: to.clone(),
-                changes: vec![local_change()],
-            }
-        }
-    }
-}
-
-fn local_response_samples() -> Vec<local::WsCkptResponse> {
-    vec![
+fn response_cases() -> Vec<(&'static str, local::WsCkptResponse)> {
+    let samples = vec![
         local::WsCkptResponse::InitOk { ws_id: "id".into() },
         local::WsCkptResponse::CheckpointOk {
             snapshot_id: "s1".into(),
@@ -815,15 +347,107 @@ fn local_response_samples() -> Vec<local::WsCkptResponse> {
             to: "s1".into(),
             changes: vec![local_change()],
         },
-    ]
+    ];
+    samples
+        .into_iter()
+        .map(|value| (response_case_name(&value), value))
+        .collect()
+}
+
+fn encode_cases<T: Serialize>(cases: &[(&'static str, T)]) -> Vec<FixtureCase> {
+    cases
+        .iter()
+        .map(|(name, value)| FixtureCase {
+            name: (*name).to_string(),
+            hex: to_hex(&bincode::serialize(value).unwrap()),
+        })
+        .collect()
+}
+
+fn assert_decode_reencode<T: Serialize + DeserializeOwned>(name: &str, hex: &str) {
+    let bytes = from_hex(name, hex);
+    let decoded: T = bincode::deserialize(&bytes)
+        .unwrap_or_else(|e| panic!("case {name}: golden wire bytes no longer decode: {e}"));
+    assert_eq!(
+        to_hex(&bincode::serialize(&decoded).unwrap()),
+        hex,
+        "case {name}: decode/re-encode round trip diverged from golden bytes"
+    );
+}
+
+fn load_fixture() -> Fixture {
+    let path = fixture_path();
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "missing golden fixture {}: {e}; regenerate with {REGEN_ENV}=1 \
+             only for an intentional, daemon-coordinated protocol change",
+            path.display()
+        )
+    });
+    serde_json::from_str(&raw).unwrap()
 }
 
 #[test]
-fn every_response_variant_matches_authoritative_bincode() {
-    for value in local_response_samples() {
-        assert_same_bincode(&value, &wire_response(&value));
+fn checkpoint_wire_matches_golden_fixture() {
+    let requests = request_cases();
+    let errors = error_cases();
+    let responses = response_cases();
+
+    let mut expected = encode_cases(&requests);
+    expected.extend(encode_cases(&errors));
+    expected.extend(encode_cases(&responses));
+
+    let unique: BTreeSet<&str> = expected.iter().map(|case| case.name.as_str()).collect();
+    assert_eq!(unique.len(), expected.len(), "duplicate case names");
+
+    if std::env::var_os(REGEN_ENV).is_some() {
+        let fixture = Fixture {
+            protocol_version: PROTOCOL_VERSION,
+            cases: expected,
+        };
+        let serialized = serde_json::to_string_pretty(&fixture).unwrap();
+        std::fs::write(fixture_path(), serialized + "\n").unwrap();
+        return;
     }
-    for value in local_response_samples().iter().map(wire_response) {
-        assert_same_bincode(&local_response(&value), &value);
+
+    let fixture = load_fixture();
+    assert_eq!(fixture.protocol_version, PROTOCOL_VERSION);
+
+    let expected_names: Vec<&str> = expected.iter().map(|case| case.name.as_str()).collect();
+    let fixture_names: Vec<&str> = fixture
+        .cases
+        .iter()
+        .map(|case| case.name.as_str())
+        .collect();
+    assert_eq!(
+        fixture_names, expected_names,
+        "wire case set drifted from golden fixture; if the protocol change is \
+         intentional and daemon-coordinated, regenerate with {REGEN_ENV}=1"
+    );
+
+    for (expected_case, fixture_case) in expected.iter().zip(fixture.cases.iter()) {
+        assert_eq!(
+            expected_case.hex, fixture_case.hex,
+            "case {}: local bincode encoding no longer matches golden wire bytes",
+            expected_case.name
+        );
+    }
+
+    let fixture_hex = |name: &str| {
+        fixture
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .map(|case| case.hex.as_str())
+            .unwrap()
+    };
+    for (name, _) in &requests {
+        assert_decode_reencode::<local::WsCkptRequest>(name, fixture_hex(name));
+    }
+    for (name, _) in &errors {
+        assert_decode_reencode::<local::WsCkptErrorCode>(name, fixture_hex(name));
+    }
+    for (name, _) in &responses {
+        assert_decode_reencode::<local::WsCkptResponse>(name, fixture_hex(name));
     }
 }

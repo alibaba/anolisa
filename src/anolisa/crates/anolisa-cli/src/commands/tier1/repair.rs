@@ -178,7 +178,8 @@ fn repair_attempt(
     let now = now_iso8601();
 
     let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
-    let store = view.writable.state;
+    let mut store = view.writable.state;
+    common::hydrate_owned_file_contracts(&mut store, &layout);
     let target = resolved.as_str();
 
     // The probe target: an active delegated record's resolved package (a
@@ -2609,6 +2610,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }
     }
 
@@ -3407,6 +3410,86 @@ mod tests {
         }
         assert_eq!(store.operations.len(), 1);
         assert!(store.operations[0].command.starts_with("repair"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mode_only_damage_replays_and_restores_declared_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::commands::tier1::install::tests::{
+            component_manifest_toml, write_local_repo_component,
+        };
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        let repo_root = tmp.path().join("repo");
+        let base_url = write_local_repo_component(&repo_root, "skillfs", "1.0.0", &["system"]);
+        fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{base_url}\"\n"
+            ),
+        )
+        .expect("write repo.toml");
+
+        let binary = layout.bin_dir.join("skillfs");
+        fs::create_dir_all(&layout.bin_dir).expect("bin dir");
+        let payload = b"#!/bin/sh\necho skillfs\n";
+        fs::write(&binary, payload).expect("write intact binary");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o644)).expect("damage mode");
+        let mut owned = anolisa_file(binary.clone());
+        owned.sha256 = Some({
+            use sha2::{Digest, Sha256};
+            Sha256::digest(payload)
+                .iter()
+                .fold(String::new(), |mut digest, byte| {
+                    use std::fmt::Write;
+                    let _ = write!(digest, "{byte:02x}");
+                    digest
+                })
+        });
+        let mut object = raw_object("skillfs", "1.0.0", vec![owned]);
+        object.raw_package = Some("skillfs".to_string());
+        seed(&ctx, vec![object]);
+
+        let manifest_path = common::installed_component_manifest_path(&layout, "skillfs", COMMAND)
+            .expect("manifest path");
+        fs::create_dir_all(manifest_path.parent().expect("manifest parent")).expect("manifest dir");
+        fs::write(
+            &manifest_path,
+            component_manifest_toml("skillfs", "1.0.0", &["system"]),
+        )
+        .expect("saved installed manifest");
+        let fake = FakeRpm::new("unrelated", None);
+
+        repair_with_deps("skillfs", &ctx, &fake, &fake, false).expect("repair mode");
+
+        assert_eq!(
+            fs::metadata(&binary)
+                .expect("binary metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755
+        );
+        let state_path = layout.state_dir.join("installed.toml");
+        let store = StateStore::load(&state_path, 0).expect("reload");
+        let ProviderBinding::Owned { artifact } = &store
+            .find(ObjectKind::Component, "skillfs")
+            .expect("record")
+            .binding
+        else {
+            panic!("expected owned record");
+        };
+        let binary_row = artifact
+            .files
+            .iter()
+            .find(|file| file.path == binary)
+            .expect("binary row");
+        assert_eq!(binary_row.mode.as_deref(), Some("0755"));
     }
 
     #[test]

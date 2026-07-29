@@ -2,11 +2,15 @@
 //! Sandbox backend kinds + selection / fallback.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{BlazeError, Result};
+use crate::policy::{BackendConfigs, VmConfig};
+use crate::storage::StorageSlot;
 
 /// All backends that blaze v0.1 knows about. Each backend maps to a
 /// binary path configured in the daemon `[backends]` section.
@@ -78,6 +82,23 @@ impl FromStr for BackendKind {
             }),
         }
     }
+}
+
+/// Complete input for starting a backend instance.
+#[derive(Debug, Clone)]
+pub struct SpawnRequest {
+    /// Stable sandbox identifier.
+    pub instance_id: Uuid,
+    /// Provider-owned runtime directory.
+    pub run_dir: PathBuf,
+    /// Backend executable selected during daemon startup.
+    pub binary_path: PathBuf,
+    /// Storage resources owned by this sandbox.
+    pub storage: StorageSlot,
+    /// Backend-specific policy configuration.
+    pub backend: BackendConfigs,
+    /// Generic VM resource configuration.
+    pub vm: Option<VmConfig>,
 }
 
 /// Probed availability of a single backend on this host.

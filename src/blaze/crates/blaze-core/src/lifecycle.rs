@@ -56,6 +56,21 @@ pub enum StartPath {
     Warm,
 }
 
+/// Durable knowledge about whether a backend may still own a live process.
+///
+/// `Unknown` is the safe default for state written by older daemon versions.
+/// Recovery must confirm termination for both `Unknown` and `Starting`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendOwnership {
+    #[default]
+    Unknown,
+    NotStarted,
+    Starting,
+    Running,
+    Stopped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxInstance {
     pub id: Uuid,
@@ -67,6 +82,9 @@ pub struct SandboxInstance {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub policy_name: String,
+    /// Last durably known backend ownership state.
+    #[serde(default)]
+    pub backend_ownership: BackendOwnership,
 }
 
 impl SandboxInstance {
@@ -91,6 +109,7 @@ impl SandboxInstance {
             created_at: now,
             updated_at: now,
             policy_name,
+            backend_ownership: BackendOwnership::NotStarted,
         }
     }
 

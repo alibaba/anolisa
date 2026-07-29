@@ -1050,6 +1050,8 @@ mod tests {
             sha256: Some(sha),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         };
 
         let mut store = StateStore::empty();
@@ -1126,6 +1128,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         };
 
         let req = ObserveRequest {
@@ -1147,6 +1151,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         };
         let mut store = StateStore::empty();
         store

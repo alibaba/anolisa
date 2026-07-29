@@ -17,6 +17,9 @@ venv/
 
 # Build artifacts
 rpmbuild/
+website/.docusaurus/
+website/.generated/
+website/build/
 # target/ is already covered by **/target/ (Rust rule above)
 *.o
 *.a

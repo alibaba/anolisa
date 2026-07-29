@@ -87,6 +87,15 @@ diff。只有相邻 active 阶段的输出与输入内容完全一致时才会�
 从而避免重复计算中间阶段的 Token。完整选项和度量限制见
 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#统计与效果度量)。
 
+## npm 安装
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+自动安装适合您平台的预编译二进制文件（`tokenless`、`rtk`、`toon`）。
+支持 Linux 和 macOS 的 x86_64 和 arm64 架构。
+
 ## 架构
 
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor

@@ -10,6 +10,3 @@ serde.workspace = true
 serde_json.workspace = true
 chrono = { workspace = true, features = ["serde", "alloc"] }
 bincode.workspace = true
-
-[dev-dependencies]
-ws-ckpt-common = { path = "../../../ws-ckpt/src/crates/common" }

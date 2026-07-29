@@ -6,7 +6,7 @@ Tokenless 是 ANOLISA 的 Token 优化组件。它自动压缩工具定义和模
 
 ## 概述
 
-AI Agent 交互中通常包含大量工具 Schema 定义和冗长的 CLI 输出。Tokenless 在框架层拦截这些内容并进行无损/近无损压缩，透明地实现 30–70% 的 Token 节省。
+AI Agent 交互中通常包含大量工具 Schema 和冗长的 CLI 输出。Tokenless 在框架层压缩这些内容，并记录 Payload 级统计，让实际效果可以结合当前负载进行衡量。
 
 **核心能力：**
 
@@ -18,8 +18,9 @@ AI Agent 交互中通常包含大量工具 Schema 定义和冗长的 CLI 输出�
 
 ## 前置条件
 
-- Linux（x86_64 或 aarch64）
-- 已安装 cosh、OpenClaw、Hermes、claude-code、codex 或 qwencode 之一（作为宿主 Agent 框架）
+- Linux（x86_64 或 aarch64，glibc 2.17+）— npm 支持两种架构；ANOLISA CLI 制品支持 x86_64
+- macOS（x86_64 或 Apple Silicon）— npm 支持两种架构；ANOLISA CLI 制品支持 Apple Silicon
+- 已安装 Cosh、OpenClaw、Hermes、Qoder、Claude Code、Codex 或 Qwencode 之一（作为宿主 Agent 框架；这些框架跨平台，可运行于 macOS）
 
 ---
 
@@ -31,17 +32,30 @@ AI Agent 交互中通常包含大量工具 Schema 定义和冗长的 CLI 输出�
 anolisa install tokenless
 ```
 
+Linux x86_64 或 Apple Silicon Mac 可使用此方式。Linux aarch64 或 Intel Mac
+请使用 npm。
+
 ### 方式二：YUM（Alinux，需配置 ANOLISA YUM 源）
 
 ```bash
 sudo yum install tokenless
 ```
 
-### 方式三：源码编译（开发者）
+### 方式三：npm（Node.js 用户）
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+自动安装 Linux（glibc）和 macOS（x86_64、aarch64）的预编译二进制，并将框架适配器安装到 `~/.local/share/anolisa/adapters/tokenless/`（Linux 与 macOS 均支持）。通过对应的安装脚本将适配器注册到框架，例如 `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`。
+
+### 方式四：源码编译（开发者，仅限 Linux）
 
 ```bash
 cd src/tokenless && cargo build --release
 ```
+
+> 源码编译仅支持 Linux。macOS 用户请使用 npm 包，其中包含交叉编译的 macOS 二进制。
 
 ---
 
@@ -93,12 +107,12 @@ Tokenless 还支持 claude-code、codex 和 qwencode adapter。运行 `anolisa i
 | `tokenless compress-toon` | 压缩为 TOON 格式 |
 | `tokenless decompress-toon` | 从 TOON 格式解压 |
 | `tokenless env-check` | 检查环境和集成状态 |
-| `tokenless stats` | 查看压缩统计 |
+| `tokenless stats summary` | 查看压缩统计摘要 |
 
 ### 查看压缩统计
 
 ```bash
-tokenless stats
+tokenless stats summary
 ```
 
 示例输出：

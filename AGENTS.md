@@ -9,9 +9,10 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | Component | Path | Tech | Platform |
 |-----------|------|------|----------|
 | **copilot-shell** (`cosh`) | `src/copilot-shell/` | TypeScript / Node.js | All |
+| **cosh-ng** | `src/cosh-ng/` | Rust | Linux only |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux only |
-| **tokenless** | `src/tokenless/` | Rust | Linux only |
+| **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm) |
 | **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
 | **anolisa** | `src/anolisa/` | Rust | Linux + macOS (arm64) |
@@ -20,7 +21,7 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **ktuner** | `src/ktuner/` | Rust | Linux only |
 | **blaze** | `src/blaze/` | Rust | Linux only |
 
-> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, and `blaze` require Linux. Do **not** attempt to build them on macOS or Windows.
+> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, and `blaze` require Linux. Do **not** attempt to build them on macOS or Windows. (tokenless ships macOS CLI binaries and framework adapters via npm, but the binaries are cross-compiled **from Linux** — building tokenless on macOS is still unsupported.)
 
 ## 2. Development Commands
 

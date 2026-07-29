@@ -72,7 +72,12 @@ pub struct CmdlineGlobMatcher {
 impl CmdlineGlobMatcher {
     pub fn new(agent_name: &str, patterns: Vec<String>) -> Self {
         Self {
-            info: AgentInfo::new(agent_name, vec![], "Config-driven agent", "custom"),
+            info: AgentInfo {
+                name: agent_name.to_string(),
+                process_names: patterns.clone(),
+                description: "Config-driven agent".to_string(),
+                category: "custom".to_string(),
+            },
             patterns,
         }
     }
@@ -102,6 +107,11 @@ impl CmdlineGlobMatcher {
     /// Return the agent metadata
     pub fn info(&self) -> &AgentInfo {
         &self.info
+    }
+
+    /// Return the command-line glob rule used by this matcher.
+    pub fn patterns(&self) -> &[String] {
+        &self.patterns
     }
 
     /// Check if a process matches this matcher's patterns
@@ -171,6 +181,21 @@ mod tests {
         };
         assert!(matcher.matches(&ctx));
         assert_eq!(matcher.info().name, "Claude Code");
+        assert_eq!(matcher.info().process_names, matcher.patterns());
+    }
+
+    #[test]
+    fn test_from_config_keeps_cmdline_rule_metadata() {
+        let rule = crate::config::CmdlineRule {
+            patterns: vec!["*node*".to_string(), "*codex*".to_string()],
+            agent_name: Some("Codex".to_string()),
+            allow: true,
+        };
+        let matcher = CmdlineGlobMatcher::from_config(&rule).expect("allow rule creates matcher");
+
+        assert_eq!(matcher.info().name, "Codex");
+        assert_eq!(matcher.patterns(), rule.patterns);
+        assert_eq!(matcher.info().process_names, rule.patterns);
     }
 
     #[test]

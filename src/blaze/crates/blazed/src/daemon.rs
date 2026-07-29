@@ -22,7 +22,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::api;
 use crate::error::{BlazeDaemonError, Result};
 use crate::spawner::{
-    BackendSpawner, BubblewrapSpawner, DynSpawner, FirecrackerSpawner, MockSpawner,
+    BubblewrapSpawner, DynSpawner, FirecrackerSpawner, MockSpawner, SpawnerRegistry,
 };
 use crate::state::ServerState;
 
@@ -37,7 +37,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
     let pool = PoolManager::new();
     let template = TemplateRegistry::new();
     let hook = HookRegistry::new();
-    let (spawner, active_backend) = build_spawner(&config).await;
+    let (spawners, active_backend) = build_spawners(&config).await;
 
     // Build storage provider
     if config.storage.provider != "file" && config.storage.provider != "auto" {
@@ -48,9 +48,13 @@ pub async fn run(config_path: &Path) -> Result<()> {
     }
     let storage: Arc<dyn StorageProvider> = {
         use crate::file_provider::FileStorageProvider;
-        // Ensure base_dir exists (acquire uses create_dir, not create_dir_all)
+        // Keep immutable images and provider-owned runtime slots separate.
         tokio::fs::create_dir_all(&config.storage.images_dir).await?;
-        let fp = FileStorageProvider::new(config.storage.images_dir.clone());
+        tokio::fs::create_dir_all(&config.storage.instances_dir).await?;
+        let fp = FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        );
         match fp.probe().await {
             Ok(true) => {
                 tracing::info!(dir = %config.storage.images_dir.display(), "storage provider ready");
@@ -70,7 +74,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
         pool,
         template,
         hook,
-        spawner,
+        spawners,
         active_backend,
         storage,
     ));
@@ -99,33 +103,45 @@ pub async fn run(config_path: &Path) -> Result<()> {
 }
 
 fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
+    cfg.validate()?;
     std::fs::create_dir_all(&cfg.daemon.state_dir)?;
     std::fs::create_dir_all(&cfg.template.dir)?;
+    std::fs::create_dir_all(&cfg.storage.images_dir)?;
+    std::fs::create_dir_all(&cfg.storage.instances_dir)?;
+    let images_dir = std::fs::canonicalize(&cfg.storage.images_dir)?;
+    let instances_dir = std::fs::canonicalize(&cfg.storage.instances_dir)?;
+    blaze_core::config::validate_storage_paths(&images_dir, &instances_dir)?;
     if let Some(parent) = cfg.daemon.socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
 }
 
-/// Build the [`BackendSpawner`] used by API handlers. Probes
+/// Build the [`crate::spawner::BackendSpawner`] implementations used by API
+/// handlers. Probes
 /// `[backends]` for known backends in priority order:
 ///   1. `firecracker` → [`FirecrackerSpawner`]
 ///   2. `bubblewrap` → [`BubblewrapSpawner`]
 ///   3. fallback → [`MockSpawner`]
-async fn build_spawner(cfg: &DaemonConfig) -> (DynSpawner, BackendKind) {
+async fn build_spawners(cfg: &DaemonConfig) -> (SpawnerRegistry, BackendKind) {
+    let firecracker: DynSpawner = Arc::new(FirecrackerSpawner::new(cfg.storage.images_dir.clone()));
+    let bubblewrap: DynSpawner = Arc::new(BubblewrapSpawner);
+    let mock: DynSpawner = Arc::new(MockSpawner);
+    let mut spawners = SpawnerRegistry::new();
+    spawners.insert(BackendKind::Firecracker, firecracker.clone());
+    spawners.insert(BackendKind::Bubblewrap, bubblewrap.clone());
+    spawners.insert(BackendKind::Mock, mock);
+
     // --- Firecracker --------------------------------------------------------
     if let Some(fc_path) = cfg.backends.get(BackendKind::Firecracker.as_str()).cloned() {
-        let fc = FirecrackerSpawner {
-            images_dir: cfg.storage.images_dir.clone(),
-        };
-        match fc.probe(&fc_path).await {
+        match firecracker.probe(&fc_path).await {
             Ok(true) => {
                 tracing::info!(
                     binary = %fc_path.display(),
                     images_dir = %cfg.storage.images_dir.display(),
                     "data plane: using FirecrackerSpawner",
                 );
-                return (Arc::new(fc), BackendKind::Firecracker);
+                return (spawners, BackendKind::Firecracker);
             }
             Ok(false) => {
                 tracing::warn!(
@@ -145,14 +161,13 @@ async fn build_spawner(cfg: &DaemonConfig) -> (DynSpawner, BackendKind) {
 
     // --- Bubblewrap (bwrap) --------------------------------------------------
     if let Some(path) = cfg.backends.get(BackendKind::Bubblewrap.as_str()).cloned() {
-        let probe = BubblewrapSpawner;
-        match probe.probe(&path).await {
+        match bubblewrap.probe(&path).await {
             Ok(true) => {
                 tracing::info!(
                     binary = %path.display(),
                     "data plane: using BubblewrapSpawner",
                 );
-                return (Arc::new(BubblewrapSpawner), BackendKind::Bubblewrap);
+                return (spawners, BackendKind::Bubblewrap);
             }
             Ok(false) => {
                 tracing::warn!(
@@ -174,7 +189,7 @@ async fn build_spawner(cfg: &DaemonConfig) -> (DynSpawner, BackendKind) {
     tracing::warn!(
         "no usable backend found in [backends], using MockSpawner (data plane is simulated)",
     );
-    (Arc::new(MockSpawner), BackendKind::Mock)
+    (spawners, BackendKind::Mock)
 }
 
 fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {

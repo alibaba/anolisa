@@ -1864,7 +1864,7 @@ fn suggestions_for_health(
     layout: &FsLayout,
 ) -> Vec<FixSuggestion> {
     match status {
-        "missing_file" | "sha256_mismatch" => {
+        "missing_file" | "sha256_mismatch" | "mode_mismatch" | "capability_mismatch" => {
             let repairable = check_name.strip_prefix("integrity:").is_some_and(|path| {
                 owned_file_damage_matches(object, layout, |owned| owned == Path::new(path))
             });
@@ -2279,6 +2279,8 @@ mod tests {
             sha256: Some("0".repeat(64)),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         });
     }
 
@@ -2901,6 +2903,61 @@ mod tests {
             Ok(Plan::NoOp {
                 reason: NoOpReason::AlreadyInstalled,
             })
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mode_mismatch_health_recommends_repair() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        fs::create_dir_all(&layout.bin_dir).expect("bin dir");
+        let binary = layout.bin_dir.join("agentsight");
+        fs::write(&binary, b"payload").expect("write binary");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let mut object = owned_object("agentsight", LifecycleStatus::Installed);
+        push_owned_file(&mut object, binary.clone());
+        let ProviderBinding::Owned { artifact } = &mut object.binding else {
+            panic!("fixture must be owned");
+        };
+        artifact.files[0].mode = Some("0755".to_string());
+
+        let suggestions = suggestions_for_health(
+            StateScope::System,
+            "agentsight",
+            &format!("integrity:{}", binary.display()),
+            "mode_mismatch",
+            Some(&object),
+            &layout,
+        );
+
+        assert_eq!(suggestions[0].action, "repair_component");
+        assert_eq!(
+            suggestions[0].command.as_deref(),
+            Some("sudo anolisa --install-mode system repair agentsight")
+        );
+
+        let structured = CheckOutcome {
+            spec_label: format!("binary_version binary={}", binary.display()),
+            status: CheckStatus::Failed,
+            detail: Some("Permission denied (os error 13)".to_string()),
+            children: Vec::new(),
+        };
+        let suggestions = suggestions_for_structured_health(
+            StateScope::System,
+            "agentsight",
+            &object,
+            &layout,
+            &structured,
+        );
+        assert_eq!(suggestions[0].action, "repair_component");
+        assert_eq!(
+            suggestions[0].command.as_deref(),
+            Some("sudo anolisa --install-mode system repair agentsight")
         );
     }
 

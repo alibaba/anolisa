@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14] - 2026-07-29
+
+### Fixed
+
+- `anolisa status` and `anolisa doctor` now detect Unix mode and Linux file
+  capability drift for raw-managed files, including installations recorded by
+  earlier releases, and recommend `anolisa repair` for recovery.
+- `anolisa repair` now replays raw-managed components when only file metadata
+  has drifted, restoring declared modes and confirmed capabilities. Failed
+  updates restore only capabilities known to have been active before the
+  operation, avoiding optional grants that never applied
+  ([#1987](https://github.com/alibaba/anolisa/pull/1987)).
+
 ## [0.2.13] - 2026-07-28
 
 ### Added
@@ -708,6 +721,18 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.14] - 2026-07-29
+
+### 修复
+
+- `anolisa status` 和 `anolisa doctor` 现可检测 raw 托管文件的 Unix mode 与
+  Linux file capability 漂移（包括由旧版本记录的安装），并建议运行
+  `anolisa repair` 进行恢复。
+- `anolisa repair` 现会在仅文件元数据漂移时重新部署 raw 托管组件，恢复声明的
+  mode 和已确认的 capability。更新失败后的回滚仅恢复操作前已确认生效的
+  capability，避免授予原安装中未成功应用的可选 capability
+  ([#1987](https://github.com/alibaba/anolisa/pull/1987))。
 
 ## [0.2.13] - 2026-07-28
 

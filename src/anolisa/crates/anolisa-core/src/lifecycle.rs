@@ -933,6 +933,8 @@ mod tests {
                 sha256: Some("0".repeat(64)),
                 kind: OwnedFileKind::File,
                 referent: None,
+                mode: None,
+                capabilities: Vec::new(),
             }],
             external_modified_files: vec![ExternalModifiedFile {
                 path: external_path.to_path_buf(),

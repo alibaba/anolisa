@@ -82,6 +82,8 @@ pub struct PoolStats {
     pub total_hits: u64,
     pub total_misses: u64,
     pub evict_count: u64,
+    /// Candidates removed from service because their runtime resources failed validation.
+    pub quarantine_count: u64,
 }
 
 #[derive(Debug, Default)]
@@ -117,6 +119,32 @@ impl PoolManager {
             tracing::info!(?key, "pool miss");
             None
         }
+    }
+
+    /// Record that a candidate returned by [`Self::lookup`] failed validation.
+    ///
+    /// Invalid candidates are not returned to the ready queue. Reclassifying
+    /// the optimistic lookup as a miss keeps hit metrics aligned with usable
+    /// warm activations.
+    pub fn quarantine(&mut self, key: &PoolKey, instance_id: Uuid) {
+        let bucket = self.pools.entry(key.clone()).or_default();
+        bucket.stats.total_hits = bucket.stats.total_hits.saturating_sub(1);
+        bucket.stats.total_misses += 1;
+        bucket.stats.quarantine_count += 1;
+        tracing::warn!(?key, %instance_id, "quarantined invalid warm instance");
+    }
+
+    /// Restore a claimed warm instance after a retryable activation failure.
+    ///
+    /// Capacity is not re-evaluated because the instance occupied this slot
+    /// immediately before [`Self::lookup`] removed it.
+    pub fn restore_lookup(&mut self, key: PoolKey, instance_id: Uuid) {
+        let bucket = self.pools.entry(key.clone()).or_default();
+        if !bucket.warm.contains(&instance_id) {
+            bucket.warm.push_front(instance_id);
+        }
+        bucket.stats.warm_count = bucket.warm.len() as u32;
+        tracing::warn!(?key, %instance_id, "restored failed pool activation");
     }
 
     /// Push an instance back into its pool after reset.
@@ -215,6 +243,22 @@ mod tests {
         let drained = mgr.drain(BackendKind::KataFc, WorkloadClass::AgentTool);
         assert_eq!(drained.len(), 2);
         assert_eq!(mgr.stats(&key()).warm_count, 0);
+    }
+
+    #[test]
+    fn quarantine_reclassifies_an_invalid_candidate_as_a_miss() {
+        let mut mgr = PoolManager::new();
+        let id = Uuid::new_v4();
+        mgr.return_to_pool(key(), id);
+
+        assert_eq!(mgr.lookup(&key()), Some(id));
+        mgr.quarantine(&key(), id);
+
+        let stats = mgr.stats(&key());
+        assert_eq!(stats.warm_count, 0);
+        assert_eq!(stats.total_hits, 0);
+        assert_eq!(stats.total_misses, 1);
+        assert_eq!(stats.quarantine_count, 1);
     }
 
     #[test]
