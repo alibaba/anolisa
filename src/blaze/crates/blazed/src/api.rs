@@ -72,12 +72,18 @@ async fn dispatch(
 
     match (m, parts.as_slice()) {
         ("GET", ["v1", "health"]) => health(state),
-        ("GET", ["v1", "instances"]) => list_instances(state),
-        ("POST", ["v1", "instances"]) => create_instance(state, &body).await,
-        ("GET", ["v1", "instances", id]) => get_instance(state, id),
+        ("GET", ["v1", "instances"]) | ("GET", ["v1", "sandboxes"]) => list_instances(state),
+        ("POST", ["v1", "instances"]) | ("POST", ["v1", "sandboxes"]) => {
+            create_instance(state, &body).await
+        }
+        ("GET", ["v1", "instances", id]) | ("GET", ["v1", "sandboxes", id]) => {
+            get_instance(state, id)
+        }
         ("POST", ["v1", "instances", id, "checkpoint"]) => checkpoint(state, id).await,
         ("POST", ["v1", "instances", id, "reset"]) => reset_instance(state, id).await,
-        ("POST", ["v1", "instances", id, "destroy"]) => destroy_instance(state, id).await,
+        ("DELETE", ["v1", "instances", id])
+        | ("DELETE", ["v1", "sandboxes", id])
+        | ("POST", ["v1", "instances", id, "destroy"]) => destroy_instance(state, id).await,
         ("GET", ["v1", "pools"]) => list_pools(state),
         ("GET", ["v1", "pools", backend, class]) => pool_status(state, backend, class),
         ("POST", ["v1", "pools", backend, class, "drain"]) => drain_pool(state, backend, class),
@@ -719,6 +725,26 @@ mod tests {
         .expect("created json")
     }
 
+    async fn dispatched_json(
+        state: &Arc<ServerState>,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = dispatch(&method, path, "", body, state)
+            .await
+            .expect("dispatch");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value = serde_json::from_slice(&body).expect("response json");
+        (status, value)
+    }
+
     struct TransientReconstructStorage {
         inner: FileStorageProvider,
         fail_reconstruct: AtomicBool,
@@ -1090,6 +1116,97 @@ mod tests {
             storage,
         );
         (state, kill_count, orphan_cleanup_count, release_count)
+    }
+
+    #[tokio::test]
+    async fn sandbox_collection_and_item_routes_match_instance_routes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+
+        let (status, created) =
+            dispatched_json(&state, Method::POST, "/v1/sandboxes", test_request()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["instance"]["state"], "running");
+        let id = created["instance"]["id"].as_str().expect("instance id");
+
+        let (_, sandboxes) =
+            dispatched_json(&state, Method::GET, "/v1/sandboxes", Vec::new()).await;
+        let (_, instances) =
+            dispatched_json(&state, Method::GET, "/v1/instances", Vec::new()).await;
+        assert_eq!(sandboxes, instances);
+
+        let (_, sandbox) = dispatched_json(
+            &state,
+            Method::GET,
+            &format!("/v1/sandboxes/{id}"),
+            Vec::new(),
+        )
+        .await;
+        let (_, instance) = dispatched_json(
+            &state,
+            Method::GET,
+            &format!("/v1/instances/{id}"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(sandbox, instance);
+    }
+
+    #[tokio::test]
+    async fn destroy_route_forms_share_managed_cleanup() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let created = created_json(&state, &test_request()).await;
+            ids.push(
+                Uuid::parse_str(created["instance"]["id"].as_str().expect("instance id"))
+                    .expect("uuid"),
+            );
+        }
+        let routes = [
+            (Method::DELETE, format!("/v1/sandboxes/{}", ids[0]), ids[0]),
+            (Method::DELETE, format!("/v1/instances/{}", ids[1]), ids[1]),
+            (
+                Method::POST,
+                format!("/v1/instances/{}/destroy", ids[2]),
+                ids[2],
+            ),
+        ];
+
+        for (method, path, id) in routes {
+            let (status, response) = dispatched_json(&state, method, &path, Vec::new()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response["destroyed"], true);
+            assert_eq!(response["instance_id"], id.to_string());
+            assert_eq!(
+                state.manager.get(id).expect("destroyed state").state,
+                SandboxState::Destroyed
+            );
+        }
     }
 
     /// When multiple backend binaries exist on disk but the daemon probed
