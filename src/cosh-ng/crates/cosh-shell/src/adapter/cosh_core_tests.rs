@@ -290,6 +290,35 @@ fn prepare_invocation_prompt_includes_cosh_shell_contract() {
         .contains("at most one primary recommendation command"));
 }
 
+// cosh-core recovers the raw user input from this envelope for session
+// summaries, so the anchors it matches on must keep their exact spelling and
+// order. Changing them silently degrades `/session list` previews.
+#[test]
+fn prepare_invocation_prompt_keeps_session_summary_anchors() {
+    const PREFIX: &str =
+        "Handle this natural-language shell prompt request for a Shell-first assistant.\n";
+    const INPUT_MARKER: &str = "\nuser_input: ";
+    const RUNTIME_MARKER: &str = "\n\nruntime_frame:\n";
+    const CONTRACT_MARKER: &str = "\n\ncosh-shell Agent contract:\n";
+    let mut request = test_request();
+    request.user_input = Some("查看当前目录下的文件".to_string());
+
+    let prompt = test_adapter()
+        .prepare_invocation(&request, CoshApprovalMode::Auto)
+        .prompt;
+
+    assert!(prompt.starts_with(PREFIX), "{prompt}");
+    let input_start = prompt.find(INPUT_MARKER).expect("input marker") + INPUT_MARKER.len();
+    let runtime_start = prompt.find(RUNTIME_MARKER).expect("runtime marker");
+    let contract_start = prompt.rfind(CONTRACT_MARKER).expect("contract marker");
+    assert!(input_start < runtime_start, "{prompt}");
+    assert!(runtime_start < contract_start, "{prompt}");
+    assert_eq!(
+        prompt[input_start..runtime_start].trim(),
+        "查看当前目录下的文件"
+    );
+}
+
 #[test]
 fn prepare_invocation_prompt_preserves_user_provided_secret() {
     let secret = "api_key=sk-cosh-shell-runtime-secret";
