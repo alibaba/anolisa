@@ -834,7 +834,13 @@ fn update_owned(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
-    let prior = match store
+    // Hydrate a disposable view so pre-v5 required capability contracts can
+    // drive rollback without persisting inferred metadata for unrelated
+    // components when this update later saves the real store. Optional
+    // grants remain state-only inside the hydrator.
+    let mut prior_view = store.clone();
+    common::hydrate_owned_file_contracts(&mut prior_view, layout);
+    let prior = match prior_view
         .find(ObjectKind::Component, target)
         .map(|r| &r.binding)
     {
@@ -3445,6 +3451,8 @@ sha256 = "{sha}"
                 sha256: Some(bin_sha),
                 kind: OwnedFileKind::File,
                 referent: None,
+                mode: None,
+                capabilities: Vec::new(),
             },
             OwnedFile {
                 path: manifest_path,
@@ -3452,6 +3460,8 @@ sha256 = "{sha}"
                 sha256: None,
                 kind: OwnedFileKind::File,
                 referent: None,
+                mode: None,
+                capabilities: Vec::new(),
             },
         ];
         let mut obj = raw_object(component, version);
@@ -3656,9 +3666,8 @@ sha256 = "{sha}"
     }
 
     /// Restoring a file writes a new inode, which carries no capability
-    /// xattr — so the rollback has to re-apply the capabilities the *prior*
-    /// contract declared, or the restored binary comes back stripped of them
-    /// exactly like it used to come back stripped of its executable bit.
+    /// xattr — so rollback has to re-apply the capabilities confirmed in the
+    /// prior state, or the restored binary comes back stripped of them.
     ///
     /// User mode is deliberate: `capability_for_install_mode` always answers
     /// with the unsupported manager there, so the assertion is about which
@@ -3672,16 +3681,33 @@ sha256 = "{sha}"
         let layout = common::resolve_layout(&c);
         let bin = layout.bin_dir.join("foo");
 
-        // Re-state the installed contract with a capability row. The record
-        // keeps no digest for the manifest, so rewriting it in place is what
-        // an installation of a cap-declaring component would have left.
+        // Model a successfully applied optional grant: the manifest declares
+        // it and the prior state confirms that it landed.
         let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
             .expect("manifest path");
         let with_caps = format!(
-            "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\n",
+            "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\noptional = true\n",
             raw_manifest("foo", "0.1.0")
         );
         std::fs::write(&manifest_path, &with_caps).expect("rewrite installed manifest");
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut store =
+            StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
+                .expect("load active state");
+        let ProviderBinding::Owned { artifact } = &mut store
+            .find_mut(ObjectKind::Component, "foo")
+            .expect("component")
+            .binding
+        else {
+            panic!("expected owned record");
+        };
+        artifact
+            .files
+            .iter_mut()
+            .find(|file| file.path == bin)
+            .expect("binary row")
+            .capabilities = vec!["cap_net_bind_service".to_string()];
+        store.save(&state_path).expect("persist recorded grant");
 
         publish_raw_repo(
             &tmp.path().join("repo"),
@@ -3717,12 +3743,11 @@ sha256 = "{sha}"
         assert_eq!(applied[0]["details"]["caps"][0], "cap_net_bind_service");
     }
 
-    /// A contract the rollback cannot read is the one case where capabilities
-    /// go missing without anyone applying them, so it must not degrade to a
-    /// silent skip: the operator has to learn from the failure itself that the
-    /// restored files may be short their capabilities.
+    /// A manifest can declare an optional grant that did not land. Rollback
+    /// must not infer it from the snapshot and expand privilege while
+    /// restoring a failed update.
     #[test]
-    fn raw_update_rollback_reports_an_unreadable_prior_contract() {
+    fn raw_update_rollback_does_not_infer_unrecorded_optional_capability() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("home"), InstallMode::User, false);
         seed_installed_raw(&c, "foo", "0.1.0", b"original v1 binary\n");
@@ -3730,7 +3755,12 @@ sha256 = "{sha}"
 
         let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
             .expect("manifest path");
-        std::fs::write(&manifest_path, "this is not = valid toml [[[").expect("corrupt manifest");
+        let with_optional_capability = format!(
+            "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\noptional = true\n",
+            raw_manifest("foo", "0.1.0")
+        );
+        std::fs::write(&manifest_path, with_optional_capability)
+            .expect("rewrite installed manifest");
 
         publish_raw_repo(
             &tmp.path().join("repo"),
@@ -3745,18 +3775,92 @@ sha256 = "{sha}"
             .expect_err("install of the new version must fail");
         let reason = err.reason();
         assert!(
-            reason.contains("restoring the previous files reported problems"),
-            "an unreadable contract must downgrade the honest-rollback claim: {reason}"
+            reason.contains("the previous files were restored"),
+            "an unrecorded optional grant must not degrade rollback: {reason}"
         );
+        let capability_was_attempted = std::fs::read_to_string(&layout.central_log)
+            .ok()
+            .is_some_and(|log| log.lines().any(|line| line.contains("capability:apply")));
         assert!(
-            reason.contains(&manifest_path.display().to_string())
-                && reason.contains("file capabilities"),
-            "the warning must name the snapshot it could not use: {reason}"
+            !capability_was_attempted,
+            "rollback must not infer the unrecorded optional grant"
         );
         assert_eq!(
             std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
             b"original v1 binary\n",
-            "an unreadable contract must not stop the files themselves coming back"
+            "the prior binary must still be restored"
+        );
+    }
+
+    /// A pre-v5 state row has no capability metadata even when its required
+    /// grant succeeded. The locked update must hydrate that contract before
+    /// building the rollback snapshot, while keeping the inference in-memory
+    /// when the update fails.
+    #[test]
+    fn raw_update_rollback_hydrates_legacy_required_capability() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"original v1 binary\n");
+        let layout = common::resolve_layout(&c);
+        let bin = layout.bin_dir.join("foo");
+
+        let manifest_path = common::installed_component_manifest_path(&layout, "foo", "update")
+            .expect("manifest path");
+        let with_required_capability = format!(
+            "{}\n[[component.capabilities]]\npath = \"{{bindir}}/foo\"\ncaps = [\"cap_net_bind_service\"]\n",
+            raw_manifest("foo", "0.1.0")
+        );
+        std::fs::write(&manifest_path, with_required_capability)
+            .expect("rewrite installed manifest");
+
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &raw_artifact_missing_binary("foo", "0.2.0"),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("install of the new version must fail");
+
+        let log = std::fs::read_to_string(&layout.central_log).expect("read central log");
+        let applied: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| record["command"] == "capability:apply")
+            .collect();
+        assert_eq!(
+            applied.len(),
+            1,
+            "rollback must attempt the hydrated required grant exactly once: {log}"
+        );
+        assert_eq!(applied[0]["details"]["path"], bin.display().to_string());
+        assert_eq!(applied[0]["details"]["caps"][0], "cap_net_bind_service");
+
+        let state_path = layout.state_dir.join("installed.toml");
+        let store = StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
+            .expect("reload state");
+        let ProviderBinding::Owned { artifact } = &store
+            .find(ObjectKind::Component, "foo")
+            .expect("component")
+            .binding
+        else {
+            panic!("expected owned record");
+        };
+        let binary_row = artifact
+            .files
+            .iter()
+            .find(|file| file.path == bin)
+            .expect("binary row");
+        assert!(
+            binary_row.capabilities.is_empty(),
+            "failed update must not persist inferred legacy metadata"
+        );
+        assert_eq!(
+            std::fs::read(&bin).expect("read restored binary"),
+            b"original v1 binary\n"
         );
     }
 

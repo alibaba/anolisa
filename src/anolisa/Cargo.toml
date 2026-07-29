@@ -49,6 +49,7 @@ nix = { version = "0.29", default-features = false, features = ["user", "fs", "s
 
 # File integrity
 sha2 = "0.10"
+xattr = "1.6"
 
 # HTTP download
 ureq = "2.12"

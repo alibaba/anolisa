@@ -447,6 +447,8 @@ mod tests {
             sha256: Some("aa".repeat(32)),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }
     }
 
@@ -457,6 +459,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }
     }
 

@@ -31,9 +31,10 @@ use anolisa_core::state::{FileOwner, ObjectKind, OwnedFile, OwnedFileKind, Servi
 use anolisa_core::state_store::StateStore;
 use anolisa_core::transaction::restore_backup_file;
 use anolisa_core::{
-    ResolvedLifecycleHooks, ServiceActivation, ServiceRequest, ServiceRunOutcome, ServiceScope,
-    apply_capabilities, apply_services, capability_for_install_mode, deactivate_services,
-    run_hooks, service_for_install_mode, user_service_for_install_mode,
+    CapabilityRequest, FileKind, ResolvedInstallFile, ResolvedLifecycleHooks, ServiceActivation,
+    ServiceRequest, ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
+    capability_for_install_mode, deactivate_services, run_hooks, service_for_install_mode,
+    user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -45,9 +46,7 @@ use super::io_util::{
     service_cleanup_suffix, write_installed_component_manifest,
 };
 use super::provision::{retained_packages_note, run_provision};
-use super::raw::{
-    InstallHooks, prepare_raw_execution, resolve_install_hooks, resolve_manifest_capabilities,
-};
+use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
@@ -58,6 +57,28 @@ struct ReplayBackup {
     /// Permission bits `dest` carried before the replay, so restore puts
     /// the file back executable if it was executable.
     mode: Option<u32>,
+}
+
+fn rollback_capability_requests(
+    prior_files: &[OwnedFile],
+    backups: &[ReplayBackup],
+) -> Vec<CapabilityRequest> {
+    prior_files
+        .iter()
+        .filter(|file| {
+            file.owner == FileOwner::Anolisa
+                && file.kind == OwnedFileKind::File
+                && !file.capabilities.is_empty()
+                && backups.iter().any(|backup| backup.dest == file.path)
+        })
+        .map(|file| CapabilityRequest {
+            path: file.path.clone(),
+            caps: file.capabilities.clone(),
+            // A recorded grant was confirmed during the prior installation;
+            // rollback must surface failure to restore that contract.
+            optional: false,
+        })
+        .collect()
 }
 
 /// Raw-backend [`OwnedOps`] for one replay operation.
@@ -82,6 +103,8 @@ pub(crate) struct RawReplayOps<'a> {
     placed: Vec<InstalledFile>,
     /// Manifest snapshot this run wrote, set by `place_files`.
     manifest_path: Option<PathBuf>,
+    /// Capability assignments the backend confirmed this run.
+    applied_capabilities: Vec<CapabilityRequest>,
     backups: Vec<ReplayBackup>,
     backup_root: PathBuf,
     /// Activation result, read back by the record commit.
@@ -124,6 +147,7 @@ impl<'a> RawReplayOps<'a> {
             prepared_files: None,
             placed: Vec::new(),
             manifest_path: None,
+            applied_capabilities: Vec::new(),
             backups: Vec::new(),
             backup_root,
             service_run: None,
@@ -177,8 +201,7 @@ impl<'a> RawReplayOps<'a> {
             .collect()
     }
 
-    /// Re-apply the file capabilities the *prior* contract declared, after
-    /// the backup has been put back.
+    /// Re-apply the file capabilities recorded as active before the replay.
     ///
     /// Restoring a file writes a new inode, and a new inode carries no
     /// `security.capability` xattr — so a rollback silently strips the
@@ -188,63 +211,12 @@ impl<'a> RawReplayOps<'a> {
     /// the file, so they can only be re-applied once the file is back, and
     /// `restore_backup` is the last compensation the executor replays.
     ///
-    /// The prior contract is read from the restored manifest snapshot, not
-    /// from `self.prepared` — the new version's capability set is exactly
-    /// what rollback must *not* leave behind.
+    /// Only grants confirmed in the prior state are restored. Reconstructing
+    /// requests from the manifest could grant an optional capability that
+    /// failed during the original installation, expanding privilege during
+    /// a failed operation.
     fn reapply_prior_capabilities(&self) -> Vec<String> {
-        let manifest_path = match crate::commands::common::installed_component_manifest_path(
-            self.layout,
-            &self.component,
-            super::COMMAND,
-        ) {
-            Ok(path) => path,
-            Err(err) => return vec![format!("cannot locate the restored manifest: {err}")],
-        };
-        if !manifest_path.exists() {
-            // Two very different situations reach here. If the record owned
-            // the snapshot, restore was supposed to put it back and did not,
-            // so the prior contract is unreadable and any capabilities it
-            // declared are silently gone — say so. If the record never owned
-            // one, this predates manifest snapshots: nothing was knowable to
-            // begin with, and warning on every such rollback would be noise.
-            if self.prior.files.iter().any(|f| f.path == manifest_path) {
-                return vec![format!(
-                    "restored files but {} is missing, so any file capabilities the previous \
-                     version declared could not be re-applied",
-                    manifest_path.display()
-                )];
-            }
-            return Vec::new();
-        }
-        let toml = match fs::read_to_string(&manifest_path) {
-            Ok(toml) => toml,
-            Err(err) => {
-                return vec![format!(
-                    "restored files but could not read {} to re-apply file capabilities: {err}",
-                    manifest_path.display()
-                )];
-            }
-        };
-        let manifest = match anolisa_core::ComponentManifest::from_toml_str(&toml) {
-            Ok(manifest) => manifest,
-            Err(err) => {
-                return vec![format!(
-                    "restored files but could not parse {} to re-apply file capabilities: {err}",
-                    manifest_path.display()
-                )];
-            }
-        };
-        let requests = match resolve_manifest_capabilities(&manifest, self.layout, &self.component)
-        {
-            Ok(requests) => requests,
-            Err(err) => {
-                return vec![format!(
-                    "restored files but could not resolve the file capabilities {} declares: {}",
-                    manifest_path.display(),
-                    err.reason()
-                )];
-            }
-        };
+        let requests = rollback_capability_requests(&self.prior.files, &self.backups);
         if requests.is_empty() {
             return Vec::new();
         }
@@ -391,6 +363,7 @@ impl OwnedOps for RawReplayOps<'_> {
                 "required capability application failed: {reason}"
             )));
         }
+        self.applied_capabilities = outcome.applied_requests;
         Ok(StepSuccess::with_warnings(outcome.warnings))
     }
 
@@ -463,7 +436,13 @@ impl OwnedOps for RawReplayOps<'_> {
             // Digest verification of the embedded manifest is future work;
             // recording an unverified digest would overstate what ran.
             manifest_digest: None,
-            files: owned_file_rows(&self.placed, &manifest_path, &prepared.manifest_toml),
+            files: owned_file_rows(
+                &self.placed,
+                &manifest_path,
+                &prepared.manifest_toml,
+                &prepared.files,
+                &self.applied_capabilities,
+            ),
             services: self.service_refs(&prepared.services),
             // A clean replay leaves no externally-modified files behind.
             external_modified_files: Vec::new(),
@@ -1089,6 +1068,8 @@ pub(crate) struct RawInstallOps<'a> {
     placed: Vec<InstalledFile>,
     /// Manifest snapshot this run wrote, set by `place_files`.
     manifest_path: Option<PathBuf>,
+    /// Capability assignments the backend confirmed this run.
+    applied_capabilities: Vec<CapabilityRequest>,
     /// Activation result, read back by the record commit and the undo.
     service_run: Option<ServiceRunOutcome>,
     store: &'a mut StateStore,
@@ -1131,6 +1112,7 @@ impl<'a> RawInstallOps<'a> {
             journals,
             placed: Vec::new(),
             manifest_path: None,
+            applied_capabilities: Vec::new(),
             service_run: None,
             store,
             state_path,
@@ -1280,6 +1262,7 @@ impl OwnedOps for RawInstallOps<'_> {
                 "required capability application failed: {reason}"
             )));
         }
+        self.applied_capabilities = outcome.applied_requests;
         Ok(StepSuccess::with_warnings(outcome.warnings))
     }
 
@@ -1370,7 +1353,13 @@ impl OwnedOps for RawInstallOps<'_> {
             // Digest verification of the embedded manifest is future work;
             // recording an unverified digest would overstate what ran.
             manifest_digest: None,
-            files: owned_file_rows(&self.placed, &manifest_path, &prepared.manifest_toml),
+            files: owned_file_rows(
+                &self.placed,
+                &manifest_path,
+                &prepared.manifest_toml,
+                &prepared.files,
+                &self.applied_capabilities,
+            ),
             services: prepared
                 .services
                 .iter()
@@ -1465,6 +1454,8 @@ fn owned_file_rows(
     placed: &[InstalledFile],
     manifest_path: &Path,
     manifest_toml: &str,
+    contract_files: &[ResolvedInstallFile],
+    applied_capabilities: &[CapabilityRequest],
 ) -> Vec<OwnedFile> {
     let mut files: Vec<OwnedFile> = placed
         .iter()
@@ -1482,6 +1473,8 @@ fn owned_file_rows(
                 OwnedFileKind::File
             },
             referent: f.referent.clone(),
+            mode: expected_mode_for_path(&f.path, contract_files),
+            capabilities: capabilities_for_path(&f.path, applied_capabilities),
         })
         .collect();
     files.push(OwnedFile {
@@ -1490,8 +1483,56 @@ fn owned_file_rows(
         sha256: Some(sha256_hex(manifest_toml.as_bytes())),
         kind: OwnedFileKind::File,
         referent: None,
+        mode: recorded_mode(manifest_path),
+        capabilities: Vec::new(),
     });
     files
+}
+
+fn expected_mode_for_path(path: &Path, contract_files: &[ResolvedInstallFile]) -> Option<String> {
+    contract_files
+        .iter()
+        .filter(|file| file.kind != FileKind::Symlink)
+        .find(|file| {
+            file.dest == path
+                || (file
+                    .source
+                    .as_deref()
+                    .is_some_and(|source| source.ends_with('/'))
+                    && path.starts_with(&file.dest))
+        })
+        .and_then(|file| {
+            let raw = file.mode.as_deref().unwrap_or("0755");
+            let octal = raw.trim().strip_prefix("0o").unwrap_or(raw.trim());
+            u32::from_str_radix(octal, 8)
+                .ok()
+                .filter(|mode| *mode <= 0o7777)
+                .map(|mode| format!("{mode:04o}"))
+        })
+}
+
+#[cfg(unix)]
+fn recorded_mode(path: &Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| format!("{:04o}", meta.permissions().mode() & 0o7777))
+}
+
+#[cfg(not(unix))]
+fn recorded_mode(_path: &Path) -> Option<String> {
+    None
+}
+
+fn capabilities_for_path(path: &Path, applied: &[CapabilityRequest]) -> Vec<String> {
+    let mut capabilities = applied
+        .iter()
+        .filter(|request| request.path == path)
+        .flat_map(|request| request.caps.iter().cloned())
+        .collect::<Vec<_>>();
+    capabilities.sort_by_key(|cap| cap.to_ascii_lowercase());
+    capabilities.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    capabilities
 }
 
 /// Lowercase-hex sha256 of `bytes`.
@@ -1508,6 +1549,96 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_capabilities_restore_only_recorded_backed_up_grants() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let restored = tmp.path().join("restored");
+        let never_granted = tmp.path().join("never-granted");
+        let not_backed_up = tmp.path().join("not-backed-up");
+        let owned = |path: PathBuf, capabilities: Vec<&str>| OwnedFile {
+            path,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: capabilities.into_iter().map(str::to_string).collect(),
+        };
+        let prior_files = vec![
+            owned(restored.clone(), vec!["CAP_BPF"]),
+            owned(never_granted.clone(), Vec::new()),
+            owned(not_backed_up, vec!["CAP_NET_ADMIN"]),
+        ];
+        let backups = vec![
+            ReplayBackup {
+                source: tmp.path().join("0.bak"),
+                dest: restored.clone(),
+                sha256: None,
+                mode: Some(0o755),
+            },
+            ReplayBackup {
+                source: tmp.path().join("1.bak"),
+                dest: never_granted,
+                sha256: None,
+                mode: Some(0o755),
+            },
+        ];
+
+        let requests = rollback_capability_requests(&prior_files, &backups);
+
+        assert_eq!(
+            requests,
+            vec![CapabilityRequest {
+                path: restored,
+                caps: vec!["CAP_BPF".to_string()],
+                optional: false,
+            }]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_file_rows_record_mode_and_applied_capabilities() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let binary = tmp.path().join("tool");
+        let manifest = tmp.path().join("component.toml");
+        fs::write(&binary, b"payload").expect("binary");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("chmod");
+        fs::write(&manifest, b"[component]\nname = \"tool\"\n").expect("manifest");
+        let placed = vec![InstalledFile {
+            path: binary.clone(),
+            sha256: "deadbeef".to_string(),
+            referent: None,
+        }];
+        let capabilities = vec![CapabilityRequest {
+            path: binary.clone(),
+            caps: vec!["CAP_BPF".to_string()],
+            optional: false,
+        }];
+
+        let rows = owned_file_rows(
+            &placed,
+            &manifest,
+            "[component]\nname = \"tool\"\n",
+            &[ResolvedInstallFile {
+                source: Some("bin/tool".to_string()),
+                dest: binary.clone(),
+                mode: Some("0755".to_string()),
+                kind: FileKind::Executable,
+            }],
+            &capabilities,
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.path == binary)
+            .expect("binary row");
+
+        assert_eq!(row.mode.as_deref(), Some("0755"));
+        assert_eq!(row.capabilities, vec!["CAP_BPF".to_string()]);
+    }
 
     /// Teardown pruning must remove the directory chain the file removal
     /// emptied (so no skeleton is left to shadow adapter source probing in

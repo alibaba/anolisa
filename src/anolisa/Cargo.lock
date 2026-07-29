@@ -76,6 +76,7 @@ dependencies = [
  "toml_edit",
  "ureq",
  "uuid",
+ "xattr",
 ]
 
 [[package]]
