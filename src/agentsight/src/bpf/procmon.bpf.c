@@ -61,6 +61,8 @@ int trace_execve_exit(struct syscall_trace_exit *ctx)
     event->uid = uid;
     event->event_type = PROCMON_EVENT_EXEC;
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
+    // exit_code only carries data for EXIT events
+    event->exit_code = 0;
 
     bpf_ringbuf_submit(event, 0);
     return 0;
@@ -80,6 +82,7 @@ int trace_process_exit(void *ctx)
 
     u32 uid = bpf_get_current_uid_gid();
     u64 ts = bpf_ktime_get_ns();
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
 
     // Reserve space in ring buffer
     struct procmon_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
@@ -95,6 +98,11 @@ int trace_process_exit(void *ctx)
     event->uid = uid;
     event->event_type = PROCMON_EVENT_EXIT;
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
+    // The sched_process_exit tracepoint format exposes no exit_code field, so
+    // read it from the current task via CO-RE. By the time this tracepoint
+    // fires, do_exit() has already stored the raw wait(2)-encoded status in
+    // task_struct->exit_code; decoding is done in userspace.
+    event->exit_code = (u32)BPF_CORE_READ(task, exit_code);
 
     bpf_ringbuf_submit(event, 0);
     return 0;

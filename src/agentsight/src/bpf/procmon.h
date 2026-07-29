@@ -33,6 +33,11 @@ struct procmon_event {
     u32 uid;
     u32 event_type;         // enum procmon_event_type
     char comm[TASK_COMM_LEN];
+    // Raw task_struct->exit_code (wait(2) encoding), only meaningful for
+    // PROCMON_EVENT_EXIT; 0 for other event types. Appended at the tail so
+    // the offsets of all preceding fields stay unchanged, and it fills the
+    // trailing padding after comm (struct size stays 56 bytes).
+    u32 exit_code;
 };
 
 #endif /* __PROCMON_H */

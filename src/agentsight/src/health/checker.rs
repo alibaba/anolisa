@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use super::port_detector::detect_listening_ports;
 use super::store::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore, now_ms};
 use crate::discovery::AgentScanner;
-use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
+use crate::interruption::{
+    InterruptionEvent, InterruptionType, ProcessExitStatus, was_pid_oom_killed,
+};
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 
 /// Infer the UI role for a discovered agent.
@@ -139,16 +141,78 @@ impl HealthChecker {
             vec![]
         };
 
-        // Write agent_crash interruption events for processes that just went offline.
-        //
-        // Deduplication strategy:
-        //   - Cosh spawns 2 node processes per session (parent + worker). LLM traffic
-        //     may be recorded under either pid. We group all pids for the same agent_name
-        //     and query them together so we see all calls in one pass.
-        //   - OpenClaw is a single-pid gateway that may serve multiple concurrent sessions.
-        //     All sessions for that pid are returned and each gets its own event.
-        //   - Deduplication key is (agent_name, session_id, conversation_id): at most one
-        //     agent_crash event is written per unique (agent, session, conversation) triple.
+        self.record_offline_agent_crashes(&newly_offline);
+
+        log::debug!("Health check: found {} agent(s)", agents.len());
+
+        // Collect agent names by PID for role inference (detect parent-child within same agent)
+        let agent_name_by_pid: HashMap<u32, String> = agents
+            .iter()
+            .map(|a| (a.pid, a.agent_info.name.clone()))
+            .collect();
+
+        // Pre-scan listening ports per pid (also avoids scanning /proc twice).
+        let ports_by_pid: HashMap<u32, Vec<u16>> = agents
+            .iter()
+            .map(|a| (a.pid, detect_listening_ports(a.pid)))
+            .collect();
+
+        for agent in &agents {
+            let ports = ports_by_pid.get(&agent.pid).cloned().unwrap_or_default();
+            // Cosh has no daemon process and does not support keepalive/restart.
+            // Build restart_cmd only for agents that support it.
+            let restart_cmd = if agent.agent_info.name == "Cosh" {
+                None
+            } else {
+                Some(build_restart_cmd(&agent.exe_path, &agent.cmdline_args))
+            };
+
+            // Read parent PID from /proc/<pid>/stat for role inference
+            let ppid = read_ppid(agent.pid);
+
+            let role = infer_agent_role(&agent.agent_info.name, &ports, ppid, &agent_name_by_pid);
+
+            let status = if ports.is_empty() {
+                AgentHealthStatus {
+                    pid: agent.pid,
+                    agent_name: agent.agent_info.name.clone(),
+                    category: agent.agent_info.category.clone(),
+                    exe_path: agent.exe_path.clone(),
+                    ports: vec![],
+                    status: AgentHealthState::NoPort,
+                    last_check_time: now_ms(),
+                    latency_ms: None,
+                    error_message: None,
+                    restart_cmd,
+                    offline_since: None,
+                    role,
+                    parent_pid: ppid,
+                    has_crash: false,
+                }
+            } else {
+                self.probe_agent(agent, &ports, restart_cmd, role, ppid)
+            };
+
+            if let Ok(mut store) = self.store.write() {
+                store.update(agent.pid, status);
+            }
+        }
+    }
+
+    /// Write agent_crash interruption events for processes that just went offline.
+    ///
+    /// Deduplication strategy:
+    ///   - Cosh spawns 2 node processes per session (parent + worker). LLM traffic
+    ///     may be recorded under either pid. We group all pids for the same agent_name
+    ///     and query them together so we see all calls in one pass.
+    ///   - OpenClaw is a single-pid gateway that may serve multiple concurrent sessions.
+    ///     All sessions for that pid are returned and each gets its own event.
+    ///   - Deduplication key is (agent_name, session_id, conversation_id): at most one
+    ///     agent_crash event is written per unique (agent, session, conversation) triple.
+    ///
+    /// Split out of `check_once` so the crash-vs-normal-shutdown decision can
+    /// be unit-tested by injecting offline entries without scanning /proc.
+    fn record_offline_agent_crashes(&self, newly_offline: &[AgentHealthStatus]) {
         if !newly_offline.is_empty() {
             if let Some(ref istore) = self.interruption_store {
                 let now_ns = std::time::SystemTime::now()
@@ -159,7 +223,7 @@ impl HealthChecker {
                 // Group newly-offline entries by agent_name so multi-process agents
                 // (e.g. Cosh) are processed together in a single DB query.
                 let mut by_agent: HashMap<String, Vec<&AgentHealthStatus>> = HashMap::new();
-                for offline in &newly_offline {
+                for offline in newly_offline {
                     by_agent
                         .entry(offline.agent_name.clone())
                         .or_default()
@@ -183,6 +247,32 @@ impl HealthChecker {
                     // ── Branch A: pending (in-flight) LLM calls ──────────────────────────
                     let pending_calls = self.get_pending_calls_for_pids(&pids);
                     if !pending_calls.is_empty() {
+                        // Trace mode records each agent's raw exit status into
+                        // the shared interruption DB. When every offline pid in
+                        // this group is a trace-confirmed clean exit, this is a
+                        // single-shot agent shutting down normally (issue
+                        // #1989): trace deliberately wrote no agent_crash, so
+                        // this backup path must not re-add one. Missing records
+                        // keep the historical fallback (offline + pending →
+                        // crash) for exits trace did not observe.
+                        let exit_status_by_pid: HashMap<i32, ProcessExitStatus> = pids
+                            .iter()
+                            .filter_map(|&p| {
+                                istore
+                                    .get_process_exit_recent(p, 120)
+                                    .map(|raw| (p, ProcessExitStatus::decode(raw)))
+                            })
+                            .collect();
+                        let all_clean_exit = exit_status_by_pid.len() == pids.len()
+                            && exit_status_by_pid.values().all(|s| s.is_clean());
+                        if all_clean_exit {
+                            log::debug!(
+                                "Agent {agent_name} (pids={pids:?}) exited cleanly (trace-recorded exit status) — treating as normal shutdown despite {} pending call(s)",
+                                pending_calls.len()
+                            );
+                            continue;
+                        }
+
                         // Check if any of the crashed PIDs were OOM-killed
                         let is_oom = pids.iter().any(|&p| was_pid_oom_killed(p));
                         if is_oom {
@@ -233,6 +323,14 @@ impl HealthChecker {
                             if is_oom {
                                 detail["oom"] = serde_json::json!(true);
                                 detail["source"] = serde_json::json!("healthchecker+dmesg");
+                            }
+                            // Attach the trace-recorded exit status when
+                            // available; omitted (not fabricated) when trace
+                            // did not observe this pid's exit.
+                            if let Some(status) = exit_status_by_pid.get(&(rep.pid as i32)) {
+                                detail["exit_code"] = serde_json::json!(status.code);
+                                detail["signal"] = serde_json::json!(status.signal);
+                                detail["core_dump"] = serde_json::json!(status.core_dump);
                             }
                             let event = InterruptionEvent::new(
                                 InterruptionType::AgentCrash,
@@ -289,61 +387,6 @@ impl HealthChecker {
                         );
                     }
                 }
-            }
-        }
-
-        log::debug!("Health check: found {} agent(s)", agents.len());
-
-        // Collect agent names by PID for role inference (detect parent-child within same agent)
-        let agent_name_by_pid: HashMap<u32, String> = agents
-            .iter()
-            .map(|a| (a.pid, a.agent_info.name.clone()))
-            .collect();
-
-        // Pre-scan listening ports per pid (also avoids scanning /proc twice).
-        let ports_by_pid: HashMap<u32, Vec<u16>> = agents
-            .iter()
-            .map(|a| (a.pid, detect_listening_ports(a.pid)))
-            .collect();
-
-        for agent in &agents {
-            let ports = ports_by_pid.get(&agent.pid).cloned().unwrap_or_default();
-            // Cosh has no daemon process and does not support keepalive/restart.
-            // Build restart_cmd only for agents that support it.
-            let restart_cmd = if agent.agent_info.name == "Cosh" {
-                None
-            } else {
-                Some(build_restart_cmd(&agent.exe_path, &agent.cmdline_args))
-            };
-
-            // Read parent PID from /proc/<pid>/stat for role inference
-            let ppid = read_ppid(agent.pid);
-
-            let role = infer_agent_role(&agent.agent_info.name, &ports, ppid, &agent_name_by_pid);
-
-            let status = if ports.is_empty() {
-                AgentHealthStatus {
-                    pid: agent.pid,
-                    agent_name: agent.agent_info.name.clone(),
-                    category: agent.agent_info.category.clone(),
-                    exe_path: agent.exe_path.clone(),
-                    ports: vec![],
-                    status: AgentHealthState::NoPort,
-                    last_check_time: now_ms(),
-                    latency_ms: None,
-                    error_message: None,
-                    restart_cmd,
-                    offline_since: None,
-                    role,
-                    parent_pid: ppid,
-                    has_crash: false,
-                }
-            } else {
-                self.probe_agent(agent, &ports, restart_cmd, role, ppid)
-            };
-
-            if let Ok(mut store) = self.store.write() {
-                store.update(agent.pid, status);
             }
         }
     }
@@ -572,5 +615,182 @@ mod tests {
             infer_agent_role("Hermes", &[], None, &map),
             AgentRole::Gateway
         );
+    }
+
+    // ── Tests for record_offline_agent_crashes (issue #1989 backup path) ──
+
+    fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("agentsight-hc-{}-{tag}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// Build a checker wired to fresh temp stores plus one pending call for
+    /// `pid`, mirroring the serve-mode setup in `run_server`.
+    fn setup_checker(
+        tag: &str,
+        pid: i32,
+    ) -> (
+        std::path::PathBuf,
+        HealthChecker,
+        Arc<GenAISqliteStore>,
+        Arc<InterruptionStore>,
+    ) {
+        let dir = unique_tmp_dir(tag);
+        let genai_store = Arc::new(
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store"),
+        );
+        let istore = Arc::new(
+            InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+                .expect("interruption store"),
+        );
+        let info = crate::storage::sqlite::genai::PendingCallInfo {
+            call_id: format!("hc-call-{tag}"),
+            trace_id: None,
+            conversation_id: None,
+            session_id: None,
+            start_timestamp_ns: 1_000_000_000,
+            pid,
+            process_name: "test".to_string(),
+            agent_name: Some("cosh-core".to_string()),
+            http_method: Some("POST".to_string()),
+            http_path: Some("/v1/chat/completions".to_string()),
+            input_messages: None,
+            system_instructions: None,
+            user_query: None,
+            is_sse: false,
+            model: Some("gpt-4".to_string()),
+            provider: Some("openai".to_string()),
+            call_kind: "main".to_string(),
+            pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
+            pending_match_key: None,
+        };
+        genai_store.insert_pending(&info).expect("insert_pending");
+        let checker = HealthChecker::new(
+            Arc::new(RwLock::new(HealthStore::new())),
+            Duration::from_secs(30),
+        )
+        .with_interruption_store(Arc::clone(&istore))
+        .with_genai_store(Arc::clone(&genai_store));
+        (dir, checker, genai_store, istore)
+    }
+
+    fn offline_status(pid: u32) -> AgentHealthStatus {
+        AgentHealthStatus {
+            pid,
+            agent_name: "cosh-core".to_string(),
+            category: "cli".to_string(),
+            exe_path: "/usr/bin/cosh-core".to_string(),
+            ports: vec![],
+            status: AgentHealthState::Offline,
+            last_check_time: now_ms(),
+            latency_ms: None,
+            error_message: None,
+            restart_cmd: None,
+            offline_since: Some(now_ms()),
+            role: AgentRole::Client,
+            parent_pid: None,
+            has_crash: false,
+        }
+    }
+
+    fn list_crash_events(
+        istore: &InterruptionStore,
+    ) -> Vec<crate::storage::sqlite::interruption::InterruptionRecord> {
+        istore
+            .list(0, i64::MAX, None, Some("agent_crash"), None, None, 100)
+            .expect("list interruptions")
+    }
+
+    #[test]
+    fn test_offline_with_pending_and_clean_exit_record_skips_agent_crash() {
+        // PID large enough to never collide with dmesg OOM records.
+        let pid = 4_100_001;
+        let (dir, checker, genai_store, istore) = setup_checker("clean", pid);
+
+        // trace mode recorded a clean exit (exit 0 → raw 0x0) for this pid
+        istore.record_process_exit(pid, 0x0).expect("record exit");
+
+        checker.record_offline_agent_crashes(&[offline_status(pid as u32)]);
+
+        assert!(
+            list_crash_events(&istore).is_empty(),
+            "clean exit recorded by trace must not be re-reported as agent_crash"
+        );
+        // Pending call must stay pending: marking it interrupted would pollute
+        // grader root_cause attribution just like the crash event itself.
+        assert_eq!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .len(),
+            1,
+            "pending call must not be marked interrupted on clean exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_offline_with_pending_and_no_exit_record_still_records_agent_crash() {
+        let pid = 4_100_002;
+        let (dir, checker, genai_store, istore) = setup_checker("norec", pid);
+
+        // No process_exits record: trace did not observe this exit, so the
+        // historical fallback (offline + pending → crash) must be preserved.
+        checker.record_offline_agent_crashes(&[offline_status(pid as u32)]);
+
+        let events = list_crash_events(&istore);
+        assert_eq!(events.len(), 1, "fallback path must still record the crash");
+        let detail: serde_json::Value =
+            serde_json::from_str(events[0].detail.as_deref().expect("detail json"))
+                .expect("parse detail");
+        assert_eq!(detail["pid"], pid);
+        // Exit status is unknown here — fields must be omitted, not fabricated.
+        assert!(detail.get("exit_code").is_none());
+        assert!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .is_empty(),
+            "fallback path must mark the pending call as interrupted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_offline_with_pending_and_sigkill_exit_record_records_crash_with_detail() {
+        let pid = 4_100_003;
+        let (dir, checker, genai_store, istore) = setup_checker("sigkill", pid);
+
+        // SIGKILL → raw 0x9 (measured on a real kernel): not a clean exit,
+        // so the checker must behave exactly as before the #1989 fix.
+        istore.record_process_exit(pid, 0x9).expect("record exit");
+
+        checker.record_offline_agent_crashes(&[offline_status(pid as u32)]);
+
+        let events = list_crash_events(&istore);
+        assert_eq!(events.len(), 1, "SIGKILL must still be recorded as crash");
+        let detail: serde_json::Value =
+            serde_json::from_str(events[0].detail.as_deref().expect("detail json"))
+                .expect("parse detail");
+        assert_eq!(detail["signal"], 9);
+        assert_eq!(detail["exit_code"], 0);
+        assert_eq!(detail["core_dump"], false);
+        assert!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .is_empty(),
+            "crash path must mark the pending call as interrupted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
