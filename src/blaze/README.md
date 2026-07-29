@@ -13,7 +13,8 @@ Designed as the per-host agent for E2B-style orchestrator platforms.
 
 - **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **Policy-driven backend selection** — workload class → backend priority list
-- **Lifecycle state machine** — 8 states (Pending → Creating → Running → Paused → Checkpointed → Reset → Warm → Destroyed)
+- **Lifecycle state machine** — 9 states: Pending, Creating, Running, Paused,
+  Checkpointed, RecoveryRequired, Reset, Warm, and Destroyed
 - **Warm pool management** — pre-warmed instances with TTL-based GC
 - **Template registry** — in-memory template tracking with idle eviction
 - **Kernel hook registry** — state tracking for pre/post hooks
@@ -38,7 +39,7 @@ sudo ./target/release/blazed daemon start --config examples/config.toml
 curl --unix-socket /run/blaze/api.sock http://localhost/v1/health
 
 # Create a sandbox
-curl -X POST --unix-socket /run/blaze/api.sock http://localhost/v1/instances \
+curl -X POST --unix-socket /run/blaze/api.sock http://localhost/v1/sandboxes \
   -H 'Content-Type: application/json' \
   -d '{"workload_class":"agent-rl","image_digest":"sha256:..."}'
 ```
@@ -100,12 +101,17 @@ The `file` provider uses standard filesystem operations for sandbox storage. The
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/v1/health` | Health check |
-| GET | `/v1/instances` | List all instances |
-| POST | `/v1/instances` | Create a new sandbox instance |
-| GET | `/v1/instances/{id}` | Get instance details |
-| POST | `/v1/instances/{id}/checkpoint` | Checkpoint an instance |
-| POST | `/v1/instances/{id}/reset` | Reset instance to checkpoint |
-| POST | `/v1/instances/{id}/destroy` | Destroy an instance |
+| GET | `/v1/sandboxes` | List all sandboxes |
+| POST | `/v1/sandboxes` | Create a sandbox |
+| GET | `/v1/sandboxes/{id}` | Get sandbox details |
+| DELETE | `/v1/sandboxes/{id}` | Destroy a sandbox |
+| GET | `/v1/instances` | Alias for listing sandboxes |
+| POST | `/v1/instances` | Alias for creating a sandbox |
+| GET | `/v1/instances/{id}` | Alias for sandbox details |
+| DELETE | `/v1/instances/{id}` | Alias for destroying a sandbox |
+| POST | `/v1/instances/{id}/destroy` | Compatible destroy action |
+| POST | `/v1/instances/{id}/checkpoint` | Record checkpoint state |
+| POST | `/v1/instances/{id}/reset` | Record reset and return to the warm pool |
 | GET | `/v1/pools` | List warm pools |
 | GET | `/v1/pools/{backend}/{class}` | Get pool status |
 | POST | `/v1/pools/{backend}/{class}/drain` | Drain a pool |
@@ -117,6 +123,24 @@ The `file` provider uses standard filesystem operations for sandbox storage. The
 | GET | `/v1/hooks` | List kernel hooks |
 | GET | `/v1/metrics` | Prometheus metrics |
 | POST | `/v1/admin/reload` | Hot-reload policies |
+
+### Managed lifecycle and recovery
+
+Create and destroy record their operation before changing storage or backend
+resources. A successful create finishes in `Running`; a successful destroy
+finishes in `Destroyed`. If compensation cannot release every owned resource,
+the sandbox remains visible as `RecoveryRequired` so destroy can be retried.
+
+At startup, the daemon reconciles each non-terminal sandbox independently.
+Failure to clean up one sandbox does not prevent the remaining records from
+being processed or the API from starting.
+
+The operation journal records the operation and start time, not completion of
+each resource step. An interrupted create is cleaned up rather than resumed,
+and an existing backend process is not adopted after restart. Failed recovery
+does not run in a background retry loop. The checkpoint and reset endpoints
+retain their existing metadata transitions; this recovery flow does not add
+backend snapshot or restore operations.
 
 #### Health Check
 
@@ -148,4 +172,3 @@ src/blaze/
 - Linux host with root privileges for sandbox backends
 
 ## License
-
