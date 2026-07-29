@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 # -- extract config (mirrors cosh/extractors.py TOOL_EXTRACTORS) ----------
+from hook_config import env_flag_enabled
 from trace_context import with_trace_context
 
 # cosh tool_name -> field in tool_input that carries the command
@@ -26,6 +27,7 @@ _TOOL_FIELD = {
     "run_shell_command": "command",
     "shell": "command",
 }
+_HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 _DEFAULT_LANGUAGE = "bash"
 
 
@@ -60,6 +62,10 @@ def _format_cosh(scan_result: dict) -> str:
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        print(_allow())
+        return
+
     # 1. Read stdin JSON
     try:
         input_data = json.load(sys.stdin)
