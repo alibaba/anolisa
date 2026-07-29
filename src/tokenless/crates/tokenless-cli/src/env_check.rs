@@ -364,7 +364,7 @@ fn normalize_dep(value: &Value) -> DepEntry {
     }
 }
 
-/// Normalize an array of dep values (strings or objects) into Vec<DepEntry>.
+/// Normalize an array of dep values (strings or objects) into `Vec<DepEntry>`.
 fn normalize_deps(array: &Value) -> Vec<DepEntry> {
     array
         .as_array()

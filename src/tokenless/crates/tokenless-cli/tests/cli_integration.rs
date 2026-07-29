@@ -1,7 +1,68 @@
 use std::process::Command;
 
+use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, get_home_dir};
+
 fn tokenless_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tokenless"))
+}
+
+struct TempStatsDb {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+    record_id: i64,
+}
+
+impl TempStatsDb {
+    fn new() -> Option<Self> {
+        let home = get_home_dir();
+        if home.is_empty() {
+            return None;
+        }
+        let unique = format!(
+            ".tokenless-cli-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos()
+        );
+        let dir = std::path::PathBuf::from(home).join(unique);
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("stats.db");
+        let recorder = StatsRecorder::new(&path).ok()?;
+        let record_id = recorder
+            .record(
+                &StatsRecord::new(
+                    OperationType::CompressResponse,
+                    "integration-agent".to_string(),
+                    17,
+                    10,
+                    9,
+                    5,
+                )
+                .with_session_id("integration-session")
+                .with_tool_use_id("integration-tool")
+                .with_text("keep\nremove\n".to_string(), "keep\n".to_string()),
+            )
+            .ok()?;
+        Some(Self {
+            dir,
+            path,
+            record_id,
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = tokenless_bin();
+        command.env("TOKENLESS_STATS_DB", &self.path);
+        command
+    }
+}
+
+impl Drop for TempStatsDb {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
 }
 
 #[test]
@@ -261,4 +322,99 @@ fn stats_show_single_nonexistent() {
         .unwrap();
     // Should fail gracefully for nonexistent record
     let _ = output.status;
+}
+
+#[test]
+fn stats_diff_record_json_contains_structured_hunks() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args(["stats", "diff", &db.record_id.to_string(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["scope"]["kind"], "record");
+    assert_eq!(json["chains"][0]["diff"]["available"], true);
+    assert!(json["chains"][0]["diff"]["hunks"].is_array());
+}
+
+#[test]
+fn stats_diff_session_omits_content_hunks() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args([
+            "stats",
+            "diff",
+            "--session",
+            "integration-session",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["scope"]["kind"], "session");
+    assert!(json["chains"][0].get("diff").is_none());
+}
+
+#[test]
+fn stats_diff_tool_use_renders_terminal_diff() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args([
+            "stats",
+            "diff",
+            "--session",
+            "integration-session",
+            "--tool-use-id",
+            "integration-tool",
+            "--no-color",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Estimated tokens: 10 -> 5"));
+    assert!(stdout.contains("-remove"));
+    assert!(!stdout.contains("\u{1b}["));
+}
+
+#[test]
+fn stats_diff_invalid_scope_and_missing_record_use_expected_exit_codes() {
+    let invalid = tokenless_bin()
+        .args(["stats", "diff", "42", "--session", "session"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let missing = db
+        .command()
+        .args(["stats", "diff", "999999"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
 }

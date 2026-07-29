@@ -104,6 +104,60 @@ fn records_by_session_filters() {
 }
 
 #[test]
+fn records_for_diff_filters_tool_and_orders_oldest_first() {
+    let (rec, _dir) = new_recorder();
+    let first = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "session-diff",
+    )
+    .with_tool_use_id("tool-a");
+    let second = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "session-diff",
+    )
+    .with_tool_use_id("tool-a");
+    let other = sample(
+        OperationType::CompressSchema,
+        CompressionMode::Active,
+        "session-diff",
+    )
+    .with_tool_use_id("tool-b");
+    let first_id = rec.record(&first).unwrap();
+    let second_id = rec.record(&second).unwrap();
+    rec.record(&other).unwrap();
+
+    let records = rec
+        .records_for_diff("session-diff", Some("tool-a"))
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].id, first_id);
+    assert_eq!(records[1].id, second_id);
+
+    let session = rec.records_for_diff("session-diff", None).unwrap();
+    assert_eq!(session.len(), 3);
+    assert!(session.windows(2).all(|pair| pair[0].id < pair[1].id));
+}
+
+#[test]
+fn records_for_diff_caps_to_newest_records() {
+    let (rec, _dir) = new_recorder();
+    for _ in 0..(StatsRecorder::DEFAULT_LIMIT + 1) {
+        rec.record(&sample(
+            OperationType::CompressSchema,
+            CompressionMode::Active,
+            "large-session",
+        ))
+        .unwrap();
+    }
+
+    let records = rec.records_for_diff("large-session", None).unwrap();
+    assert_eq!(records.len(), StatsRecorder::DEFAULT_LIMIT);
+    assert_eq!(records[0].id, 2);
+}
+
+#[test]
 fn count_returns_total_records() {
     let (rec, _dir) = new_recorder();
     assert_eq!(rec.count().unwrap(), 0);
@@ -268,6 +322,17 @@ fn schema_migration_adds_missing_columns() {
     let got = rec.record_by_id(id).unwrap().unwrap();
     assert_eq!(got.mode, CompressionMode::Active);
     assert_eq!(got.stash_writes, Some(1));
+
+    let conn = rec.lock_conn();
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_index_info('idx_session_tool') ORDER BY seqno")
+        .unwrap();
+    let indexed_columns = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(indexed_columns, ["session_id", "tool_use_id"]);
 }
 
 #[test]

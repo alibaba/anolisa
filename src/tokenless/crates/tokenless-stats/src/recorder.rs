@@ -88,6 +88,10 @@ impl StatsRecorder {
             "CREATE INDEX IF NOT EXISTS idx_session_id ON stats(session_id)",
             [],
         )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_tool ON stats(session_id, tool_use_id)",
+            [],
+        )?;
 
         // Schema migration: add columns introduced after the initial schema if
         // missing. Use PRAGMA table_info to check column existence before
@@ -258,6 +262,58 @@ impl StatsRecorder {
         ))?;
         let rows = stmt.query_map(rusqlite::params![session_id, n as i64], Self::row_to_record)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Queries the newest records used to build a session or tool-use diff.
+    ///
+    /// Results are returned oldest first so callers can validate consecutive
+    /// before/after content. The internal cap bounds memory for long-running
+    /// sessions while retaining the most recent records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot prepare or execute the query, or a
+    /// stored row cannot be converted into a statistics record.
+    pub fn records_for_diff(
+        &self,
+        session_id: &str,
+        tool_use_id: Option<&str>,
+    ) -> StatsResult<Vec<StatsRecord>> {
+        let conn = self.lock_conn();
+        let newest_first = match tool_use_id {
+            Some(_) => format!(
+                "SELECT {} FROM stats
+                 WHERE session_id = ? AND tool_use_id = ?
+                 ORDER BY id DESC LIMIT ?",
+                Self::SELECT_COLS
+            ),
+            None => format!(
+                "SELECT {} FROM stats
+                 WHERE session_id = ?
+                 ORDER BY id DESC LIMIT ?",
+                Self::SELECT_COLS
+            ),
+        };
+        let mut stmt = conn.prepare(&newest_first)?;
+        let rows = match tool_use_id {
+            Some(tool_use_id) => stmt.query_map(
+                rusqlite::params![session_id, tool_use_id, Self::DEFAULT_LIMIT as i64],
+                Self::row_to_record,
+            )?,
+            None => stmt.query_map(
+                rusqlite::params![session_id, Self::DEFAULT_LIMIT as i64],
+                Self::row_to_record,
+            )?,
+        };
+        let mut records = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StatsError::from)?;
+        records.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(records)
     }
 
     /// Get record count

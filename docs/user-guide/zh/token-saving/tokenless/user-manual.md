@@ -188,6 +188,19 @@ tokenless stats list -l 50
 # 查看某条记录的压缩前后文本
 tokenless stats show 42
 
+# 解释单条记录的估算节省和内容变化
+tokenless stats diff 42
+tokenless stats diff 42 -U 5
+tokenless stats diff 42 --json
+
+# 按端到端节省量排列 Session 明细（仅指标）
+tokenless stats diff --session <session-id>
+tokenless stats diff --session <session-id> -l 50 --sort time
+
+# 展开一次工具调用中可确认衔接的阶段
+tokenless stats diff --session <session-id> \
+  --tool-use-id <tool-use-id>
+
 # 清空统计
 tokenless stats clear --yes
 
@@ -198,6 +211,36 @@ tokenless stats status
 tokenless stats enable
 tokenless stats disable
 ```
+
+`show` 是原始记录查看器，会完整打印存储的 before 和 after payload；
+`diff` 是节省分析视图，显示估算的 before/after/emitted Token、各阶段贡献、
+stash 指标及 unified 差异行。支持以下选项：
+
+| 参数 | 说明 |
+|------|------|
+| `<RECORD_ID>` | 查看一个压缩阶段；与 `--session` 冲突 |
+| `--session <id>` | 查看 Session 总览，或限定 `--tool-use-id` 的范围 |
+| `--tool-use-id <id>` | 展开一次工具调用；必须配合 `--session` |
+| `-l, --limit <n>` | Session 总览最多显示的链路数（默认 20） |
+| `--sort saved\|time` | 按估算节省量（默认）或最新时间排列 |
+| `-U, --context <n>` | 每处变化周围保留的未变化行数（默认 3） |
+| `--no-color` | 关闭 ANSI 颜色 |
+| `--json` | 输出 schema `1.0` JSON，hunk 行类型为 `context`/`delete`/`insert` |
+
+Session 总览 JSON 只包含指标和阶段，不包含源内容；单记录/tool-use JSON
+包含结构化 hunks。两端均为合法 JSON 值时（包括标量），输出会先做仅用于展示
+的规范化；对象 key 会排序，因此可能隐藏仅 key 顺序不同的词法差异，但不会修改
+存储内容。任一端缺失或超过 1 MiB 时不计算内容差异，渲染的 hunk 最多 500 行；
+完整 payload 仍使用 `stats show` 查看。
+
+对于 active 记录，只有 session/tool-use ID 相同，且上一阶段存储的输出与下一
+阶段输入完全一致时才会串联。端到端节省使用第一阶段 before 和最后阶段
+after，避免重复计算中间输入。断链、dry-run、mode 混合及缺少 tool-use ID
+的记录保持独立。
+
+所有 Token 数均为估算值，不是模型计费数据。dry-run 的 after 表示预测压缩
+大小，实际 emitted 仍为原始 before 大小。无节省操作不会入库，因此 Session
+视图只覆盖已记录的有效压缩。
 
 #### 双跑对比（dry-run baseline vs active）
 

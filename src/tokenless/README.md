@@ -180,6 +180,25 @@ echo 'name: Alice\nage: 30' | tokenless decompress-toon
 # {"name":"Alice","age":30}
 ```
 
+### Inspect token savings
+
+Use `show` to print the complete stored before/after payload, or `diff` to
+explain the estimated token saving and highlight only changed lines:
+
+```bash
+tokenless stats show 42
+tokenless stats diff 42
+tokenless stats diff --session <session-id>
+tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
+tokenless stats diff 42 --json
+```
+
+Session overviews contain metrics only. Record and tool-use reports include a
+unified content diff; consecutive active stages are linked only when their
+stored output/input content matches exactly, avoiding duplicate intermediate
+token counts. See the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#statistics--measurement)
+for options and measurement limits.
+
 ## copilot-shell Hooks
 
 The adapter provides hooks that are auto-discovered by copilot-shell via the cosh extension manifest:

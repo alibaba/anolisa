@@ -2,19 +2,20 @@
 mod env_check;
 mod mcp;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal as _, Read};
 use std::process;
 use std::sync::Arc;
 use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 use tokenless_stats::{
-    CompressionMode, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
+    CompressionMode, DiffSort, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
 };
 use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
 use tokenless_stats::{
-    format_compare, format_compare_json, format_list, format_show, format_summary,
+    format_compare, format_compare_json, format_diff_report, format_list, format_show,
+    format_summary, record_report, session_report, tool_use_report,
 };
 
 #[derive(Parser)]
@@ -150,6 +151,23 @@ enum McpCommands {
     Serve,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DiffSortArg {
+    Saved,
+    Time,
+}
+
+const DEFAULT_DIFF_LIMIT: usize = 20;
+
+impl From<DiffSortArg> for DiffSort {
+    fn from(value: DiffSortArg) -> Self {
+        match value {
+            DiffSortArg::Saved => DiffSort::Saved,
+            DiffSortArg::Time => DiffSort::Time,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum StatsCommands {
     /// Show summary statistics with breakdown by operation
@@ -174,6 +192,43 @@ enum StatsCommands {
         /// Record database ID
         id: i64,
     },
+    /// Explain estimated token savings with a unified content diff
+    Diff {
+        /// Record database ID
+        #[arg(
+            value_name = "RECORD_ID",
+            required_unless_present = "session",
+            conflicts_with = "session"
+        )]
+        id: Option<i64>,
+        /// Session ID to summarize or inspect
+        #[arg(long, required_unless_present = "id")]
+        session: Option<String>,
+        /// Restrict a session diff to one tool call
+        #[arg(long, requires = "session")]
+        tool_use_id: Option<String>,
+        /// Maximum number of chains in a session overview
+        #[arg(
+            short,
+            long,
+            default_value_t = DEFAULT_DIFF_LIMIT,
+            value_parser = parse_positive_usize,
+            conflicts_with_all = ["id", "tool_use_id"]
+        )]
+        limit: usize,
+        /// Session overview ordering
+        #[arg(long, value_enum, conflicts_with_all = ["id", "tool_use_id"])]
+        sort: Option<DiffSortArg>,
+        /// Unchanged lines around each content change
+        #[arg(short = 'U', long, default_value_t = 3)]
+        context: usize,
+        /// Disable ANSI colors even when stdout is a terminal
+        #[arg(long)]
+        no_color: bool,
+        /// Output machine-readable JSON with structured diff hunks
+        #[arg(long)]
+        json: bool,
+    },
     /// Clear all statistics
     Clear {
         #[arg(long)]
@@ -189,6 +244,16 @@ enum StatsCommands {
 
 /// Maximum input size (64 MiB) to prevent OOM on accidental large-file stdin.
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid positive integer: {value}"))?;
+    if parsed == 0 {
+        return Err("value must be greater than zero".to_string());
+    }
+    Ok(parsed)
+}
 
 fn read_input(file: &Option<String>) -> Result<String, String> {
     // Cap stream reads at MAX_INPUT_BYTES + 1 via Read::take so a hostile
@@ -676,6 +741,66 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         .map_err(|e| (format!("Failed to query record: {}", e), 1))?
                         .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
                     println!("{}", format_show(&record));
+                }
+                StatsCommands::Diff {
+                    id,
+                    session,
+                    tool_use_id,
+                    limit,
+                    sort,
+                    context,
+                    no_color,
+                    json,
+                } => {
+                    let report = match (id, session) {
+                        (Some(id), None) => {
+                            let record = recorder
+                                .record_by_id(id)
+                                .map_err(|e| (format!("Failed to query record: {}", e), 1))?
+                                .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
+                            record_report(&record, context)
+                        }
+                        (None, Some(session_id)) => {
+                            let records = recorder
+                                .records_for_diff(&session_id, tool_use_id.as_deref())
+                                .map_err(|e| (format!("Failed to query diff records: {}", e), 1))?;
+                            if records.is_empty() {
+                                let scope = tool_use_id.as_deref().map_or_else(
+                                    || format!("session '{}'", session_id),
+                                    |tool| {
+                                        format!("tool use '{}' in session '{}'", tool, session_id)
+                                    },
+                                );
+                                return Err((format!("No records found for {}", scope), 1));
+                            }
+                            if let Some(tool_use_id) = tool_use_id {
+                                tool_use_report(&records, &session_id, &tool_use_id, context)
+                            } else {
+                                session_report(
+                                    &records,
+                                    &session_id,
+                                    limit,
+                                    sort.map(DiffSort::from).unwrap_or_default(),
+                                )
+                            }
+                        }
+                        _ => {
+                            return Err((
+                                "Specify exactly one of RECORD_ID or --session".to_string(),
+                                2,
+                            ));
+                        }
+                    };
+                    if json {
+                        let output = serde_json::to_string_pretty(&report)
+                            .map_err(|e| (format!("Failed to serialize diff report: {}", e), 1))?;
+                        println!("{}", output);
+                    } else {
+                        let color = !no_color
+                            && std::env::var_os("NO_COLOR").is_none()
+                            && io::stdout().is_terminal();
+                        println!("{}", format_diff_report(&report, color));
+                    }
                 }
                 StatsCommands::Clear { yes } => {
                     if !yes {

@@ -69,6 +69,24 @@ make setup
 
 安装完成后 `tokenless` 命令位于 `~/.local/bin`，RTK/TOON 辅助二进制同目录。
 
+## 查看 Token 节省明细
+
+`show` 用于原样打印完整的压缩前后内容；`diff` 用于解释估算 Token
+节省，并只突出发生变化的行：
+
+```bash
+tokenless stats show 42
+tokenless stats diff 42
+tokenless stats diff --session <session-id>
+tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
+tokenless stats diff 42 --json
+```
+
+Session 总览只包含指标；单记录和 tool-use 报告包含 unified content
+diff。只有相邻 active 阶段的输出与输入内容完全一致时才会串成一条链，
+从而避免重复计算中间阶段的 Token。完整选项和度量限制见
+[用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#统计与效果度量)。
+
 ## 架构
 
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor

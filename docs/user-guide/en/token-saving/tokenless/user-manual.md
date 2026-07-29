@@ -188,6 +188,19 @@ tokenless stats list -l 50
 # Show before/after text for a record
 tokenless stats show 42
 
+# Explain one record's estimated savings and changed content
+tokenless stats diff 42
+tokenless stats diff 42 -U 5
+tokenless stats diff 42 --json
+
+# Rank end-to-end savings in a session (metrics only)
+tokenless stats diff --session <session-id>
+tokenless stats diff --session <session-id> -l 50 --sort time
+
+# Expand the independently linked stages for one tool call
+tokenless stats diff --session <session-id> \
+  --tool-use-id <tool-use-id>
+
 # Clear all stats
 tokenless stats clear --yes
 
@@ -198,6 +211,41 @@ tokenless stats status
 tokenless stats enable
 tokenless stats disable
 ```
+
+`show` is the verbatim record viewer: it prints the complete stored before and
+after payloads. `diff` is the savings analysis view: it reports estimated
+before/after/emitted tokens, per-stage contribution, stash metrics, and unified
+changed lines. Its options are:
+
+| Argument | Description |
+|------|------|
+| `<RECORD_ID>` | Inspect one recorded compression stage; conflicts with `--session` |
+| `--session <id>` | Show a session overview, or select the scope for `--tool-use-id` |
+| `--tool-use-id <id>` | Expand one tool call; requires `--session` |
+| `-l, --limit <n>` | Maximum session-overview chains (default 20) |
+| `--sort saved\|time` | Sort session chains by estimated savings (default) or newest time |
+| `-U, --context <n>` | Unchanged lines around each change (default 3) |
+| `--no-color` | Disable ANSI colors |
+| `--json` | Emit schema `1.0` JSON with structured `context`/`delete`/`insert` hunk lines |
+
+Session overview JSON contains metrics and stages but no source content.
+Record/tool-use JSON includes structured hunks. When both endpoints are valid
+JSON values, including scalars, they are canonicalized for display before
+comparison. Object keys are sorted, so lexical-only differences such as key
+order may be hidden; stored content is never modified. Content diffing is
+omitted when either side is missing or exceeds 1 MiB, and rendered hunks stop
+after 500 lines; use `stats show` for the complete payload.
+
+For active records, consecutive stages with the same session/tool-use ID are
+linked only when the previous stored output exactly matches the next stored
+input. End-to-end savings then use the first `before` and final `after`, so
+intermediate inputs are not counted twice. Disconnected, dry-run, mixed-mode,
+and records without a tool-use ID remain separate.
+
+All displayed token counts are estimates, not model billing data. In dry-run,
+`after` is the predicted compressed size while `emitted` remains the original
+`before` size. Operations that produce no savings are not stored, so session
+views cover recorded saving operations only.
 
 #### Dual-run comparison (dry-run baseline vs active)
 
