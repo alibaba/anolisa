@@ -397,6 +397,10 @@ fn is_trusted_path_system_prefixes_unconditional() {
     assert!(is_trusted_path(Path::new("/usr/libexec/anolisa/x")));
     assert!(is_trusted_path(Path::new("/usr/lib/anolisa/x")));
     assert!(is_trusted_path(Path::new("/usr/local/share/anolisa/x")));
+    // Anolisa CLI system mode installs helpers under /usr/local/libexec.
+    assert!(is_trusted_path(Path::new(
+        "/usr/local/libexec/anolisa/tokenless/rtk"
+    )));
 }
 
 #[cfg(unix)]

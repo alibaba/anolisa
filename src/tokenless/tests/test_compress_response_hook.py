@@ -295,6 +295,87 @@ class TestBinaryFallbackPaths(unittest.TestCase):
                 )
             hook_utils._resolved_cache.clear()
 
+    # -- Codex standalone resolver drift guards --------------------------
+    #
+    # Codex caches its scripts without common/hooks, so each keeps a
+    # standalone candidate list. These tests fail whenever a standalone
+    # probe order drifts from hook_utils.py::_known_binary_paths.
+
+    @staticmethod
+    def _load_codex_script(filename: str) -> types.ModuleType:
+        script_path = os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                os.pardir,
+                "adapters",
+                "tokenless",
+                "codex",
+                "scripts",
+                filename,
+            )
+        )
+        module_name = "codex_" + filename.replace("-", "_")
+        loader = importlib.machinery.SourceFileLoader(module_name, script_path)
+        spec = importlib.util.spec_from_loader(module_name, loader)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"unable to load codex {filename}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _assert_probe_order_matches(self, find, binary: str) -> None:
+        """Assert a standalone resolver probes the shared candidate order."""
+        hook_utils = self._hook_utils()
+        try:
+            import pwd
+
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError):
+            home = ""
+        expected = [
+            path for path in hook_utils._known_binary_paths(binary, home) if path
+        ]
+        # The tokenless legacy share/lib paths are not part of
+        # _known_binary_paths (callers pass them as explicit fallbacks);
+        # standalone scripts append them after the layout candidates.
+        if binary == "tokenless" and home and os.path.isabs(home):
+            expected.extend(
+                (
+                    os.path.join(
+                        home, ".local", "share", "anolisa", "tokenless", "tokenless"
+                    ),
+                    os.path.join(
+                        home, ".local", "lib", "anolisa", "tokenless", "tokenless"
+                    ),
+                )
+            )
+        probed: list[str] = []
+
+        def _record(path: str) -> bool:
+            if path:
+                probed.append(path)
+            return False
+
+        with (
+            mock.patch.dict(os.environ, {"TOKENLESS_BIN": ""}),
+            mock.patch("shutil.which", return_value=None),
+            mock.patch("os.path.isfile", side_effect=_record),
+        ):
+            self.assertIsNone(find())
+        self.assertEqual(probed, expected)
+
+    def test_codex_rewrite_hook_rtk_probe_order_matches_shared_list(self) -> None:
+        module = self._load_codex_script("rewrite-hook")
+        self._assert_probe_order_matches(module._find_rtk, "rtk")
+
+    def test_codex_tool_ready_probe_order_matches_shared_list(self) -> None:
+        module = self._load_codex_script("tool-ready")
+        self._assert_probe_order_matches(module._find_tokenless, "tokenless")
+
+    def test_codex_compress_response_probe_order_matches_shared_list(self) -> None:
+        module = self._load_codex_script("compress-response")
+        self._assert_probe_order_matches(module._find_tokenless, "tokenless")
+
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestReplacementProtocol(unittest.TestCase):
