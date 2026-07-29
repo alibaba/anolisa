@@ -26,7 +26,7 @@ new over-threshold file appears that is not listed here.
 
 | Lines | File | Owner | Reason / split plan |
 |------:|------|-------|---------------------|
-| 1717 | `src/ui/agent_render/health.rs` | ui | Health banner rendering; pre-existing. Split per-severity renderers. |
+| 1691 | `src/ui/agent_render/health.rs` | ui | Health banner rendering; pre-existing. Split per-severity renderers. Checks coverage extracted to `health_checks.rs`. |
 | 1628 | `src/diagnostics/health/collectors.rs` | diagnostics | Per-subsystem collectors; pre-existing. Split by collector family. |
 | 850 | `src/runtime/state.rs` | runtime | Central inline state; approval state extracted. Continue per-domain splits. |
 | 912 | `src/evidence/output_policy.rs` | evidence | Output excerpt policy; pre-existing. Split bounding from classification. |

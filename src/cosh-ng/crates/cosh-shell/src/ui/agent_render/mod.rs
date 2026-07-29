@@ -21,6 +21,7 @@ mod approval_receipt;
 mod card;
 mod consultation;
 mod health;
+mod health_checks;
 mod health_labels;
 mod help;
 #[cfg(test)]

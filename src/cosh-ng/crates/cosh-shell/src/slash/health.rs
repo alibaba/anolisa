@@ -1,6 +1,9 @@
 //! `/health` slash command: render the shared on-demand doctor report as an
 //! inline card. Uses the same [`run_doctor_report`] engine and status model as
 //! the `cosh-shell doctor` CLI, so both entry points report identical checks.
+//! Renders the full panel (with the checks coverage line) even when healthy,
+//! so TUI users see the same checks coverage as the CLI instead of a one-line
+//! summary.
 
 use crate::diagnostics::doctor::run_doctor_report;
 use crate::diagnostics::health::finding_remediation;
@@ -22,7 +25,7 @@ pub(crate) fn render_health_command<W: Write>(
     let report = run_doctor_report(&config, &cwd);
 
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    renderer.write_health_banner(output, HealthBannerModel::new(&report))?;
+    renderer.write_health_banner(output, HealthBannerModel::full(&report))?;
 
     // Match the `cosh-shell doctor` CLI by surfacing the actionable remediation
     // carried on each finding. Kept in this small slash module instead of the

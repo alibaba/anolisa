@@ -1744,6 +1744,92 @@ fn health_banner_compresses_healthy_report() {
     assert!(!text.contains("Suggested Prompt"), "{text}");
 }
 
+fn healthy_report_with_checks() -> HealthScanReport {
+    let mut report = HealthScanReport::new("health-ok-checks", 0);
+    report.elapsed_ms = 4;
+    report.facts = vec![
+        health_float_fact("cpu.load_per_core_1m", 0.2),
+        health_float_fact("cpu.load_1m", 0.8),
+        health_float_fact("cpu.cores", 4.0),
+        health_float_fact("memory.used_ratio", 0.38),
+        health_float_fact("filesystem.root_used_ratio", 0.41),
+    ];
+    report.checks_done = [
+        "host",
+        "cpu",
+        "memory",
+        "disk",
+        "kernel_signal",
+        "provider",
+        "config",
+        "hooks",
+        "pty",
+        "permissions",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    report.recompute_overall_severity();
+    report
+}
+
+#[test]
+fn health_banner_full_model_shows_checks_for_healthy_report() {
+    let report = healthy_report_with_checks();
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel::full(&report))
+        .join("\n");
+
+    assert!(text.lines().count() > 2, "{text}");
+    assert!(text.contains("Health check"), "{text}");
+    assert!(
+        text.contains(
+            "checks: config, cpu, disk, hooks, host, kernel_signal, memory, \
+             permissions, provider, pty"
+        ),
+        "{text}"
+    );
+    assert_box_lines_aligned(&text, 120);
+
+    // The brief model (startup banner) keeps the compact one-line row.
+    let brief = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel::new(&report))
+        .join("\n");
+    assert!(brief.lines().count() <= 2, "{brief}");
+    assert!(!brief.contains("checks:"), "{brief}");
+}
+
+#[test]
+fn health_banner_full_model_shows_checks_with_findings() {
+    let mut report = warning_health_report();
+    report.checks_done = vec!["memory".to_string(), "disk".to_string()];
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel::full(&report))
+        .join("\n");
+
+    assert!(text.contains("checks: disk, memory"), "{text}");
+    assert!(text.contains("Findings"), "{text}");
+}
+
+#[test]
+fn health_banner_full_model_plain_and_zh_show_checks() {
+    let report = healthy_report_with_checks();
+
+    let plain = RatatuiInlineRenderer::plain_with_width(120)
+        .health_banner_lines(HealthBannerModel::full(&report))
+        .join("\n");
+    assert!(plain.contains("checks: config, cpu"), "{plain}");
+    assert!(!plain.contains('│'), "{plain}");
+
+    let zh = RatatuiInlineRenderer::with_width(120)
+        .with_language(crate::Language::ZhCn)
+        .health_banner_lines(HealthBannerModel::full(&report))
+        .join("\n");
+    assert!(zh.contains("检查项: config, cpu"), "{zh}");
+}
+
 #[test]
 fn health_banner_caps_try_lines_and_hides_suppressed_try_items() {
     let mut report = warning_health_report();
