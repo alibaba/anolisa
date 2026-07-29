@@ -28,7 +28,7 @@ When AI Agents modify code, configurations, or data files, mistakes can be costl
 ### Option 1: anolisa CLI (recommended)
 
 ```bash
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 ```
 
 ### Option 2: YUM (Alinux, requires ANOLISA YUM repo)
@@ -59,6 +59,8 @@ ws-ckpt plugin install --runtime hermes
 # Uninstall
 ws-ckpt plugin uninstall --runtime openclaw
 ```
+
+`plugin install` first runs a detect script to verify prerequisites (exit 2 = missing prerequisite, abort; exit 1 = not installed but installable, continue), then runs the install script. Scripts live under `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`.
 
 ---
 
@@ -110,6 +112,17 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
 
+### diff Output Markers
+
+| Marker | Meaning | Color |
+|--------|---------|-------|
+| `+` | File/directory added | Green |
+| `-` | File/directory deleted | Red |
+| `M` | Content modified | Yellow |
+| `R` | Renamed | Cyan |
+
+> diff ships a smart resolver that maps btrfs low-level transient inode references (such as `o261-118-0`) to real file paths and dedupes multiple operations on the same file. Rollback previews (`rollback --preview`) use the same marker semantics.
+
 ---
 
 ## Configuration
@@ -138,6 +151,8 @@ hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
 
 ### CLI-Based Configuration
 
+Configuration has two layers: **global** (`/etc/ws-ckpt/config.toml`, daemon-wide defaults) and **local** (per-workspace `policy.toml` overrides). Running `ws-ckpt config` without a scope prints a read-only overview; `-g` views/edits the global config; `-w` can only override `auto_cleanup` and `auto_cleanup_keep` — the remaining fields (interval / image / health check) are daemon-wide and can only be set via `-g`; `-w <workspace> --reset` removes the workspace override and falls back to the global config.
+
 ```bash
 # Enable auto-cleanup, keep checkpoints for 7 days
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
@@ -153,9 +168,35 @@ ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 20
 > **WARNING**: The workspace path configured for ws-ckpt must NOT be:
 > - The root path (`/`)
 > - Inside the daemon's mount_path
+> - An active mount point (see below)
 > - The Agent startup directory or any parent directory (validated at plugin level)
 >
 > These constraints are enforced by the daemon. Attempts to use invalid paths will be rejected.
+
+### The workspace root cannot be a mount point
+
+Initializing a workspace moves the original directory aside as a backup, and
+`rename(2)` fails with `EBUSY` on a directory that is itself a mount point. Any
+filesystem type is affected, not just FUSE.
+
+The common case is an in-place SkillFS mount, where the source and the mountpoint
+are the same directory. Unmount it first:
+
+```bash
+skillfs stop /path/to/workspace      # in-place SkillFS mount
+fusermount3 -u /path/to/workspace    # any other FUSE mount
+```
+
+This applies to `init` and to the first `checkpoint` on an unmanaged path, which
+auto-initializes. Once a workspace is initialized, later `checkpoint`, `rollback`,
+`list`, and `diff` operations are unaffected.
+
+Only the workspace root itself is rejected. A mount nested *inside* the workspace
+does not block `init`, but the outcome is rarely what you want: the mount stays
+attached to the backup directory that `init` moves aside, while the new workspace
+receives a plain copy of the mount's contents — subsequent writes land in the
+copy, not on the mounted filesystem, and the two silently diverge. Unmount nested
+mounts before initializing, or keep mount points outside the workspace tree.
 
 ---
 

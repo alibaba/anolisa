@@ -283,7 +283,7 @@ impl CapabilityManager for FakeCapabilityManager {
 /// One resolved capability assignment to apply. `path` is already
 /// layout-expanded and boundary-validated by the caller, so the executor
 /// never touches manifest templates or the filesystem layout.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityRequest {
     /// Binary to receive the capabilities (absolute, owned-root-checked).
     pub path: PathBuf,
@@ -299,6 +299,10 @@ pub struct CapabilityRequest {
 pub struct CapabilityRunOutcome {
     /// Count of capabilities successfully applied.
     pub applied: usize,
+    /// Requests confirmed by the capability backend. Record writers persist
+    /// only this subset so a tolerated optional failure is not later reported
+    /// as integrity drift.
+    pub applied_requests: Vec<CapabilityRequest>,
     /// Per-request warnings from tolerated (`optional`) failures.
     pub warnings: Vec<String>,
     /// `Some(reason)` when a required capability failed — the caller must
@@ -357,6 +361,7 @@ pub fn apply_capabilities(
                     None,
                 );
                 outcome.applied += 1;
+                outcome.applied_requests.push(req.clone());
             }
             Err(err) => {
                 let msg = err.to_string();
@@ -386,6 +391,249 @@ pub fn apply_capabilities(
         }
     }
     outcome
+}
+
+/// Linux file-capability state decoded from the `security.capability` xattr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileCapabilitySnapshot {
+    /// Capabilities in the permitted set.
+    permitted: Vec<String>,
+    /// Capabilities in the inheritable set.
+    inheritable: Vec<String>,
+    /// Whether the kernel should raise the permitted set into the effective
+    /// set when the file is executed.
+    effective: bool,
+    /// Namespace root UID carried by a revision 3 xattr. `None` denotes the
+    /// global revision 1/2 format.
+    root_id: Option<u32>,
+}
+
+impl FileCapabilitySnapshot {
+    /// Whether this snapshot is exactly what ANOLISA's `setcap ...+ep`
+    /// contract produces for `expected`.
+    pub(crate) fn matches_requested(&self, expected: &[String]) -> bool {
+        // ANOLISA applies capabilities from the initial user namespace. A
+        // nonzero revision-3 root ID confines the grant to another namespace,
+        // so matching bit sets alone do not make the binary usable here.
+        if self.root_id.is_some_and(|root_id| root_id != 0) {
+            return false;
+        }
+        self.effective
+            && self.inheritable.is_empty()
+            && normalize_capability_names(&self.permitted) == normalize_capability_names(expected)
+    }
+
+    /// Stable rendering for integrity findings.
+    pub(crate) fn display(&self) -> String {
+        let mut rendered = if self.permitted.is_empty() && self.inheritable.is_empty() {
+            if self.effective {
+                "none+effective".to_string()
+            } else {
+                "none".to_string()
+            }
+        } else {
+            let mut sets = Vec::new();
+            if !self.permitted.is_empty() {
+                sets.push(format!(
+                    "{}={}",
+                    normalize_capability_names(&self.permitted).join(","),
+                    if self.effective { "ep" } else { "p" }
+                ));
+            }
+            if !self.inheritable.is_empty() {
+                sets.push(format!(
+                    "{}=i",
+                    normalize_capability_names(&self.inheritable).join(",")
+                ));
+            }
+            sets.join(";")
+        };
+        if let Some(root_id) = self.root_id {
+            rendered.push_str(&format!("@rootid={root_id}"));
+        }
+        rendered
+    }
+}
+
+/// Failures while reading or decoding a Linux file-capability xattr.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CapabilityProbeError {
+    /// The filesystem refused the xattr read.
+    #[error("reading security.capability from {path} failed: {source}")]
+    Read {
+        /// File whose xattr could not be read.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The kernel returned an unsupported or truncated capability payload.
+    #[error("security.capability on {path} is malformed: {reason}")]
+    Malformed {
+        /// File carrying the malformed xattr.
+        path: PathBuf,
+        /// Decoding failure.
+        reason: String,
+    },
+    /// This host cannot inspect Linux capability xattrs.
+    #[cfg(not(target_os = "linux"))]
+    #[error("file capability inspection is unsupported on this platform")]
+    Unsupported,
+}
+
+/// Read a file's Linux capability xattr without invoking an external tool.
+///
+/// A missing xattr is a valid empty snapshot. Revision 1, 2, and 3 kernel
+/// payloads are accepted; revision 3's root-id suffix is preserved because
+/// it constrains which user namespace receives the capabilities.
+///
+/// # Errors
+///
+/// Returns [`CapabilityProbeError`] when the xattr read fails, the payload is
+/// malformed, or the host is not Linux.
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_file_capabilities(
+    path: &Path,
+) -> Result<FileCapabilitySnapshot, CapabilityProbeError> {
+    let Some(raw) =
+        xattr::get(path, "security.capability").map_err(|source| CapabilityProbeError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?
+    else {
+        return Ok(FileCapabilitySnapshot {
+            permitted: Vec::new(),
+            inheritable: Vec::new(),
+            effective: false,
+            root_id: None,
+        });
+    };
+    decode_file_capabilities(path, &raw)
+}
+
+/// Non-Linux hosts cannot carry the Linux `security.capability` contract.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn probe_file_capabilities(
+    _path: &Path,
+) -> Result<FileCapabilitySnapshot, CapabilityProbeError> {
+    Err(CapabilityProbeError::Unsupported)
+}
+
+#[cfg(target_os = "linux")]
+fn decode_file_capabilities(
+    path: &Path,
+    raw: &[u8],
+) -> Result<FileCapabilitySnapshot, CapabilityProbeError> {
+    const REVISION_MASK: u32 = 0xff00_0000;
+    const REVISION_1: u32 = 0x0100_0000;
+    const REVISION_2: u32 = 0x0200_0000;
+    const REVISION_3: u32 = 0x0300_0000;
+    const EFFECTIVE: u32 = 0x0000_0001;
+
+    let malformed = |reason: String| CapabilityProbeError::Malformed {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let word = |offset: usize| -> Result<u32, CapabilityProbeError> {
+        let bytes: [u8; 4] = raw
+            .get(offset..offset + 4)
+            .ok_or_else(|| malformed(format!("truncated at byte {offset}")))?
+            .try_into()
+            .map_err(|_| malformed(format!("invalid word at byte {offset}")))?;
+        Ok(u32::from_le_bytes(bytes))
+    };
+
+    let magic = word(0)?;
+    let (words, root_id) = match magic & REVISION_MASK {
+        REVISION_1 if raw.len() == 12 => (1, None),
+        REVISION_2 if raw.len() == 20 => (2, None),
+        REVISION_3 if raw.len() == 24 => (2, Some(word(20)?)),
+        revision => {
+            return Err(malformed(format!(
+                "unsupported revision 0x{revision:08x} with {} bytes",
+                raw.len()
+            )));
+        }
+    };
+    let mut permitted = 0u64;
+    let mut inheritable = 0u64;
+    for index in 0..words {
+        let shift = index * 32;
+        permitted |= u64::from(word(4 + index * 8)?) << shift;
+        inheritable |= u64::from(word(8 + index * 8)?) << shift;
+    }
+    Ok(FileCapabilitySnapshot {
+        permitted: capability_mask_names(permitted),
+        inheritable: capability_mask_names(inheritable),
+        effective: magic & EFFECTIVE != 0,
+        root_id,
+    })
+}
+
+fn normalize_capability_names(caps: &[String]) -> Vec<String> {
+    let mut names = caps
+        .iter()
+        .map(|cap| cap.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+#[cfg(target_os = "linux")]
+fn capability_mask_names(mask: u64) -> Vec<String> {
+    const NAMES: &[&str] = &[
+        "cap_chown",
+        "cap_dac_override",
+        "cap_dac_read_search",
+        "cap_fowner",
+        "cap_fsetid",
+        "cap_kill",
+        "cap_setgid",
+        "cap_setuid",
+        "cap_setpcap",
+        "cap_linux_immutable",
+        "cap_net_bind_service",
+        "cap_net_broadcast",
+        "cap_net_admin",
+        "cap_net_raw",
+        "cap_ipc_lock",
+        "cap_ipc_owner",
+        "cap_sys_module",
+        "cap_sys_rawio",
+        "cap_sys_chroot",
+        "cap_sys_ptrace",
+        "cap_sys_pacct",
+        "cap_sys_admin",
+        "cap_sys_boot",
+        "cap_sys_nice",
+        "cap_sys_resource",
+        "cap_sys_time",
+        "cap_sys_tty_config",
+        "cap_mknod",
+        "cap_lease",
+        "cap_audit_write",
+        "cap_audit_control",
+        "cap_setfcap",
+        "cap_mac_override",
+        "cap_mac_admin",
+        "cap_syslog",
+        "cap_wake_alarm",
+        "cap_block_suspend",
+        "cap_audit_read",
+        "cap_perfmon",
+        "cap_bpf",
+        "cap_checkpoint_restore",
+    ];
+
+    (0..64)
+        .filter(|bit| mask & (1u64 << bit) != 0)
+        .map(|bit| {
+            NAMES
+                .get(bit)
+                .map_or_else(|| format!("cap_{bit}"), |name| (*name).to_string())
+        })
+        .collect()
 }
 
 /// Append a [`crate::central_log::LogKind::Component`] record for one
@@ -626,6 +874,7 @@ mod tests {
         let reqs = vec![req("/a", false), req("/b", false)];
         let out = apply_capabilities(&m, &reqs, None, "comp", "op1", "cli", "system");
         assert_eq!(out.applied, 2);
+        assert_eq!(out.applied_requests.len(), 2);
         assert!(out.warnings.is_empty());
         assert!(out.aborted.is_none());
     }
@@ -636,6 +885,7 @@ mod tests {
         let reqs = vec![req("/a", false)];
         let out = apply_capabilities(&m, &reqs, None, "comp", "op1", "cli", "user");
         assert_eq!(out.applied, 0);
+        assert!(out.applied_requests.is_empty());
         assert!(out.warnings.is_empty());
         assert!(out.aborted.is_none());
     }
@@ -647,6 +897,7 @@ mod tests {
         let reqs = vec![req("/a", true), req("/b", false)];
         let out = apply_capabilities(&m, &reqs, None, "comp", "op1", "cli", "system");
         assert_eq!(out.applied, 1);
+        assert_eq!(out.applied_requests, vec![req("/b", false)]);
         assert_eq!(out.warnings.len(), 1);
         assert!(out.warnings[0].contains("/a"));
         assert!(out.aborted.is_none());
@@ -664,6 +915,49 @@ mod tests {
         let calls = m.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, PathBuf::from("/a"));
+        assert!(out.applied_requests.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn decodes_revision_two_capability_xattr() {
+        let permitted = (1u64 << 38) | (1u64 << 39);
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&0x0200_0001u32.to_le_bytes());
+        raw.extend_from_slice(&(permitted as u32).to_le_bytes());
+        raw.extend_from_slice(&0u32.to_le_bytes());
+        raw.extend_from_slice(&((permitted >> 32) as u32).to_le_bytes());
+        raw.extend_from_slice(&0u32.to_le_bytes());
+
+        let snapshot = decode_file_capabilities(Path::new("/bin/tool"), &raw).expect("decode");
+
+        assert_eq!(
+            snapshot.permitted,
+            vec!["cap_perfmon".to_string(), "cap_bpf".to_string()]
+        );
+        assert!(snapshot.inheritable.is_empty());
+        assert!(snapshot.effective);
+        assert_eq!(snapshot.root_id, None);
+        assert!(snapshot.matches_requested(&["CAP_BPF".to_string(), "CAP_PERFMON".to_string(),]));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn revision_three_root_id_participates_in_matching() {
+        let permitted = 1u64 << 39;
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&0x0300_0001u32.to_le_bytes());
+        raw.extend_from_slice(&(permitted as u32).to_le_bytes());
+        raw.extend_from_slice(&0u32.to_le_bytes());
+        raw.extend_from_slice(&((permitted >> 32) as u32).to_le_bytes());
+        raw.extend_from_slice(&0u32.to_le_bytes());
+        raw.extend_from_slice(&1000u32.to_le_bytes());
+
+        let snapshot = decode_file_capabilities(Path::new("/bin/tool"), &raw).expect("decode");
+
+        assert_eq!(snapshot.root_id, Some(1000));
+        assert!(!snapshot.matches_requested(&["CAP_BPF".to_string()]));
+        assert_eq!(snapshot.display(), "cap_bpf=ep@rootid=1000");
     }
 
     /// One `LogKind::Component` line per apply with `command:

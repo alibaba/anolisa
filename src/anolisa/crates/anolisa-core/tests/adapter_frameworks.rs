@@ -108,9 +108,12 @@ impl World {
         )
     }
 
-    fn load_state(&self) -> anolisa_core::state::InstalledState {
-        anolisa_core::state::InstalledState::load(&self.layout.state_dir.join("installed.toml"))
-            .expect("load state")
+    fn load_state(&self) -> anolisa_core::state_store::StateStore {
+        anolisa_core::state_store::StateStore::load(
+            &self.layout.state_dir.join("installed.toml"),
+            anolisa_platform::privilege::effective_uid(),
+        )
+        .expect("load state")
     }
 }
 
@@ -165,6 +168,8 @@ kind = "component"
 name = "{COMPONENT}"
 version = "0.6.0"
 status = "installed"
+install_backend = "raw"
+ownership = "raw_managed"
 installed_at = "2026-07-04T00:00:00Z"
 "#,
             prefix = prefix.display(),
@@ -248,7 +253,7 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     assert_eq!(claim.adapter_type.as_deref(), Some("extension"));
 
@@ -306,7 +311,7 @@ fn cosh_dry_run_enable_writes_nothing() {
         .enable(COMPONENT, Some("cosh"), true)
         .expect("dry-run");
     match outcome {
-        EnableOutcome::Planned(plan) => {
+        EnableOutcome::Planned { plan, .. } => {
             assert_eq!(plan.framework, "cosh");
             assert!(
                 plan.actions
@@ -464,7 +469,7 @@ fn codex_enable_records_argv_and_builds_marketplace() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
 
     // Marketplace layout on disk.
@@ -546,7 +551,7 @@ fn codex_dry_run_enable_writes_nothing() {
     let outcome = manager
         .enable(COMPONENT, Some("codex"), true)
         .expect("dry-run");
-    assert!(matches!(outcome, EnableOutcome::Planned(_)));
+    assert!(matches!(outcome, EnableOutcome::Planned { .. }));
     assert!(
         !marketplace_root.exists(),
         "dry-run must not create marketplace dir"
@@ -717,7 +722,7 @@ fn codex_enable_succeeds_with_bundle_under_packaged_datadir() {
     // the packaged datadir, so resolution lands there.
     seed_component(
         &layout,
-        &prefix,
+        &layout.prefix,
         "codex",
         "plugin",
         "{datadir}/adapters/{component}/codex/",
@@ -739,7 +744,7 @@ fn codex_enable_succeeds_with_bundle_under_packaged_datadir() {
         .expect("enable must succeed with bundle under a packaged datadir")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     // The symlink target points at the packaged-datadir bundle, outside the
     // install-prefix layout roots — the very case that previously failed.
@@ -833,7 +838,7 @@ fn claude_code_enable_records_validate_marketplace_and_install() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     assert_eq!(claim.plugin_id.as_deref(), Some("tokenless"));
 
@@ -1009,8 +1014,10 @@ fn stage_qoder_bundle(root: &Path) {
 }
 
 /// Fake `qodercli`: records each argv line to `$FAKE_QODER_LOG` and mirrors
-/// qodercli's plugin cache under `$FAKE_QODER_CACHE` so the driver's
-/// cache-based removal check reflects prior install/uninstall calls.
+/// qodercli's plugin cache under `$FAKE_QODER_CACHE` — `plugins install`
+/// copies the staged plugin dir verbatim, like the real CLI — so the
+/// driver's cache-based removal check reflects prior install/uninstall
+/// calls and tests can assert on the cached bundle contents.
 /// `$FAKE_QODER_FAIL=uninstall` fails the uninstall without clearing the
 /// cache, so the driver cannot confirm removal.
 fn write_fake_qodercli(dir: &Path) -> PathBuf {
@@ -1022,7 +1029,7 @@ printf '%s\n' "$*" >> "$FAKE_QODER_LOG"
 cache="$FAKE_QODER_CACHE"
 if [ "$1" = "plugins" ]; then
   case "$2" in
-    install) mkdir -p "$cache/tokenless" 2>/dev/null ;;
+    install) mkdir -p "$cache" && cp -R "$3" "$cache/" 2>/dev/null ;;
     uninstall)
       [ "$FAKE_QODER_FAIL" = "uninstall" ] && { echo "uninstall boom" >&2; exit 1; }
       rm -rf "$cache/$3" 2>/dev/null || true ;;
@@ -1036,7 +1043,7 @@ exit 0
     path
 }
 
-/// Returns `(log, settings_path, cache_dir, staging_symlink)`.
+/// Returns `(log, settings_path, cache_dir, staging_dir)`.
 fn apply_qoder_env(
     guard: &EnvGuard,
     world: &World,
@@ -1108,7 +1115,7 @@ fn qoder_enable_installs_writes_receipt_and_merges_settings() {
         stage_qoder_bundle,
     );
     let fake = write_fake_qodercli(&world.prefix);
-    let (log, settings, _cache, staging) = apply_qoder_env(&guard, &world, &fake);
+    let (log, settings, cache, staging) = apply_qoder_env(&guard, &world, &fake);
 
     let manager = world.manager();
     let claim = match manager
@@ -1116,17 +1123,31 @@ fn qoder_enable_installs_writes_receipt_and_merges_settings() {
         .expect("enable")
     {
         EnableOutcome::Enabled(c) => *c,
-        EnableOutcome::Planned(_) => panic!("expected enabled"),
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
     };
     assert_eq!(claim.plugin_id.as_deref(), Some("tokenless"));
 
-    // Recorded argv: install from the plugin-named staging symlink.
+    // Recorded argv: install from the plugin-named staging copy.
     let log_text = std::fs::read_to_string(&log).expect("qoder log");
     assert!(
         log_text
             .lines()
             .any(|l| l == format!("plugins install {}", staging.display())),
         "must run `plugins install <staging>`: {log_text}"
+    );
+
+    // The verbatim bundle qodercli cached carries the patched hooks.json:
+    // consumers that load it directly (the Qoder IDE shares ~/.qoder with
+    // qodercli) never expand the placeholder.
+    let cached_hooks = cache.join("tokenless").join("hooks.json");
+    let cached = std::fs::read_to_string(&cached_hooks).expect("cached hooks.json");
+    assert!(
+        !cached.contains("${QODER_TOKENLESS_HOOKS}"),
+        "cached hooks.json keeps no placeholder: {cached}"
+    );
+    assert!(
+        cached.contains("common/hooks"),
+        "cached hooks.json uses the absolute hooks dir: {cached}"
     );
 
     // settings.json merged: our hooks + tokenless@local, and the placeholder
@@ -1358,13 +1379,10 @@ fn qoder_dry_run_enable_writes_nothing() {
     let outcome = manager
         .enable(COMPONENT, Some("qoder"), true)
         .expect("dry-run");
-    assert!(matches!(outcome, EnableOutcome::Planned(_)));
+    assert!(matches!(outcome, EnableOutcome::Planned { .. }));
     assert!(!log.exists(), "dry-run must not invoke qodercli (no log)");
     assert!(!settings.exists(), "dry-run must not write settings.json");
-    assert!(
-        !staging.exists(),
-        "dry-run must not create the staging symlink"
-    );
+    assert!(!staging.exists(), "dry-run must not create the staging dir");
     assert!(
         world
             .load_state()

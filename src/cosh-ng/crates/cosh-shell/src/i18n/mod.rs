@@ -1,7 +1,5 @@
 mod en;
-mod en_approval;
 mod message_id;
-mod message_id_all;
 mod zh;
 
 use crate::config::Language;
@@ -46,6 +44,57 @@ fn message(language: Language, id: MessageId) -> &'static str {
 mod tests {
     use super::{I18n, MessageId};
     use crate::config::Language;
+    use std::fs;
+    use std::path::Path;
+
+    const EXPECTED_CATALOG_DOMAINS: &[&str] = &[
+        "activity",
+        "agent",
+        "approval",
+        "config",
+        "debug",
+        "health",
+        "help",
+        "hook_details",
+        "hooks",
+        "insight",
+        "modes",
+        "question",
+        "recommendation",
+        "session",
+        "startup",
+    ];
+
+    fn catalog_modules(directory: &str) -> Vec<String> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/i18n")
+            .join(directory);
+        let mut modules = fs::read_dir(path)
+            .expect("read i18n catalog directory")
+            .map(|entry| entry.expect("read i18n catalog entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .map(|path| {
+                path.file_stem()
+                    .expect("i18n catalog module stem")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        modules.sort();
+        modules
+    }
+
+    #[test]
+    fn language_catalog_modules_match_message_id_domains() {
+        let domains = EXPECTED_CATALOG_DOMAINS
+            .iter()
+            .map(|domain| (*domain).to_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(catalog_modules("message_id"), domains);
+        assert_eq!(catalog_modules("en"), domains);
+        assert_eq!(catalog_modules("zh"), domains);
+    }
 
     #[test]
     fn all_messages_have_en_and_zh_values() {
@@ -53,6 +102,66 @@ mod tests {
             assert!(!I18n::new(Language::EnUs).t(*id).trim().is_empty());
             assert!(!I18n::new(Language::ZhCn).t(*id).trim().is_empty());
         }
+    }
+
+    #[test]
+    fn message_id_keeps_fieldless_enum_compatibility() {
+        for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
+            assert_eq!(id as usize, ordinal);
+        }
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 750);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 751);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 752);
+        assert_eq!(
+            MessageId::AgentQuestionUnavailableTitle as usize,
+            MessageId::SlashQuotedArgumentsUnsupported as usize + 1
+        );
+        assert_eq!(
+            MessageId::ApprovalTitle as usize,
+            MessageId::QuestionNoPendingBody as usize + 1
+        );
+        // The tool-argument status pair is a registered stable runtime
+        // interface: pin the discriminants with fixed values so a segment
+        // inserted ahead of them can never shift the tail unnoticed
+        // (new segments must append after mcp_registry_ids).
+        assert_eq!(MessageId::AgentStatusToolArguments as usize, 829);
+        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 830);
+        assert_eq!(MessageId::HelpGroupPrompt as usize, 831);
+        // The #1747 trailing segment must stay appended after every earlier
+        // segment so pre-existing discriminants never shift.
+        assert_eq!(MessageId::HelpSummaryMcp as usize, 834);
+        assert_eq!(MessageId::SlashMcpTitle as usize, 835);
+        assert_eq!(MessageId::SlashMcpTitle as usize, MessageId::ALL.len() - 1);
+        assert_eq!(MessageId::HelpSummaryMcp as usize, MessageId::ALL.len() - 2);
+    }
+
+    #[test]
+    fn question_interaction_messages_match_the_approved_contract() {
+        let en = I18n::new(Language::EnUs);
+        let zh = I18n::new(Language::ZhCn);
+        assert_eq!(
+            en.t(MessageId::QuestionRequiredGhost),
+            "Please enter an answer"
+        );
+        assert_eq!(
+            en.t(MessageId::QuestionInvalidGhost),
+            "Choose a valid answer"
+        );
+        assert_eq!(
+            en.t(MessageId::QuestionAnswerNotSentTitle),
+            "Answer not sent"
+        );
+        assert_eq!(
+            en.t(MessageId::QuestionAnswerNotSentBody),
+            "The question is still pending. Retry or press Ctrl+C to cancel."
+        );
+        assert_eq!(zh.t(MessageId::QuestionRequiredGhost), "请先输入回答");
+        assert_eq!(zh.t(MessageId::QuestionInvalidGhost), "请选择有效回答");
+        assert_eq!(zh.t(MessageId::QuestionAnswerNotSentTitle), "回答未发送");
+        assert_eq!(
+            zh.t(MessageId::QuestionAnswerNotSentBody),
+            "问题仍在等待回答，请重试或按 Ctrl+C 取消。"
+        );
     }
 
     #[test]
@@ -93,5 +202,71 @@ mod tests {
             i18n.t(MessageId::ApprovalResolutionAutoApprovedTitle),
             "已自动批准"
         );
+    }
+
+    #[test]
+    fn quoted_argument_error_is_localized() {
+        let en = I18n::new(Language::EnUs);
+        assert_eq!(
+            en.t(MessageId::SlashInvalidArgumentsTitle),
+            "Invalid slash arguments"
+        );
+        assert_eq!(
+            en.t(MessageId::SlashQuotedArgumentsUnsupported),
+            "Quoted arguments are not supported. Use /mode approval trust confirm instead."
+        );
+
+        let zh = I18n::new(Language::ZhCn);
+        assert_eq!(
+            zh.t(MessageId::SlashInvalidArgumentsTitle),
+            "Slash 参数错误"
+        );
+        assert_eq!(
+            zh.t(MessageId::SlashQuotedArgumentsUnsupported),
+            "不支持带引号的参数。本例请改用 /mode approval trust confirm。"
+        );
+    }
+
+    #[test]
+    fn help_and_mode_messages_distinguish_recommendation_and_insight_scopes() {
+        let en = I18n::new(Language::EnUs);
+        let zh = I18n::new(Language::ZhCn);
+
+        // /help: /recommendations is scoped to personalization only and points to /mode analysis.
+        assert!(en
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("personalized prompt recommendations only"));
+        assert!(en
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("/mode analysis"));
+        assert!(zh
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("仅管理个性化提示词推荐"));
+        assert!(zh
+            .t(MessageId::HelpSummaryRecommendations)
+            .contains("/mode analysis"));
+
+        // /help: /mode analysis owns passive suggestions and failure insights.
+        assert!(en
+            .t(MessageId::HelpSummaryModeAnalysis)
+            .contains("failure insights"));
+        assert!(zh
+            .t(MessageId::HelpSummaryModeAnalysis)
+            .contains("失败命令 Insight"));
+
+        // /mode analysis manual: footer states insight scope and the asymmetric
+        // pause of personalized recommendations.
+        assert!(en
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("failure insights"));
+        assert!(en
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("/recommendations"));
+        assert!(zh
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("失败命令 Insight"));
+        assert!(zh
+            .t(MessageId::AnalysisModeManualFooter)
+            .contains("/recommendations"));
     }
 }

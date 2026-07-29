@@ -16,6 +16,9 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(dead_code)]
 
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +26,8 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{
-    ACTIVATION_XATTR, ActiveSkillResolver, ActiveTarget, bootstrap_activation, load_activation,
+    ACTIVATION_XATTR, ActiveSkillResolver, ActiveTarget, bootstrap_activation,
+    enumerate_hermes_skill_ids, load_activation,
 };
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
@@ -48,6 +52,18 @@ impl ActivationMount {
         S: FnOnce(&Path),
         R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
     {
+        Self::new_with_layout(seed, resolver_builder, None)
+    }
+
+    fn new_with_layout<S, R>(
+        seed: S,
+        resolver_builder: R,
+        skill_layout: Option<skillfs_fuse::SkillLayout>,
+    ) -> Self
+    where
+        S: FnOnce(&Path),
+        R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
+    {
         let source = tempfile::tempdir().expect("source tempdir");
         seed(source.path());
         let resolver = resolver_builder(source.path());
@@ -65,6 +81,7 @@ impl ActivationMount {
             false,
             MountConfig {
                 active_resolver: resolver,
+                skill_layout,
                 ..MountConfig::default()
             },
         )
@@ -128,6 +145,32 @@ fn write_snapshot(source: &Path, skill: &str, version: &str, skill_md: &str) -> 
     std::fs::create_dir_all(&dir).expect("create snapshot dir");
     std::fs::write(dir.join("SKILL.md"), skill_md).expect("write snapshot SKILL.md");
     dir
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .expect("set fixture permissions");
+}
+
+fn access_errno(path: &Path, mask: i32) -> Option<i32> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).expect("path contains no NUL");
+    let result = unsafe { libc::access(c_path.as_ptr(), mask) };
+    if result == 0 {
+        None
+    } else {
+        Some(
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+        )
+    }
+}
+
+fn assert_errno<T>(result: std::io::Result<T>, expected: i32) {
+    match result {
+        Ok(_) => panic!("operation unexpectedly succeeded"),
+        Err(error) => assert_eq!(error.raw_os_error(), Some(expected)),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,6 +259,125 @@ fn valid_snapshot_activation_reads_snapshot_skill_md() {
 
     assert!(mount.skill_dir("demo-weather").exists());
     assert!(mount.skill_md("demo-weather").exists());
+}
+
+#[test]
+fn snapshot_access_uses_visible_flat_permissions() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = ActivationMount::new(
+        |src| {
+            create_skill_dir(src, "access-check");
+            let live = src.join("access-check");
+            std::fs::write(live.join("tool.sh"), "UNTRUSTED-LIVE\n").unwrap();
+            std::fs::write(live.join("payload.txt"), "UNTRUSTED-LIVE\n").unwrap();
+            set_mode(&live.join("SKILL.md"), 0o700);
+            set_mode(&live.join("tool.sh"), 0o700);
+            set_mode(&live.join("payload.txt"), 0o200);
+
+            let snapshot = write_snapshot(
+                src,
+                "access-check",
+                "v000001.snapshot",
+                "---\nname: access-check\ndescription: snapshot\n---\n",
+            );
+            std::fs::write(snapshot.join("tool.sh"), "TRUSTED-SNAPSHOT\n").unwrap();
+            std::fs::write(snapshot.join("payload.txt"), "TRUSTED-SNAPSHOT\n").unwrap();
+            std::fs::write(snapshot.join("snapshot-only.txt"), "SNAPSHOT-ONLY\n").unwrap();
+            set_mode(&snapshot.join("SKILL.md"), 0o600);
+            set_mode(&snapshot.join("tool.sh"), 0o600);
+            set_mode(&snapshot.join("payload.txt"), 0o400);
+            set_mode(&snapshot.join("snapshot-only.txt"), 0o400);
+            write_activation(
+                src,
+                "access-check",
+                r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+            );
+        },
+        |src_root| {
+            let resolver = ActiveSkillResolver::new(src_root);
+            bootstrap_activation(src_root, &["access-check".to_string()], &resolver);
+            Some(Arc::new(resolver))
+        },
+    );
+
+    let skill = mount.skill_dir("access-check");
+    let skill_md = skill.join("SKILL.md");
+    let tool = skill.join("tool.sh");
+    let payload = skill.join("payload.txt");
+    let snapshot_only = skill.join("snapshot-only.txt");
+
+    assert_eq!(
+        std::fs::metadata(&tool).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read_to_string(&payload).unwrap(),
+        "TRUSTED-SNAPSHOT\n"
+    );
+    assert_eq!(access_errno(&skill_md, libc::X_OK), Some(libc::EACCES));
+    assert_eq!(access_errno(&tool, libc::X_OK), Some(libc::EACCES));
+    assert_eq!(access_errno(&payload, libc::R_OK), None);
+    assert_eq!(access_errno(&payload, libc::W_OK), None);
+    assert_eq!(access_errno(&payload, libc::R_OK | libc::W_OK), None);
+    assert_eq!(access_errno(&snapshot_only, libc::F_OK), None);
+}
+
+#[test]
+fn snapshot_access_uses_visible_hermes_permissions() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = ActivationMount::new_with_layout(
+        |src| {
+            let live = src.join("category/nested");
+            std::fs::create_dir_all(&live).unwrap();
+            std::fs::write(
+                live.join("SKILL.md"),
+                "---\nname: nested\ndescription: live\n---\n",
+            )
+            .unwrap();
+            std::fs::write(live.join("tool.sh"), "UNTRUSTED-LIVE\n").unwrap();
+            set_mode(&live.join("tool.sh"), 0o700);
+
+            let snapshot = write_snapshot(
+                src,
+                "category/nested",
+                "v000001.snapshot",
+                "---\nname: nested\ndescription: snapshot\n---\n",
+            );
+            std::fs::write(snapshot.join("tool.sh"), "TRUSTED-SNAPSHOT\n").unwrap();
+            set_mode(&snapshot.join("tool.sh"), 0o600);
+            write_activation(
+                src,
+                "category/nested",
+                r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+            );
+        },
+        |src_root| {
+            let resolver = ActiveSkillResolver::new(src_root);
+            let ids = enumerate_hermes_skill_ids(src_root);
+            bootstrap_activation(src_root, &ids, &resolver);
+            Some(Arc::new(resolver))
+        },
+        Some(skillfs_fuse::SkillLayout::Hermes),
+    );
+
+    let tool = mount.skill_dir("category/nested").join("tool.sh");
+    assert_eq!(
+        std::fs::read_to_string(&tool).unwrap(),
+        "TRUSTED-SNAPSHOT\n"
+    );
+    assert_eq!(
+        std::fs::metadata(&tool).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(access_errno(&tool, libc::X_OK), Some(libc::EACCES));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -340,6 +502,285 @@ fn activation_mode_off_preserves_original_behavior() {
 
     let md = std::fs::read_to_string(mount.skill_md("alpha")).expect("read SKILL.md");
     assert!(!md.is_empty(), "SKILL.md should be readable");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes: a symlinked top-level SKILL.md is a category, not a top-level skill.
+//
+// Regression (marker-consistency across all layers): a directory whose only
+// SKILL.md is a symlink is not a Skill. `top` must be a category, and its real
+// nested child `top/child` (regular SKILL.md) must be classified with the
+// nested id "top/child" by enumeration/resolver AND stay reachable through
+// readdir with activation keyed on that id. Previously `hermes_is_top_level_skill`
+// followed the symlink, reclassified `top` as a flat skill "top" that had no
+// activation key, and fail-closed-hid the entire directory.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_symlinked_top_marker_is_category_nested_child_visible() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let src = source.path();
+    std::fs::create_dir_all(src.join("top/child")).unwrap();
+    // `top`'s only SKILL.md is a symlink → not a valid marker.
+    let real = src.join("real-marker.md");
+    std::fs::write(&real, "---\nname: r\ndescription: d\n---\n").unwrap();
+    std::os::unix::fs::symlink(&real, src.join("top/SKILL.md")).unwrap();
+    // Nested child has a real regular SKILL.md, activated to a snapshot.
+    std::fs::write(
+        src.join("top/child/SKILL.md"),
+        "---\nname: child\ndescription: live\n---\nlive body\n",
+    )
+    .unwrap();
+    write_snapshot(
+        src,
+        "top/child",
+        "v000001.snapshot",
+        "---\nname: child\ndescription: snapshot\n---\nSNAPSHOT BODY\n",
+    );
+    write_activation(
+        src,
+        "top/child",
+        r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+    );
+
+    // Every layer must agree on the id: enumeration yields "top/child",
+    // never "top".
+    let ids = enumerate_hermes_skill_ids(src);
+    assert!(
+        ids.contains(&"top/child".to_string()),
+        "enumeration must yield nested id top/child, got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|i| i == "top"),
+        "symlink-marker top must NOT be a top-level skill id, got {ids:?}"
+    );
+
+    let resolver = ActiveSkillResolver::new(src);
+    bootstrap_activation(src, &ids, &resolver);
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(src, &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    // Normal mode: mountpoint is separate from the source, so the resolver
+    // and readdir gating read the physical source directly (no over-mount
+    // recursion). Hermes exposes nested skills at /skills/<category>/<skill>.
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        src,
+        shared,
+        MountOptions::default(),
+        false,
+        MountConfig {
+            skill_layout: Some(skillfs_fuse::SkillLayout::Hermes),
+            active_resolver: Some(Arc::new(resolver)),
+            ..MountConfig::default()
+        },
+    )
+    .expect("mount_background_configured");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let skills_root = mountpoint.path().join("skills");
+    // Capture first, then always unmount so the failure path never leaks the
+    // mount.
+    let root = sorted_dir(&skills_root);
+    let top_listing = std::fs::read_dir(skills_root.join("top")).map(|it| {
+        let mut v: Vec<String> = it
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        v.sort();
+        v
+    });
+    let child_md = std::fs::read_to_string(skills_root.join("top/child/SKILL.md"));
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+
+    assert!(
+        root.contains(&"top".to_string()),
+        "category `top` must be listed under /skills (not hidden), got {root:?}"
+    );
+    let top_listing = top_listing.expect("read_dir /skills/top");
+    assert!(
+        top_listing.contains(&"child".to_string()),
+        "activated nested skill `child` must be visible under category `top` via id \
+         top/child (not fail-closed-hidden as a phantom top-level skill), got {top_listing:?}"
+    );
+    let content = child_md.expect("/skills/top/child/SKILL.md must be readable");
+    assert!(
+        content.contains("SNAPSHOT BODY"),
+        "activated nested skill must serve its snapshot via id top/child, got {content:?}"
+    );
+}
+
+#[test]
+fn hermes_symlinked_boundaries_are_hidden_and_cannot_escape() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let top_target = outside.path().join("top-target");
+    let nested_target = outside.path().join("nested-target");
+    std::fs::create_dir_all(&top_target).unwrap();
+    std::fs::create_dir_all(&nested_target).unwrap();
+    std::fs::write(
+        top_target.join("SKILL.md"),
+        "---\nname: escaped-top\ndescription: outside\n---\n",
+    )
+    .unwrap();
+    std::fs::write(top_target.join("secret.txt"), "TOP-SECRET\n").unwrap();
+    std::fs::write(
+        nested_target.join("SKILL.md"),
+        "---\nname: escaped-nested\ndescription: outside\n---\n",
+    )
+    .unwrap();
+    std::fs::write(nested_target.join("secret.txt"), "NESTED-SECRET\n").unwrap();
+
+    let mount = ActivationMount::new_with_layout(
+        |src| {
+            create_skill_dir(src, "top-skill");
+            std::fs::create_dir_all(src.join("safe/real")).unwrap();
+            std::fs::write(
+                src.join("safe/real/SKILL.md"),
+                "---\nname: real\ndescription: safe\n---\n",
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&top_target, src.join("evil-top")).unwrap();
+            std::os::unix::fs::symlink(&nested_target, src.join("safe/evil-nested")).unwrap();
+        },
+        |_| None,
+        Some(skillfs_fuse::SkillLayout::Hermes),
+    );
+
+    let skills = mount.skills_dir();
+    let root_listing = sorted_dir(&skills);
+    assert!(root_listing.contains(&"top-skill".to_string()));
+    assert!(root_listing.contains(&"safe".to_string()));
+    assert!(!root_listing.contains(&"evil-top".to_string()));
+
+    let category_listing = sorted_dir(&skills.join("safe"));
+    assert!(category_listing.contains(&"real".to_string()));
+    assert!(!category_listing.contains(&"evil-nested".to_string()));
+
+    let escaped_top = skills.join("evil-top");
+    let escaped_nested = skills.join("safe/evil-nested");
+    assert_errno(std::fs::symlink_metadata(&escaped_top), libc::ENOENT);
+    assert_errno(std::fs::symlink_metadata(&escaped_nested), libc::ENOENT);
+    assert_errno(
+        std::fs::read_to_string(escaped_top.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::read_to_string(escaped_nested.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(escaped_top.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(escaped_nested.join("created.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::remove_file(escaped_nested.join("secret.txt")),
+        libc::ENOENT,
+    );
+    assert_errno(
+        std::fs::rename(
+            escaped_top.join("secret.txt"),
+            skills.join("safe/moved.txt"),
+        ),
+        libc::ENOENT,
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(top_target.join("secret.txt")).unwrap(),
+        "TOP-SECRET\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(nested_target.join("secret.txt")).unwrap(),
+        "NESTED-SECRET\n"
+    );
+    assert!(!nested_target.join("created.txt").exists());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flat: a symlinked Skill directory is not a managed Skill.
+//
+// Regression (cross-layer symlink consistency): `<root>/linked-skill ->
+// <outside>/real-skill`. The resolver descends with openat(O_NOFOLLOW) and
+// rejects the symlinked component, so store discovery must reject it too —
+// otherwise SkillFS would list/activate/read a Skill the resolver refuses to
+// resolve, and the ledger could misread that as "not managed" and direct-
+// fallback. The store-driven /skills view must not expose it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn flat_symlinked_skill_dir_not_exposed_as_managed_skill() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let real = outside.path().join("outside-skill");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(
+        real.join("SKILL.md"),
+        "---\nname: outside\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    let real_for_seed = real.clone();
+
+    let mount = ActivationMount::new(
+        move |src| {
+            create_skill_dir(src, "genuine");
+            std::os::unix::fs::symlink(&real_for_seed, src.join("linked-skill")).unwrap();
+        },
+        // No resolver: exercises the pure store-driven /skills view.
+        |_src| None,
+    );
+
+    let listing = sorted_dir(&mount.skills_dir());
+    assert!(
+        listing.contains(&"genuine".to_string()),
+        "the real skill must be listed, got {listing:?}"
+    );
+    assert!(
+        !listing.contains(&"linked-skill".to_string()),
+        "a symlinked Skill directory must not be exposed under /skills (matches the \
+         resolver's O_NOFOLLOW rejection), got {listing:?}"
+    );
+    // Lookup / read of the symlinked skill must fail — it is not a managed
+    // Skill, consistent with the resolver refusing to resolve it.
+    let err = std::fs::metadata(mount.skill_md("linked-skill")).unwrap_err();
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "symlinked Skill must not be resolvable as a managed skill"
+    );
+    // `outside` (the symlink target) outlives `mount`: locals drop in reverse
+    // declaration order, so `mount` is torn down before `outside` here.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -39,4 +39,4 @@ All Linux distributions use systemd (`systemctl`) uniformly. macOS does not supp
 ## Adding New Distribution Support
 
 To add support for a new distribution, see the developer documentation
-[Adding Distribution Support Guide](../developers/adding-distros.md).
+[Adding Distribution Support Guide](../../../../developer-guide/en/cosh-ng/adding-distros.md).

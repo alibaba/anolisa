@@ -18,7 +18,7 @@
 #   2. Build Rust binary (cargo build --release)
 #   3. Create a tarball: agentsight-<version>.tar.gz
 #   4. The tarball contains: agentsight, agentsight-start, agentsight.service,
-#      component.toml, agentsight.json, README.md, README_CN.md, LICENSE
+#      component.toml, agentsight.json, README.md, README_zh.md, LICENSE
 # =============================================================================
 
 set -e
@@ -54,7 +54,7 @@ The script will:
     2. Build Rust binary (cargo build --release)
     3. Create a tarball: agentsight-<version>.tar.gz
     4. The tarball contains: agentsight, agentsight-start, agentsight.service,
-       component.toml, agentsight.json, README.md, README_CN.md, LICENSE
+       component.toml, agentsight.json, README.md, README_zh.md, LICENSE
 
 Example:
     $(basename "$0")                    # Build with default version
@@ -161,7 +161,7 @@ cp "$PROJECT_ROOT/scripts/agentsight.service" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/component.toml" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/agentsight.json" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/README.md" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/README_CN.md" "$TARBALL_DIR/"
+cp "$PROJECT_ROOT/README_zh.md" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/LICENSE" "$TARBALL_DIR/"
 
 log_info "Files prepared in: $TARBALL_DIR"

@@ -4,18 +4,12 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Add hermes-plugin/ to sys.path so 'src' is importable as a package
-_HERMES_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "hermes-plugin"
-sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
-
-from src.capabilities.pii_scan import PiiScanCapability  # noqa: E402
-from src.cli_runner import CliResult  # noqa: E402
+from hermes_plugin_src.capabilities.pii_scan import PiiScanCapability
+from hermes_plugin_src.cli_runner import CliResult
 
 
 def _make_capability(
@@ -75,7 +69,7 @@ class TestPiiScanCapability:
             "on_session_end",
         ]
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_empty_input_passthrough(self, mock_cli, capability):
         """Empty user input should not call scan-pii."""
         result = capability._on_pre_llm_call(
@@ -86,7 +80,7 @@ class TestPiiScanCapability:
         assert result is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_missing_user_fields_passthrough(self, mock_cli, capability):
         """Missing user text fields should fail open without invoking scan-pii."""
         result = capability._on_pre_llm_call(session_id="session-1")
@@ -96,7 +90,7 @@ class TestPiiScanCapability:
         assert transformed is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_pass_verdict_does_not_transform_output(self, mock_cli, capability):
         """Pass verdict should not cache a warning."""
         mock_cli.return_value = _scan_result("pass")
@@ -113,7 +107,7 @@ class TestPiiScanCapability:
         assert pre_result is None
         assert transform_result is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_passes_hermes_trace_context_to_cli(self, mock_cli, capability):
         """Hermes session tracing should be propagated to scan-pii."""
         mock_cli.return_value = _scan_result("pass")
@@ -130,7 +124,7 @@ class TestPiiScanCapability:
         }
         assert "run_id" not in mock_cli.call_args.kwargs["trace_context"]
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_warn_verdict_prepends_warning_once(self, mock_cli, capability):
         """Warn verdict should prepend one redacted warning to final output."""
         mock_cli.side_effect = [
@@ -172,7 +166,7 @@ class TestPiiScanCapability:
         assert "raw_evidence" not in first
         assert second is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_deny_verdict_uses_high_risk_warning(self, mock_cli, capability):
         """Deny verdict should still be warning-only but marked high risk."""
         mock_cli.side_effect = [
@@ -203,7 +197,7 @@ class TestPiiScanCapability:
         assert "password=[REDACTED]" in result
         assert "assistant reply" in result
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_include_low_confidence_adds_cli_arg(self, mock_cli):
         """include_low_confidence should pass through to scan-pii."""
         cap = _make_capability(include_low_confidence=True)
@@ -224,7 +218,7 @@ class TestPiiScanCapability:
         ]
         assert mock_cli.call_args.kwargs["stdin"] == "hello"
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_extracts_last_user_message_from_messages(self, mock_cli, capability):
         """Fallback should scan only the last user message."""
         mock_cli.return_value = _scan_result("pass")
@@ -250,7 +244,7 @@ class TestPiiScanCapability:
         ]
         assert mock_cli.call_args.kwargs["stdin"] == "new text"
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_missing_cache_key_fails_open(self, mock_cli, capability):
         """Missing session/task/run key should avoid session-level leakage."""
         mock_cli.return_value = _scan_result(
@@ -265,7 +259,7 @@ class TestPiiScanCapability:
         assert transformed is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_cli_nonzero_fails_open(self, mock_cli, capability):
         """CLI failure should not change final output."""
         mock_cli.return_value = CliResult(stdout="", stderr="boom", exit_code=1)
@@ -281,7 +275,7 @@ class TestPiiScanCapability:
 
         assert result is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_invalid_json_fails_open(self, mock_cli, capability):
         """Invalid CLI JSON should not change final output."""
         mock_cli.return_value = CliResult(stdout="not-json", stderr="", exit_code=0)
@@ -297,7 +291,7 @@ class TestPiiScanCapability:
 
         assert result is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_unknown_verdict_fails_open(self, mock_cli, capability):
         """Unknown verdicts should not change final output."""
         mock_cli.return_value = _scan_result(
@@ -316,7 +310,7 @@ class TestPiiScanCapability:
 
         assert result is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_ttl_expiry_drops_warning(self, mock_cli):
         """Expired warnings should not be delivered."""
         cap = _make_capability(warning_ttl_seconds=0)
@@ -336,7 +330,7 @@ class TestPiiScanCapability:
 
         assert result is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_session_end_clears_warning(self, mock_cli, capability):
         """Session end should drop pending warnings."""
         mock_cli.return_value = _scan_result(
@@ -356,7 +350,7 @@ class TestPiiScanCapability:
 
         assert result is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_next_turn_clears_stale_warning(self, mock_cli, capability):
         """A new pre_llm_call should clear stale warnings for the same session."""
         mock_cli.side_effect = [
@@ -383,7 +377,7 @@ class TestPiiScanCapability:
 
         assert result is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_duplicate_warning_is_delivered_once(self, mock_cli, capability):
         """Repeated identical findings in one turn should not duplicate text."""
         mock_cli.side_effect = [
@@ -414,7 +408,7 @@ class TestPiiScanCapability:
         assert result is not None
         assert result.count("[pii-checker]") == 1
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_model_output_is_redacted(self, mock_cli, capability):
         """transform_llm_output should redact PII from final model text."""
         mock_cli.return_value = CliResult(
@@ -453,7 +447,7 @@ class TestPiiScanCapability:
             "model_output",
         ]
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_model_output_drops_raw_text_when_redaction_missing(
         self, mock_cli: MagicMock, capability: PiiScanCapability
     ) -> None:
@@ -487,7 +481,7 @@ class TestPiiScanCapability:
         assert "alice@example.com" not in result
         assert "Contact " not in result
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_tool_input_warning_is_delivered_on_transform(self, mock_cli, capability):
         """pre_tool_call findings should be cached for final output."""
         mock_cli.side_effect = [
@@ -529,7 +523,7 @@ class TestPiiScanCapability:
             "tool_input",
         ]
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_runtime_hermes_session_context_bridges_missing_tool_session_id(
         self, mock_cli, capability, monkeypatch
     ):
@@ -573,7 +567,7 @@ class TestPiiScanCapability:
         assert output.endswith("\n\nassistant response")
         assert second is None
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_cached_tool_warning_is_delivered_when_final_output_is_empty(
         self, mock_cli, capability
     ):
@@ -599,7 +593,7 @@ class TestPiiScanCapability:
         assert second is None
         assert mock_cli.call_count == 1
 
-    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_tool_output_warning_is_delivered_on_transform(self, mock_cli, capability):
         """post_tool_call findings should be cached for final output."""
         mock_cli.side_effect = [

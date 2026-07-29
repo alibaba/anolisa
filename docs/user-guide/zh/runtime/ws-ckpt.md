@@ -28,7 +28,7 @@ AI Agent 修改代码、配置或数据文件时，误操作代价高昂。ws-ck
 ### 方式一：anolisa CLI（推荐）
 
 ```bash
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 ```
 
 ### 方式二：YUM（Alinux，需配置 ANOLISA YUM 源）
@@ -59,6 +59,8 @@ ws-ckpt plugin install --runtime hermes
 # 卸载
 ws-ckpt plugin uninstall --runtime openclaw
 ```
+
+`plugin install` 会先执行 detect 脚本检查前置条件（exit 2 = 缺前置依赖，中止；exit 1 = 未安装但可安装，继续），通过后再执行 install 脚本。脚本位于 `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`。
 
 ---
 
@@ -110,6 +112,17 @@ ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
 
+### diff 输出标记
+
+| 标记 | 含义 | 颜色 |
+|------|------|------|
+| `+` | 新增文件/目录（Added） | 绿色 |
+| `-` | 删除文件/目录（Deleted） | 红色 |
+| `M` | 内容修改（Modified） | 黄色 |
+| `R` | 重命名（Renamed） | 青色 |
+
+> diff 内置智能解析器，自动将 btrfs 底层的临时 inode 引用（如 `o261-118-0`）解析为真实文件路径，并对同一文件的多个操作去重合并。预览回滚（`rollback --preview`）使用相同的标记含义。
+
 ---
 
 ## 配置
@@ -138,6 +151,8 @@ hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
 
 ### CLI 配置
 
+配置分两层：**全局**（`/etc/ws-ckpt/config.toml`，daemon-wide 默认值）与**局部**（per-workspace `policy.toml` 覆盖）。`ws-ckpt config` 不带 scope 时打印只读概览；`-g` 查看/修改全局；`-w` 仅可覆盖 `auto_cleanup` 与 `auto_cleanup_keep`，其余字段（interval / image / health check）为 daemon-wide，只能通过 `-g` 设置；`-w <workspace> --reset` 删除该工作区的覆盖，回退到沿用全局。
+
 ```bash
 # 启用自动清理，保留 7 天内的检查点
 ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
@@ -153,9 +168,31 @@ ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 20
 > **警告**：ws-ckpt 配置的工作区路径**不能**是：
 > - 根路径（`/`）
 > - daemon mount_path 内部的路径
+> - 活跃的挂载点（见下文）
 > - Agent 启动目录或其父目录（在 plugin 层校验）
 >
 > 这些约束由 daemon 代码强制执行。使用无效路径将被拒绝。
+
+### 工作区根目录不能是挂载点
+
+初始化工作区时会把原目录改名后作为备份，而 `rename(2)` 对「自身是挂载点」的目录会返回
+`EBUSY`。这与文件系统类型无关，不只是 FUSE。
+
+最常见的情况是 in-place 模式的 SkillFS 挂载 —— 此时 source 和 mountpoint 是同一个目录。
+先卸载再操作：
+
+```bash
+skillfs stop /path/to/workspace      # in-place SkillFS 挂载
+fusermount3 -u /path/to/workspace    # 其他 FUSE 挂载
+```
+
+该约束作用于 `init`，以及在未纳管路径上首次执行的 `checkpoint`（会自动初始化）。工作区
+初始化完成之后，后续的 `checkpoint`、`rollback`、`list`、`diff` 都不受影响。
+
+被拒绝的只有工作区根目录本身。工作区**内部**的嵌套挂载不会阻止 `init`，但结果通常不是
+你想要的：挂载会留在 `init` 改名移走的备份目录上，新工作区里只有挂载内容的普通副本 ——
+后续写入落在副本上而不是挂载的文件系统里，两边会静默分叉。初始化前先卸载嵌套挂载，
+或让挂载点保持在工作区目录树之外。
 
 ---
 

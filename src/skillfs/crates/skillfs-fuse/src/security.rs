@@ -110,6 +110,7 @@ pub mod path;
 pub mod policy;
 pub mod protocol_events;
 pub mod refresh;
+pub mod resolver;
 pub mod runtime_metrics;
 pub mod session_stats;
 pub mod session_stats_writer;

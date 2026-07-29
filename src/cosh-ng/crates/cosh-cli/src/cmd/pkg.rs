@@ -4,7 +4,7 @@ use clap::Subcommand;
 
 use cosh_platform::detect::Distro;
 use cosh_platform::pkg;
-use cosh_platform::validate::validate_pkg_name;
+use cosh_platform::validate::{validate_pkg_name, validate_pkg_search_query};
 
 use crate::{build_meta, print_failure, print_success};
 
@@ -60,7 +60,7 @@ pub fn run(action: PkgCommands, distro: &Distro, start: Instant) -> i32 {
             }
         }
         PkgCommands::Search { query } => {
-            if let Err(e) = validate_pkg_name(&query) {
+            if let Err(e) = validate_pkg_search_query(&query) {
                 return print_failure(e, build_meta("pkg", distro, start, false));
             }
             match pkg::pkg_search(distro, &query) {

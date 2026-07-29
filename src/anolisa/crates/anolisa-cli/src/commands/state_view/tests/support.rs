@@ -1,8 +1,8 @@
 use anolisa_core::{
-    InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership, RpmMetadata,
-    SubscriptionScope,
+    InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
+    Ownership, RpmMetadata, SubscriptionScope,
 };
-use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::fs_layout::{FsLayout, InstallMode as LayoutInstallMode};
 use std::path::PathBuf;
 
 use super::super::INSTALLED_STATE_FILE;
@@ -13,6 +13,11 @@ pub(super) fn user_layout(home: PathBuf) -> FsLayout {
 
 pub(super) fn write_state(layout: &FsLayout, objects: Vec<InstalledObject>) {
     let state = InstalledState {
+        install_mode: match layout.mode {
+            LayoutInstallMode::System => StateInstallMode::System,
+            LayoutInstallMode::User => StateInstallMode::User,
+        },
+        prefix: layout.prefix.clone(),
         objects,
         ..InstalledState::default()
     };
@@ -60,5 +65,13 @@ pub(super) fn rpm_component(name: &str, package: &str) -> InstalledObject {
     });
     object.managed = false;
     object.adopted = true;
+    object
+}
+
+pub(super) fn quarantined_component(name: &str) -> InstalledObject {
+    let mut object = component(name);
+    object.install_backend = None;
+    object.ownership = None;
+    object.managed = false;
     object
 }

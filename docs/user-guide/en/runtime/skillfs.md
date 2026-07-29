@@ -40,7 +40,7 @@ it cannot mount SkillFS.
 
 ```bash
 # Recommended package install
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # Source build for developers
 cd src/skillfs
@@ -241,6 +241,20 @@ In activation file mode, activation JSON expresses fallback and hidden states.
 It does not write current/live state. If a skill has no activation JSON or
 activation xattr in this mode, SkillFS treats it as hidden by fail-safe default.
 
+### Permission Sources
+
+Visibility decides **which** content is read; permissions decide **whether** it
+can be read or written. Since 0.4.0 the two are resolved from different sources:
+
+| Operation | Permission source |
+| --- | --- |
+| Agent-visible read | The activated target's own permissions — for fallback, the snapshot's |
+| Write | The live source's permissions |
+
+A skill can therefore be readable through its snapshot while its live source is
+not writable. If you relied on reads following live-source permissions before
+0.4.0, review the permission bits on your snapshots.
+
 ## Read-Time Transforms
 
 After the activation target is resolved, `SKILL.md` bytes pass through an
@@ -437,7 +451,7 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --foreground \
   --security \
   --activation-mode file \
-  --notify-socket /run/skill-ledger.sock \
+  --notify-socket "$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock" \
   --activation-events-log /var/log/skillfs/activation-events.jsonl \
   --activation-reload-mode poll
 ```
@@ -455,15 +469,28 @@ Agent or installer writes through SkillFS
 `--activation-reload-mode poll` requires `--notify-socket` or
 `--activation-events-log`, because SkillFS needs a trigger source for polling.
 
+`--notify-socket` points at a socket the **external daemon** listens on, not one
+SkillFS creates. In a joint deployment with Skill Ledger this is the
+agent-sec-core daemon endpoint, which defaults to
+`$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` and can be overridden with
+`AGENT_SEC_DAEMON_SOCKET`. Note that a failed notify delivery is only a warning
+and never stops the FUSE service, so pointing at the wrong path shows up as
+skills staying hidden rather than as an obvious error.
+
 For in-place activation and notify mounts, set `--ledger-backing-root` to a
-daemon-visible backing source path:
+daemon-visible backing source path and enable the authenticated resolver.
+Notify v2 carries canonical identity only, so startup rejects an in-place
+notify configuration that omits `--trusted-peer-exe`. The same resolver
+requirement applies to an out-of-place notify mount whenever it explicitly
+configures `--ledger-backing-root`:
 
 ```bash
 skillfs mount /path/to/skills /path/to/skills \
   --security-mode \
   --security \
   --activation-mode file \
-  --notify-socket /run/skill-ledger.sock \
+  --notify-socket "$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock" \
+  --trusted-peer-exe /usr/bin/python3.11 \
   --ledger-backing-root /run/user/$UID/skillfs-ledger/source
 ```
 
@@ -474,19 +501,61 @@ startup validation.
 ### Control Socket
 
 The trusted control socket is the preferred production path for activation
-writes:
+writes and for the read-only resolver query:
 
 ```bash
 skillfs mount /path/to/skills /mnt/skillfs \
   --security \
   --activation-mode file \
   --control-socket /run/skillfs/control.sock \
-  --trusted-peer-exe /usr/bin/skill-ledger
+  --trusted-peer-exe /usr/bin/python3.11
 ```
 
 The socket requires `--security --activation-mode file`, is mutually exclusive
 with `--decision-command`, and requires a pinned trusted peer executable. Peer
 validation uses Linux peer credentials and executable identity checks.
+
+The packaged AgentSecCore daemon starts the Skill Ledger worker with
+`sys.executable`, which resolves to `/usr/bin/python3.11`; the worker is not a
+`/usr/bin/skill-ledger` executable. For a custom virtual environment, run the
+following with the exact interpreter that starts the daemon and configure the
+real path it prints:
+
+```bash
+/path/to/ledger/python -c 'import os, sys; print(os.path.realpath(sys.executable))'
+```
+
+This M1 executable gate trusts that Python interpreter, not a particular
+module. Keep SkillFS and the Ledger worker in the same UID/security domain and
+account for the fact that another process under that UID using the same
+interpreter also satisfies the executable identity check.
+
+#### Endpoint and priority
+
+The control plane is opt-in and authenticated. The endpoint is resolved by
+priority:
+
+1. CLI `--control-socket <PATH>`
+2. `[control_socket].path` in the config file
+3. the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`
+
+A trusted peer with no explicit path uses the default endpoint; an explicit
+path with no trusted peer is a configuration error; neither leaves the control
+plane off. The default endpoint never falls back to `/tmp` or `/var/tmp` — if
+`/run/user/<uid>` is unavailable, startup fails with an actionable error and
+you must pass `--control-socket` explicitly. A second instance never unlinks an
+active endpoint; only a confirmed-stale socket that SkillFS owns is reclaimed.
+
+No `register`, `mountId`, or `generation` handshake is required — the endpoint
+is stable per UID and the resolver is queried directly.
+
+> **Do not use a custom endpoint in a joint deployment with Skill Ledger.** The
+> Skill Ledger resolver client only probes the default
+> `/run/user/<uid>/skillfs/control.sock`; no configuration key or command-line
+> option makes it follow a custom path. If you point `--control-socket` or
+> `[control_socket].path` elsewhere, Ledger fails to find the default socket and
+> silently falls back to host mode, canonical path resolution stops working, and
+> neither side reports an error. This is a current M1 limitation.
 
 Supported JSONL request examples:
 
@@ -495,7 +564,53 @@ Supported JSONL request examples:
 {"schemaVersion":"1","method":"status"}
 {"schemaVersion":"1","method":"meta.writeActivation","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
 {"schemaVersion":"1","method":"meta.setActivationXattr","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
+{"schemaVersion":"1","method":"skill.resolveLiveSource","canonicalSkillDir":"/path/to/skills/apple/apple-notes"}
 ```
+
+#### `skill.resolveLiveSource`
+
+A read-only query that maps a canonical Skill directory to its physical
+live/backing source. The only business parameter is `canonicalSkillDir`. It has
+three distinct outcomes:
+
+- **`managed=true`** — the path is inside the managed canonical root and
+  resolves to a valid live Skill directory. The response includes the derived
+  `skillId`, `relativeSkillDir`, the physical `liveSkillDir`, the live
+  directory's `identity` (`device`, `inode`), and `transport` (`shared_path`).
+  The query is read-only: it triggers no scan, manifest build, policy decision,
+  or activation write.
+- **`managed=false`** — the request is well-formed and `canonicalSkillDir` is a
+  valid absolute path outside the managed root (`reason: not_managed`). This is
+  a normal success; the caller may manage that directory directly.
+- **structured error** — a non-absolute or non-normalized path (including
+  repeated or trailing `/`), an illegal `..` segment, a symlink/path escape, a
+  management/reserved directory, a missing Skill directory, an invalid layout /
+  missing `SKILL.md`, an unreadable live source, or peer-authentication failure.
+  These are never disguised as `managed=false`.
+
+The skill id is derived from the canonical relative path, so both flat
+(`my-skill`) and Hermes nested (`apple/apple-notes`) layouts resolve to full
+ids. S1 implements a single source runtime; the endpoint is shared across
+future multiple canonical roots.
+
+> Note: `skill.resolveLiveSource` (SkillFS S1) is a read-only resolver. notify
+> v2 and deletion-state semantics are not part of S1.
+
+#### Notify v2
+
+`skill_ledger.skillfs_notify_change` uses schema version 2. Its business
+payload contains only `canonicalSkillDir`, the complete `skillId`, `eventKind`,
+and relative `paths`. Flat ids stay intact (`weather`), and Hermes ids retain
+both components (`category/weather`). SkillFS sorts and deduplicates paths; an
+empty array requests a whole-Skill rescan, including when the path limit is
+exceeded.
+
+The canonical directory is derived from the absolute, lexically normalized
+source identity without following a source-root symlink. The physical
+live/backing root remains private to activation and the S1 resolver, so backing
+paths never appear in notifications. The daemon must accept v2 directly and
+return `schemaVersion=2` with `accepted=true`; there is no v1 fallback or
+negotiation.
 
 ### Trusted Mount-path Writer
 
@@ -574,14 +689,19 @@ shares the same file for compatibility.
 | `--foreground` | Run in the foreground |
 | `--managed` | Start a detached supervised mount |
 | `--security-mode` | Require source and mountpoint to be the same path |
+| `--skill-layout <MODE>` | `auto` (default, detect Hermes from source-root markers), `flat`, or `hermes`; `hermes` is incompatible with `--decision-command` |
 | `--security` | Enable security integration |
 | `--activation-mode file` | Consume activation JSON/xattr state |
 | `--activation-reload-mode poll` | Poll activation after notify triggers |
 | `--notify-socket <PATH>` | Send mutation events to an external daemon |
 | `--activation-events-log <PATH>` | Write activation protocol events as JSONL |
 | `--audit-log <PATH>` | Write filesystem audit events as JSONL |
-| `--control-socket <PATH>` | Accept trusted activation write requests |
-| `--trusted-peer-exe <PATH>` | Pin the trusted control socket peer |
+| `--audit-queue-capacity <N>` | Queue size for the audit writer thread; `0` uses the built-in default, and it only applies with `--audit-log` |
+| `--events-log <PATH>` | Write legacy security decision events as JSONL; only applies with `--security --decision-command` |
+| `--control-socket <PATH>` | Override the control socket endpoint (default: `/run/user/<uid>/skillfs/control.sock`); do not use in a joint deployment with Skill Ledger |
+| `--trusted-peer-exe <PATH>` | Pin the trusted control socket peer (enables the control plane on the default endpoint if no path is given) |
+| `--trusted-peer-uid <UID>` | Additionally constrain the control socket peer's UID (from `SO_PEERCRED`) |
+| `--trusted-peer-gid <GID>` | Additionally constrain the control socket peer's GID (from `SO_PEERCRED`) |
 | `--trusted-writer-exe <PATH>` | Pin a trusted mount-path writer |
 | `--ledger-backing-root <PATH>` | Provide a daemon-visible source view |
 | `--decision-command <CMD>` | Use legacy external decision mode |

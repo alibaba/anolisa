@@ -9,7 +9,12 @@ use ratatui::{
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
 
-use super::actions::{ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
+use super::actions::{ApprovalActionSet, ApprovalPanelAction};
+use super::approval_actions::{
+    action_span, approval_action_label, approval_action_plain_rows, approval_action_row_count,
+    approval_action_styled_rows, hook_approval_action_line, hook_approval_action_spans,
+    packed_approval_actions,
+};
 
 use super::{
     buffer_to_lines, buffer_to_styled_lines, char_width, display_width, RatatuiInlineRenderer,
@@ -29,6 +34,9 @@ pub struct ApprovalPanelModel<'a> {
     pub next_label: Option<&'a str>,
     pub selected_action: ApprovalPanelAction,
     pub expanded: bool,
+    /// Offer the turn-scope batch consent action (issue #1773): true when
+    /// the run already has ≥ 2 approval requests (queued or resolved).
+    pub turn_consent: bool,
     pub hook_warnings: Vec<HookWarningView<'a>>,
 }
 
@@ -59,7 +67,7 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_panel_height(&model, width);
+        let height = approval_panel_height(&model, width, self.i18n());
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_approval_panel(model, self.i18n(), area, &mut buffer);
@@ -72,11 +80,11 @@ impl RatatuiInlineRenderer {
         }
 
         let width = self.panel_standard_width();
-        let height = approval_panel_height(&model, width);
+        let height = approval_panel_height(&model, width, self.i18n());
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_approval_panel(model, self.i18n(), area, &mut buffer);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -120,7 +128,12 @@ impl RatatuiInlineRenderer {
                 }
                 lines.push(queue);
             }
-            lines.push(approval_action_line(model.selected_action, i18n));
+            lines.extend(approval_action_plain_rows(
+                model_action_set(&model),
+                model.selected_action,
+                i18n,
+                self.content_width(),
+            ));
             if model.expanded {
                 lines.push(
                     i18n.t(crate::MessageId::ApprovalCommandDefaultPolicy)
@@ -156,20 +169,25 @@ impl RatatuiInlineRenderer {
             return lines;
         }
 
-        let position = model.queue_position.to_string();
-        let total = model.queue_total.to_string();
-        let risk = i18n.format(
-            crate::MessageId::ApprovalRiskSuffix,
-            &[("risk", model.risk)],
+        // V6a slim generic card (ARP-R8): title, single metadata row
+        // `{subject} · {risk badge}[ · queue N/M]`, optional High-risk
+        // continuation line, preview, optional next, actions; key hints and
+        // policy only when expanded.
+        let risk_label = risk_level_label(model.risk, i18n);
+        let queue_suffix = queue_meta_suffix(&model, i18n);
+        let subject = metadata_subject(
+            model.subject,
+            self.content_width(),
+            &risk_label,
+            &queue_suffix,
         );
         let mut lines = vec![
             i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
-            format!("{} · {} · {}", model.id, model.kind, risk),
-            i18n.format(
-                crate::MessageId::ApprovalQueueFullLine,
-                &[("position", position.as_str()), ("total", total.as_str())],
-            ),
+            format!("{subject} · {risk_label}{queue_suffix}"),
         ];
+        if let Some(reason) = model.reason {
+            lines.push(approval_reason_line(reason, i18n));
+        }
         for warning in &model.hook_warnings {
             let icon = hook_warning_icon(warning.decision);
             lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
@@ -177,22 +195,19 @@ impl RatatuiInlineRenderer {
                 lines.push(format!("\u{2502}   {msg_line}"));
             }
         }
-        lines.push(format!(
-            "{}{}",
-            i18n.t(crate::MessageId::ApprovalSubjectLabel),
-            model.subject
-        ));
-        lines.push(format!("{}: {}", model.preview_label, model.preview));
-        if let Some(reason) = model.reason {
-            lines.push(approval_reason_line(reason, i18n));
-        }
+        lines.push(model.preview.to_string());
         if let Some(next) = model.next_label {
             lines.push(format!(
                 "{}{next}",
                 i18n.t(crate::MessageId::ApprovalNextLabel)
             ));
         }
-        lines.push(approval_action_line(model.selected_action, i18n));
+        lines.extend(approval_action_plain_rows(
+            model_action_set(&model),
+            model.selected_action,
+            i18n,
+            self.content_width(),
+        ));
         if model.expanded {
             lines.push(
                 i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)
@@ -208,8 +223,10 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
+fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16, i18n: crate::I18n) -> u16 {
     let content_width = approval_content_width(width);
+    let action_rows =
+        approval_action_row_count(model_action_set(model), i18n, content_width) as u16;
     let hook_warning_rows = model
         .hook_warnings
         .iter()
@@ -218,7 +235,7 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
     if is_hook_approval_request(model) {
         // heading + hook_warnings + queue(opt) + actions + keys + border(2)
         let queue_rows = u16::from(model.queue_total > 1);
-        return 4 + hook_warning_rows + queue_rows;
+        return 3 + action_rows + hook_warning_rows + queue_rows;
     }
     if is_command_approval_request(model) {
         let command_rows = command_preview_rows(
@@ -241,7 +258,13 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
             })
             .unwrap_or(0);
         let expanded_rows = if model.expanded { 2 } else { 0 };
-        return 4 + command_rows + queue_rows + reason_rows + expanded_rows + hook_warning_rows;
+        return 3
+            + action_rows
+            + command_rows
+            + queue_rows
+            + reason_rows
+            + expanded_rows
+            + hook_warning_rows;
     }
 
     let preview_rows = wrapped_preview_rows(
@@ -263,8 +286,10 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
             .len() as u16
         })
         .unwrap_or(0);
-    let policy_rows = if model.expanded { 2 } else { 0 };
-    7 + preview_rows + next_rows + reason_rows + policy_rows + hook_warning_rows
+    // V6a slim generic card: border(2) + metadata(1) + actions(N) + content;
+    // keys(1) + policy(2) only when expanded (ARP-R8).
+    let expanded_rows = if model.expanded { 3 } else { 0 };
+    3 + action_rows + preview_rows + next_rows + reason_rows + expanded_rows + hook_warning_rows
 }
 
 fn render_approval_panel(
@@ -318,44 +343,63 @@ fn render_approval_panel(
         .iter()
         .map(|w| 1 + w.message.lines().count())
         .sum::<usize>() as u16;
+    // V6a slim generic card: metadata row, optional continuation line,
+    // hook warnings, preview, optional next, actions; keys + policy only
+    // when expanded (ARP-R8).
+    let action_lines = approval_action_styled_rows(
+        model_action_set(&model),
+        model.selected_action,
+        i18n,
+        inner.width as usize,
+    );
     let mut constraints = vec![
         Constraint::Length(1),
+        Constraint::Length(reason_height),
         Constraint::Length(hook_warning_height),
-        Constraint::Length(1),
-        Constraint::Length(1),
         Constraint::Length(preview_height),
         Constraint::Length(next_height),
-        Constraint::Length(reason_height),
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(action_lines.len() as u16),
     ];
     if model.expanded {
+        constraints.push(Constraint::Length(1));
         constraints.push(Constraint::Length(2));
     }
     let chunks = Layout::vertical(constraints).split(inner);
 
+    // Metadata row: `{subject} · {risk badge}[ · queue N/M]` — the badge is
+    // localized (ARP-R7); High keeps the border color, low/medium are dimmed.
+    // The subject is ellipsized so the risk badge and queue info always keep
+    // their reserved width (review follow-up: long MCP tool names must never
+    // push the risk signal out of view).
+    let risk_style = if model.risk == "high" {
+        Style::default().fg(border)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let risk_label = risk_level_label(model.risk, i18n);
+    let queue_suffix = queue_meta_suffix(&model, i18n);
+    let subject = metadata_subject(
+        model.subject,
+        inner.width.saturating_sub(2) as usize,
+        &risk_label,
+        &queue_suffix,
+    );
     Paragraph::new(Line::from(vec![
-        Span::styled(model.kind, Style::default().fg(Color::Cyan)),
-        Span::raw("  "),
-        Span::styled(
-            i18n.format(
-                crate::MessageId::ApprovalRiskSuffix,
-                &[("risk", model.risk)],
-            ),
-            Style::default().fg(border),
-        ),
-        Span::raw(format!(
-            "  {}",
-            i18n.format(
-                crate::MessageId::ApprovalQueueCompactLine,
-                &[
-                    ("position", model.queue_position.to_string().as_str()),
-                    ("total", model.queue_total.to_string().as_str()),
-                ],
-            )
-        )),
+        Span::styled(subject, Style::default().fg(Color::Cyan)),
+        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+        Span::styled(risk_label, risk_style),
+        Span::styled(queue_suffix, Style::default().fg(Color::DarkGray)),
     ]))
     .render(chunks[0], buffer);
+
+    if !reason_rows.is_empty() {
+        Paragraph::new(Text::from(approval_reason_styled_lines(
+            reason_rows,
+            border,
+            i18n,
+        )))
+        .render(chunks[1], buffer);
+    }
 
     if !model.hook_warnings.is_empty() {
         let mut warning_lines: Vec<Line<'_>> = Vec::new();
@@ -378,31 +422,14 @@ fn render_approval_panel(
                 ]));
             }
         }
-        Paragraph::new(Text::from(warning_lines)).render(chunks[1], buffer);
+        Paragraph::new(Text::from(warning_lines)).render(chunks[2], buffer);
     }
-
-    Paragraph::new(Line::from(vec![
-        Span::styled(
-            i18n.t(crate::MessageId::ApprovalSubjectLabel),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(model.subject),
-    ]))
-    .render(chunks[2], buffer);
-
-    Paragraph::new(Line::from(Span::styled(
-        format!("{}:", model.preview_label),
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .render(chunks[3], buffer);
 
     let preview_lines = preview_rows
         .into_iter()
         .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
         .collect::<Vec<_>>();
-    Paragraph::new(Text::from(preview_lines)).render(chunks[4], buffer);
+    Paragraph::new(Text::from(preview_lines)).render(chunks[3], buffer);
 
     if let Some(next) = model.next_label {
         Paragraph::new(Line::from(vec![
@@ -412,37 +439,26 @@ fn render_approval_panel(
             ),
             Span::raw(next.to_string()),
         ]))
-        .render(chunks[5], buffer);
+        .render(chunks[4], buffer);
     }
 
-    if !reason_rows.is_empty() {
-        Paragraph::new(Text::from(
-            reason_rows
-                .into_iter()
-                .map(|line| Line::from(Span::raw(line)))
-                .collect::<Vec<_>>(),
-        ))
-        .render(chunks[6], buffer);
-    }
-
-    Paragraph::new(approval_action_spans(model.selected_action, i18n)).render(chunks[7], buffer);
-
-    Paragraph::new(Line::from(vec![
-        Span::styled(
-            i18n.t(crate::MessageId::ApprovalKeysPrefix),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
-    ]))
-    .render(chunks[8], buffer);
+    Paragraph::new(Text::from(action_lines)).render(chunks[5], buffer);
 
     if model.expanded {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                i18n.t(crate::MessageId::ApprovalKeysPrefix),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
+        ]))
+        .render(chunks[6], buffer);
         Paragraph::new(Text::from(vec![
             Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicy)),
             Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicyExtra)),
         ]))
         .wrap(Wrap { trim: true })
-        .render(chunks[9], buffer);
+        .render(chunks[7], buffer);
     }
 }
 
@@ -485,13 +501,19 @@ fn render_command_tool_approval_panel(
         .map(|w| 1 + w.message.lines().count())
         .sum::<usize>() as u16;
     let queue_height = u16::from(model.queue_total > 1);
+    let action_lines = approval_action_styled_rows(
+        model_action_set(&model),
+        model.selected_action,
+        i18n,
+        inner.width as usize,
+    );
     let mut constraints = vec![
         Constraint::Length(1),
         Constraint::Length(hook_warning_height),
         Constraint::Length(reason_rows.len() as u16),
         Constraint::Length(command_rows.len().max(1) as u16),
         Constraint::Length(queue_height),
-        Constraint::Length(1),
+        Constraint::Length(action_lines.len() as u16),
     ];
     if model.expanded {
         constraints.push(Constraint::Length(1));
@@ -533,12 +555,11 @@ fn render_command_tool_approval_panel(
     }
 
     if !reason_rows.is_empty() {
-        Paragraph::new(Text::from(
-            reason_rows
-                .into_iter()
-                .map(|line| Line::from(Span::raw(line)))
-                .collect::<Vec<_>>(),
-        ))
+        Paragraph::new(Text::from(approval_reason_styled_lines(
+            reason_rows,
+            border,
+            i18n,
+        )))
         .render(chunks[2], buffer);
     }
 
@@ -567,8 +588,7 @@ fn render_command_tool_approval_panel(
         .render(chunks[4], buffer);
     }
 
-    Paragraph::new(approval_action_spans(model.selected_action, i18n))
-        .render(chunks[action_index], buffer);
+    Paragraph::new(Text::from(action_lines)).render(chunks[action_index], buffer);
 
     if model.expanded {
         Paragraph::new(Line::from(vec![
@@ -673,78 +693,25 @@ fn render_hook_approval_panel(
     .render(chunks[3], buffer);
 }
 
-/// Render action spans excluding "Always trust" for hook approval panels.
-fn hook_approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut first = true;
-    for descriptor in APPROVAL_PANEL_ACTIONS.iter() {
-        if descriptor.action == ApprovalPanelAction::AlwaysTrust {
-            continue;
-        }
-        if !first {
-            spans.push(Span::raw("  "));
-        }
-        first = false;
-        spans.push(action_span(
-            approval_action_label(descriptor.action, i18n),
-            descriptor.action,
-            selected == descriptor.action,
-        ));
+/// Action set offered by this card (single source of truth mirrors
+/// `approval_action_set_for` on the request side, issue #1773).
+fn model_action_set(model: &ApprovalPanelModel<'_>) -> ApprovalActionSet {
+    if is_hook_approval_request(model) {
+        ApprovalActionSet::Hook
+    } else if model.turn_consent {
+        ApprovalActionSet::TurnConsent
+    } else {
+        ApprovalActionSet::Standard
     }
-    Line::from(spans)
 }
 
-/// Plain-text action line excluding "Always trust" for hook approval panels.
-fn hook_approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -> String {
-    APPROVAL_PANEL_ACTIONS
-        .iter()
-        .filter(|d| d.action != ApprovalPanelAction::AlwaysTrust)
-        .map(|descriptor| {
-            let label = approval_action_label(descriptor.action, i18n);
-            if descriptor.action == selected {
-                format!("[{label}]")
-            } else {
-                label.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
-}
-
-fn approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (idx, descriptor) in APPROVAL_PANEL_ACTIONS.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(action_span(
-            approval_action_label(descriptor.action, i18n),
-            descriptor.action,
-            selected == descriptor.action,
-        ));
-    }
-    Line::from(spans)
-}
-
-fn approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -> String {
-    APPROVAL_PANEL_ACTIONS
-        .iter()
-        .map(|descriptor| {
-            let label = approval_action_label(descriptor.action, i18n);
-            if descriptor.action == selected {
-                format!("[{label}]")
-            } else {
-                label.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
-}
-
+/// V6a continuation line under the metadata row: `└ 风险: <phrase>`.
+/// `reason` is already the localized natural-language phrase (never a raw
+/// code) — the policy lives in `approval_reason::card_reason_phrase`.
 fn approval_reason_line(reason: &str, i18n: crate::I18n) -> String {
-    i18n.format(
-        crate::MessageId::ApprovalAssessmentReasonLine,
-        &[("reason", reason)],
+    format!(
+        "\u{2514} {}{reason}",
+        i18n.t(crate::MessageId::ApprovalRiskDetailLabel)
     )
 }
 
@@ -752,38 +719,117 @@ fn approval_reason_rows(reason: &str, width: usize, i18n: crate::I18n) -> Vec<St
     wrapped_preview_rows(&approval_reason_line(reason, i18n), width, 2)
 }
 
-fn approval_action_label(action: ApprovalPanelAction, i18n: crate::I18n) -> &'static str {
-    match action {
-        ApprovalPanelAction::Approve => i18n.t(crate::MessageId::ApprovalActionAllowOnce),
-        ApprovalPanelAction::AlwaysTrust => i18n.t(crate::MessageId::ApprovalActionAlwaysTrust),
-        ApprovalPanelAction::Deny => i18n.t(crate::MessageId::ApprovalActionDeny),
-        ApprovalPanelAction::Details => i18n.t(crate::MessageId::ApprovalActionDetails),
-    }
+/// Styled continuation lines: label in the border color, phrase dimmed.
+fn approval_reason_styled_lines(
+    reason_rows: Vec<String>,
+    border: Color,
+    i18n: crate::I18n,
+) -> Vec<Line<'static>> {
+    let label = format!(
+        "\u{2514} {}",
+        i18n.t(crate::MessageId::ApprovalRiskDetailLabel)
+    );
+    reason_rows
+        .into_iter()
+        .map(|row| {
+            if let Some(phrase) = row.strip_prefix(&label) {
+                Line::from(vec![
+                    Span::styled(label.clone(), Style::default().fg(border)),
+                    Span::styled(phrase.to_string(), Style::default().fg(Color::DarkGray)),
+                ])
+            } else {
+                Line::from(Span::styled(row, Style::default().fg(Color::DarkGray)))
+            }
+        })
+        .collect()
 }
 
-fn action_span(label: &str, action: ApprovalPanelAction, selected: bool) -> Span<'static> {
-    if selected {
-        Span::styled(format!("> [ {label} ] "), selected_action_style(action))
-    } else {
-        Span::styled(format!("  [ {label} ] "), Style::default().fg(Color::Gray))
-    }
-}
-
-fn selected_action_style(action: ApprovalPanelAction) -> Style {
-    let background = match action {
-        ApprovalPanelAction::Approve => Color::Green,
-        ApprovalPanelAction::AlwaysTrust => Color::Cyan,
-        ApprovalPanelAction::Deny => Color::Red,
-        ApprovalPanelAction::Details => Color::Blue,
+/// Localized risk badge value (ARP-R7): high/medium/low map to i18n labels;
+/// values outside the closed `legacy_risk()` domain fall back to a neutral
+/// localized label so the badge never mixes languages (review follow-up).
+fn risk_level_label(risk: &str, i18n: crate::I18n) -> String {
+    let id = match risk {
+        "high" => crate::MessageId::ApprovalRiskLevelHigh,
+        "medium" => crate::MessageId::ApprovalRiskLevelMedium,
+        "low" => crate::MessageId::ApprovalRiskLevelLow,
+        _ => crate::MessageId::ApprovalRiskLevelUnknown,
     };
-    Style::default()
-        .fg(Color::White)
-        .bg(background)
-        .add_modifier(Modifier::BOLD)
+    i18n.t(id).to_string()
+}
+
+/// Metadata-row queue suffix, only rendered when more than one card is pending.
+fn queue_meta_suffix(model: &ApprovalPanelModel<'_>, i18n: crate::I18n) -> String {
+    if model.queue_total <= 1 {
+        return String::new();
+    }
+    i18n.format(
+        crate::MessageId::ApprovalQueueMetaSuffix,
+        &[
+            ("position", model.queue_position.to_string().as_str()),
+            ("total", model.queue_total.to_string().as_str()),
+        ],
+    )
+}
+
+/// Ellipsize the metadata-row subject so the risk badge and queue suffix
+/// always fit: unbounded custom/MCP tool names must never push the risk
+/// signal past the row end (review follow-up on #1786).
+fn metadata_subject(
+    subject: &str,
+    content_width: usize,
+    risk_label: &str,
+    queue_suffix: &str,
+) -> String {
+    const SEPARATOR_WIDTH: usize = 3; // " · "
+    const MIN_SUBJECT_WIDTH: usize = 8;
+    let reserved = SEPARATOR_WIDTH + display_width(risk_label) + display_width(queue_suffix);
+    let budget = content_width
+        .saturating_sub(reserved)
+        .max(MIN_SUBJECT_WIDTH);
+    if display_width(subject) <= budget {
+        return subject.to_string();
+    }
+    let mut truncated = String::new();
+    let mut width = 0;
+    for ch in subject.chars() {
+        let ch_width = char_width(ch);
+        if width + ch_width > budget.saturating_sub(1) {
+            break;
+        }
+        truncated.push(ch);
+        width += ch_width;
+    }
+    truncated.push('\u{2026}');
+    truncated
 }
 
 pub(super) fn approval_content_width(width: u16) -> usize {
     width.saturating_sub(4).max(20) as usize
+}
+
+/// Renders the `audit_ref` row for the approval details and journal panels.
+///
+/// Both surfaces must derive their panel height from the same row count, so the
+/// reference is wrapped here instead of at each call site. Event ids are longer
+/// than the 40-column minimum panel, and a truncated id cannot be traced back to
+/// the audit log — so the row wraps rather than clipping at the border.
+///
+/// Returns an empty vec when no reference exists, which keeps the panel height
+/// unchanged and avoids a placeholder row.
+pub(super) fn audit_ref_rows(audit_ref: Option<&str>, content_width: usize) -> Vec<String> {
+    let Some(audit_ref) = audit_ref else {
+        return Vec::new();
+    };
+    let text = audit_ref_line(audit_ref);
+    // One row beyond the worst case keeps `wrapped_preview_rows` from
+    // ellipsizing an id that must stay verbatim.
+    let max_rows = display_width(&text).div_ceil(content_width.max(20)) + 1;
+    wrapped_preview_rows(&text, content_width, max_rows)
+}
+
+/// Field name is a stable technical identifier shared with `/audit`; never localize it.
+pub(super) fn audit_ref_line(audit_ref: &str) -> String {
+    format!("audit_ref: {audit_ref}")
 }
 
 fn max_preview_rows(expanded: bool) -> usize {

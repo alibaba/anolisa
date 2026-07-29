@@ -13,24 +13,34 @@ use crate::types::{AgentEvent, GovernedEvent};
 mod actions;
 mod activity;
 mod approval;
+mod approval_actions;
 mod approval_details;
 mod approval_journal;
+mod approval_reason;
 mod approval_receipt;
 mod card;
 mod consultation;
 mod health;
+mod health_labels;
+mod help;
+#[cfg(test)]
+mod help_tests;
+mod hook_status;
+#[cfg(test)]
+mod hook_status_tests;
 mod markdown;
 mod notice;
 mod question;
 mod recommendation;
+mod reference_style;
 mod status;
 mod stream;
 mod wrap;
 
 pub use actions::{
     approval_action_at, approval_action_index, hook_approval_action_at,
-    hook_approval_action_max_index, ApprovalActionDescriptor, ApprovalPanelAction,
-    APPROVAL_PANEL_ACTIONS,
+    hook_approval_action_max_index, pack_action_rows, ApprovalActionDescriptor, ApprovalActionSet,
+    ApprovalPanelAction, APPROVAL_PANEL_ACTIONS, TURN_APPROVAL_PANEL_ACTIONS,
 };
 pub use activity::{
     ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel, ActivityToolRowModel,
@@ -40,20 +50,23 @@ pub(crate) use approval::hook_warning_icon;
 pub use approval::{ApprovalPanelModel, HookWarningView};
 pub use approval_details::{ApprovalDetailsPanelModel, CommandAssessmentSummaryModel};
 pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel};
+pub(crate) use approval_reason::{card_reason_phrase, CARD_REASON_PHRASE_MAX_WIDTH};
 pub use approval_receipt::ApprovalReceiptPanelModel;
 pub use consultation::ConsultationCardModel;
 pub use health::HealthBannerModel;
 pub(crate) use health::{health_uses_startup_row, primary_health_prompt_suggestion};
+pub(crate) use help::{HelpPanelEntry, HelpPanelGroup, HelpPanelModel};
+pub(crate) use hook_status::{AgentHooksView, HookEntryView, HookEventGroup, HookStatusPanelModel};
 use markdown::MarkdownRenderModel;
 pub use notice::NoticePanelModel;
-pub use question::{QuestionAnswerPanelModel, QuestionPanelModel};
+pub use question::{
+    QuestionAnswerPanelModel, QuestionCursorPlacement, QuestionInputFeedback, QuestionPanelModel,
+};
 pub use recommendation::{RecommendationActionPanelModel, RecommendationPanelModel};
 pub use status::AgentStatusAnimation;
 pub use stream::{MarkdownStreamBlock, StreamingAgentBlock};
-use wrap::{
-    char_width, compact_rendered_lines, display_width, line_to_string, strip_ansi_escape,
-    wrap_plain_line,
-};
+use wrap::{char_width, compact_rendered_lines, line_to_string, strip_ansi_escape};
+pub(crate) use wrap::{display_width, wrap_plain_line, wrap_plain_line_with_prefix};
 
 const DEFAULT_WIDTH: u16 = 100;
 const MIN_WIDTH: u16 = 40;
@@ -62,8 +75,8 @@ const MAX_WIDTH: u16 = 160;
 #[derive(Debug, Clone)]
 pub struct RatatuiInlineRenderer {
     width: u16,
-    plain: bool,
-    styled: bool,
+    pub(crate) plain: bool,
+    pub(crate) styled: bool,
     language: crate::Language,
 }
 
@@ -83,7 +96,7 @@ impl RatatuiInlineRenderer {
         Self {
             width,
             plain: plain_output_requested(),
-            styled: stdout_is_tty,
+            styled: stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
             language: crate::Language::EnUs,
         }
     }
@@ -111,7 +124,7 @@ impl RatatuiInlineRenderer {
         self
     }
 
-    fn i18n(&self) -> crate::I18n {
+    pub(crate) fn i18n(&self) -> crate::I18n {
         crate::I18n::new(self.language)
     }
 
@@ -177,7 +190,7 @@ impl RatatuiInlineRenderer {
     ) -> io::Result<()> {
         let model =
             MarkdownRenderModel::parse_with_language(text, self.content_width(), self.language);
-        if self.styled && !self.plain {
+        if self.styles_enabled() && !self.plain {
             let mut body = model.styled_lines();
             if let Some(footer) = footer {
                 body.extend(
@@ -314,11 +327,15 @@ impl RatatuiInlineRenderer {
     fn rich_block_lines(&self, title: &str, body: Vec<String>) -> Vec<String> {
         let width = self.panel_standard_width();
         let inner_width = width.saturating_sub(4).max(1) as usize;
-        let content_height = body
+        // Pre-wrap with wrap_plain_line so leading indentation survives and
+        // continuation lines keep a hanging indent. Paragraph must not re-wrap:
+        // ratatui's `Wrap { trim: true }` strips leading whitespace, which
+        // flattens intentional hierarchy (e.g. /help group headers vs entries).
+        let wrapped = body
             .iter()
-            .map(|line| wrap_plain_line(line, inner_width).len().max(1))
-            .sum::<usize>()
-            .max(1);
+            .flat_map(|line| wrap_plain_line(line, inner_width))
+            .collect::<Vec<_>>();
+        let content_height = wrapped.len().max(1);
         let height = content_height.saturating_add(2).min(200) as u16;
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -332,16 +349,14 @@ impl RatatuiInlineRenderer {
         let inner = block.inner(area);
         block.render(area, &mut buffer);
 
-        let text = if body.is_empty() {
+        let text = if wrapped.is_empty() {
             Text::from(Line::from(""))
         } else {
-            Text::from(body.into_iter().map(Line::from).collect::<Vec<_>>())
+            Text::from(wrapped.into_iter().map(Line::from).collect::<Vec<_>>())
         };
-        Paragraph::new(text)
-            .wrap(Wrap { trim: true })
-            .render(inner, &mut buffer);
+        Paragraph::new(text).render(inner, &mut buffer);
 
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -375,14 +390,23 @@ impl RatatuiInlineRenderer {
         } else {
             Text::from(body)
         };
+        // `Wrap { trim: false }` keeps leading whitespace intact, so pre-wrapped
+        // callers (help panel) keep their indentation while unwrapped styled
+        // markdown content (plain paragraphs, list items) still wraps instead
+        // of being truncated. `trim: true` must not come back: it strips the
+        // indentation hierarchy.
         Paragraph::new(text)
-            .wrap(Wrap { trim: true })
+            .wrap(Wrap { trim: false })
             .render(inner, &mut buffer);
 
-        buffer_to_styled_lines(&buffer, area)
+        if self.styles_enabled() {
+            buffer_to_styled_lines(&buffer, area)
+        } else {
+            buffer_to_lines(&buffer, area)
+        }
     }
 
-    fn panel_standard_width(&self) -> u16 {
+    pub(crate) fn panel_standard_width(&self) -> u16 {
         self.width.clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
@@ -405,9 +429,13 @@ impl RatatuiInlineRenderer {
             _ => std::io::stdout().is_terminal() && !running_under_cargo_test(),
         }
     }
+
+    pub(super) fn styles_enabled(&self) -> bool {
+        self.styled
+    }
 }
 
-fn buffer_to_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
+pub(crate) fn buffer_to_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
     (0..area.height)
         .map(|y| {
             let mut line = String::new();
@@ -424,7 +452,7 @@ fn buffer_to_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
         .collect()
 }
 
-fn buffer_to_styled_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
+pub(crate) fn buffer_to_styled_lines(buffer: &Buffer, area: Rect) -> Vec<String> {
     (0..area.height)
         .map(|y| styled_buffer_row(buffer, area, y))
         .collect()
@@ -480,6 +508,9 @@ fn push_ansi_style(line: &mut String, style: RenderCellStyle) {
     let mut codes = vec!["0".to_string()];
     if style.modifier.contains(Modifier::BOLD) {
         codes.push("1".to_string());
+    }
+    if style.modifier.contains(Modifier::DIM) {
+        codes.push("2".to_string());
     }
     if style.modifier.contains(Modifier::REVERSED) {
         codes.push("7".to_string());

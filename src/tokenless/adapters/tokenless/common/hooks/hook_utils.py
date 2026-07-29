@@ -1,5 +1,7 @@
 """Shared utilities for tokenless Python hooks."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -7,22 +9,109 @@ import shutil
 import subprocess
 import sys
 
-# -- FHS fallback paths (ANOLISA spec) ----------------------------------------
+# -- Binary fallback paths ----------------------------------------------------
+#
+# Tokenless has three supported installers whose layouts differ:
+#
+# - Makefile:     ~/.local/{bin,libexec} or /usr/{bin,libexec}
+# - Anolisa CLI:  ~/.local/{bin,lib/anolisa/libexec} or /usr/local/{bin,libexec}
+# - RPM:          /usr/{bin,libexec}
+#
+# Keep the legacy lib/share paths until installations made by older releases
+# have aged out.
+#
+# KEEP IN SYNC with tool_ready_hook.sh::resolve_binary,
+# env_check.rs::binary_fallback_paths, OpenClaw's fallback constants, and the
+# Codex standalone scripts. Makefile and the Anolisa component manifest define
+# the supported layouts; the canonical order is user, /usr/local, /usr, legacy.
+
+_USER_HOME = os.path.expanduser("~")
+if not _USER_HOME or not os.path.isabs(_USER_HOME):
+    _USER_HOME = ""
+
+
+def _user_path(*parts: str) -> str:
+    return os.path.join(_USER_HOME, *parts) if _USER_HOME else ""
+
 
 _TOKENLESS_FALLBACK = "/usr/bin/tokenless"
-_TOKENLESS_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "tokenless"
+_TOKENLESS_LOCAL_SHARE = _user_path(
+    ".local", "share", "anolisa", "tokenless", "tokenless"
 )
-_TOKENLESS_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "tokenless"
+_TOKENLESS_LOCAL_LIB = _user_path(
+    ".local", "lib", "anolisa", "tokenless", "tokenless"
 )
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk"
+_RTK_LOCAL_SHARE = _user_path(
+    ".local", "share", "anolisa", "tokenless", "rtk"
 )
-_RTK_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk"
-)
+_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
+
+_TOKENLESS_HELPER_BINARIES = frozenset({"rtk", "toon"})
+
+
+def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
+    """Return install-layout fallbacks for a binary outside ``PATH``."""
+    if not name or os.path.basename(name) != name or name in {".", ".."}:
+        return ()
+    home = os.path.expanduser("~") if home is None else home
+    user_home = home if home and os.path.isabs(home) else None
+    paths = []
+    if user_home:
+        paths.append(os.path.join(user_home, ".local", "bin", name))
+    if name in _TOKENLESS_HELPER_BINARIES:
+        if user_home:
+            paths.extend(
+                [
+                    # Anolisa CLI user mode.
+                    os.path.join(
+                        user_home,
+                        ".local",
+                        "lib",
+                        "anolisa",
+                        "libexec",
+                        "tokenless",
+                        name,
+                    ),
+                    # Makefile user mode.
+                    os.path.join(
+                        user_home,
+                        ".local",
+                        "libexec",
+                        "anolisa",
+                        "tokenless",
+                        name,
+                    ),
+                ]
+            )
+    paths.append(os.path.join("/usr/local/bin", name))
+    if name in _TOKENLESS_HELPER_BINARIES:
+        # Anolisa CLI system mode.
+        paths.append(
+            os.path.join("/usr/local/libexec/anolisa/tokenless", name)
+        )
+    paths.append(os.path.join("/usr/bin", name))
+    if name in _TOKENLESS_HELPER_BINARIES:
+        paths.extend(
+            [
+                # Makefile system mode and RPM.
+                os.path.join("/usr/libexec/anolisa/tokenless", name),
+                # Debian and pre-layout-migration compatibility.
+                os.path.join("/usr/lib/anolisa/tokenless", name),
+            ]
+        )
+        if user_home:
+            paths.extend(
+                [
+                    os.path.join(
+                        user_home, ".local", "share", "anolisa", "tokenless", name
+                    ),
+                    os.path.join(
+                        user_home, ".local", "lib", "anolisa", "tokenless", name
+                    ),
+                ]
+            )
+    return tuple(paths)
 
 # -- Unified tool categorization ----------------------------------------------
 
@@ -263,12 +352,13 @@ _resolved_cache: dict[tuple, str | None] = {}
 
 
 def resolve_binary(name: str, *fallback_paths: str) -> str | None:
-    """Locate a binary by PATH search, then optional fallback paths.
+    """Locate a binary by PATH search, install layouts, then explicit paths.
 
-    Results are cached per (name, fallback_paths) — different callers passing
-    distinct fallback paths for the same name get independent cache entries.
+    Results are cached per name, explicit fallbacks, and home directory so
+    callers with distinct install contexts get independent entries.
     """
-    cache_key = (name, fallback_paths)
+    home = os.path.expanduser("~")
+    cache_key = (name, fallback_paths, home)
     if cache_key in _resolved_cache:
         return _resolved_cache[cache_key]
 
@@ -277,7 +367,8 @@ def resolve_binary(name: str, *fallback_paths: str) -> str | None:
     if path:
         result = path
     else:
-        for fp in fallback_paths:
+        candidates = dict.fromkeys((*_known_binary_paths(name, home), *fallback_paths))
+        for fp in candidates:
             if fp and os.path.isfile(fp) and os.access(fp, os.X_OK):
                 result = fp
                 break
@@ -352,19 +443,28 @@ def resolve_tool_call_id(agent_id: str, input_data: dict) -> str:
     return input_data.get("tool_use_id") or input_data.get("toolCallId", "")
 
 
-def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
-    """Write context file for rtk rewrite session tracking."""
-    os.makedirs(_CONTEXT_DIR, mode=0o700, exist_ok=True)
-    if os.path.islink(_CONTEXT_FILE):
-        os.unlink(_CONTEXT_FILE)
+def secure_write_text(path: str, content: str) -> None:
+    """Write a private hook state file (0o600, symlink-safe).
+
+    Shared hardening for state files under ~/.tokenless: the parent directory
+    is created 0o700, symlinks are refused (unlink + O_NOFOLLOW) and the file
+    stays owner-readable only, so hook state never leaks through a shared or
+    mounted HOME.
+    """
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    if os.path.islink(path):
+        os.unlink(path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(_CONTEXT_FILE, flags, 0o600)
+    fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(f"{agent_id}\n")
-        f.write(f"{session_id}\n")
-        f.write(f"{tool_use_id}\n")
+        f.write(content)
+
+
+def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
+    """Write context file for rtk rewrite session tracking."""
+    secure_write_text(_CONTEXT_FILE, f"{agent_id}\n{session_id}\n{tool_use_id}\n")
 
 
 def forward_stderr(proc: subprocess.CompletedProcess) -> None:
@@ -387,6 +487,58 @@ def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.Comple
         return proc
     except Exception:
         return None
+
+
+def detect_cosh_ng_runtime() -> tuple | None:
+    """Detect if we are running under Cosh-NG and return its version.
+
+    Returns:
+        A (major, minor, patch) version tuple if Cosh-NG is detected,
+        or (0, 0, 0) if Cosh-NG is detected but version is unknown
+        (unsupported), or None if not running under Cosh-NG.
+
+    Detection checks (in order):
+      1. ``COSH_NG_VERSION`` environment variable — set by Cosh-NG when
+         launching hook processes.
+      2. ``COSH_RUNTIME`` environment variable set to ``cosh-ng``.
+
+    The ``(0, 0, 0)`` sentinel means "Cosh-NG detected but version unknown" —
+    callers should treat this as "unsupported version" and fail open (disable
+    compression) rather than falling back to duplicate injection.
+    """
+    version_str = os.environ.get("COSH_NG_VERSION", "")
+    if version_str:
+        ver = parse_version(version_str)
+        if ver:
+            return ver
+        # Detected Cosh-NG but can't parse version — unsupported
+        return (0, 0, 0)
+
+    runtime = os.environ.get("COSH_RUNTIME", "")
+    if runtime == "cosh-ng":
+        # Cosh-NG detected via runtime env var but no version available
+        return (0, 0, 0)
+
+    return None
+
+
+def resolve_agent_id(default: str = "tokenless") -> str:
+    """Resolve the agent ID used for stats attribution.
+
+    Runtime detection wins over ``TOKENLESS_AGENT_ID``. The shared extension
+    manifest sets that variable to ``copilot-shell``, and now that Cosh-NG
+    honours hook ``env`` (#1617) an unconditional read would attribute Cosh-NG
+    sessions to copilot-shell. ``COSH_RUNTIME`` / ``COSH_NG_VERSION`` are
+    injected by the host after the manifest env, so they take precedence over
+    the declared env map.
+
+    This is attribution only. The signal is cooperative — a manifest controls
+    its own ``command`` and could reassign these — so it must never gate
+    anything security-relevant.
+    """
+    if detect_cosh_ng_runtime() is not None:
+        return "cosh-ng"
+    return os.environ.get("TOKENLESS_AGENT_ID") or default
 
 
 def parse_version(version_str: str) -> tuple | None:

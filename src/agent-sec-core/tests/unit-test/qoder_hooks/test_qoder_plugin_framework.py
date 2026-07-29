@@ -1,6 +1,5 @@
 """Unit tests for the Qoder plugin framework shell."""
 
-import importlib.util
 import json
 import os
 import shlex
@@ -11,17 +10,17 @@ import textwrap
 import tomllib
 from pathlib import Path
 
+from standalone_hook_test_loader import load_module_from_path
+
 _CORE_DIR = Path(__file__).resolve().parents[3]
 _PLUGIN_DIR = _CORE_DIR / "qoder-plugin"
 _HOOKS_DIR = _PLUGIN_DIR / "hooks"
 _INSTALL_SCRIPT = _PLUGIN_DIR / "install.sh"
 
-_spec = importlib.util.spec_from_file_location(
-    "qoder_hook_common", _HOOKS_DIR / "qoder_hook_common.py"
+qoder_hook_common = load_module_from_path(
+    "qoder_framework_hook_common",
+    _HOOKS_DIR / "qoder_hook_common.py",
 )
-qoder_hook_common = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = qoder_hook_common
-_spec.loader.exec_module(qoder_hook_common)
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -110,7 +109,7 @@ _AGENT_SEC_CLI = textwrap.dedent("""\
     #!/usr/bin/env bash
     set -euo pipefail
     case "$*" in
-        "scan-pii --help"|"skill-ledger check --help")
+        "scan-pii --help"|"skill-ledger check --help"|"observability record --help"|"scan-code --help")
             exit 0
             ;;
         *)
@@ -119,10 +118,17 @@ _AGENT_SEC_CLI = textwrap.dedent("""\
     esac
     """)
 
-_AGENT_SEC_CLI_PII_ONLY = textwrap.dedent("""\
+_AGENT_SEC_CLI_WITHOUT_SKILL_LEDGER = textwrap.dedent("""\
     #!/usr/bin/env bash
     set -euo pipefail
-    [[ "$*" == "scan-pii --help" ]]
+    case "$*" in
+        "scan-pii --help"|"observability record --help"|"scan-code --help")
+            exit 0
+            ;;
+        *)
+            exit 2
+            ;;
+    esac
     """)
 
 
@@ -144,7 +150,14 @@ def test_hooks_json_uses_qoder_plugin_wrapper() -> None:
     hooks = json.loads((_HOOKS_DIR / "hooks.json").read_text())
 
     assert set(hooks) == {"hooks"}
-    assert set(hooks["hooks"]) == {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
+    assert set(hooks["hooks"]) == {
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "StopFailure",
+    }
     pre_tool = hooks["hooks"]["PreToolUse"]
     skill_ledger = next(entry for entry in pre_tool if entry["matcher"] == "Skill")
     hook = skill_ledger["hooks"][0]
@@ -244,7 +257,7 @@ def test_install_rejects_cli_without_skill_ledger(tmp_path: Path) -> None:
         tmp_path,
         qodercli_script=_QODER_WITH_PLUGINS,
         python_script=_python_version_script((3, 11)),
-        agent_sec_cli_script=_AGENT_SEC_CLI_PII_ONLY,
+        agent_sec_cli_script=_AGENT_SEC_CLI_WITHOUT_SKILL_LEDGER,
     )
 
     assert proc.returncode != 0

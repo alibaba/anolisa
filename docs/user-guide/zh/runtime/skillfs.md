@@ -39,7 +39,7 @@ SkillFS。
 
 ```bash
 # 推荐包安装
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # 开发者源码构建
 cd src/skillfs
@@ -228,6 +228,18 @@ Activation file mode 下，Activation JSON 表达 fallback 和 hidden 两种状�
 current/live 状态。如果该模式下某个 skill 没有 activation JSON 或 activation
 xattr，SkillFS 会按 fail-safe 默认值将其视为 hidden。
 
+### 权限判定来源
+
+可见性决定读**哪一份**内容，权限决定**能不能**读写。自 0.4.0 起两者的判定来源是分开的：
+
+| 操作 | 权限来源 |
+| --- | --- |
+| Agent 可见的读取 | 当前激活目标的权限，即 fallback 时用 snapshot 自身的权限 |
+| 写入 | live source 的权限 |
+
+因此一个 skill 可能 snapshot 可读、live source 不可写。升级到 0.4.0 前若依赖读取跟随
+live source 权限，需要复核 snapshot 的权限位。
+
 ## 读时转换
 
 在解析出激活目标之后，`SKILL.md` 字节会先经过一条固定顺序的转换流水线，再交给
@@ -397,7 +409,7 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --foreground \
   --security \
   --activation-mode file \
-  --notify-socket /run/skill-ledger.sock \
+  --notify-socket "$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock" \
   --activation-events-log /var/log/skillfs/activation-events.jsonl \
   --activation-reload-mode poll
 ```
@@ -415,15 +427,25 @@ Agent 或 installer 通过 SkillFS 写入
 `--activation-reload-mode poll` 需要 `--notify-socket` 或
 `--activation-events-log`，因为 SkillFS 需要触发源来启动 polling。
 
+`--notify-socket` 指向的是**外部 daemon 监听的** socket，而不是 SkillFS 自己创建的
+socket。与 Skill Ledger 联合部署时，它就是 agent-sec-core daemon 的 endpoint，默认为
+`$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock`，可用 `AGENT_SEC_DAEMON_SOCKET` 覆盖。
+注意 notify 投递失败只记 warning，不会中断 FUSE 服务，因此指向错误路径的表现是 skill
+一直停留在 hidden 而没有明显报错。
+
 对于 in-place activation 和 notify mount，需要设置 `--ledger-backing-root`，给
-daemon 一个可见的 backing source path：
+daemon 一个可见的 backing source path，并启用 authenticated resolver。Notify v2
+只携带 canonical identity，因此缺少 `--trusted-peer-exe` 的 in-place notify 配置会
+在启动阶段被拒绝。out-of-place notify mount 如果显式配置
+`--ledger-backing-root`，同样必须启用 resolver：
 
 ```bash
 skillfs mount /path/to/skills /path/to/skills \
   --security-mode \
   --security \
   --activation-mode file \
-  --notify-socket /run/skill-ledger.sock \
+  --notify-socket "$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock" \
+  --trusted-peer-exe /usr/bin/python3.11 \
   --ledger-backing-root /run/user/$UID/skillfs-ledger/source
 ```
 
@@ -432,19 +454,56 @@ skillfs mount /path/to/skills /path/to/skills \
 
 ### Control Socket
 
-可信 control socket 是生产环境推荐的 activation 写入路径：
+可信 control socket 是生产环境推荐的 activation 写入路径，也承载只读的
+resolver 查询：
 
 ```bash
 skillfs mount /path/to/skills /mnt/skillfs \
   --security \
   --activation-mode file \
   --control-socket /run/skillfs/control.sock \
-  --trusted-peer-exe /usr/bin/skill-ledger
+  --trusted-peer-exe /usr/bin/python3.11
 ```
 
 该 socket 要求 `--security --activation-mode file`，与 `--decision-command` 互斥，
 并且必须指定可信 peer executable。Peer 校验使用 Linux peer credential 和
 executable identity。
+
+packaged AgentSecCore daemon 使用 `sys.executable` 启动 Skill Ledger worker，该路径
+解析为 `/usr/bin/python3.11`；worker 并不是 `/usr/bin/skill-ledger` executable。
+使用自定义 virtual environment 时，请用启动 daemon 的同一个 interpreter 执行以下
+命令，并配置它输出的真实路径：
+
+```bash
+/path/to/ledger/python -c 'import os, sys; print(os.path.realpath(sys.executable))'
+```
+
+这个 M1 executable gate 信任的是 Python interpreter，而不是某个特定 module。请让
+SkillFS 与 Ledger worker 运行在相同 UID/security domain，并注意同一 UID 下使用相同
+interpreter 的其他进程也会通过 executable identity 校验。
+
+#### Endpoint 与优先级
+
+control plane 是 opt-in 且需认证的。endpoint 按优先级解析：
+
+1. CLI `--control-socket <PATH>`
+2. 配置文件 `[control_socket].path`
+3. 默认的每用户 endpoint `/run/user/<uid>/skillfs/control.sock`
+
+仅配置可信 peer 而未给显式 path 时使用默认 endpoint；仅给显式 path 而未配置可信
+peer 为配置错误；两者都没有则 control plane 保持关闭。默认 endpoint 绝不 fallback
+到 `/tmp` 或 `/var/tmp`——若 `/run/user/<uid>` 不可用，启动会返回明确且可操作的
+错误，此时必须显式传入 `--control-socket`。第二个实例绝不会 unlink 处于活跃状态
+的 endpoint；只有确认属于 SkillFS 且为 stale 的 socket 才会被回收。
+
+无需 `register`、`mountId` 或 `generation` 握手——endpoint 按 UID 稳定，resolver
+可直接查询。
+
+> **与 Skill Ledger 联合部署时不要使用自定义 endpoint。** Skill Ledger 的 resolver
+> 客户端只探测默认的 `/run/user/<uid>/skillfs/control.sock`，没有任何配置项或命令行
+> 参数可以让它跟随自定义路径。如果用 `--control-socket` 或 `[control_socket].path`
+> 指定了其他路径，Ledger 找不到默认 socket 会静默按 host 模式处理，canonical path
+> 解析随之失效，且两侧都不会报错。这是当前 M1 的限制。
 
 支持的 JSONL 请求示例：
 
@@ -453,7 +512,42 @@ executable identity。
 {"schemaVersion":"1","method":"status"}
 {"schemaVersion":"1","method":"meta.writeActivation","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
 {"schemaVersion":"1","method":"meta.setActivationXattr","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
+{"schemaVersion":"1","method":"skill.resolveLiveSource","canonicalSkillDir":"/path/to/skills/apple/apple-notes"}
 ```
+
+#### `skill.resolveLiveSource`
+
+只读查询，将 canonical Skill 目录映射到其物理 live/backing source。业务参数只有
+`canonicalSkillDir`，结果分三态：
+
+- **`managed=true`**——路径位于受管 canonical root 内且对应有效 live Skill 目录。
+  响应包含推导出的 `skillId`、`relativeSkillDir`、物理 `liveSkillDir`、live 目录的
+  `identity`（`device`、`inode`）以及 `transport`（`shared_path`）。查询是只读的：
+  不触发 scan、manifest、policy decide 或 activation write。
+- **`managed=false`**——请求格式合法且 `canonicalSkillDir` 是位于受管 root 之外的
+  合法绝对路径（`reason: not_managed`）。这是正常成功响应，调用方可直接管理该目录。
+- **structured error**——非绝对或非规范路径（包括重复或末尾 `/`）、非法 `..` 段、
+  symlink/path 逃逸、管理/保留目录、Skill 目录不存在、布局无效/缺少 `SKILL.md`、
+  live source 不可安全访问，或 peer 认证失败。这些绝不会伪装成 `managed=false`。
+
+skillId 由 canonical 相对路径推导，因此 flat（`my-skill`）和 Hermes nested
+（`apple/apple-notes`）布局都会解析为完整 id。S1 只实现单 source runtime；该 endpoint
+在未来多 canonical root 场景下仍共享。
+
+> 说明：`skill.resolveLiveSource`（SkillFS S1）是只读 resolver。notify v2 与删除态
+> 语义不属于 S1。
+
+#### Notify v2
+
+`skill_ledger.skillfs_notify_change` 使用 schema version 2。业务 payload 只包含
+`canonicalSkillDir`、完整 `skillId`、`eventKind` 和相对 `paths`。Flat id 保持完整
+（`weather`），Hermes id 保留两个分量（`category/weather`）。SkillFS 会排序、去重
+paths；空数组表示需要重新扫描整个 Skill，也用于超过路径数量上限的情况。
+
+canonical 目录由不跟随 source-root symlink 的绝对、词法规范化 source identity
+推导。物理 live/backing root 只供 activation 和 S1 resolver 使用，因此通知不会暴露
+backing 路径。daemon 必须直接接受 v2，并返回 `schemaVersion=2` 与
+`accepted=true`；不提供 v1 fallback 或协商。
 
 ### Trusted Mount-path Writer
 
@@ -524,14 +618,19 @@ mount-session summary 仍共享同一个文件。
 | `--foreground` | 前台运行 |
 | `--managed` | 启动 detached supervised mount |
 | `--security-mode` | 要求 source 和 mountpoint 是同一路径 |
+| `--skill-layout <MODE>` | `auto`（默认，按 source-root marker 探测 Hermes）、`flat` 或 `hermes`；`hermes` 与 `--decision-command` 互斥 |
 | `--security` | 启用安全集成 |
 | `--activation-mode file` | 消费 activation JSON/xattr 状态 |
 | `--activation-reload-mode poll` | notify trigger 后 poll activation |
 | `--notify-socket <PATH>` | 向外部 daemon 发送 mutation event |
 | `--activation-events-log <PATH>` | 写 activation protocol events JSONL |
 | `--audit-log <PATH>` | 写 filesystem audit events JSONL |
-| `--control-socket <PATH>` | 接收可信 activation 写请求 |
-| `--trusted-peer-exe <PATH>` | 固定可信 control socket peer |
+| `--audit-queue-capacity <N>` | audit writer 线程队列长度；`0` 用内置默认值，仅配合 `--audit-log` 生效 |
+| `--events-log <PATH>` | 写旧 decision 流程的 security decision events JSONL，仅配合 `--security --decision-command` 生效 |
+| `--control-socket <PATH>` | 覆盖 control socket endpoint（默认 `/run/user/<uid>/skillfs/control.sock`）；与 Skill Ledger 联合部署时不要使用 |
+| `--trusted-peer-exe <PATH>` | 固定可信 control socket peer（未给 path 时在默认 endpoint 启用 control plane） |
+| `--trusted-peer-uid <UID>` | 额外约束 control socket peer 的 UID（取自 `SO_PEERCRED`） |
+| `--trusted-peer-gid <GID>` | 额外约束 control socket peer 的 GID（取自 `SO_PEERCRED`） |
 | `--trusted-writer-exe <PATH>` | 固定可信 mount-path writer |
 | `--ledger-backing-root <PATH>` | 提供 daemon 可见的 source view |
 | `--decision-command <CMD>` | 使用旧 external decision 模式 |

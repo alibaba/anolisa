@@ -34,7 +34,8 @@
 /src/tokenless/                         @Forrest-ly @shiloong @ikunkun-sys      # auto-label: component:tokenless
 /src/agent-memory/                      @shiloong @ikunkun-sys      # auto-label: component:memory
 /src/anolisa/                           @kongche-jbw @ikunkun-sys   # auto-label: component:anolisa
-/src/cosh-ng/                           @samchu-zsl                 # auto-label: component:cosh-ng
+/src/cosh-ng/                           @KaiLongZhou                # auto-label: component:cosh-ng
+/src/cosh-ng/crates/cosh-shell/         @SunnyQjm                   # auto-label: component:cosh-ng
 
 # ---------------------------------------------------------------------------
 # Scope paths

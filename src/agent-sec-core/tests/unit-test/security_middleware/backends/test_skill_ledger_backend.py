@@ -59,6 +59,7 @@ def test_check_event_result_keeps_skill_ledger_status_contract():
     assert warn_result == {
         "command": "check",
         "status": "warn",
+        "verdict": "warn",
         "skill_name": "demo",
         "version_id": "v000001",
         "created_at": "2026-06-17T00:00:00+00:00",
@@ -78,6 +79,7 @@ def test_check_event_result_keeps_skill_ledger_status_contract():
     assert tampered_result == {
         "command": "check",
         "status": "tampered",
+        "verdict": "tampered",
         "skill_name": "demo",
         "version_id": "v000001",
         "created_at": "2026-06-17T00:00:00+00:00",
@@ -186,6 +188,72 @@ def test_scan_and_certify_event_results_use_scan_verdict_contract():
     }
 
 
+def test_show_event_result_uses_latest_status_instead_of_active_verdict():
+    result = _event_result(
+        {
+            "command": "show",
+            "latestStatus": "deny",
+            "latestVersionId": "v000002",
+            "activeVersionId": "v000001",
+            "skillName": "demo",
+            "latest": {
+                "versionId": "v000002",
+                "status": "deny",
+                "scanStatus": "deny",
+            },
+            "active": {
+                "versionId": "v000001",
+                "status": "pass",
+                "scanStatus": "pass",
+            },
+        }
+    )
+
+    assert result["verdict"] == "deny"
+    assert result["latest"]["verdict"] == "deny"
+    assert result["active"]["verdict"] == "pass"
+
+
+def test_show_event_result_uses_latest_risk_state():
+    for latest_status in ("drifted", "tampered", "unmanaged"):
+        result = _event_result(
+            {
+                "command": "show",
+                "latestStatus": latest_status,
+                "skillName": "demo",
+                "latest": {"status": latest_status, "scanStatus": "pass"},
+                "active": {"status": "pass", "scanStatus": "pass"},
+            }
+        )
+
+        assert result["verdict"] == latest_status
+        assert result["latest"]["verdict"] == "pass"
+        assert result["active"]["verdict"] == "pass"
+
+
+def test_decide_event_result_prefers_current_status_then_scan_verdict():
+    drifted_result = _event_result(
+        {
+            "command": "decide",
+            "status": "decided",
+            "currentStatus": "drifted",
+            "scanStatus": "pass",
+            "skillName": "demo",
+        }
+    )
+    fallback_result = _event_result(
+        {
+            "command": "decide",
+            "status": "decided",
+            "scanStatus": "warn",
+            "skillName": "demo",
+        }
+    )
+
+    assert drifted_result["verdict"] == "drifted"
+    assert fallback_result["verdict"] == "warn"
+
+
 def test_batch_event_results_keep_command_and_child_result_contracts():
     scan_all_result = _event_result(
         {
@@ -226,6 +294,7 @@ def test_batch_event_results_keep_command_and_child_result_contracts():
     assert scan_all_result == {
         "command": "scan",
         "key_created": False,
+        "verdict": "deny",
         "results": [
             {
                 "status": "scanned",
@@ -245,6 +314,7 @@ def test_batch_event_results_keep_command_and_child_result_contracts():
         "command": "init",
         "key_created": True,
         "baseline": True,
+        "verdict": "warn",
         "results": [
             {
                 "status": "scanned",
@@ -254,6 +324,48 @@ def test_batch_event_results_keep_command_and_child_result_contracts():
             }
         ],
     }
+
+
+def test_batch_check_event_result_uses_declared_severity_order():
+    cases = (
+        (["pass", "none"], "none"),
+        (["none", "warn"], "warn"),
+        (["warn", "unmanaged"], "unmanaged"),
+        (["unmanaged", "drifted"], "drifted"),
+        (["drifted", "deny"], "deny"),
+        (["deny", "tampered"], "tampered"),
+        (["tampered", "error"], "error"),
+    )
+
+    for statuses, expected in cases:
+        result = _event_result(
+            {
+                "command": "check",
+                "results": [
+                    {"skillName": f"skill-{index}", "status": status}
+                    for index, status in enumerate(statuses)
+                ],
+            }
+        )
+
+        assert result["verdict"] == expected
+
+
+def test_status_verbose_event_result_does_not_project_verdict():
+    result = _event_result(
+        {
+            "command": "status",
+            "skills": {
+                "discovered": 1,
+                "breakdown": {"tampered": 1},
+                "health": "critical",
+            },
+            "results": [{"skillName": "demo-skill", "status": "tampered"}],
+        }
+    )
+
+    assert "verdict" not in result
+    assert result["results"] == [{"skill_name": "demo-skill", "status": "tampered"}]
 
 
 def test_non_scan_commands_normalize_names_without_changing_business_meaning():
@@ -367,8 +479,13 @@ def test_event_details_are_safe_copies_with_redacted_request():
     }
     original = deepcopy(data)
 
+    action_result = ActionResult(
+        success=True,
+        data=data,
+        stdout=json.dumps(data, ensure_ascii=False) + "\n",
+    )
     details = backend.build_event_details(
-        ActionResult(success=True, data=data),
+        action_result,
         {"command": "scan", "passphrase": "secret"},
     )
 
@@ -381,6 +498,8 @@ def test_event_details_are_safe_copies_with_redacted_request():
         "key_created": True,
     }
     assert data == original
+    assert action_result.data == original
+    assert json.loads(action_result.stdout) == original
 
 
 def test_decide_backend_requires_action_unless_clear(monkeypatch):

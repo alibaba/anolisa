@@ -116,7 +116,7 @@ impl RatatuiInlineRenderer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_activity_panel(&i18n, model, area, &mut buffer);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -183,7 +183,7 @@ impl RatatuiInlineRenderer {
                 out.extend(styled_tool_invocation_card_lines(
                     &card,
                     self.panel_standard_width(),
-                    self.styled,
+                    self.styles_enabled(),
                     card.debug_ref.is_some(),
                 ));
             }
@@ -222,7 +222,7 @@ impl RatatuiInlineRenderer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         render_activity_details_panel(&i18n, model, area, &mut buffer);
-        if self.styled {
+        if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
             buffer_to_lines(&buffer, area)
@@ -629,6 +629,9 @@ fn activity_status_label<'a>(i18n: &crate::I18n, status: &'a str) -> &'a str {
         "requested" => i18n.t(crate::MessageId::ActivityStatusRequested),
         "captured" => i18n.t(crate::MessageId::ActivityStatusCaptured),
         "completed" => i18n.t(crate::MessageId::ActivityStatusCompleted),
+        crate::types::SHELL_HANDOFF_UNTRACKED_STATUS => {
+            i18n.t(crate::MessageId::ActivityStatusCompletedUntracked)
+        }
         "error" => i18n.t(crate::MessageId::ActivityStatusError),
         "interrupted" => i18n.t(crate::MessageId::ActivityStatusInterrupted),
         _ => status,

@@ -37,7 +37,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | 文档 | 组件 | 说明 |
 |------|------|------|
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | 统一 CLI 组件管理 |
-| [Copilot Shell](user-entrypoint/copilot-shell.md) | cosh | AI 终端助手与命令网关 |
+| [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI 终端助手与命令网关 |
 | [OS 技能库](user-entrypoint/os-skills.md) | os-skills | 系统管理与 DevOps 技能 |
 
 ### 可观测性 `agent-observability/`
@@ -50,14 +50,19 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 
 | 文档 | 组件 | 说明 |
 |------|------|------|
-| [AgentSecCore](agent-security/agent-sec-core.md) | agent-sec-core | 系统加固、代码扫描、提示词扫描、技能账本 |
+| [AgentSecCore](agent-security/agent-sec-core/QUICKSTART.md) | agent-sec-core | 系统加固、代码扫描、提示词扫描、技能账本 |
+| [PII 检测](agent-security/agent-sec-core/pii-checker.md) | agent-sec-core | 个人数据/凭证检测与脱敏 |
+| [Skill Ledger 用户指南](agent-security/agent-sec-core/skill-ledger.md) | agent-sec-core | 技能账本完整性链与签名工作流 |
+| [OpenClaw 兼容部署与升级](agent-security/agent-sec-core/openclaw-deploy.md) | agent-sec-core | OpenClaw 插件部署与升级指南 |
 
 ### Token 节省 `token-saving/`
 
 | 文档 | 组件 | 说明 |
 |------|------|------|
-| [Token 优化](token-saving/tokenless.md) | tokenless | Schema/响应压缩、命令重写 |
-| [Agent 记忆](token-saving/agent-memory.md) | agent-memory | MCP 持久化文件形态记忆 |
+| [Token 优化](token-saving/tokenless/QUICKSTART.md) | tokenless | Schema/响应压缩、命令重写 |
+| [Token 优化用户手册](token-saving/tokenless/user-manual.md) | tokenless | 各策略触发条件、阈值、统计与 A/B 测试 |
+| [Agent 记忆](token-saving/agent-memory/QUICKSTART.md) | agent-memory | MCP 持久化文件形态记忆 |
+| [Agent 记忆用户手册](token-saving/agent-memory/user-manual.md) | agent-memory | MCP 工具完整参考、检索与数据主权控制 |
 
 ### 运行时 `runtime/`
 

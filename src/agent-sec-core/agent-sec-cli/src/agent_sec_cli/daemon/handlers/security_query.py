@@ -1,6 +1,7 @@
 """Read-only daemon handlers for security and observability SQLite data."""
 
 import json
+from pathlib import PurePath
 from typing import Any
 
 from agent_sec_cli.daemon.errors import BadRequestError
@@ -17,7 +18,7 @@ from agent_sec_cli.observability.correlation import (
 )
 from agent_sec_cli.observability.models import ObservabilityEventRecord
 from agent_sec_cli.observability.sqlite_reader import ObservabilityReader
-from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.security_events.schema import SecurityEvent, extract_verdict
 from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
 from agent_sec_cli.utils.timestamp import (
     normalize_iso_to_utc_iso,
@@ -350,9 +351,51 @@ def _security_filters(params: dict[str, Any]) -> dict[str, str | None]:
 
 def _event_payload(event: SecurityEvent, *, include_details: bool) -> dict[str, Any]:
     payload = event.to_dict()
+    payload.update(_dashboard_event_fields(event))
     if not include_details:
         payload.pop("details", None)
     return payload
+
+
+def _dashboard_event_fields(event: SecurityEvent) -> dict[str, str]:
+    """Project optional fields needed by dashboard event rows."""
+    fields: dict[str, str] = {}
+    verdict = extract_verdict(event.details)
+    if verdict is not None:
+        fields["verdict"] = verdict
+
+    if event.category != "skill_ledger":
+        return fields
+
+    result = event.details.get("result")
+    result_data = result if isinstance(result, dict) else {}
+    request = event.details.get("request")
+    request_data = request if isinstance(request, dict) else {}
+
+    command = _first_non_empty_string(
+        result_data.get("command"), request_data.get("command")
+    )
+    if command is not None:
+        fields["command"] = command
+
+    if isinstance(result_data.get("results"), list):
+        return fields
+
+    skill_name = _first_non_empty_string(result_data.get("skill_name"))
+    if skill_name is None:
+        skill_dir = _first_non_empty_string(request_data.get("skill_dir"))
+        if skill_dir is not None:
+            skill_name = PurePath(skill_dir).name or None
+    if skill_name is not None:
+        fields["skill_name"] = skill_name
+    return fields
+
+
+def _first_non_empty_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _observability_item(row: ObservabilityEventRecord) -> dict[str, Any]:

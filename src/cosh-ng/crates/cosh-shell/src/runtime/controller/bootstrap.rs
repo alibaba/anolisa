@@ -3,12 +3,15 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::approval::handoff::trust_key_from_command;
+use crate::config::parse_recommendations_environment_override;
 use crate::diagnostics::health::{spawn_startup_health_scan, startup_health_scan_enabled_for_env};
 use crate::hooks::{
     dirs_for_hook_loading, is_trusted_project_root, load_hook_feedback_preferences,
     project_hook_root_from_cwd,
 };
-use crate::runtime::cli_args::RawShellKind;
+use crate::recommendation::personal_analysis_runtime::AnalyzerCancellation;
+use crate::recommendation::personal_runtime::PersonalRuntime;
+use crate::runtime::cli_args::{LaunchOptions, RawShellKind, ResumeLaunch};
 use crate::runtime::prelude::*;
 use crate::runtime::startup::bootstrap_process_path_from_shell;
 use crate::runtime::state::{AnalysisMode, InlineState};
@@ -59,7 +62,11 @@ pub(crate) fn run_host_demo() -> i32 {
     render_loop_from_events(&output.events)
 }
 
-pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
+pub(crate) fn run_raw(
+    adapter_name: &str,
+    shell_kind: RawShellKind,
+    launch_options: LaunchOptions,
+) -> i32 {
     let args = std::env::args().collect::<Vec<_>>();
 
     let Some(kind) = AdapterKind::parse(adapter_name) else {
@@ -103,12 +110,71 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
     }
 
     let cosh_config = load_config();
+    let recommendations_environment_override = parse_recommendations_environment_override(
+        std::env::var("COSH_RECOMMENDATIONS_ENABLED")
+            .ok()
+            .as_deref(),
+    );
     config.input_classifier = config
         .input_classifier
         .with_ai_enabled(cosh_config.ai_enabled);
 
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    inline_state.shell_session_id = Some(config.session_id.clone());
+    inline_state.audit = Some(crate::journal::audit::ShellAuditRecorder::initialize(
+        config.session_id.clone(),
+    ));
+    if let Some(resume) = launch_options.resume {
+        inline_state
+            .control
+            .session_mut()
+            .set_pending_launch(match resume {
+                ResumeLaunch::Picker => crate::slash::session::SessionLaunchRequest::Picker,
+                ResumeLaunch::Session(id) => {
+                    crate::slash::session::SessionLaunchRequest::Resume(id)
+                }
+            });
+    }
+    inline_state.personalization.bash_history = cosh_config.recommendations.bash_history;
+    inline_state.personalization.ai_disabled = !cosh_config.ai_enabled;
+    inline_state.personalization.analyzer_cancellation = Some(AnalyzerCancellation::new());
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let root = home.join(".copilot-shell/cosh/recommendations");
+        let configured_enabled = cosh_config.recommendations.enabled;
+        let environment_override = recommendations_environment_override;
+        inline_state.personalization.store_root = Some(root.clone());
+        inline_state.personalization.configured_enabled = configured_enabled;
+        inline_state.personalization.environment_override = environment_override;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        inline_state.personalization.writer_pending = Some(receiver);
+        let _ = std::thread::Builder::new()
+            .name("cosh-recommendation-load".to_string())
+            .spawn(move || {
+                if let Ok(runtime) = PersonalRuntime::open_with_environment(
+                    configured_enabled,
+                    environment_override,
+                    root,
+                    now_hour_bucket(),
+                ) {
+                    if let Ok(writer) = runtime.spawn_writer() {
+                        let _ = sender.send(writer);
+                    }
+                }
+            });
+    }
+    if matches!(&shell_kind, RawShellKind::Bash)
+        && config.native_mode
+        && cosh_config.recommendations.enabled
+        && recommendations_environment_override != Some(false)
+        && cosh_config.recommendations.bash_history
+    {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        inline_state.personalization.history_file_pending = Some(receiver);
+        config.set_shell_history_file_observer(move |path| {
+            let _ = sender.send(path);
+        });
+    }
     let snapshot_publisher = inline_state.shell_rewrite.start_worker();
     config.set_shell_environment_observer(move |snapshot| {
         snapshot_publisher.publish(snapshot);
@@ -132,7 +198,7 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
     inline_state.approval_mode = approval_mode_from_config(&cosh_config.approval_mode);
     for cmd in &cosh_config.trusted_commands {
         if let Some(key) = trust_key_from_command(cmd) {
-            inline_state.control.trust_session_command(key);
+            inline_state.control.trust.trust_session_command(key);
         }
     }
     apply_readonly_config(&cosh_config);
@@ -161,6 +227,14 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
     };
 
     config.clear_shell_environment_observer();
+    config.clear_shell_history_file_observer();
+    inline_state.personalization.poll_ready();
+    if let Some(cancellation) = inline_state.personalization.analyzer_cancellation.as_ref() {
+        cancellation.cancel_current();
+    }
+    if let Some(mut writer) = inline_state.personalization.writer.take() {
+        let _ = writer.shutdown(now_hour_bucket(), std::time::Duration::from_millis(100));
+    }
     inline_state.shell_rewrite.shutdown();
 
     match raw_result {
@@ -171,6 +245,13 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
             1
         }
     }
+}
+
+fn now_hour_bucket() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / 3600)
+        .unwrap_or_default()
 }
 
 pub(crate) fn run_interactive(adapter_name: &str) -> i32 {

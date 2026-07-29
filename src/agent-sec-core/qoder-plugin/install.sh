@@ -44,11 +44,16 @@ require_agent_sec_cli() {
     command -v agent-sec-cli >/dev/null 2>&1 || die "agent-sec-cli not found on PATH"
     agent-sec-cli scan-pii --help >/dev/null 2>&1 || die "agent-sec-cli scan-pii is unavailable"
     agent-sec-cli skill-ledger check --help >/dev/null 2>&1 || die "agent-sec-cli skill-ledger check is unavailable"
+    agent-sec-cli observability record --help >/dev/null 2>&1 || die "agent-sec-cli observability record is unavailable"
+    agent-sec-cli scan-code --help >/dev/null 2>&1 || die "agent-sec-cli scan-code is unavailable"
 }
 
 require_plugin_files() {
     [[ -f "${PLUGIN_DIR}/.qoder-plugin/plugin.json" ]] || die "plugin manifest not found"
     [[ -f "${PLUGIN_DIR}/hooks/hooks.json" ]] || die "hook configuration not found"
+    [[ -f "${PLUGIN_DIR}/hooks/qoder_hook_common.py" ]] || die "shared hook helper not found"
+    [[ -f "${PLUGIN_DIR}/hooks/pii_checker_hook.py" ]] || die "PII hook not found"
+    [[ -f "${PLUGIN_DIR}/hooks/observability_hook.py" ]] || die "observability hook not found"
 }
 
 while [[ $# -gt 0 ]]; do

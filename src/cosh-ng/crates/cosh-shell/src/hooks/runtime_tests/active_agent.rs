@@ -61,8 +61,15 @@ fn active_agent_run_queues_deferred_consultation_and_renders_after_completion() 
     let adapter = AdapterInstance::Fake(FakeAgentAdapter);
     let mut state = InlineState::default();
     let mut output = Vec::new();
-    start_agent_run(&active_request, &adapter, &mut state, &mut output, None)
-        .expect("start active fake run");
+    start_agent_run(
+        &active_request,
+        AgentStartIntent::UserInitiated,
+        &adapter,
+        &mut state,
+        &mut output,
+        None,
+    )
+    .expect("start active fake run");
     assert!(state.agent_run.active.is_some());
 
     let findings = vec![finding("memory-pressure", FindingSeverity::Critical)];

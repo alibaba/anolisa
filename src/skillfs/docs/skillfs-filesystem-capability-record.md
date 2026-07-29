@@ -174,7 +174,10 @@ In in-place security mounts, the agent-visible path is intentionally the FUSE
 view. That path is not a safe source of truth for the external daemon because
 hidden skills may be invisible and fallback skills may resolve to a snapshot.
 The ledger backing root creates a private source-side work path for daemon
-scan, activation, reconcile, and notify payloads. It complements the
+scan, activation, reload, and N3 protocol event-log v1 `skillDir` values.
+Socket notify v2 keeps `canonicalSkillDir` under the canonical source root;
+the daemon resolves that identity to the live backing path through the control
+socket when it needs source access. The backing root complements the
 trusted-writer gate: trusted-writer controls selected `.skill-meta/**`
 mutations through the FUSE entry point, while the backing root is protected by
 OS ownership, private parent permissions, identity checks, and mount setup.
@@ -234,8 +237,12 @@ Note: "install-complete" is not a protocol-level event kind. It is an
 internal/historical flush concept only. The formal notify protocol uses
 ordinary filesystem mutation events (rename, write, create, etc.). In
 in-place/security mode, the daemon-facing backing root must be configured
-and accessible; notify payloads always use the backing root path, never the
-FUSE mount path.
+and accessible. Socket notify v2 identifies the skill with
+`canonicalSkillDir` under the canonical source root and the full `skillId`;
+the daemon resolves that identity before accessing live source. The separate
+N3 protocol event log remains schema v1 and writes `skillDir` under the live
+backing root. Activation bootstrap, reload, and watching also use that live
+root rather than the agent-visible FUSE view.
 
 Missing activation remains hidden by default; the notification triggers
 security processing and does not approve exposure. Configuration is via the

@@ -25,12 +25,13 @@ pub(crate) fn render_approval_journal<W: Write>(
             command_block_id: entry.command_block_id.as_deref(),
             redaction_status: entry.redaction_status,
             assessment: entry.assessment.as_ref().map(assessment_summary_model),
+            audit_ref: entry.audit_ref.as_deref(),
         })
         .collect::<Vec<_>>();
     RatatuiInlineRenderer::for_terminal()
         .with_language(state.language)
-        .write_approval_journal_panel(output, ApprovalJournalPanelModel { entries: &entries })?;
-    Ok(())
+        .write_approval_journal_panel(output, ApprovalJournalPanelModel { entries: &entries })
+        .map(|_| ())
 }
 
 pub(super) fn write_approval_receipt<W: Write>(
@@ -83,8 +84,8 @@ pub(super) fn write_approval_receipt<W: Write>(
                 preview: &request.preview,
                 message,
             },
-        )?;
-    Ok(())
+        )
+        .map(|_| ())
 }
 
 fn approval_receipt_is_negative(status: ApprovalRequestStatus) -> bool {
@@ -183,9 +184,10 @@ pub(crate) fn render_approval_details<W: Write>(
                 command_block_id: request.command_block_id.as_deref(),
                 redaction_status: request.redaction_status,
                 assessment: request.assessment.as_ref().map(assessment_summary_model),
+                audit_ref: request.audit_ref.as_deref(),
             },
-        )?;
-    Ok(())
+        )
+        .map(|_| ())
 }
 
 fn assessment_summary_model(
@@ -210,6 +212,7 @@ mod tests {
     fn approved_bash_request(execution_path: Option<&'static str>) -> RuntimeApprovalRequest {
         RuntimeApprovalRequest {
             id: "req-zh".to_string(),
+            audit_ref: None,
             run_id: "run-1".to_string(),
             origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),
@@ -253,6 +256,20 @@ mod tests {
         let old_provider_native_text = ["Provider-native shell", " tool allowed"].concat();
         assert!(!text.contains(&old_foreground_text), "{text}");
         assert!(!text.contains(&old_provider_native_text), "{text}");
+    }
+
+    #[test]
+    fn approval_receipt_never_emits_audit_reference() {
+        let mut request = approved_bash_request(None);
+        request.audit_ref = Some("audit-event-1".to_string());
+        let mut output = Vec::new();
+
+        write_approval_receipt(Language::ZhCn, &request, "已自动批准", &mut output).unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("audit_ref"), "{text}");
+        assert!(!text.contains("audit-event-1"), "{text}");
+        assert!(text.contains("Bash tool 已发送到 shell"), "{text}");
     }
 
     #[test]

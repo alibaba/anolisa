@@ -144,6 +144,48 @@ def test_user_prompt_observe_scans_and_allows_silently(mock_cli) -> None:
     assert captured["stdin"] == "phone 13800138000"
 
 
+def test_hook_trace_context_contains_only_host_correlation_ids(mock_cli) -> None:
+    env, capture = mock_cli(output=_PII_WARN_RESULT)
+
+    first = _run_hook(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "hello",
+            "session_id": "sess-1",
+        },
+        env,
+    )
+    assert first.returncode == 0
+    first_call = _captured_call(capture)
+    first_index = first_call["argv"].index("--trace-context") + 1
+    first_context = json.loads(first_call["argv"][first_index])
+
+    second = _run_hook(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "pwd"},
+            "tool_use_id": "tool-1",
+            "session_id": "sess-1",
+        },
+        env,
+    )
+    assert second.returncode == 0
+    second_call = _captured_call(capture)
+    second_index = second_call["argv"].index("--trace-context") + 1
+    second_context = json.loads(second_call["argv"][second_index])
+
+    assert first_context == {
+        "agent_name": "qoder",
+        "session_id": "sess-1",
+    }
+    assert second_context == {
+        "agent_name": "qoder",
+        "session_id": "sess-1",
+        "tool_call_id": "tool-1",
+    }
+
+
 def test_user_prompt_deny_blocks_without_raw_pii(mock_cli) -> None:
     env, _capture = mock_cli(
         output=_PII_DENY_RESULT,

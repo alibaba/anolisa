@@ -1,31 +1,21 @@
 """Unit tests for codex-plugin/hooks/trace_context.py."""
 
-import importlib.util
 import json
-import os
-import sys
 from pathlib import Path
 
-_HOOKS_DIR = str(
+from standalone_hook_test_loader import load_module_from_path
+
+_HOOKS_DIR = (
     Path(__file__).resolve().parents[2]
     / ".."
     / "codex-plugin"
     / "hooks-plugin"
     / "hooks"
 )
-if _HOOKS_DIR not in sys.path:
-    sys.path.insert(0, _HOOKS_DIR)
-
-# Register under a unique sys.modules key ("codex_trace_context") so that
-# cosh-extension's same-named module is not shadowed/loaded by mistake
-# when the full test suite is collected in a single pytest invocation.
-_spec = importlib.util.spec_from_file_location(
+trace_context = load_module_from_path(
     "codex_trace_context",
-    os.path.join(_HOOKS_DIR, "trace_context.py"),
+    _HOOKS_DIR / "trace_context.py",
 )
-trace_context = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = trace_context
-_spec.loader.exec_module(trace_context)
 
 
 class TestTraceContext:

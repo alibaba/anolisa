@@ -74,16 +74,30 @@ impl ShellAdapter for ZshAdapter {
     ) {
         command.arg("-i").env("ZDOTDIR", &config.work_dir);
         if config.native_mode {
-            if let Ok(original) = std::env::var("ZDOTDIR") {
+            if let Some(original) = configured_original_zdotdir(config) {
                 command.env("COSH_ZDOTDIR_ORIG", original);
-            } else if let Ok(home) = std::env::var("HOME") {
-                command.env("COSH_ZDOTDIR_ORIG", home);
             }
         }
         if config.login_shell {
             command.env("COSH_LOGIN_SHELL", "1");
         }
     }
+}
+
+fn configured_original_zdotdir(config: &ShellHostConfig) -> Option<String> {
+    for key in ["ZDOTDIR", "HOME"] {
+        if let Some((_, value)) = config
+            .env_overrides
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+        {
+            return Some(value.clone());
+        }
+    }
+    std::env::var("ZDOTDIR")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
 }
 
 #[cfg(test)]
@@ -160,12 +174,19 @@ mod tests {
     }
 
     #[test]
-    fn zsh_native_mode_sets_zdotdir_orig() {
-        let config = test_config(true, false);
+    fn zsh_native_mode_prefers_isolated_home_for_zdotdir_orig() {
+        let mut config = test_config(true, false);
+        config
+            .env_overrides
+            .push(("HOME".to_string(), "/tmp/cosh-test-home".to_string()));
         let mut cmd = Command::new("zsh");
         let marker = PathBuf::from("/tmp/marker.zsh");
         ZshAdapter.configure_command(&mut cmd, &marker, &config);
-        assert!(has_env(&cmd, "COSH_ZDOTDIR_ORIG"));
+
+        assert!(cmd.get_envs().any(|(key, value)| {
+            key == OsStr::new("COSH_ZDOTDIR_ORIG")
+                && value == Some(OsStr::new("/tmp/cosh-test-home"))
+        }));
     }
 
     #[test]

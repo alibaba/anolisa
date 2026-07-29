@@ -1,12 +1,21 @@
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::cosh_core::CoshCoreAdapter;
-use super::AgentAdapter;
+use super::cosh_core::{CoshCoreAdapter, SessionRecoveryState, SessionRuntimeState};
+use super::{AdapterError, AgentAdapter, AgentRunHandle, AgentRunPoll, FreshSessionOutcome};
 use crate::types::{
     AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
 };
 
+fn test_workspace_scope() -> String {
+    std::fs::canonicalize(std::env::temp_dir())
+        .expect("canonical test workspace")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn test_request() -> AgentRequest {
+    let workspace_scope = test_workspace_scope();
     AgentRequest {
         id: "test".to_string(),
         session_id: "sess".to_string(),
@@ -15,8 +24,8 @@ fn test_request() -> AgentRequest {
             session_id: "sess".to_string(),
             command: "echo test".to_string(),
             origin: Default::default(),
-            cwd: "/tmp".to_string(),
-            end_cwd: "/tmp".to_string(),
+            cwd: workspace_scope.clone(),
+            end_cwd: workspace_scope,
             started_at_ms: 0,
             ended_at_ms: 0,
             duration_ms: 0,
@@ -27,6 +36,7 @@ fn test_request() -> AgentRequest {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: vec![],
         context_hints: vec![],
@@ -40,12 +50,172 @@ fn test_request() -> AgentRequest {
 }
 
 fn test_adapter() -> CoshCoreAdapter {
-    CoshCoreAdapter {
-        program: "cosh-core".to_string(),
-        allow_model_call: false,
-        session_id: Arc::new(Mutex::new(None)),
-        session_cwd: Arc::new(Mutex::new(None)),
+    CoshCoreAdapter::new("cosh-core", false)
+}
+
+fn write_mock_core(label: &str, script: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("cosh-core-{label}-{}.sh", std::process::id()));
+    std::fs::write(&path, script).expect("write mock cosh-core");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("mock cosh-core metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("chmod mock cosh-core");
+    path
+}
+
+fn adapter_with_active_session(program: &std::path::Path) -> CoshCoreAdapter {
+    let adapter = CoshCoreAdapter::new(program.to_string_lossy().into_owned(), true);
+    *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+        "00000000-0000-4000-8000-000000000000",
+        test_workspace_scope(),
+    );
+    adapter
+}
+
+fn adapter_with_selected_session(program: &std::path::Path) -> CoshCoreAdapter {
+    let adapter = adapter_with_active_session(program);
+    if let Ok(mut session) = adapter.session.lock() {
+        session.recovery.state = SessionRecoveryState::Selected;
+        session.recovery.selected_session_id =
+            Some("11111111-1111-4111-8111-111111111111".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
     }
+    adapter
+}
+
+fn assert_failed_selection_was_released(adapter: &CoshCoreAdapter) {
+    let recovery = adapter.recovery_snapshot();
+    assert_eq!(recovery.state, SessionRecoveryState::Failed);
+    assert_eq!(recovery.selected_session_id, None);
+    assert_eq!(recovery.selected_workspace_scope, None);
+    assert_eq!(
+        adapter.protected_session_ids(),
+        vec!["00000000-0000-4000-8000-000000000000"]
+    );
+}
+
+fn collect_cancellable_run(handle: &AgentRunHandle) -> Vec<AgentEvent> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut events = Vec::new();
+    loop {
+        match handle
+            .poll_event_timeout(Duration::from_millis(100))
+            .expect("poll persistent cosh-core run")
+        {
+            AgentRunPoll::Event(event) => events.push(event),
+            AgentRunPoll::Finished => return events,
+            AgentRunPoll::Timeout if Instant::now() < deadline => {}
+            AgentRunPoll::Timeout => panic!("persistent cosh-core run timed out"),
+        }
+    }
+}
+
+fn persistent_mock_paths(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "cosh-core-persistent-{name}-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("create persistent mock directory");
+    (root.join("mock-cosh-core.sh"), root)
+}
+
+fn write_persistent_mock(
+    script: &std::path::Path,
+    gate: &std::path::Path,
+    started: &std::path::Path,
+) {
+    let source = r#"#!/bin/sh
+session_id=00000000-0000-4000-8000-000000000000
+resume_next=0
+for arg in "$@"; do
+  if [ "$arg" = "--registry" ]; then
+    IFS= read -r line || exit 1
+    request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+    printf '{"type":"registry_response","request_id":"%s","success":true,"data":{"transport":"short"}}\n' "$request_id"
+    exit 0
+  fi
+  if [ "$resume_next" -eq 1 ]; then
+    session_id=$arg
+    resume_next=0
+  elif [ "$arg" = "--resume" ]; then
+    resume_next=1
+  fi
+done
+
+turns=0
+reloads=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      turns=$((turns + 1))
+      if [ "$turns" -eq 1 ] && [ ! -f "__GATE__" ]; then
+        : > "__STARTED__"
+        while [ ! -f "__GATE__" ]; do sleep 0.02; done
+      fi
+      printf '{"type":"result","subtype":"success","session_id":"%s","is_error":false,"result":"done"}\n' "$session_id"
+      ;;
+    *'"type":"registry_request"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'"action":"reload"'*) reloads=$((reloads + 1));;
+      esac
+      printf '{"type":"registry_response","request_id":"%s","success":true,"data":{"pid":%s,"turns":%s,"reloads":%s,"transport":"live"}}\n' "$request_id" "$$" "$turns" "$reloads"
+      ;;
+    *'"subtype":"shutdown"'*) exit 0;;
+  esac
+done
+"#
+    .replace("__GATE__", &gate.to_string_lossy())
+    .replace("__STARTED__", &started.to_string_lossy());
+    std::fs::write(script, source).expect("write persistent cosh-core mock");
+    let mut permissions = std::fs::metadata(script)
+        .expect("persistent cosh-core mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(script, permissions).expect("chmod persistent cosh-core mock");
+}
+
+#[test]
+fn fresh_session_detaches_active_and_selected_without_protecting_them() {
+    let active = "00000000-0000-4000-8000-000000000000".to_string();
+    let selected = "11111111-1111-4111-8111-111111111111".to_string();
+    let mut session = SessionRuntimeState::with_active(active.clone(), "/tmp");
+    session.recovery.state = SessionRecoveryState::Selected;
+    session.recovery.selected_session_id = Some(selected);
+    session.recovery.selected_workspace_scope = Some("/tmp".to_string());
+    let adapter = CoshCoreAdapter {
+        program: "unused".to_string(),
+        allow_model_call: false,
+        session: Arc::new(Mutex::new(session)),
+        ..CoshCoreAdapter::default()
+    };
+
+    assert_eq!(
+        adapter.start_fresh_session(),
+        FreshSessionOutcome::Detached {
+            previous_session_id: Some(active),
+        }
+    );
+    assert_eq!(adapter.committed_session_id(), None);
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::None
+    );
+    assert!(adapter.protected_session_ids().is_empty());
+
+    assert_eq!(
+        adapter.start_fresh_session(),
+        FreshSessionOutcome::Detached {
+            previous_session_id: None,
+        }
+    );
 }
 
 #[test]
@@ -80,6 +250,30 @@ fn prepare_invocation_approval_modes() {
 }
 
 #[test]
+fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
+    let mut request = test_request();
+    request.context_hints = vec![
+        crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
+        format!("{}auto", crate::types::USER_APPROVAL_MODE_HINT_PREFIX),
+    ];
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
+
+    assert!(inv.args.contains(&"strict".to_string()));
+    assert!(!inv.prompt.contains("recommend mode"), "{}", inv.prompt);
+    assert!(
+        inv.prompt
+            .contains("approval mode is auto and has not changed"),
+        "{}",
+        inv.prompt
+    );
+    assert!(
+        inv.prompt.contains("Do not emit tool calls in this turn"),
+        "{}",
+        inv.prompt
+    );
+}
+
+#[test]
 fn prepare_invocation_prompt_includes_cosh_shell_contract() {
     let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
 
@@ -94,6 +288,18 @@ fn prepare_invocation_prompt_includes_cosh_shell_contract() {
     assert!(inv
         .prompt
         .contains("at most one primary recommendation command"));
+}
+
+#[test]
+fn prepare_invocation_prompt_preserves_user_provided_secret() {
+    let secret = "api_key=sk-cosh-shell-runtime-secret";
+    let mut request = test_request();
+    request.user_input = Some(format!("write this exact value: {secret}"));
+
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Auto);
+
+    assert!(inv.prompt.contains(secret), "{}", inv.prompt);
+    assert!(!inv.prompt.contains("<redacted>"), "{}", inv.prompt);
 }
 
 #[test]
@@ -181,12 +387,9 @@ fn prepare_invocation_prompt_suppresses_shell_output_requests_in_recommend_mode(
 
 #[test]
 fn prepare_invocation_session_resume() {
-    let adapter = CoshCoreAdapter {
-        program: "cosh-core".to_string(),
-        allow_model_call: false,
-        session_id: Arc::new(Mutex::new(Some("prev-sess".to_string()))),
-        session_cwd: Arc::new(Mutex::new(Some("/tmp".to_string()))),
-    };
+    let adapter = CoshCoreAdapter::new("cosh-core", false);
+    *adapter.session.lock().unwrap() =
+        SessionRuntimeState::with_active("prev-sess", test_workspace_scope());
     let inv = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Auto);
     assert!(inv.args.contains(&"--resume".to_string()));
     assert!(inv.args.contains(&"prev-sess".to_string()));
@@ -194,15 +397,46 @@ fn prepare_invocation_session_resume() {
 
 #[test]
 fn prepare_invocation_does_not_resume_across_cwd_scope() {
-    let adapter = CoshCoreAdapter {
-        program: "cosh-core".to_string(),
-        allow_model_call: false,
-        session_id: Arc::new(Mutex::new(Some("prev-sess".to_string()))),
-        session_cwd: Arc::new(Mutex::new(Some("/other".to_string()))),
-    };
+    let adapter = CoshCoreAdapter::new("cosh-core", false);
+    *adapter.session.lock().unwrap() = SessionRuntimeState::with_active("prev-sess", "/other");
     let inv = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Auto);
     assert!(!inv.args.contains(&"--resume".to_string()));
     assert!(!inv.args.contains(&"prev-sess".to_string()));
+}
+
+#[test]
+fn prepare_invocation_ignores_failed_selected_session() {
+    let adapter = test_adapter();
+    if let Ok(mut session) = adapter.session.lock() {
+        session.recovery.state = SessionRecoveryState::Failed;
+        session.recovery.selected_session_id =
+            Some("11111111-1111-4111-8111-111111111111".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
+    }
+
+    let invocation = adapter.prepare_invocation(&test_request(), CoshApprovalMode::Auto);
+
+    assert!(!invocation.args.contains(&"--resume".to_string()));
+}
+
+#[test]
+fn prepare_invocation_uses_process_cwd_for_unknown_intercept_scope() {
+    let mut request = test_request();
+    request.command_block.cwd = "<unknown>".to_string();
+    request.command_block.end_cwd = "<unknown>".to_string();
+
+    let invocation = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
+    let workspace_index = invocation
+        .args
+        .iter()
+        .position(|argument| argument == "--workspace")
+        .expect("workspace argument");
+    let expected = std::fs::canonicalize(std::env::current_dir().expect("current dir"))
+        .expect("canonical current dir")
+        .to_string_lossy()
+        .into_owned();
+
+    assert_eq!(invocation.args[workspace_index + 1], expected);
 }
 
 #[test]
@@ -215,6 +449,63 @@ fn capabilities_match_expected() {
     assert!(caps.user_question);
     assert!(caps.cancellable);
     assert!(caps.control_protocol);
+}
+
+#[test]
+fn list_sessions_returns_one_page_and_preserves_opaque_cursor() {
+    let script =
+        std::env::temp_dir().join(format!("cosh-core-session-pages-{}.sh", std::process::id()));
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+request=$(cat)
+case "$request" in
+  *'"cursor":null'*)
+    printf '%s\n' '{"ok":true,"data":{"action":"list","sessions":[{"session_id":"00000000-0000-4000-8000-000000000000","workspace_scope":"/tmp","created_at_ms":1,"updated_at_ms":3,"model":"mock","message_count":1,"first_prompt":"first","schema_version":1,"health":"ready"}],"next_cursor":"cursor-1"}}'
+    ;;
+  *'"cursor":"cursor-1"'*)
+    printf '%s\n' '{"ok":true,"data":{"action":"list","sessions":[{"session_id":"11111111-1111-4111-8111-111111111111","workspace_scope":"/tmp","created_at_ms":1,"updated_at_ms":2,"model":"mock","message_count":1,"first_prompt":"second","schema_version":1,"health":"ready"}],"next_cursor":"cursor-2"}}'
+    ;;
+  *'"cursor":"cursor-2"'*)
+    printf '%s\n' '{"ok":true,"data":{"action":"list","sessions":[{"session_id":"22222222-2222-4222-8222-222222222222","workspace_scope":"/tmp","created_at_ms":1,"updated_at_ms":1,"model":"mock","message_count":1,"first_prompt":"third","schema_version":1,"health":"ready"}],"next_cursor":null}}'
+    ;;
+esac
+"#,
+    )
+    .expect("write paginated session mock");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("paginated session mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod paginated session mock");
+    let adapter = CoshCoreAdapter {
+        program: script.to_string_lossy().into_owned(),
+        ..test_adapter()
+    };
+
+    let first = adapter.list_sessions("/tmp").expect("first session page");
+    let second = adapter
+        .list_sessions_page("/tmp", 100, first.next_cursor.as_deref())
+        .expect("second session page");
+    let third = adapter
+        .list_sessions_page("/tmp", 100, second.next_cursor.as_deref())
+        .expect("third session page");
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(
+        first
+            .sessions
+            .iter()
+            .chain(&second.sessions)
+            .chain(&third.sessions)
+            .map(|summary| summary.first_prompt.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("first"), Some("second"), Some("third")]
+    );
+    assert_eq!(first.next_cursor.as_deref(), Some("cursor-1"));
+    assert_eq!(second.next_cursor.as_deref(), Some("cursor-2"));
+    assert!(third.next_cursor.is_none());
 }
 
 #[test]
@@ -236,12 +527,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"s","is_error":
     permissions.set_mode(0o755);
     std::fs::set_permissions(&script, permissions).expect("chmod mock cosh-tui");
 
-    let adapter = CoshCoreAdapter {
-        program: script.to_string_lossy().to_string(),
-        allow_model_call: true,
-        session_id: Arc::new(Mutex::new(None)),
-        session_cwd: Arc::new(Mutex::new(None)),
-    };
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy().to_string(), true);
     let mut events = Vec::new();
     let result = adapter.run_stream(&test_request(), &mut |event| {
         events.push(event);
@@ -262,4 +548,467 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"s","is_error":
     let debug = format!("{events:?}");
     assert!(!debug.contains("claude"), "{debug}");
     assert!(!debug.contains("co thinking"), "{debug}");
+}
+
+#[test]
+fn selected_session_transitions_through_restoring_to_active() {
+    let workspace_scope = test_workspace_scope();
+    let script = std::env::temp_dir().join(format!(
+        "cosh-core-session-recovery-{}.sh",
+        std::process::id()
+    ));
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "--session-control" ]; then
+  cat >/dev/null
+  printf '%s\n' '{{"ok":true,"data":{{"action":"validate","session":{{"session_id":"00000000-0000-4000-8000-000000000000","workspace_scope":"{workspace_scope}","created_at_ms":1,"updated_at_ms":2,"model":"mock","message_count":2,"first_prompt":"remember","schema_version":1,"health":"ready"}}}}}}'
+  exit 0
+fi
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      printf '%s\n' '{{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"duration_ms":1,"result":"done"}}'
+      ;;
+    *'"subtype":"shutdown"'*) exit 0;;
+  esac
+done
+"#
+        ),
+    )
+    .expect("write session recovery mock");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("session recovery mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod session recovery mock");
+
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy().into_owned(), true);
+    let selected = adapter
+        .select_session(&workspace_scope, "00000000-0000-4000-8000-000000000000")
+        .expect("select persisted session");
+    assert_eq!(selected.session_id, "00000000-0000-4000-8000-000000000000");
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::Selected
+    );
+
+    let mut request = test_request();
+    request.command_block.cwd.clone_from(&workspace_scope);
+    request.command_block.end_cwd.clone_from(&workspace_scope);
+    let handle = adapter.start_cancellable(request, CoshApprovalMode::Recommend);
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::Restoring
+    );
+    while let AgentRunPoll::Event(_) | AgentRunPoll::Timeout = handle
+        .poll_event_timeout(std::time::Duration::from_secs(2))
+        .expect("poll session recovery")
+    {}
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::Active
+    );
+    assert_eq!(
+        adapter.committed_session_id().as_deref(),
+        Some("00000000-0000-4000-8000-000000000000")
+    );
+}
+
+#[test]
+fn active_and_selected_sessions_are_protected_only_while_selection_is_live() {
+    let adapter = CoshCoreAdapter {
+        session: Arc::new(Mutex::new(SessionRuntimeState::with_active(
+            "00000000-0000-4000-8000-000000000000",
+            "/tmp",
+        ))),
+        ..test_adapter()
+    };
+    if let Ok(mut session) = adapter.session.lock() {
+        session.recovery.state = SessionRecoveryState::Selected;
+        session.recovery.selected_session_id =
+            Some("11111111-1111-4111-8111-111111111111".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
+    }
+
+    assert_eq!(
+        adapter.protected_session_ids(),
+        vec![
+            "00000000-0000-4000-8000-000000000000",
+            "11111111-1111-4111-8111-111111111111"
+        ]
+    );
+
+    if let Ok(mut session) = adapter.session.lock() {
+        session.recovery.state = SessionRecoveryState::Failed;
+    }
+    assert_eq!(
+        adapter.protected_session_ids(),
+        vec!["00000000-0000-4000-8000-000000000000"]
+    );
+}
+
+#[test]
+fn failed_session_selection_clears_previous_selection() {
+    let script = write_mock_core(
+        "selection-failure",
+        r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"ok":false,"error":{"code":"not_found","message":"session disappeared","recoverable":true,"hint":"Refresh and retry."}}'
+"#,
+    );
+    let adapter = CoshCoreAdapter {
+        program: script.to_string_lossy().into_owned(),
+        ..test_adapter()
+    };
+    if let Ok(mut session) = adapter.session.lock() {
+        session.recovery.state = SessionRecoveryState::Selected;
+        session.recovery.selected_session_id =
+            Some("00000000-0000-4000-8000-000000000000".to_string());
+        session.recovery.selected_workspace_scope = Some(test_workspace_scope());
+    }
+
+    let result = adapter.select_session("/tmp", "11111111-1111-4111-8111-111111111111");
+    let _ = std::fs::remove_file(&script);
+
+    assert!(result.is_err());
+    let recovery = adapter.recovery_snapshot();
+    assert_eq!(recovery.state, SessionRecoveryState::Failed);
+    assert_eq!(recovery.selected_session_id, None);
+    assert_eq!(recovery.selected_workspace_scope, None);
+}
+
+#[test]
+fn synchronous_status_sink_error_releases_restoring_selection() {
+    let program = std::path::Path::new("/unused/cosh-core");
+    let adapter = adapter_with_selected_session(program);
+
+    let result = adapter.run_stream(&test_request(), &mut |_| {
+        Err(AdapterError {
+            message: "status sink failed".to_string(),
+        })
+    });
+
+    assert_eq!(
+        result.expect_err("status sink failure").message,
+        "status sink failed"
+    );
+    assert_failed_selection_was_released(&adapter);
+}
+
+#[test]
+fn synchronous_spawn_error_releases_restoring_selection() {
+    let missing = std::env::temp_dir().join(format!(
+        "missing-cosh-core-{}-{}",
+        std::process::id(),
+        "spawn"
+    ));
+    let adapter = adapter_with_selected_session(&missing);
+
+    let result = adapter.run_stream(&test_request(), &mut |_| Ok(()));
+
+    assert!(result
+        .expect_err("spawn failure")
+        .message
+        .contains("failed to run cosh-core"));
+    assert_failed_selection_was_released(&adapter);
+}
+
+#[test]
+fn synchronous_stream_read_error_releases_restoring_selection() {
+    let script = write_mock_core(
+        "invalid-utf8-stream",
+        r#"#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111","model":"mock","tools":[]}'
+printf '\377\n'
+"#,
+    );
+    let adapter = adapter_with_selected_session(&script);
+
+    let result = adapter.run_stream(&test_request(), &mut |_| Ok(()));
+
+    let error = result.expect_err("stream read failure");
+    assert!(
+        error.message.contains("failed to read cosh-core stream"),
+        "{}",
+        error.message
+    );
+    assert_failed_selection_was_released(&adapter);
+    let _ = std::fs::remove_file(&script);
+}
+
+#[test]
+fn non_resumable_error_result_discards_active_session() {
+    let script = write_mock_core(
+        "non-resumable-error",
+        r#"#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}'
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"failed"}'
+"#,
+    );
+    let adapter = adapter_with_active_session(&script);
+
+    adapter
+        .run_stream(&test_request(), &mut |_| Ok(()))
+        .expect("run non-resumable error result");
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(adapter.committed_session_id(), None);
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::None
+    );
+}
+
+#[test]
+fn non_resumable_nonzero_exit_discards_active_session() {
+    let script = write_mock_core(
+        "non-resumable-nonzero",
+        r#"#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}'
+printf '%s\n' 'provider failed' >&2
+exit 7
+"#,
+    );
+    let adapter = adapter_with_active_session(&script);
+
+    adapter
+        .run_stream(&test_request(), &mut |_| Ok(()))
+        .expect("run non-resumable nonzero exit");
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(adapter.committed_session_id(), None);
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::None
+    );
+}
+
+#[test]
+fn cancellable_runs_and_registry_share_one_persistent_core() {
+    let (script, root) = persistent_mock_paths("shared");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    std::fs::write(&gate, "ready").expect("open persistent mock gate");
+    write_persistent_mock(&script, &gate, &started);
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let first =
+        collect_cancellable_run(&adapter.start_cancellable(test_request(), CoshApprovalMode::Auto));
+    assert!(first
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+    let first_info = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query first live registry state");
+
+    let mut second_request = test_request();
+    second_request.id = "test-2".to_string();
+    let second =
+        collect_cancellable_run(&adapter.start_cancellable(second_request, CoshApprovalMode::Auto));
+    assert!(second
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+    let second_info = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query second live registry state");
+
+    assert_eq!(first_info["transport"], "live");
+    assert_eq!(second_info["transport"], "live");
+    assert_eq!(first_info["pid"], second_info["pid"]);
+    assert_eq!(first_info["turns"], 1);
+    assert_eq!(second_info["turns"], 2);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn selecting_another_session_restarts_the_persistent_core() {
+    let workspace = std::fs::canonicalize("/tmp")
+        .expect("canonical temporary directory")
+        .to_string_lossy()
+        .into_owned();
+    let (script, root) = persistent_mock_paths("session-switch");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    std::fs::write(&gate, "ready").expect("open persistent mock gate");
+    write_persistent_mock(&script, &gate, &started);
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let first =
+        collect_cancellable_run(&adapter.start_cancellable(test_request(), CoshApprovalMode::Auto));
+    assert!(first
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+    let first_info = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query first live registry state");
+
+    if let Ok(mut session) = adapter.session.lock() {
+        session.recovery.state = SessionRecoveryState::Selected;
+        session.recovery.selected_session_id =
+            Some("11111111-1111-4111-8111-111111111111".to_string());
+        session.recovery.selected_workspace_scope = Some(workspace.clone());
+    }
+    let mut second_request = test_request();
+    second_request.id = "test-selected".to_string();
+    second_request.command_block.cwd.clone_from(&workspace);
+    second_request.command_block.end_cwd.clone_from(&workspace);
+    let second =
+        collect_cancellable_run(&adapter.start_cancellable(second_request, CoshApprovalMode::Auto));
+    assert!(second
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+    let second_info = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query selected session runtime");
+
+    assert_ne!(first_info["pid"], second_info["pid"]);
+    assert_eq!(
+        adapter.committed_session_id().as_deref(),
+        Some("11111111-1111-4111-8111-111111111111")
+    );
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::Active
+    );
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn busy_external_mutation_reloads_live_core_at_safe_point() {
+    let (script, root) = persistent_mock_paths("deferred-reload");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    write_persistent_mock(&script, &gate, &started);
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let run = adapter.start_cancellable(test_request(), CoshApprovalMode::Auto);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        started.exists(),
+        "persistent mock did not enter the busy turn"
+    );
+
+    let mutation = adapter
+        .registry_query("extensions", "enable", serde_json::json!({"id": "demo"}))
+        .expect("fall back to short registry mutation while live core is busy");
+    assert_eq!(mutation["transport"], "short");
+    std::fs::write(&gate, "continue").expect("release persistent mock turn");
+    let events = collect_cancellable_run(&run);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+
+    let live = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query live registry after deferred reload");
+    assert_eq!(live["transport"], "live");
+    assert_eq!(live["reloads"], 1);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_mutation_reloads_live_core_at_safe_point() {
+    let (script, root) = persistent_mock_paths("mcp-deferred-reload");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    write_persistent_mock(&script, &gate, &started);
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let run = adapter.start_cancellable(test_request(), CoshApprovalMode::Auto);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        started.exists(),
+        "persistent mock did not enter the busy turn"
+    );
+
+    adapter.note_mcp_mutation();
+    std::fs::write(&gate, "continue").expect("release persistent mock turn");
+    let events = collect_cancellable_run(&run);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+
+    let live = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query live registry after deferred mcp reload");
+    assert_eq!(live["transport"], "live");
+    assert_eq!(live["reloads"], 1);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn idle_mcp_mutation_reloads_before_the_next_turn_starts() {
+    let (script, root) = persistent_mock_paths("mcp-idle-reload");
+    // Embeds the reload counter into every turn result so the assertion can
+    // prove ordering: the reload must be consumed before the next user
+    // message reaches the mock, not merely at the end of that turn.
+    let source = r#"#!/bin/sh
+turns=0
+reloads=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      turns=$((turns + 1))
+      printf '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done-r%s"}\n' "$reloads"
+      ;;
+    *'"type":"registry_request"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'"action":"reload"'*) reloads=$((reloads + 1));;
+      esac
+      printf '{"type":"registry_response","request_id":"%s","success":true,"data":{"turns":%s,"reloads":%s,"transport":"live"}}\n' "$request_id" "$turns" "$reloads"
+      ;;
+    *'"subtype":"shutdown"'*) exit 0;;
+  esac
+done
+"#;
+    std::fs::write(&script, source).expect("write idle-reload cosh-core mock");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("idle-reload cosh-core mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod idle-reload cosh-core mock");
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let first =
+        collect_cancellable_run(&adapter.start_cancellable(test_request(), CoshApprovalMode::Auto));
+    assert!(
+        first.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text == "done-r0"
+        )),
+        "{first:?}"
+    );
+
+    adapter.note_mcp_mutation();
+
+    let mut second_request = test_request();
+    second_request.id = "test-2".to_string();
+    let second =
+        collect_cancellable_run(&adapter.start_cancellable(second_request, CoshApprovalMode::Auto));
+    assert!(
+        second.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text == "done-r1"
+        )),
+        "reload must land before the next turn's user message: {second:?}"
+    );
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
 }

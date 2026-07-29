@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent::run::PendingAgentRequest;
 use crate::hooks::state::HookRuntimeState;
+use crate::raw_input::{PromptGhostCandidate, PromptGhostRoute};
 use crate::runtime::prelude::{
     AgentMode, AgentRequest, AgentRunOrigin, CommandBlock, CommandStatus, OutputRefs,
 };
@@ -10,6 +11,8 @@ use crate::runtime::state::{
     ApprovalState, ContinuityState, ControlState, ProviderShellRequestKind, QuestionState,
     RuntimeApprovalRequest,
 };
+use crate::runtime::state::{InlineState, PendingInputGhostBinding};
+use crate::types::AgentContextBinding;
 
 #[test]
 fn analysis_throttle_uses_fixed_window_instead_of_sliding_forever() {
@@ -24,12 +27,69 @@ fn analysis_throttle_uses_fixed_window_instead_of_sliding_forever() {
 }
 
 #[test]
+fn clearing_personal_candidates_rebuilds_health_first_selection() {
+    let mut state = InlineState::default();
+    state.pending_prompt_suggestion_bindings.insert(
+        "health-1".to_string(),
+        PendingInputGhostBinding::Health(AgentContextBinding::StartupHealthFollowUp),
+    );
+    state.pending_prompt_suggestion_bindings.insert(
+        "personal-1".to_string(),
+        PendingInputGhostBinding::Personal(
+            crate::recommendation::personal_feedback::FrozenPromptBinding {
+                candidate_id: "personal-1".to_string(),
+                task_ref: "task-1".to_string(),
+                original_prompt: "continue deployment".to_string(),
+                source: crate::recommendation::personal_model::CandidateSource::RecentTask,
+                suppression_key: "suppress-1".to_string(),
+                profile_generation: 1,
+                intent_lifecycle_id: "intent-1".to_string(),
+            },
+        ),
+    );
+    state.pending_input_ghost = Some("inspect memory".to_string());
+    state.pending_input_ghost_binding = Some(PendingInputGhostBinding::Health(
+        AgentContextBinding::StartupHealthFollowUp,
+    ));
+    state.pending_input_ghost_route = PromptGhostRoute::AgentSelection {
+        candidates: vec![
+            PromptGhostCandidate {
+                text: "inspect memory".to_string(),
+                suggestion_id: "health-1".to_string(),
+            },
+            PromptGhostCandidate {
+                text: "continue deployment".to_string(),
+                suggestion_id: "personal-1".to_string(),
+            },
+        ],
+        active: 0,
+    };
+
+    assert!(state.clear_personal_prompt_ghost());
+    assert_eq!(state.pending_input_ghost.as_deref(), Some("inspect memory"));
+    assert_eq!(
+        state.pending_input_ghost_route,
+        PromptGhostRoute::AgentSelection {
+            candidates: vec![PromptGhostCandidate {
+                text: "inspect memory".to_string(),
+                suggestion_id: "health-1".to_string(),
+            }],
+            active: 0,
+        }
+    );
+    assert!(!state
+        .pending_prompt_suggestion_bindings
+        .contains_key("personal-1"));
+}
+
+#[test]
 fn approval_state_generates_request_ids_from_owned_queue() {
     let mut state = ApprovalState::default();
 
     assert_eq!(state.next_request_id(), "req-1");
     state.requests.push(RuntimeApprovalRequest {
         id: "req-1".to_string(),
+        audit_ref: None,
         run_id: "run-1".to_string(),
         origin: AgentRunOrigin::Standard,
         session_id: "session-1".to_string(),
@@ -169,6 +229,8 @@ fn pending_agent_request(id: &str, before_held_text: bool) -> PendingAgentReques
     PendingAgentRequest {
         request: agent_request(id),
         origin: AgentRunOrigin::Standard,
+        intent: crate::agent::run::AgentStartIntent::UserInitiated,
+        class: crate::agent::run::PendingRequestClass::Normal,
         selectable_after_event_index: None,
         before_held_text,
     }
@@ -195,6 +257,7 @@ fn agent_request(id: &str) -> AgentRequest {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),

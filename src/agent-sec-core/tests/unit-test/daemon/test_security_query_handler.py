@@ -179,6 +179,93 @@ def test_security_event_queries_read_sqlite_data(tmp_path: Path) -> None:
     assert summary_response.data["affected_runs"] == 2
 
 
+def test_skill_ledger_dashboard_fields_are_available_without_details(
+    tmp_path: Path,
+) -> None:
+    details = {
+        "request": {"command": "show", "skill_dir": "/opt/skills/demo"},
+        "result": {
+            "command": "show",
+            "verdict": "deny",
+            "skill_name": "demo",
+            "latest_status": "deny",
+        },
+    }
+    _write_security_event(
+        tmp_path,
+        event_id="skill-show",
+        event_type="skill_ledger",
+        category="skill_ledger",
+        details=details,
+    )
+
+    list_response = _call_daemon(tmp_path, "sec.events.list")
+    list_item = list_response.data["items"][0]
+    assert list_item["verdict"] == "deny"
+    assert list_item["command"] == "show"
+    assert list_item["skill_name"] == "demo"
+    assert "details" not in list_item
+
+    get_response = _call_daemon(
+        tmp_path,
+        "sec.events.get",
+        {"event_id": "skill-show"},
+    )
+    get_item = get_response.data["event"]
+    assert get_item["verdict"] == "deny"
+    assert get_item["command"] == "show"
+    assert get_item["skill_name"] == "demo"
+    assert get_item["details"] == details
+
+    summary_response = _call_daemon(tmp_path, "sec.summary")
+    latest_item = summary_response.data["latest_events"][0]
+    assert latest_item["verdict"] == "deny"
+    assert latest_item["command"] == "show"
+    assert latest_item["skill_name"] == "demo"
+    assert "details" not in latest_item
+
+
+def test_skill_ledger_dashboard_skill_name_fallback_skips_batch_events() -> None:
+    failed_event = SecurityEvent(
+        event_type="skill_ledger",
+        category="skill_ledger",
+        result="failed",
+        details={
+            "request": {"command": "check", "skill_dir": "/opt/skills/fallback"},
+            "result": {},
+        },
+    )
+    failed_payload = security_query._event_payload(
+        failed_event,
+        include_details=False,
+    )
+
+    assert failed_payload["command"] == "check"
+    assert failed_payload["skill_name"] == "fallback"
+    assert "verdict" not in failed_payload
+
+    batch_event = SecurityEvent(
+        event_type="skill_ledger",
+        category="skill_ledger",
+        details={
+            "request": {"command": "check", "skill_dir": "/opt/skills/not-a-skill"},
+            "result": {
+                "command": "check",
+                "verdict": "tampered",
+                "results": [{"skill_name": "a", "status": "tampered"}],
+            },
+        },
+    )
+    batch_payload = security_query._event_payload(
+        batch_event,
+        include_details=False,
+    )
+
+    assert batch_payload["command"] == "check"
+    assert batch_payload["verdict"] == "tampered"
+    assert "skill_name" not in batch_payload
+
+
 def test_security_summary_handler_uses_repository_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -430,6 +517,7 @@ def test_security_events_list_filters_by_verdict(tmp_path: Path) -> None:
     assert len(response.data["items"]) == 2
     returned_ids = {item["event_id"] for item in response.data["items"]}
     assert returned_ids == {"deny-1", "deny-2"}
+    assert all(item["verdict"] == "deny" for item in response.data["items"])
 
 
 def test_security_events_list_normalizes_explicit_since_until(tmp_path: Path) -> None:

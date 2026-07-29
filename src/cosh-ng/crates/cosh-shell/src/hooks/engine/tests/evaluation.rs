@@ -147,6 +147,7 @@ fn evaluate_returns_sorted_findings() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
 
     let findings = engine.evaluate(&block);
@@ -189,6 +190,7 @@ fn evaluate_with_disabled_skips_matching_hook() {
             terminal_output_bytes: 0,
         },
         shell_environment_generation: None,
+        audit_identity: None,
     };
     let disabled = HashSet::from(["disabled-hook".to_string()]);
 

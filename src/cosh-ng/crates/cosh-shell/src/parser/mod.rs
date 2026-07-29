@@ -295,6 +295,7 @@ pub fn agent_request_from_intercepted_input(
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -355,6 +356,7 @@ pub fn recommendation_selection_from_event(event: &ShellEvent) -> Option<usize> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalCommandKind {
     Approve,
+    ApproveTurn,
     AlwaysTrust,
     Deny,
     Details,
@@ -384,6 +386,10 @@ pub fn approval_command_from_event(event: &ShellEvent) -> Option<ApprovalCommand
         return match event.message.as_deref() {
             Some("approve") => Some(ApprovalCommand {
                 kind: ApprovalCommandKind::Approve,
+                id: id.to_string(),
+            }),
+            Some("approve_turn") => Some(ApprovalCommand {
+                kind: ApprovalCommandKind::ApproveTurn,
                 id: id.to_string(),
             }),
             Some("always_trust") => Some(ApprovalCommand {
@@ -571,6 +577,7 @@ mod tests {
                 terminal_output_bytes: 0,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         }
     }
 

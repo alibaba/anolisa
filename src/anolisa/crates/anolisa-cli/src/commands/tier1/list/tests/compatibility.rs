@@ -1,9 +1,12 @@
-use anolisa_core::state::{ObjectKind, ObjectStatus};
+use anolisa_core::domain::LifecycleStatus;
+use anolisa_core::state::ObjectKind;
 
 use crate::commands::tier1::list::{ListArgs, ListPayload, build_rows};
 use crate::resolution::{ComponentBackendEntry, ComponentIndex, ComponentIndexEntry};
 
-use super::support::{empty_state, sample_index, state_with_object};
+use super::support::{
+    empty_state, sample_index, state_with_adopted_object, state_with_owned_object,
+};
 
 #[test]
 fn index_builds_rows() {
@@ -41,7 +44,11 @@ fn empty_state_all_not_installed() {
 fn installed_component_shows_installed() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Installed);
+    let state = state_with_owned_object(
+        ObjectKind::Component,
+        "tokenless",
+        LifecycleStatus::Installed,
+    );
     let rows = build_rows(&index, &args, &state, None);
 
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
@@ -55,7 +62,7 @@ fn installed_component_shows_installed() {
 fn adopted_rpm_component_shows_adopted() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
+    let state = state_with_adopted_object(ObjectKind::Component, "agentsight");
     let rows = build_rows(&index, &args, &state, None);
 
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
@@ -66,7 +73,7 @@ fn adopted_rpm_component_shows_adopted() {
 fn compatibility_status_labels_are_preserved_before_local_projection() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
+    let state = state_with_adopted_object(ObjectKind::Component, "agentsight");
 
     let rows = build_rows(&index, &args, &state, None);
 
@@ -80,7 +87,8 @@ fn compatibility_status_labels_are_preserved_before_local_projection() {
 fn adapter_object_does_not_mark_component_installed() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = state_with_object(ObjectKind::Adapter, "tokenless", ObjectStatus::Installed);
+    let state =
+        state_with_owned_object(ObjectKind::Adapter, "tokenless", LifecycleStatus::Installed);
     let rows = build_rows(&index, &args, &state, None);
     let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.status, "not_installed");
@@ -90,7 +98,8 @@ fn adapter_object_does_not_mark_component_installed() {
 fn failed_component_shows_failed() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Failed);
+    let state =
+        state_with_owned_object(ObjectKind::Component, "tokenless", LifecycleStatus::Failed);
     let rows = build_rows(&index, &args, &state, None);
     let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.status, "failed");
@@ -100,7 +109,11 @@ fn failed_component_shows_failed() {
 fn disabled_component_shows_disabled() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Disabled);
+    let state = state_with_owned_object(
+        ObjectKind::Component,
+        "tokenless",
+        LifecycleStatus::Disabled,
+    );
     let rows = build_rows(&index, &args, &state, None);
     let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.status, "disabled");
@@ -110,7 +123,11 @@ fn disabled_component_shows_disabled() {
 fn installed_filter_returns_only_installed() {
     let index = sample_index();
     let args = ListArgs { installed: true };
-    let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Installed);
+    let state = state_with_owned_object(
+        ObjectKind::Component,
+        "tokenless",
+        LifecycleStatus::Installed,
+    );
     let rows = build_rows(&index, &args, &state, None);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "tokenless");
@@ -121,7 +138,7 @@ fn installed_filter_returns_only_installed() {
 fn installed_filter_includes_adopted_rpm_components() {
     let index = sample_index();
     let args = ListArgs { installed: true };
-    let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
+    let state = state_with_adopted_object(ObjectKind::Component, "agentsight");
     let rows = build_rows(&index, &args, &state, None);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "agentsight");
@@ -156,7 +173,11 @@ fn json_payload_uses_components_key() {
 fn json_payload_status_reflects_install_state() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Installed);
+    let state = state_with_owned_object(
+        ObjectKind::Component,
+        "agentsight",
+        LifecycleStatus::Installed,
+    );
     let rows = build_rows(&index, &args, &state, None);
     let payload = ListPayload {
         components: rows,

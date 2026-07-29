@@ -622,15 +622,20 @@ pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
         if is_hermes_management_path(&name) || name.starts_with('.') {
             continue;
         }
-        if !entry.path().is_dir() {
+        // No-follow type: a symlinked category is not a managed category
+        // (the resolver rejects symlinked components with O_NOFOLLOW), and
+        // descending into it would register skills that live outside the
+        // managed root. Skip it so enumeration matches the resolver.
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         // A first-level directory that carries its own SKILL.md is a
         // top-level skill, not a category. The mount serves it (and its
         // whole subtree) as a flat skill, so descending into it here would
         // register `skill/subdir` as a phantom nested skill and diverge
-        // from mount discovery.
-        if entry.path().join("SKILL.md").exists() {
+        // from mount discovery. Uses the shared no-follow regular-file
+        // marker so store, mount, and resolver agree on what a Skill is.
+        if skillfs_core::store::has_regular_skill_md(&entry.path()) {
             continue;
         }
         let cat_entries = match std::fs::read_dir(entry.path()) {
@@ -639,10 +644,11 @@ pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
         };
         for child in cat_entries.flatten() {
             let child_name = child.file_name().to_string_lossy().to_string();
-            if !child.path().is_dir() {
+            // No-follow: a symlinked nested entry is never a managed skill.
+            if !child.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            if child.path().join("SKILL.md").exists() {
+            if skillfs_core::store::has_regular_skill_md(&child.path()) {
                 leaves.push(format!("{}/{}", name, child_name));
             }
         }
@@ -669,10 +675,11 @@ pub fn enumerate_hermes_top_level_skills(source_root: &Path) -> Vec<String> {
         if is_hermes_management_path(&name) || name.starts_with('.') {
             continue;
         }
-        if !entry.path().is_dir() {
+        // No-follow: a symlinked top-level entry is not a managed skill.
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        if entry.path().join("SKILL.md").exists() {
+        if skillfs_core::store::has_regular_skill_md(&entry.path()) {
             skills.push(name);
         }
     }
@@ -1087,6 +1094,63 @@ mod tests {
             vec!["apple/apple-music", "apple/apple-notes"],
             "must enumerate only dirs with SKILL.md, got: {:?}",
             leaves
+        );
+    }
+
+    #[test]
+    fn enumerate_hermes_rejects_symlink_category_and_nested_and_top_level() {
+        // Symlinked categories, symlinked nested skills, and symlinked
+        // top-level skills all live outside the managed root once resolved,
+        // and the resolver rejects symlinked components with O_NOFOLLOW.
+        // Enumeration must skip them so it never registers an activatable id
+        // the resolver would refuse to resolve.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+
+        // Real category + nested skill (must be enumerated).
+        let real_nested = root.join("cat/realnested");
+        std::fs::create_dir_all(&real_nested).unwrap();
+        std::fs::write(real_nested.join("SKILL.md"), "---\nname: rn\n---\n").unwrap();
+
+        // Symlinked nested skill under the real category (must be skipped).
+        let out_skill = outside.path().join("out-skill");
+        std::fs::create_dir(&out_skill).unwrap();
+        std::fs::write(out_skill.join("SKILL.md"), "---\nname: os\n---\n").unwrap();
+        std::os::unix::fs::symlink(&out_skill, root.join("cat/linknested")).unwrap();
+
+        // Symlinked category (must not be descended).
+        let out_cat = outside.path().join("out-cat");
+        let out_cat_child = out_cat.join("child");
+        std::fs::create_dir_all(&out_cat_child).unwrap();
+        std::fs::write(out_cat_child.join("SKILL.md"), "---\nname: oc\n---\n").unwrap();
+        std::os::unix::fs::symlink(&out_cat, root.join("linkcat")).unwrap();
+
+        // Symlinked top-level skill (must be skipped).
+        let out_top = outside.path().join("out-top");
+        std::fs::create_dir(&out_top).unwrap();
+        std::fs::write(out_top.join("SKILL.md"), "---\nname: ot\n---\n").unwrap();
+        std::os::unix::fs::symlink(&out_top, root.join("linktop")).unwrap();
+
+        let mut leaves = enumerate_hermes_skill_leaves(root);
+        leaves.sort();
+        assert_eq!(
+            leaves,
+            vec!["cat/realnested"],
+            "only the real nested skill may be enumerated, got: {leaves:?}"
+        );
+
+        let top = enumerate_hermes_top_level_skills(root);
+        assert!(
+            !top.iter().any(|s| s == "linktop"),
+            "a symlinked top-level skill must not be enumerated, got: {top:?}"
+        );
+
+        let ids = enumerate_hermes_skill_ids(root);
+        assert!(
+            !ids.iter()
+                .any(|i| i == "linktop" || i == "linkcat/child" || i == "cat/linknested"),
+            "no symlinked category/nested/top-level id may appear, got: {ids:?}"
         );
     }
 

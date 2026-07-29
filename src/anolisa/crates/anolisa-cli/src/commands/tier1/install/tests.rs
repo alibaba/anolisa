@@ -7,7 +7,7 @@
 use super::*;
 
 use anolisa_core::lock::{InstallLock, LockError};
-use anolisa_core::state::InstalledState;
+use anolisa_core::transaction::Transaction;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -26,19 +26,23 @@ use tar::{Builder, Header};
 use tempfile::tempdir;
 
 pub fn ctx_with_prefix(json: bool, prefix: Option<PathBuf>) -> CliContext {
-    CliContext {
-        install_mode: if prefix.is_some() {
-            InstallMode::System
-        } else {
-            InstallMode::User
+    let root = prefix
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("/tmp/anolisa-install-validation"));
+    let install_mode = if prefix.is_some() {
+        InstallMode::System
+    } else {
+        InstallMode::User
+    };
+    crate::test_support::context_for_root(
+        root,
+        install_mode,
+        prefix.clone(),
+        crate::test_support::TestContextOptions {
+            json,
+            ..Default::default()
         },
-        prefix,
-        json,
-        dry_run: false,
-        verbose: false,
-        quiet: true, // suppress stdout during tests
-        no_color: true,
-    }
+    )
 }
 
 pub fn args(component: &str) -> InstallArgs {
@@ -176,6 +180,48 @@ publisher = "test"
 
 pub fn write_local_repo(root: &Path) -> String {
     write_local_repo_component(root, "agentsight", "0.2.0", &["system"])
+}
+
+/// Local file:// repo publishing several versions of one component, so a
+/// version-pinned install can select a non-latest entry.
+pub fn write_local_repo_component_versions(
+    root: &Path,
+    component: &str,
+    versions: &[&str],
+    modes: &[&str],
+) -> String {
+    let v1 = root.join("v1");
+    std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+    let env = anolisa_env::EnvService::detect();
+    let modes_arr = toml_string_array(modes);
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
+    for version in versions {
+        let artifact = build_component_artifact(component, version, modes);
+        let artifact_name = format!("{component}-{version}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        index.push_str(&format!(
+            r#"
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_arr}
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ));
+    }
+    std::fs::write(v1.join("index.toml"), index).expect("write index");
+    format!("file://{}", v1.display())
 }
 
 pub fn write_local_repo_component(
@@ -590,13 +636,16 @@ sha256 = "{sha}"
 pub struct NoTxn;
 
 impl PackageTransaction for NoTxn {
-    fn install(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("adopt-path test reached a delegated dnf install");
     }
-    fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn update(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("adopt-path test reached a dnf update");
     }
-    fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn reinstall(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        panic!("adopt-path test reached a dnf reinstall");
+    }
+    fn remove(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("adopt-path test reached a dnf remove");
     }
 }
@@ -608,12 +657,14 @@ pub fn handle_one_with_query(
     query: &dyn PackageQuery,
 ) -> Result<InstallOutcome, CliError> {
     let txn = NoTxn;
-    let exec = RpmExec {
-        query,
-        txn: &txn,
-        is_root: false,
-    };
-    handle_one_with_exec(component, args, ctx, &exec)
+    install_component_with_deps(&component, &args, ctx, query, &txn, false)
+}
+
+/// Load the v5 store the pipeline writes, for post-install assertions.
+pub fn load_store(ctx: &CliContext) -> anolisa_core::state_store::StateStore {
+    let layout = common::resolve_layout(ctx);
+    anolisa_core::state_store::StateStore::load(&layout.state_dir.join("installed.toml"), 0)
+        .expect("load store")
 }
 
 pub struct FakeInstaller {
@@ -624,18 +675,22 @@ pub struct FakeInstaller {
     pub available: Vec<PackageInfo>,
     /// `false` makes the dnf install transaction fail.
     pub install_succeeds: bool,
-    /// Make the authoritative rpmdb read fail after dnf has run.
-    pub post_install_query_fails: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
+    /// Package spec(s) each `install` call received, joined per call, so tests
+    /// can pin the exact NEVRA a version-pinned install hands to dnf.
+    pub install_specs: RefCell<Vec<String>>,
+    /// Expected `install` argument (comma-joined). When `None`, the fake
+    /// asserts the bare package name; a pinned test sets the expected NEVRA.
+    pub expected_install: Option<String>,
     /// Optional lock path probed from inside `install`.
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
+    package_appears_under_lock_path: Option<PathBuf>,
     /// Optional installed.toml path replaced with a directory after dnf.
     pub block_state_save: Option<PathBuf>,
-    /// Optional journal directory replaced with a file during the post-install query.
-    pub block_journal_update: Option<PathBuf>,
-    pub journal_was_blocked: Cell<bool>,
+    pending_race: Option<(PathBuf, PathBuf, String)>,
+    pending_race_injected: Cell<bool>,
 }
 
 impl FakeInstaller {
@@ -646,39 +701,75 @@ impl FakeInstaller {
             origin: None,
             available: Vec::new(),
             install_succeeds: true,
-            post_install_query_fails: false,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
+            install_specs: RefCell::new(Vec::new()),
+            expected_install: None,
             lock_probe: None,
             lock_was_held: Cell::new(false),
+            package_appears_under_lock_path: None,
             block_state_save: None,
-            block_journal_update: None,
-            journal_was_blocked: Cell::new(false),
+            pending_race: None,
+            pending_race_injected: Cell::new(false),
         }
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
         self.origin = Some(repo.to_string());
         self
     }
-    pub fn failing_install(mut self) -> Self {
-        self.install_succeeds = false;
+    /// Repository candidates `query_available` returns for the package, so a
+    /// version-pinned install can resolve a concrete NEVRA.
+    pub fn with_available(mut self, available: Vec<PackageInfo>) -> Self {
+        self.available = available;
         self
     }
-    pub fn failing_post_install_query(mut self) -> Self {
-        self.post_install_query_fails = true;
+    /// Assert `install` receives this exact spec (e.g. a pinned NEVRA) instead
+    /// of the bare package name.
+    pub fn expecting_install(mut self, spec: &str) -> Self {
+        self.expected_install = Some(spec.to_string());
+        self
+    }
+    pub fn failing_install(mut self) -> Self {
+        self.install_succeeds = false;
         self
     }
     pub fn expect_lock_held(mut self, path: PathBuf) -> Self {
         self.lock_probe = Some(path);
         self
     }
+    pub fn package_appears_under_lock(mut self, path: PathBuf) -> Self {
+        self.package_appears_under_lock_path = Some(path);
+        self
+    }
     pub fn failing_state_save(mut self, path: PathBuf) -> Self {
         self.block_state_save = Some(path);
         self
     }
-    pub fn failing_journal_update(mut self, path: PathBuf) -> Self {
-        self.block_journal_update = Some(path);
+
+    pub fn injecting_pending_journal(mut self, layout: &FsLayout, subject: &str) -> Self {
+        self.pending_race = Some((
+            layout.state_dir.join("installed.toml"),
+            layout.state_dir.join("journal"),
+            subject.to_string(),
+        ));
         self
+    }
+
+    fn maybe_inject_pending_journal(&self) {
+        let Some((state_path, journal_dir, subject)) = &self.pending_race else {
+            return;
+        };
+        if self.pending_race_injected.replace(true) {
+            return;
+        }
+        let journal = Transaction::begin_with_subject(
+            "install",
+            Some(subject),
+            state_path.clone(),
+            journal_dir,
+        )
+        .expect("inject pending journal between preflight and lock");
+        drop(journal);
     }
 
     fn component_capability(&self) -> String {
@@ -688,23 +779,14 @@ impl FakeInstaller {
 
 impl PackageQuery for FakeInstaller {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+        self.maybe_inject_pending_journal();
         if package != self.package {
             return Ok(None);
         }
-        if self.post_install_query_fails && self.install_calls.get() > 0 {
-            if let Some(path) = &self.block_journal_update
-                && !self.journal_was_blocked.replace(true)
-            {
-                let backup = path.with_extension("before-write-failure");
-                std::fs::rename(path, &backup).expect("move journal directory");
-                std::fs::write(path, b"block journal updates")
-                    .expect("replace journal directory with file");
-            }
-            return Err(PackageQueryError::QueryFailed {
-                command: "rpm".to_string(),
-                code: Some(1),
-                stderr: "rpmdb unavailable".to_string(),
-            });
+        if let Some(path) = &self.package_appears_under_lock_path
+            && matches!(InstallLock::acquire(path), Err(LockError::Held { .. }))
+        {
+            *self.installed.borrow_mut() = Some(self.installs_to.clone());
         }
         Ok(self.installed.borrow().clone())
     }
@@ -763,9 +845,18 @@ impl PackageQuery for FakeInstaller {
 }
 
 impl PackageTransaction for FakeInstaller {
-    fn install(&self, package: &str) -> Result<(), PackageTransactionError> {
+    fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.install_calls.set(self.install_calls.get() + 1);
-        assert_eq!(package, self.package, "install targeted the wrong package");
+        self.install_specs.borrow_mut().push(packages.join(","));
+        let expected = self
+            .expected_install
+            .clone()
+            .unwrap_or_else(|| self.package.clone());
+        assert_eq!(
+            packages.join(","),
+            expected,
+            "install targeted the wrong package/spec"
+        );
         if let Some(path) = &self.lock_probe {
             self.lock_was_held.set(matches!(
                 InstallLock::acquire(path),
@@ -787,10 +878,13 @@ impl PackageTransaction for FakeInstaller {
         }
         Ok(())
     }
-    fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn update(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("delegated-install test must not run a dnf update");
     }
-    fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn reinstall(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        panic!("delegated-install test must not run a dnf reinstall");
+    }
+    fn remove(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("delegated-install test must not run a dnf remove");
     }
 }
@@ -943,6 +1037,35 @@ pub fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) ->
     }
 }
 
+/// Host architecture the install pipeline resolves against, so version-pinned
+/// tests build candidates the running host actually accepts (aarch64 on this
+/// CI, x86_64 elsewhere) instead of hard-coding one arch.
+pub fn host_arch() -> String {
+    anolisa_env::EnvService::detect().arch
+}
+
+/// A repository candidate for a version-pinned availability query, carrying an
+/// origin (source repo) so the resolved-candidate reporting has a value.
+pub fn available_candidate(
+    name: &str,
+    epoch: Option<&str>,
+    version: &str,
+    release: &str,
+    arch: &str,
+    origin: &str,
+) -> PackageInfo {
+    PackageInfo {
+        name: name.to_string(),
+        version: PackageVersion {
+            epoch: epoch.map(str::to_string),
+            version: version.to_string(),
+            release: Some(release.to_string()),
+        },
+        arch: arch.to_string(),
+        origin: Some(origin.to_string()),
+    }
+}
+
 pub fn system_ctx_with_raw_repo(dry_run: bool) -> (tempfile::TempDir, CliContext) {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().to_path_buf();
@@ -982,11 +1105,6 @@ gpgcheck = false
     let mut ctx = ctx_with_prefix(false, Some(prefix));
     ctx.dry_run = dry_run;
     (tmp, ctx)
-}
-
-pub fn load_state(ctx: &CliContext) -> InstalledState {
-    let layout = common::resolve_layout(ctx);
-    InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
 }
 
 pub fn repo_with_rpm_map(pairs: &[(&str, &str)]) -> RepoConfig {
@@ -1033,16 +1151,9 @@ pub fn package_component_provide(package: &str, component: &str) -> (String, Vec
 }
 
 pub fn target(component: &str, package: &str) -> RpmTarget {
-    RpmTarget::new(component, package)
-}
-
-pub fn situation_label(s: &RpmSituation) -> &'static str {
-    match s {
-        RpmSituation::Adoptable { .. } => "Adoptable",
-        RpmSituation::Absent { .. } => "Absent",
-        RpmSituation::NotAnolisaComponent => "NotAnolisaComponent",
-        RpmSituation::Ambiguous(_) => "Ambiguous",
-        RpmSituation::MultiVersion(_) => "MultiVersion",
+    RpmTarget {
+        component: component.to_string(),
+        package: package.to_string(),
     }
 }
 

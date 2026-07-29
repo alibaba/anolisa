@@ -9,6 +9,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[3]
 _EXTENSION_DIR = _ROOT / "qwen-code-extension"
 _DEPLOY_SCRIPT = _EXTENSION_DIR / "scripts" / "deploy.sh"
+_RPM_SPEC = _ROOT / "agent-sec-core.spec.in"
 
 
 def _write_executable(path, content):
@@ -197,3 +198,64 @@ def test_deploy_rejects_missing_agent_sec_cli(tmp_path):
     assert calls == []
     assert not (qwen_home / "extensions").exists()
     assert "agent-sec-cli is not available in PATH" in result.stderr
+
+
+def test_deploy_rejects_missing_skill_ledger_hook(tmp_path):
+    source = tmp_path / "extension-source"
+    shutil.copytree(_EXTENSION_DIR, source)
+    (source / "hooks" / "skill_ledger_hook.py").unlink()
+
+    result, calls, qwen_home = _run_deploy(tmp_path, source)
+
+    assert result.returncode == 1
+    assert calls == []
+    assert not (qwen_home / "extensions").exists()
+    assert "missing skill-ledger hook" in result.stderr
+
+
+def test_deploy_rejects_non_executable_skill_ledger_hook(tmp_path):
+    source = tmp_path / "extension-source"
+    shutil.copytree(_EXTENSION_DIR, source)
+    (source / "hooks" / "skill_ledger_hook.py").chmod(0o644)
+
+    result, calls, qwen_home = _run_deploy(tmp_path, source)
+
+    assert result.returncode == 1
+    assert calls == []
+    assert not (qwen_home / "extensions").exists()
+    assert "skill-ledger hook is not executable" in result.stderr
+
+
+def test_deploy_rejects_missing_code_scanner_hook(tmp_path):
+    source = tmp_path / "extension-source"
+    shutil.copytree(_EXTENSION_DIR, source)
+    (source / "hooks" / "code_scanner_hook.py").unlink()
+
+    result, calls, qwen_home = _run_deploy(tmp_path, source)
+
+    assert result.returncode == 1
+    assert calls == []
+    assert not (qwen_home / "extensions").exists()
+    assert "missing code scanner hook" in result.stderr
+
+
+def test_deploy_rejects_missing_trace_context_helper(tmp_path):
+    source = tmp_path / "extension-source"
+    shutil.copytree(_EXTENSION_DIR, source)
+    (source / "hooks" / "trace_context.py").unlink()
+
+    result, calls, qwen_home = _run_deploy(tmp_path, source)
+
+    assert result.returncode == 1
+    assert calls == []
+    assert not (qwen_home / "extensions").exists()
+    assert "missing trace-context helper" in result.stderr
+
+
+def test_rpm_marks_skill_ledger_hook_executable():
+    spec = _RPM_SPEC.read_text(encoding="utf-8")
+
+    assert (
+        "%attr(0755,root,root) "
+        "/opt/agent-sec/qwen-code-extension/hooks/skill_ledger_hook.py"
+    ) in spec

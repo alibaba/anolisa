@@ -222,7 +222,7 @@ UTF-8 JSON payload：
 `target` 为相对 `ioSkillDir` 的 `.skill-meta/versions/<id>.snapshot` 路径；
 `target: null` 表示不暴露该 Skill。
 `__pending_decision__.snapshot` 是保留的安全审查占位 target，不对应 manifest，也不进入
-版本链。完整的版本、决策和 exposure 规则见 [Skill Ledger 主设计](SKILL_LEDGER_CN.md)。
+版本链。完整的版本、决策和 exposure 规则见 [Skill Ledger 主设计](SKILL_LEDGER_zh.md)。
 
 activation target 由 Ledger 独立选择，SkillFS 不参与策略判定。当前 `pass_warn_only`
 优先遵循用户决策；无决策时使用可信 latest snapshot、历史可信 fallback 或安全审查占位。

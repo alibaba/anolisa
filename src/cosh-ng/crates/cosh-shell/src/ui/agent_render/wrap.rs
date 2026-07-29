@@ -21,13 +21,22 @@ pub(super) fn ordered_list_item(line: &str) -> Option<(&str, &str)> {
     Some((&trimmed[..marker_end + 2], &trimmed[marker_end + 2..]))
 }
 
-pub(super) fn wrap_plain_line(line: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_plain_line(line: &str, width: usize) -> Vec<String> {
     if line.trim().is_empty() {
         return vec![String::new()];
     }
 
     let (first_prefix, rest_prefix, text) = split_prefix(line);
     wrap_with_prefix(text, &first_prefix, &rest_prefix, width)
+}
+
+pub(crate) fn wrap_plain_line_with_prefix(
+    text: &str,
+    first_prefix: &str,
+    rest_prefix: &str,
+    width: usize,
+) -> Vec<String> {
+    wrap_with_prefix(text, first_prefix, rest_prefix, width)
 }
 
 pub(super) fn compact_rendered_lines(lines: Vec<String>) -> Vec<String> {
@@ -45,7 +54,15 @@ fn split_prefix(line: &str) -> (String, String, &str) {
     } else if let Some(rest) = line.strip_prefix("> ") {
         ("> ".to_string(), "  ".to_string(), rest)
     } else if line.starts_with("  ") {
-        ("  ".to_string(), "  ".to_string(), line.trim_start())
+        // Preserve arbitrary-width space indentation (2, 4, 6, ... columns)
+        // instead of collapsing everything to two spaces, so nested panel
+        // hierarchies survive wrapping with a matching hanging indent. Only
+        // consecutive ASCII spaces count as indentation: control whitespace
+        // (\r, \t, \n) after the spaces must never enter the hanging prefix,
+        // and the body keeps the legacy full leading-whitespace cleanup.
+        let indent_len = line.len() - line.trim_start_matches(' ').len();
+        let indent = &line[..indent_len];
+        (indent.to_string(), indent.to_string(), line.trim_start())
     } else {
         ("".to_string(), "".to_string(), line.trim_start())
     }
@@ -210,7 +227,7 @@ pub(super) fn strip_ansi_escape(text: &str) -> String {
     stripped
 }
 
-pub(super) fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     Span::raw(strip_ansi_escape(text)).width()
 }
 

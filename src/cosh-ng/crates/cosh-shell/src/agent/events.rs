@@ -1,100 +1,27 @@
-use crate::agent::approval_bridge::{render_auto_approved_tool, render_trusted_tool};
+pub(crate) use super::structured_events::{
+    render_agent_structured_events, render_new_agent_structured_events,
+};
 use crate::agent::heartbeat::{remember_agent_activity, render_agent_pending_tool_status};
 use crate::agent::run::ActiveAgentRun;
 use crate::runtime::prelude::*;
-pub(crate) fn render_new_agent_structured_events<W: Write>(
-    state: &mut InlineState,
-    output: &mut W,
-    adapter: &AdapterInstance,
-) -> std::io::Result<()> {
-    let (events, run_request, origin) = {
-        let Some(active_run) = state.agent_run.active.as_mut() else {
-            return Ok(());
-        };
-        let start = active_run.rendered_governed_event_count;
-        let end = active_run.governed_events.len();
-        if start >= end {
-            return Ok(());
-        }
-        let events = active_run.governed_events[start..end].to_vec();
-        let may_render_structured_surface = events.iter().any(event_may_render_structured_surface);
-        if may_render_structured_surface {
-            active_run.prepare_structured_surface(output)?;
-        }
-        active_run.rendered_governed_event_count = end;
-        (events, active_run.request.clone(), active_run.origin)
-    };
-    render_agent_structured_events(state, &events, Some(&run_request), origin, output, adapter)
+
+mod classification;
+
+use classification::{
+    event_updates_pending_tool_status, is_interaction_governed_event,
+    should_render_governance_block,
+};
+
+pub(super) fn event_may_render_structured_surface(event: &GovernedEvent) -> bool {
+    classification::event_may_render_structured_surface(event)
 }
-pub(crate) fn render_agent_structured_events<W: Write>(
-    state: &mut InlineState,
-    governed_events: &[GovernedEvent],
-    run_request: Option<&AgentRequest>,
-    origin: AgentRunOrigin,
-    output: &mut W,
-    adapter: &AdapterInstance,
-) -> std::io::Result<()> {
-    let ignore_tool_calls = adapter.capabilities().control_protocol;
-    let activity_ids = record_activity_rows_with_policy(
-        state,
-        governed_events,
-        ActivityRecordPolicy {
-            suppress_provider_native_shell: adapter.capabilities().control_protocol,
-            shell_evidence_tool_available: shell_evidence_tool_available(state, adapter),
-            origin,
-        },
-    );
-    render_provider_native_shell_transcript(state, &activity_ids, output)?;
-    render_activity_rows(state, &activity_ids, output)?;
-    let question_ids = record_user_questions(
-        state,
-        governed_events,
-        origin,
-        run_request.map(|request| request.id.as_str()),
-    );
-    render_user_questions(state, &question_ids, output)?;
-    let auth_ids = crate::auth::runtime::record_auth_required(state, governed_events);
-    crate::auth::runtime::render_auth_panel(state, &auth_ids, output)?;
-    if render_trusted_tool(state, governed_events, run_request, origin, output, adapter)? {
-        return Ok(());
-    }
-    if render_auto_approved_tool(state, governed_events, run_request, origin, output, adapter)? {
-        return Ok(());
-    }
-    if state.approval_mode == CoshApprovalMode::Recommend {
-        return Ok(());
-    }
-    let approval_ids = record_approval_requests(
-        state,
-        governed_events,
-        run_request,
-        origin,
-        ignore_tool_calls,
-    );
-    render_approval_requests(state, &approval_ids, output)?;
-    Ok(())
-}
-fn shell_evidence_tool_available(state: &InlineState, adapter: &AdapterInstance) -> bool {
-    state
-        .agent_run
-        .active
-        .as_ref()
-        .map(|active| {
-            active
-                .handle
-                .control_capabilities()
-                .can_handle_shell_evidence_tool
-        })
-        .unwrap_or_else(|| adapter.name() == "cosh-core" && adapter.capabilities().control_protocol)
-}
+
 pub(crate) fn render_active_agent_event<W: Write>(
     active_run: &mut ActiveAgentRun,
     event: AgentEvent,
     output: &mut W,
     text_hold_reason: Option<TextHoldReason>,
 ) -> std::io::Result<()> {
-    // If this is a HookNotification with a tool_use_id, store it in pending_hook_notifications
-    // for later association with the corresponding ToolPermissionRequest.
     if let AgentEvent::HookNotification {
         ref tool_use_id,
         ref hook_name,
@@ -181,29 +108,6 @@ pub(crate) fn active_run_has_unrendered_interaction(active_run: &ActiveAgentRun)
     active_run.governed_events[active_run.rendered_governed_event_count..]
         .iter()
         .any(is_interaction_governed_event)
-}
-
-fn is_interaction_governed_event(event: &GovernedEvent) -> bool {
-    matches!(
-        event.event,
-        AgentEvent::UserQuestion { .. }
-            | AgentEvent::AuthRequired { .. }
-            | AgentEvent::Action { .. }
-            | AgentEvent::ToolPermissionRequest { .. }
-    )
-}
-
-fn event_may_render_structured_surface(event: &GovernedEvent) -> bool {
-    is_interaction_governed_event(event)
-        || should_render_governance_block(event)
-        || matches!(
-            event.event,
-            AgentEvent::ToolCompleted { .. } | AgentEvent::ShellEvidenceRequest { .. }
-        )
-}
-
-fn event_updates_pending_tool_status(event: &GovernedEvent) -> bool {
-    matches!(event.event, AgentEvent::ToolCall { .. })
 }
 
 pub(crate) fn render_held_events_into_active_run<W: Write>(
@@ -317,25 +221,8 @@ pub(crate) fn flush_held_agent_events<W: Write>(
     Ok(())
 }
 
-fn should_render_governance_block(event: &GovernedEvent) -> bool {
-    match &event.event {
-        AgentEvent::StatusChanged { .. } => false,
-        AgentEvent::Recommendation { .. } => false,
-        AgentEvent::ToolCall { .. }
-        | AgentEvent::UserQuestion { .. }
-        | AgentEvent::Action { .. }
-        | AgentEvent::ToolPermissionRequest { .. } => false,
-        AgentEvent::AgentFailed { .. } | AgentEvent::AgentCancelled { .. } => true,
-        AgentEvent::ToolOutputDelta { .. } | AgentEvent::ToolCompleted { .. } => false,
-        AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
-        AgentEvent::AuthRequired { .. } => false,
-        AgentEvent::ShellEvidenceRequest { .. } => false,
-        AgentEvent::HookNotification { .. } => true,
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::time::Instant;
 
     use super::*;
@@ -634,7 +521,7 @@ mod tests {
         assert!(after_title < after_text, "{output}");
     }
 
-    fn test_active_run() -> ActiveAgentRun {
+    pub(crate) fn test_active_run() -> ActiveAgentRun {
         let request = AgentRequest {
             id: "request-1".to_string(),
             session_id: "session-1".to_string(),
@@ -655,6 +542,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

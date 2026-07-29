@@ -26,6 +26,15 @@ METHOD_SKILLFS_NOTIFY_CHANGE = "skill_ledger.skillfs_notify_change"
 SCHEMA_VERSION = 2
 
 _SKILL_META = ".skill-meta"
+_NOTIFY_V2_PARAM_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "canonicalSkillDir",
+        "skillId",
+        "eventKind",
+        "paths",
+    }
+)
 
 
 def register_skill_ledger_methods(registry: MethodRegistry) -> None:
@@ -77,6 +86,8 @@ def skillfs_notify_change_handler(
 
 def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
     """Validate daemon request params for a SkillFS change notification."""
+    _validate_notify_v2_param_keys(params)
+
     schema_version = params.get("schemaVersion")
     if schema_version != SCHEMA_VERSION:
         raise BadRequestError("params.schemaVersion must be 2")
@@ -96,6 +107,18 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
         event_kinds={event_kind},
         paths=set(paths),
     )
+
+
+def _validate_notify_v2_param_keys(params: dict[str, Any]) -> None:
+    unknown_fields = sorted(params.keys() - _NOTIFY_V2_PARAM_KEYS)
+    if unknown_fields:
+        names = ", ".join(unknown_fields)
+        raise BadRequestError(f"params contains unknown fields: {names}")
+
+    missing_fields = sorted(_NOTIFY_V2_PARAM_KEYS - params.keys())
+    if missing_fields:
+        names = ", ".join(missing_fields)
+        raise BadRequestError(f"params is missing required fields: {names}")
 
 
 def _validate_canonical_skill_dir(value: Any) -> Path:

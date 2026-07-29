@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
-[Chinese](README_CN.md)
+[Chinese](README_zh.md)
 
 SWE-bench Runner is a local batch runner for SWE-bench. It loads SWE-bench
 datasets, prepares isolated workspaces, invokes external coding agents, extracts

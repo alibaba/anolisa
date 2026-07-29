@@ -9,7 +9,7 @@ use cosh_shell::agent::govern_agent_events;
 use cosh_shell::journal::read_shell_events;
 use cosh_shell::ledger::build_command_blocks;
 use cosh_shell::parser::{agent_request_after_confirmation, findings_from_blocks};
-use cosh_shell::raw_input::{RawObserverAction, RawRelayAction};
+use cosh_shell::raw_input::{RawInputCapture, RawObserverAction, RawRelayAction};
 use cosh_shell::shell_host::{
     run_line_interactive_bash as shell_run_line_interactive_bash,
     run_raw_relay_bash as shell_run_raw_relay_bash,
@@ -34,6 +34,18 @@ use support_shell_host::{
     DelayedInput,
 };
 
+fn bash_supports_command_not_found_handler() -> bool {
+    Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "command_not_found_handle(){ return 0; }; __cosh_missing_probe",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 #[path = "shell_host/foreground.rs"]
 mod foreground;
 #[path = "shell_host/governance.rs"]
@@ -42,6 +54,8 @@ mod governance;
 mod handoff;
 #[path = "shell_host/heavy.rs"]
 mod heavy;
+#[path = "shell_host/input_intent.rs"]
+mod input_intent;
 #[path = "shell_host/marker.rs"]
 mod marker;
 #[path = "shell_host/native.rs"]
@@ -69,6 +83,17 @@ fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
         ));
     }
     config
+}
+
+fn with_raw_byte_readline(config: ShellHostConfig) -> ShellHostConfig {
+    std::fs::create_dir_all(&config.work_dir).expect("readline work dir");
+    let inputrc = config.work_dir.join("inputrc");
+    std::fs::write(
+        &inputrc,
+        "set input-meta on\nset convert-meta off\nset output-meta on\n",
+    )
+    .expect("readline inputrc");
+    config.with_env("INPUTRC", inputrc.display().to_string())
 }
 
 fn run_scripted_bash(

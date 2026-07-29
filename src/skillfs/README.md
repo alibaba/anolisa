@@ -486,7 +486,11 @@ Related security surfaces:
   new skills; writes land in the source tree and completion can trigger the
   external security flow.
 - `--notify-socket <PATH>` sends debounced skill mutation notifications to an
-  external daemon.
+  external daemon. Notify v2 identifies the Skill with its canonical path and
+  complete flat or Hermes `skillId`; live/backing paths are resolved separately.
+  In-place notify mounts, and any notify mount with `--ledger-backing-root`,
+  require `--trusted-peer-exe` so the authenticated resolver is available
+  before the daemon accesses the source.
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
   and updates the resolver without a remount.
@@ -507,7 +511,24 @@ Related security surfaces:
 - `--control-socket <PATH>` with `--trusted-peer-exe <PATH>` starts a trusted
   Unix socket control plane. Trusted peers can write activation JSON or xattr
   through methods such as `meta.writeActivation` and
-  `meta.setActivationXattr`.
+  `meta.setActivationXattr`. The packaged Skill Ledger worker's executable is
+  `/usr/bin/python3.11` because it starts through `sys.executable`, not a
+  `skill-ledger` launcher.
+- The control plane is opt-in and authenticated. The endpoint is resolved by
+  priority: CLI `--control-socket` > `[control_socket].path` in the config >
+  the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`. A
+  trusted peer without an explicit path uses the default endpoint; an explicit
+  path without a trusted peer is a configuration error; neither leaves the
+  control plane off. The default never falls back to `/tmp` or `/var/tmp`, and
+  a second instance never unlinks an active endpoint.
+- `skill.resolveLiveSource` is a read-only query that maps a caller-supplied
+  canonical Skill directory to its physical live/backing source. It returns
+  `managed=true` (with the derived `skillId`, `relativeSkillDir`,
+  `liveSkillDir`, and the live directory's `(device, inode)` identity),
+  `managed=false` for a valid path outside the managed root, or a structured
+  error. Skill ids are derived from the canonical relative path, so both flat
+  (`my-skill`) and Hermes nested (`apple/apple-notes`) layouts resolve to full
+  ids. No `register`, `mountId`, or `generation` is required.
 
 ## Documentation
 
@@ -527,6 +548,12 @@ Related security surfaces:
   - Decision-command JSON protocol.
 - [docs/security/runtime-activation-implementation-plan.md](docs/security/runtime-activation-implementation-plan.md)
   - Activation, notify, reload, and backing-root integration.
+- [docs/design/control-socket-resolver.md](docs/design/control-socket-resolver.md)
+  - Control socket default endpoint and the read-only
+    `skill.resolveLiveSource` resolver (SkillFS S1).
+- [docs/design/notify-v2.md](docs/design/notify-v2.md) - Canonical Skill
+  identity and live-root separation for daemon change notifications (SkillFS
+  S2).
 - [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md)
   - Long-lived filesystem capability record.
 - [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX test matrix and

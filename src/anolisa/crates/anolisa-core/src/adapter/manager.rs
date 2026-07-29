@@ -37,13 +37,16 @@ use super::AdapterError;
 use super::claim::{AdapterClaim, ClaimStatus};
 use super::driver::{
     AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport, AdapterSummary,
-    CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, FrameworkCommand, HostEnv,
+    CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, EnableProgress,
+    FrameworkCommand, HostEnv,
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
+use crate::domain::{Installation, LifecycleStatus};
 use crate::lock::InstallLock;
 use crate::manifest::ComponentManifest;
-use crate::state::{InstalledState, ObjectKind, ObjectStatus};
+use crate::state::ObjectKind;
+use crate::state_store::StateStore;
 
 /// Per-CLI-call producer name recorded in the central log.
 const LOG_SOURCE: &str = "anolisa-cli";
@@ -56,9 +59,33 @@ const OUTPUT_CAP: usize = 64 * 1024;
 #[derive(Debug, Clone)]
 pub enum EnableOutcome {
     /// `--dry-run`: what enable *would* do, no state mutated.
-    Planned(DriverPlan),
-    /// Enable ran; the persisted receipt.
+    Planned {
+        /// The driver's plan.
+        plan: DriverPlan,
+        /// Static `post_enable` notices a real enable would display.
+        /// Preview only — nothing was executed.
+        notices: Vec<crate::manifest::AdapterNotice>,
+    },
+    /// Enable ran; the persisted receipt. The declared notices are carried
+    /// in [`AdapterClaim::notices`]; the `post_enable` subset is what a
+    /// caller displays after success.
     Enabled(Box<AdapterClaim>),
+}
+
+/// Typed knobs for [`AdapterManager::enable_with_options`].
+///
+/// A distinct struct (rather than extra positional parameters) keeps the
+/// default-safe [`AdapterManager::enable`] wrapper stable for its many
+/// callers while letting a new authorization be threaded to the driver as
+/// typed data — never an environment variable or free-form map.
+#[derive(Debug, Clone, Default)]
+pub struct EnableOptions {
+    /// The caller explicitly authorized an unsafe plugin install
+    /// (`--allow-unsafe-plugin-install`). Only honored for the OpenClaw
+    /// plugin adapter; rejected for any other framework or a `skill_bundle`
+    /// adapter. Even when set, the driver adds the framework's unsafe flag
+    /// only if the host's install help exposes it.
+    pub allow_unsafe_plugin_install: bool,
 }
 
 /// Outcome of [`AdapterManager::disable`].
@@ -76,6 +103,11 @@ pub struct DisableOutcome {
     pub claim_removed: bool,
     /// True when the operation was a dry-run (no state mutated).
     pub dry_run: bool,
+    /// Static `post_disable` notices from the receipt. Populated when a
+    /// disable succeeds, or as a preview under dry-run; empty for the
+    /// no-op and degraded (cleanup-incomplete) outcomes. Display-only;
+    /// the text is inert and never executed.
+    pub notices: Vec<crate::manifest::AdapterNotice>,
 }
 
 /// One row of [`AdapterManager::scan`].
@@ -178,6 +210,10 @@ struct AdapterDecl {
     /// expansion. Used by `scan` and `enable` to resolve the
     /// contract-driven resource root.
     dest: Option<String>,
+    /// Bundle entry filename declared in the contract, if any. Scan uses
+    /// it (like enable) to tell a real bundle directory from a stale
+    /// leftover skeleton.
+    bundle_entry: Option<String>,
     /// Datadir roots from the [`VisibleRoot`] where this declaration's
     /// component contract was resolved. `dest` expansion is scoped to
     /// only these roots.
@@ -314,6 +350,21 @@ impl AdapterManager {
 
     // -- scan ---------------------------------------------------------------
 
+    /// Load the primary root's installed state (v5, migrating legacy files
+    /// at the boundary). Scope resolution follows the invoking uid, the
+    /// same convention the CLI uses.
+    fn load_state(&self) -> Result<StateStore, crate::state::StateError> {
+        StateStore::load_for_layout(
+            &self.state_path,
+            anolisa_platform::privilege::effective_uid(),
+            &self.layout,
+        )
+    }
+
+    fn load_state_at(path: &Path) -> Result<StateStore, crate::state::StateError> {
+        StateStore::load(path, anolisa_platform::privilege::effective_uid())
+    }
+
     /// Discover adapter declarations from visible installed component
     /// manifests, merge them with resource directories under the datadir
     /// roots, then annotate each row with driver availability, framework
@@ -323,18 +374,26 @@ impl AdapterManager {
     ///
     /// [`AdapterError::State`] if the state file cannot be read.
     pub fn scan(&self) -> Result<ScanReport, AdapterError> {
-        let state = InstalledState::load(&self.state_path)?;
+        let state = self.load_state()?;
         let mut entries: BTreeMap<(String, String), ScanEntry> = BTreeMap::new();
-        for (component, framework, resource_root) in self.discover_all() {
+        for (component, framework, _first_dir) in self.discover_all() {
             let (driver_available, framework_detected) = self.driver_scan_facts(&framework);
             let claim = state.find_adapter_claim(&component, &framework);
+            // discover_all() only supplies the (component, framework) key:
+            // its first-wins path may be a stale skeleton shadowing a real
+            // bundle in a later root. Re-select across all datadir roots so
+            // only a directory holding a real bundle is surfaced; a
+            // key with no valid bundle anywhere shows resource absent.
+            let resource_root = self
+                .discover_valid_convention_root(&component, &framework, None)
+                .map(|(path, _)| path);
             entries.insert(
                 (component.clone(), framework.clone()),
                 ScanEntry {
                     component,
                     framework,
                     declared: false,
-                    resource_root: Some(resource_root),
+                    resource_root,
                     driver_available,
                     framework_detected,
                     adapter_type: None,
@@ -361,10 +420,25 @@ impl AdapterManager {
                     entry.resource_root = declaration.dest.as_deref().and_then(|dest| {
                         self.resolve_declared_scan_root(
                             &declaration.component,
+                            &declaration.framework,
                             dest,
+                            declaration.bundle_entry.as_deref(),
                             &declaration.scoped_datadir_roots,
                         )
                     });
+                } else {
+                    // Convention adapter: always re-resolve with the
+                    // contract-declared bundle entry. The native-default
+                    // probe above may have accepted a root that lacks the
+                    // declared entry, which enable and the source probe
+                    // would reject — the declared entry is authoritative.
+                    entry.resource_root = self
+                        .discover_valid_convention_root(
+                            &declaration.component,
+                            &declaration.framework,
+                            declaration.bundle_entry.as_deref(),
+                        )
+                        .map(|(path, _)| path);
                 }
                 continue;
             }
@@ -374,7 +448,9 @@ impl AdapterManager {
             let resource_root = declaration.dest.as_deref().and_then(|dest| {
                 self.resolve_declared_scan_root(
                     &declaration.component,
+                    &declaration.framework,
                     dest,
+                    declaration.bundle_entry.as_deref(),
                     &declaration.scoped_datadir_roots,
                 )
             });
@@ -461,8 +537,27 @@ impl AdapterManager {
         framework: Option<&str>,
         dry_run: bool,
     ) -> Result<EnableOutcome, AdapterError> {
+        self.enable_with_options(component, framework, dry_run, EnableOptions::default())
+    }
+
+    /// Enable with explicit typed [`EnableOptions`]. [`Self::enable`] is the
+    /// default-safe wrapper over this; callers that need to pass an explicit
+    /// safety-bypass authorization use this form.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::enable`], plus [`AdapterError::UnsafeInstallNotApplicable`]
+    /// when an unsafe-install authorization is passed for a framework or
+    /// adapter type that does not support it.
+    pub fn enable_with_options(
+        &self,
+        component: &str,
+        framework: Option<&str>,
+        dry_run: bool,
+        options: EnableOptions,
+    ) -> Result<EnableOutcome, AdapterError> {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
-        let mut state = InstalledState::load(&self.state_path)?;
+        let mut state = self.load_state()?;
 
         let (manifest, scoped_datadir_roots, contract_datadir_root) =
             self.load_visible_component_manifest(component, &state)?;
@@ -485,10 +580,26 @@ impl AdapterManager {
         // so the wrong driver code path can never run.
         validate_adapter_type_for_framework(component, &framework, adapter_type.as_deref())?;
 
+        // An unsafe-install authorization is only meaningful for the OpenClaw
+        // plugin adapter. Reject it for any other framework, and for a
+        // skill_bundle adapter (which never installs a plugin), before doing
+        // any work — the authorization must never silently no-op.
+        if options.allow_unsafe_plugin_install
+            && (framework != "openclaw" || adapter_type.as_deref() == Some("skill_bundle"))
+        {
+            return Err(AdapterError::UnsafeInstallNotApplicable {
+                component: component.to_string(),
+                framework: framework.clone(),
+                adapter_type: adapter_type.clone(),
+            });
+        }
+
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
         let skill_specs = declared_skills(&manifest, &framework);
         let config = declared_config(&manifest, &framework);
+        let framework_version_req = declared_framework_version_req(&manifest, &framework);
         let bundle_entry = declared_bundle_entry(&manifest, &framework);
+        let all_notices = declared_all_notices(&manifest, &framework);
         if adapter_type.as_deref() == Some("skill_bundle") && !config.is_empty() {
             return Err(AdapterError::InvalidAdapterInput {
                 component: component.to_string(),
@@ -573,6 +684,8 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -610,6 +723,8 @@ impl AdapterManager {
             declared_skills: skills,
             declared_config: config,
             declared_bundle_entry: bundle_entry,
+            framework_version_req,
+            allow_unsafe_plugin_install: options.allow_unsafe_plugin_install,
             dry_run,
             ops: &ops,
         };
@@ -618,7 +733,12 @@ impl AdapterManager {
 
         if dry_run {
             let plan = driver.plan_enable(&bundle, &ctx)?;
-            return Ok(EnableOutcome::Planned(plan));
+            let notices = declared_notices(
+                &manifest,
+                &framework,
+                crate::manifest::NoticeWhen::PostEnable,
+            );
+            return Ok(EnableOutcome::Planned { plan, notices });
         }
 
         // enable mutates framework state, so the framework must be usable.
@@ -632,21 +752,45 @@ impl AdapterManager {
             });
         }
 
-        let claim = driver.prepare_enable(&bundle, &ctx)?;
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx)?;
+        // Persist the manifest's static notices in the receipt so a later
+        // disable can show `post_disable` notices from the receipt alone.
+        // Inert text — never expanded or executed.
+        claim.notices = all_notices;
+        let claim_allowed_roots = driver.allowed_external_roots(&ctx);
+        if let Some(prior) = state.find_adapter_claim(component, &framework).cloned() {
+            // A forged prior receipt must not gain authority merely because a
+            // driver preserves facts from it during re-enable.
+            prior.validate_with_owned_roots(
+                &self.layout,
+                &claim_allowed_roots,
+                &self.all_datadir_roots,
+            )?;
+            driver.preserve_reenable_facts(&prior, &mut claim)?;
+        }
         // Defense in depth: the driver must not emit a claim that points
         // outside its own declared roots. Reject before persisting.
         claim.validate_with_owned_roots(
             &self.layout,
-            &driver.allowed_external_roots(&ctx),
+            &claim_allowed_roots,
             &self.all_datadir_roots,
         )?;
 
         state.upsert_adapter_claim(claim.clone());
         state.save(&self.state_path)?;
-        if let Err(err) = driver.apply_enable(&claim, &ctx) {
-            let mut failed_claim = claim.clone();
-            failed_claim.status = ClaimStatus::CleanupFailed;
-            state.upsert_adapter_claim(failed_claim);
+        let apply_result = {
+            let mut progress = ManagerEnableProgress {
+                state: &mut state,
+                state_path: &self.state_path,
+                layout: &self.layout,
+                allowed_external_roots: &claim_allowed_roots,
+                extra_owned_roots: &self.all_datadir_roots,
+            };
+            driver.apply_enable(&mut claim, &prepared, &ctx, &mut progress)
+        };
+        if let Err(err) = apply_result {
+            claim.status = ClaimStatus::CleanupFailed;
+            state.upsert_adapter_claim(claim.clone());
             if let Err(save_err) = state.save(&self.state_path) {
                 self.log_operation(
                     &label,
@@ -698,7 +842,7 @@ impl AdapterManager {
         dry_run: bool,
     ) -> Result<DisableOutcome, AdapterError> {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
-        let mut state = InstalledState::load(&self.state_path)?;
+        let mut state = self.load_state()?;
 
         let framework = match framework {
             Some(f) => f.to_string(),
@@ -721,6 +865,7 @@ impl AdapterManager {
                             },
                             claim_removed: false,
                             dry_run,
+                            notices: Vec::new(),
                         });
                     }
                     1 => claimed[0].clone(),
@@ -749,6 +894,7 @@ impl AdapterManager {
                     },
                     claim_removed: false,
                     dry_run,
+                    notices: Vec::new(),
                 });
             }
         };
@@ -788,6 +934,8 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -815,6 +963,8 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run,
             ops: &ops,
         };
@@ -828,17 +978,21 @@ impl AdapterManager {
 
         if dry_run {
             let report = plan_disable_report(&claim);
+            let notices = post_disable_notices(&claim);
             return Ok(DisableOutcome {
                 component: component.to_string(),
                 framework: Some(framework),
                 report,
                 claim_removed: false,
                 dry_run: true,
+                notices,
             });
         }
 
         let report = driver.disable(&claim, &ctx)?;
         let claim_removed = report.cleanup_complete;
+        // Extract before the branch below moves `claim` into the kept receipt.
+        let disable_notices = post_disable_notices(&claim);
         if claim_removed {
             state.remove_adapter_claim(component, &framework);
             self.log_operation(&label, component, LogStatus::Ok, "adapter disabled", None);
@@ -863,6 +1017,13 @@ impl AdapterManager {
             report,
             claim_removed,
             dry_run: false,
+            // Notices are shown only on a successful disable; a degraded
+            // (cleanup-incomplete) disable shows the retry path instead.
+            notices: if claim_removed {
+                disable_notices
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -877,7 +1038,7 @@ impl AdapterManager {
     /// re-validation, or state errors. A missing driver or undetectable
     /// framework is reported in the per-entry conditions, not as an error.
     pub fn status(&self, component: Option<&str>) -> Result<StatusReport, AdapterError> {
-        let state = InstalledState::load(&self.state_path)?;
+        let state = self.load_state()?;
         let mut entries = Vec::new();
 
         for claim in &state.adapter_claims {
@@ -938,6 +1099,8 @@ impl AdapterManager {
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
                 declared_bundle_entry: None,
+                framework_version_req: None,
+                allow_unsafe_plugin_install: false,
                 dry_run: false,
                 ops: &probe_ops,
             };
@@ -965,6 +1128,8 @@ impl AdapterManager {
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
                 declared_bundle_entry: None,
+                framework_version_req: None,
+                allow_unsafe_plugin_install: false,
                 dry_run: false,
                 ops: &ops,
             };
@@ -1004,7 +1169,7 @@ impl AdapterManager {
     fn source_probe_for_claim(
         &self,
         claim: &AdapterClaim,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> SourceProbe {
         self.source_probe(&claim.component, &claim.framework, current_state)
     }
@@ -1013,7 +1178,7 @@ impl AdapterManager {
         &self,
         component: &str,
         framework: &str,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> SourceProbe {
         let vr = match self.find_component_visible_root(component, current_state) {
             Ok(Some(vr)) => vr,
@@ -1069,11 +1234,28 @@ impl AdapterManager {
             &vr.contract_datadir_roots,
             contract_datadir_root.as_deref(),
         ) {
-            Ok((resource_root, _)) => SourceProbe {
-                status: AdapterSourceStatus::Available,
-                resource_root: Some(resource_root),
-                reason: None,
-            },
+            // resolve prefers a root with a valid bundle, so a winner that
+            // still fails the bundle check means every candidate is a stale
+            // leftover (e.g. the empty skeleton an uninstalled scope left
+            // behind). Report Missing rather than letting a hollow
+            // directory masquerade as a live source.
+            Ok((resource_root, _))
+                if self.bundle_root_valid(
+                    framework,
+                    declared_bundle_entry(&manifest, framework).as_deref(),
+                    &resource_root,
+                ) =>
+            {
+                SourceProbe {
+                    status: AdapterSourceStatus::Available,
+                    resource_root: Some(resource_root),
+                    reason: None,
+                }
+            }
+            Ok((resource_root, _)) => source_missing(format!(
+                "adapter source for '{component}/{framework}' at {} is not a valid bundle (bundle marker missing)",
+                resource_root.display()
+            )),
             Err(err) => source_missing(format!(
                 "adapter source unavailable for '{component}/{framework}': {err}"
             )),
@@ -1127,7 +1309,7 @@ impl AdapterManager {
     fn load_visible_component_manifest(
         &self,
         component: &str,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> Result<(ComponentManifest, Vec<PathBuf>, Option<PathBuf>), AdapterError> {
         let vr = self
             .find_component_visible_root(component, current_state)?
@@ -1163,25 +1345,25 @@ impl AdapterManager {
     }
 
     /// First visible root whose installed state contains `component` in
-    /// an adapter-visible status ([`Installed`](ObjectStatus::Installed) or
-    /// [`Adopted`](ObjectStatus::Adopted)). Returns the full
+    /// an adapter-visible status ([`LifecycleStatus::Installed`]).
+    /// Returns the full
     /// [`VisibleRoot`] so callers can scope contract resolution to the
     /// paired datadir roots.
     fn find_component_visible_root(
         &self,
         component: &str,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> Result<Option<&VisibleRoot>, AdapterError> {
         for vr in &self.visible_roots {
             let visible = if vr.state_dir == self.layout.state_dir {
                 current_state
-                    .find_object(ObjectKind::Component, component)
-                    .is_some_and(|obj| is_adapter_visible_status(obj.status))
+                    .find(ObjectKind::Component, component)
+                    .is_some_and(is_adapter_visible)
             } else {
                 let state_path = vr.state_dir.join("installed.toml");
-                InstalledState::load(&state_path)?
-                    .find_object(ObjectKind::Component, component)
-                    .is_some_and(|obj| is_adapter_visible_status(obj.status))
+                Self::load_state_at(&state_path)?
+                    .find(ObjectKind::Component, component)
+                    .is_some_and(is_adapter_visible)
             };
             if visible {
                 return Ok(Some(vr));
@@ -1201,7 +1383,7 @@ impl AdapterManager {
     /// fallback.
     fn load_visible_adapter_declarations(
         &self,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> (Vec<AdapterDecl>, Vec<String>) {
         let mut declarations = BTreeSet::new();
         // Map component name → the VisibleRoot where it was first seen.
@@ -1213,7 +1395,7 @@ impl AdapterManager {
             let state = if vr.state_dir == self.layout.state_dir {
                 current_state.clone()
             } else {
-                match InstalledState::load(&state_path) {
+                match Self::load_state_at(&state_path) {
                     Ok(state) => state,
                     Err(err) => {
                         warnings.push(format!(
@@ -1226,10 +1408,10 @@ impl AdapterManager {
             };
 
             for object in state
-                .objects
+                .installations
                 .iter()
                 .filter(|object| object.kind == ObjectKind::Component)
-                .filter(|object| is_adapter_visible_status(object.status))
+                .filter(|object| is_adapter_visible(object))
             {
                 component_vr.entry(object.name.clone()).or_insert(vr);
             }
@@ -1301,6 +1483,7 @@ impl AdapterManager {
                             .map(str::trim)
                             .filter(|d| !d.is_empty())
                             .map(str::to_string),
+                        bundle_entry: declared_bundle_entry(&manifest, framework),
                         scoped_datadir_roots: scoped_roots.clone(),
                     });
                 }
@@ -1362,6 +1545,7 @@ impl AdapterManager {
         contract_datadir_root: Option<&Path>,
     ) -> Result<(PathBuf, PathBuf), AdapterError> {
         let dest_template = declared_dest(manifest, framework);
+        let declared_entry = declared_bundle_entry(manifest, framework);
         match dest_template {
             Some(template) => {
                 let dest_uses_datadir = template.contains("{datadir}");
@@ -1370,27 +1554,51 @@ impl AdapterManager {
                 } else {
                     scoped_datadir_roots.to_vec()
                 };
+                let effective_for = |datadir: &PathBuf| -> PathBuf {
+                    if dest_uses_datadir {
+                        datadir.clone()
+                    } else {
+                        contract_datadir_root
+                            .map(Path::to_path_buf)
+                            .or_else(|| self.manifest_datadir_root(component, scoped_datadir_roots))
+                            .unwrap_or_else(|| datadir.clone())
+                    }
+                };
+                // Prefer the first root holding a real bundle. A directory
+                // that exists but fails the bundle check (e.g. the empty
+                // skeleton a raw uninstall leaves in another scope) must
+                // not shadow a valid bundle in a later root; it is kept
+                // only as a fallback so enable still reaches the driver's
+                // specific BundleInvalid error when no root has a valid
+                // bundle at all.
+                let mut existing_fallback = None;
                 let mut last_expanded = None;
                 for datadir in &ordered_roots {
                     match self.expand_dest_template(&template, component, datadir) {
-                        Ok(path) if path.is_dir() => {
-                            let effective = if dest_uses_datadir {
-                                datadir.clone()
-                            } else {
-                                contract_datadir_root
-                                    .map(Path::to_path_buf)
-                                    .or_else(|| {
-                                        self.manifest_datadir_root(component, scoped_datadir_roots)
-                                    })
-                                    .unwrap_or_else(|| datadir.clone())
-                            };
+                        Ok(path)
+                            if self.bundle_root_valid(
+                                framework,
+                                declared_entry.as_deref(),
+                                &path,
+                            ) =>
+                        {
+                            let effective = effective_for(datadir);
                             return Ok((path, effective));
+                        }
+                        Ok(path) if path.is_dir() => {
+                            if existing_fallback.is_none() {
+                                existing_fallback = Some((path, datadir.clone()));
+                            }
                         }
                         Ok(path) => {
                             last_expanded = Some((path, datadir.clone()));
                         }
                         Err(_) => continue,
                     }
+                }
+                if let Some((path, datadir)) = existing_fallback {
+                    let effective = effective_for(&datadir);
+                    return Ok((path, effective));
                 }
                 let path = match last_expanded {
                     Some((p, _)) => p,
@@ -1411,33 +1619,95 @@ impl AdapterManager {
                     path,
                 })
             }
-            None => self.discover_resource_root(component, framework).ok_or(
-                AdapterError::ResourceRootNotFound {
+            None => {
+                // Convention discovery, with the same valid-bundle
+                // preference across all datadir roots.
+                if let Some(found) = self.discover_valid_convention_root(
+                    component,
+                    framework,
+                    declared_entry.as_deref(),
+                ) {
+                    return Ok(found);
+                }
+                let mut existing_fallback = None;
+                for root in &self.all_datadir_roots {
+                    let candidate = root.join("adapters").join(component).join(framework);
+                    if existing_fallback.is_none() && candidate.is_dir() {
+                        existing_fallback = Some((candidate, root.clone()));
+                    }
+                }
+                existing_fallback.ok_or(AdapterError::ResourceRootNotFound {
                     component: component.to_string(),
                     framework: framework.to_string(),
-                },
-            ),
+                })
+            }
         }
     }
 
     /// Resolve the contract-declared resource root for a declared adapter
     /// during scan. Returns `Some(path)` only when the expanded `dest`
-    /// directory exists on disk; returns `None` when the template cannot
-    /// be expanded or the directory is absent.
+    /// directory exists on disk **and** looks like a real bundle for the
+    /// framework (see [`Self::bundle_root_valid`]); returns `None` when
+    /// the template cannot be expanded, the directory is absent, or only
+    /// a stale leftover skeleton exists.
     ///
     /// `scoped_datadir_roots` limits expansion to the visible root that
     /// owns the component's contract.
     fn resolve_declared_scan_root(
         &self,
         component: &str,
+        framework: &str,
         dest_template: &str,
+        declared_entry: Option<&str>,
         scoped_datadir_roots: &[PathBuf],
     ) -> Option<PathBuf> {
         for datadir in scoped_datadir_roots {
             if let Ok(path) = self.expand_dest_template(dest_template, component, datadir) {
-                if path.is_dir() {
+                if self.bundle_root_valid(framework, declared_entry, &path) {
                     return Some(path);
                 }
+            }
+        }
+        None
+    }
+
+    /// True when `dir` holds a plausible adapter bundle for `framework`
+    /// rather than a stale or empty leftover (e.g. the bare directory
+    /// skeleton an uninstalled scope leaves behind, which must not shadow
+    /// the real source in another datadir root).
+    ///
+    /// Validity is owned by the driver ([`FrameworkDriver::probe_bundle`]
+    /// mirrors its own `read_bundle` mandatory-file checks); a framework
+    /// without a driver falls back to "non-empty directory", the only
+    /// signal available. Fail-closed: an unreadable directory is not a
+    /// bundle.
+    fn bundle_root_valid(&self, framework: &str, declared_entry: Option<&str>, dir: &Path) -> bool {
+        if !dir.is_dir() {
+            return false;
+        }
+        match self.registry.get(framework) {
+            Some(driver) => driver.probe_bundle(dir, declared_entry),
+            None => dir
+                .read_dir()
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false),
+        }
+    }
+
+    /// First datadir root whose conventional
+    /// `adapters/<component>/<framework>/` directory holds a valid bundle.
+    /// Returns `(resource_root, datadir_root)` like
+    /// [`Self::discover_resource_root`], but skips stale leftovers.
+    fn discover_valid_convention_root(
+        &self,
+        component: &str,
+        framework: &str,
+        declared_entry: Option<&str>,
+    ) -> Option<(PathBuf, PathBuf)> {
+        for root in &self.all_datadir_roots {
+            let candidate = root.join("adapters").join(component).join(framework);
+            if self.bundle_root_valid(framework, declared_entry, &candidate) {
+                return Some((candidate, root.clone()));
             }
         }
         None
@@ -1577,6 +1847,30 @@ struct ManagerOps {
     /// under. Populated from the driver's `allowed_external_roots` plus
     /// the resource root.
     allowed_roots: Vec<PathBuf>,
+}
+
+/// Persists incremental receipt facts while the Manager holds the enable
+/// lock. Drivers never receive the state path or write installed state
+/// directly.
+struct ManagerEnableProgress<'a> {
+    state: &'a mut StateStore,
+    state_path: &'a Path,
+    layout: &'a FsLayout,
+    allowed_external_roots: &'a [PathBuf],
+    extra_owned_roots: &'a [PathBuf],
+}
+
+impl EnableProgress for ManagerEnableProgress<'_> {
+    fn persist_claim(&mut self, claim: &AdapterClaim) -> Result<(), AdapterError> {
+        claim.validate_with_owned_roots(
+            self.layout,
+            self.allowed_external_roots,
+            self.extra_owned_roots,
+        )?;
+        self.state.upsert_adapter_claim(claim.clone());
+        self.state.save(self.state_path)?;
+        Ok(())
+    }
 }
 
 impl ManagerOps {
@@ -2332,8 +2626,8 @@ fn validate_adapter_type_for_framework(
 
 /// Whether a component status makes it visible to adapter scan/enable.
 /// Both fully-installed and adopted components should be adapter-visible.
-fn is_adapter_visible_status(status: ObjectStatus) -> bool {
-    matches!(status, ObjectStatus::Installed | ObjectStatus::Adopted)
+fn is_adapter_visible(installation: &Installation) -> bool {
+    installation.status == LifecycleStatus::Installed
 }
 
 /// Return the datadir root that supplied a resolved component contract.
@@ -2491,6 +2785,78 @@ fn declared_config(
     adapter.config.clone()
 }
 
+/// Extract every declared notice for a framework, checking the
+/// framework-specific section first then falling back to the generic one.
+///
+/// Notices are inert, display-only text: they are returned verbatim and
+/// never shell-expanded, template-substituted, or executed.
+fn declared_all_notices(
+    manifest: &ComponentManifest,
+    framework: &str,
+) -> Vec<crate::manifest::AdapterNotice> {
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework));
+    let adapter = match adapter {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    // Framework-specific section takes precedence.
+    let notices = match framework {
+        "openclaw" => adapter
+            .openclaw
+            .as_ref()
+            .filter(|oc| !oc.notices.is_empty())
+            .map_or(&adapter.notices, |oc| &oc.notices),
+        "hermes" => adapter
+            .hermes
+            .as_ref()
+            .filter(|h| !h.notices.is_empty())
+            .map_or(&adapter.notices, |h| &h.notices),
+        _ => &adapter.notices,
+    };
+    notices.clone()
+}
+
+/// The subset of a framework's declared notices matching `when`.
+fn declared_notices(
+    manifest: &ComponentManifest,
+    framework: &str,
+    when: crate::manifest::NoticeWhen,
+) -> Vec<crate::manifest::AdapterNotice> {
+    declared_all_notices(manifest, framework)
+        .into_iter()
+        .filter(|notice| notice.when == when)
+        .collect()
+}
+
+/// Resolve the adapter-level framework version requirement for a framework.
+///
+/// `[adapters.compat].framework_version` is the primary source; the legacy
+/// top-level `framework_version_req` is the compatibility entry used only
+/// when `compat.framework_version` is absent. This precedence lets newer
+/// manifests express the requirement in the structured `compat` table while
+/// older manifests keep working unchanged.
+fn declared_framework_version_req(manifest: &ComponentManifest, framework: &str) -> Option<String> {
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework))?;
+    // Precedence only — no validity check here. `[adapters.compat]
+    // .framework_version` is primary: when the field is *present* (even if
+    // empty), the legacy `framework_version_req` is not consulted, so a
+    // migrated manifest cannot accidentally fall back to a stale value. The
+    // raw value (including a present-but-empty one) is passed through to the
+    // driver, which alone decides validity — this keeps the framework-agnostic
+    // Manager from imposing OpenClaw's version rules on other frameworks
+    // (Hermes/Codex/Qoder/Cosh ignore the field entirely).
+    if let Some(raw) = adapter.compat.framework_version.as_deref() {
+        return Some(raw.to_string());
+    }
+    adapter.framework_version_req.as_deref().map(str::to_string)
+}
+
 /// Extract the bundle entry-point from the manifest, checking the
 /// framework-specific section first then falling back to the generic
 /// `[adapters.bundle].entry`.
@@ -2517,6 +2883,17 @@ fn declared_bundle_entry(manifest: &ComponentManifest, framework: &str) -> Optio
         _ => {}
     }
     adapter.bundle.entry.clone()
+}
+
+/// The `post_disable` notices persisted in a receipt, verbatim. Notices are
+/// inert display text — never expanded, substituted, or executed.
+fn post_disable_notices(claim: &AdapterClaim) -> Vec<crate::manifest::AdapterNotice> {
+    claim
+        .notices
+        .iter()
+        .filter(|notice| notice.when == crate::manifest::NoticeWhen::PostDisable)
+        .cloned()
+        .collect()
 }
 
 /// Build a non-mutating [`DisableReport`] from a validated receipt,
@@ -2729,6 +3106,103 @@ fn prioritize_datadir_root(roots: &[PathBuf], preferred: Option<&Path>) -> Vec<P
 mod tests {
     use super::*;
 
+    use crate::state::{InstalledState, ObjectStatus};
+
+    /// Read back the state file the manager wrote (v5 on disk).
+    fn load_written_state(path: &std::path::Path) -> StateStore {
+        StateStore::load(path, anolisa_platform::privilege::effective_uid()).expect("load state")
+    }
+
+    fn test_user_layout(root: &std::path::Path) -> (FsLayout, PathBuf) {
+        let home = root.join("home");
+        let layout = FsLayout::user_with_overrides(
+            home.clone(),
+            Some(root.join("user_data_home")),
+            None,
+            Some(root.join("user_state_home")),
+            None,
+            None,
+        );
+        (layout, home)
+    }
+
+    /// The framework-agnostic Manager resolves the requirement by precedence
+    /// only and never validates it — a present-but-empty value is passed
+    /// through verbatim (the owning driver decides validity), and it never
+    /// errors for any framework. This keeps the strict OpenClaw emptiness
+    /// rule from leaking onto Hermes/Codex/Qoder/Cosh (Issue non-goal).
+    #[test]
+    fn declared_framework_version_req_is_precedence_only() {
+        let compat_wins = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "openclaw"
+            framework_version_req = ">=legacy"
+            [adapters.compat]
+            framework_version = ">=2026.4.14"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            declared_framework_version_req(&compat_wins, "openclaw").as_deref(),
+            Some(">=2026.4.14"),
+            "compat is primary; legacy is not consulted when compat is present"
+        );
+
+        // A present-but-empty compat value is returned as-is (not collapsed to
+        // None, not an error) — the driver validates it.
+        let empty_compat = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "hermes"
+            [adapters.compat]
+            framework_version = ""
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            declared_framework_version_req(&empty_compat, "hermes").as_deref(),
+            Some(""),
+            "a non-OpenClaw framework's empty requirement passes through unchanged, never erroring"
+        );
+
+        // Legacy field is the fallback only when compat is absent.
+        let legacy_only = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "openclaw"
+            framework_version_req = ">=1.2"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            declared_framework_version_req(&legacy_only, "openclaw").as_deref(),
+            Some(">=1.2")
+        );
+
+        // No field at all → None.
+        let none = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "openclaw"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(declared_framework_version_req(&none, "openclaw"), None);
+    }
+
     #[test]
     fn prepend_path_puts_dirs_in_front() {
         let joined = prepend_path_with_existing(
@@ -2894,7 +3368,6 @@ mod tests {
                 ..Default::default()
             }],
             health_check: None,
-            health_checks: Vec::new(),
         }
     }
 
@@ -3088,7 +3561,13 @@ mod tests {
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
         std::fs::create_dir_all(&layout.log_dir).expect("mkdir log");
-        seed_installed_state(&layout.state_dir, "os-skills", ObjectStatus::Installed);
+        seed_installed_state(
+            &layout.state_dir,
+            crate::state::InstallMode::System,
+            &layout.prefix,
+            "os-skills",
+            ObjectStatus::Installed,
+        );
 
         let contract = r#"
 [component]
@@ -3146,7 +3625,11 @@ value = true
         let datadir = tmp.path().join("data");
 
         // Write installed.toml with an Adopted component, no snapshot.
-        let mut state = InstalledState::default();
+        let mut state = InstalledState {
+            install_mode: crate::state::InstallMode::System,
+            prefix: tmp.path().to_path_buf(),
+            ..InstalledState::default()
+        };
         state.upsert_object(InstalledObject {
             kind: ObjectKind::Component,
             name: "sec-core".to_string(),
@@ -3243,10 +3726,20 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         )
     }
 
-    fn seed_installed_state(state_dir: &std::path::Path, component: &str, status: ObjectStatus) {
+    fn seed_installed_state(
+        state_dir: &std::path::Path,
+        install_mode: crate::state::InstallMode,
+        prefix: &std::path::Path,
+        component: &str,
+        status: ObjectStatus,
+    ) {
         use crate::state::{InstalledObject, ObjectKind, Ownership, SubscriptionScope};
 
-        let mut state = InstalledState::default();
+        let mut state = InstalledState {
+            install_mode,
+            prefix: prefix.to_path_buf(),
+            ..InstalledState::default()
+        };
         state.upsert_object(InstalledObject {
             kind: ObjectKind::Component,
             name: component.to_string(),
@@ -3351,6 +3844,7 @@ source = "adapters/openclaw"
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: Vec::new(),
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "openclaw_state".to_string(),
@@ -3361,8 +3855,17 @@ source = "adapters/openclaw"
         }
     }
 
-    fn seed_adapter_claim(state_dir: &std::path::Path, claim: AdapterClaim) {
-        let mut state = InstalledState::default();
+    fn seed_adapter_claim(
+        state_dir: &std::path::Path,
+        install_mode: crate::state::InstallMode,
+        prefix: &std::path::Path,
+        claim: AdapterClaim,
+    ) {
+        let mut state = InstalledState {
+            install_mode,
+            prefix: prefix.to_path_buf(),
+            ..InstalledState::default()
+        };
         state.upsert_adapter_claim(claim);
         std::fs::create_dir_all(state_dir).expect("mkdir state");
         state
@@ -3380,7 +3883,12 @@ source = "adapters/openclaw"
             .join("adapters")
             .join("tokenless")
             .join("openclaw");
-        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+        seed_adapter_claim(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            openclaw_claim("tokenless", missing_resource),
+        );
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
@@ -3422,7 +3930,12 @@ source = "adapters/openclaw"
             .join("adapters")
             .join("tokenless")
             .join("openclaw");
-        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+        seed_adapter_claim(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            openclaw_claim("tokenless", missing_resource),
+        );
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
@@ -3464,7 +3977,12 @@ source = "adapters/openclaw"
             .join("adapters")
             .join("tokenless")
             .join("openclaw");
-        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+        seed_adapter_claim(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            openclaw_claim("tokenless", missing_resource),
+        );
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
@@ -3484,6 +4002,443 @@ source = "adapters/openclaw"
         assert!(outcome.report.cleanup_complete);
     }
 
+    /// Contract TOML for a cosh extension adapter with a declared bundle
+    /// entry and a `{datadir}`-relative dest (the tokenless shape).
+    fn contract_toml_cosh_extension(name: &str) -> String {
+        format!(
+            r#"
+[component]
+name = "{name}"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "cosh"
+adapter_type = "extension"
+plugin_id = "{name}"
+source = "extensions/{name}"
+dest = "{{datadir}}/extensions/{{component}}/"
+
+[adapters.bundle]
+entry = "cosh-extension.json"
+"#
+        )
+    }
+
+    fn cosh_claim(component: &str, resource_root: PathBuf) -> AdapterClaim {
+        use crate::adapter::claim::{
+            CLAIM_SCHEMA_VERSION, CoshClaim, DRIVER_SCHEMA_VERSION, DriverPayload,
+        };
+
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: component.to_string(),
+            framework: "cosh".to_string(),
+            plugin_id: Some(component.to_string()),
+            adapter_type: Some("extension".to_string()),
+            enabled_at: "2026-07-09T00:00:00Z".to_string(),
+            resource_root,
+            bundle_digest: None,
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            notices: Vec::new(),
+            resources: Vec::new(),
+            driver_payload: DriverPayload::Cosh(CoshClaim {
+                extension_dir_resource: "cosh_extension_dir".to_string(),
+            }),
+        }
+    }
+
+    /// A stale skeleton left in another datadir root (e.g. by an uninstall
+    /// in a different scope) must not mask a removed adapter source: with
+    /// the real bundle gone, the receipt's source must go Missing even
+    /// though the second root still has a hollow directory of the same
+    /// name (issue reproduced by AgenticOS Nightly).
+    #[test]
+    fn stale_skeleton_in_second_root_does_not_mask_missing_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let rpm_datadir = tmp.path().join("data-rpm");
+        let raw_datadir = tmp.path().join("data-raw");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
+        write_contract_with_content(
+            &rpm_datadir,
+            "tokenless",
+            &contract_toml_cosh_extension("tokenless"),
+        );
+
+        // Real bundle in the first root; hollow leftover in the second.
+        let bundle_root = rpm_datadir.join("extensions").join("tokenless");
+        std::fs::create_dir_all(&bundle_root).expect("bundle dir");
+        std::fs::write(bundle_root.join("cosh-extension.json"), b"{}").expect("marker");
+        let skeleton = raw_datadir.join("extensions").join("tokenless");
+        std::fs::create_dir_all(&skeleton).expect("skeleton dir");
+
+        let state_path = state_dir.join("installed.toml");
+        let mut state = load_written_state(&state_path);
+        state.upsert_adapter_claim(cosh_claim("tokenless", bundle_root.clone()));
+        state.save(&state_path).expect("save claim");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_path;
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![rpm_datadir.clone(), raw_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![rpm_datadir, raw_datadir];
+
+        // With the real bundle present the source is available.
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "cosh")
+            .expect("cosh row");
+        assert_eq!(entry.source_status, Some(AdapterSourceStatus::Available));
+
+        // Remove the real bundle; the skeleton alone must not keep the
+        // source alive.
+        std::fs::remove_dir_all(&bundle_root).expect("remove bundle");
+        let report = manager.scan().expect("scan after removal");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "cosh")
+            .expect("cosh row after removal");
+        assert_eq!(entry.source_status, Some(AdapterSourceStatus::Missing));
+        assert!(
+            entry
+                .source_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not a valid bundle")),
+            "reason should call out the invalid bundle, got: {:?}",
+            entry.source_reason
+        );
+        assert!(
+            entry.resource_root.is_none(),
+            "a hollow skeleton must not surface as the resource root"
+        );
+    }
+
+    /// enable's resource-root resolution must prefer the root holding a
+    /// real bundle over an earlier root that only has a stale skeleton.
+    #[test]
+    fn resolve_resource_root_prefers_valid_bundle_over_skeleton() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let first_datadir = tmp.path().join("data-first");
+        let second_datadir = tmp.path().join("data-second");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
+        write_contract_with_content(
+            &first_datadir,
+            "tokenless",
+            &contract_toml_cosh_extension("tokenless"),
+        );
+
+        // Skeleton in the contract-origin root, real bundle in the other.
+        let skeleton = first_datadir.join("extensions").join("tokenless");
+        std::fs::create_dir_all(&skeleton).expect("skeleton dir");
+        let bundle_root = second_datadir.join("extensions").join("tokenless");
+        std::fs::create_dir_all(&bundle_root).expect("bundle dir");
+        std::fs::write(bundle_root.join("cosh-extension.json"), b"{}").expect("marker");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![first_datadir.clone(), second_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![first_datadir, second_datadir];
+
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("tokenless", &state)
+            .expect("load manifest");
+        let (resolved, _) = manager
+            .resolve_resource_root(
+                "tokenless",
+                "cosh",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
+            .expect("resolve");
+        assert_eq!(
+            resolved, bundle_root,
+            "resolution must skip the skeleton and pick the real bundle"
+        );
+    }
+
+    /// A root satisfying only part of a driver's mandatory file set (qoder
+    /// needs plugin manifest AND hooks.json) is not a valid bundle and must
+    /// not shadow a complete bundle in a later root.
+    #[test]
+    fn resolve_resource_root_skips_incomplete_qoder_bundle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let first_datadir = tmp.path().join("data-first");
+        let second_datadir = tmp.path().join("data-second");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
+        let contract = r#"
+[component]
+name = "tokenless"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "qoder"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/qoder"
+dest = "{datadir}/adapters/{component}/qoder/"
+
+[adapters.bundle]
+entry = ".qoder-plugin/plugin.json"
+"#;
+        write_contract_with_content(&first_datadir, "tokenless", contract);
+
+        // First root: manifest only — read_bundle would reject it for the
+        // missing hooks.json. Second root: complete bundle.
+        let incomplete = first_datadir.join("adapters/tokenless/qoder");
+        std::fs::create_dir_all(incomplete.join(".qoder-plugin")).expect("incomplete dir");
+        std::fs::write(incomplete.join(".qoder-plugin/plugin.json"), b"{}").expect("manifest");
+        let complete = second_datadir.join("adapters/tokenless/qoder");
+        std::fs::create_dir_all(complete.join(".qoder-plugin")).expect("complete dir");
+        std::fs::write(complete.join(".qoder-plugin/plugin.json"), b"{}").expect("manifest");
+        std::fs::write(complete.join("hooks.json"), b"{}").expect("hooks");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![first_datadir.clone(), second_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![first_datadir, second_datadir];
+
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("tokenless", &state)
+            .expect("load manifest");
+        let (resolved, _) = manager
+            .resolve_resource_root(
+                "tokenless",
+                "qoder",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
+            .expect("resolve");
+        assert_eq!(
+            resolved, complete,
+            "an incomplete qoder bundle must not shadow the complete one"
+        );
+    }
+
+    /// Convention-path scan rows (no contract dest) must not surface a
+    /// hollow directory as a present resource either.
+    #[test]
+    fn scan_convention_row_hides_skeleton_resource() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
+        write_contract_with_content(
+            &datadir,
+            "tokenless",
+            &contract_toml_without_dest("tokenless"),
+        );
+        // Empty conventional directory — a leftover, not a bundle.
+        std::fs::create_dir_all(datadir.join("adapters/tokenless/openclaw")).expect("skeleton");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![datadir.clone()];
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "openclaw")
+            .expect("row");
+        assert!(
+            entry.resource_root.is_none(),
+            "an empty convention directory must not show as a present resource"
+        );
+
+        // A real (non-empty) bundle in the same place is surfaced again.
+        std::fs::write(
+            datadir.join("adapters/tokenless/openclaw/openclaw.plugin.json"),
+            b"{}",
+        )
+        .expect("bundle file");
+        let report = manager.scan().expect("scan with bundle");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "openclaw")
+            .expect("row with bundle");
+        assert_eq!(
+            entry.resource_root.as_deref(),
+            Some(datadir.join("adapters/tokenless/openclaw").as_path()),
+            "a real bundle must still be surfaced"
+        );
+    }
+
+    /// discover_all() dedupes on (component, framework) first-wins, so a
+    /// leading skeleton root used to swallow the key before validation
+    /// could consider later roots. Scan must re-select across all roots.
+    #[test]
+    fn scan_convention_prefers_valid_bundle_in_later_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let first_datadir = tmp.path().join("data-first");
+        let second_datadir = tmp.path().join("data-second");
+
+        // Pure directory discovery: no installed state, no contract.
+        std::fs::create_dir_all(&state_dir).expect("mkdir state");
+        InstalledState::default()
+            .save(&state_dir.join("installed.toml"))
+            .expect("save empty state");
+
+        // First root: empty skeleton. Second root: real bundle.
+        std::fs::create_dir_all(first_datadir.join("adapters/tokenless/openclaw"))
+            .expect("skeleton");
+        let bundle = second_datadir.join("adapters/tokenless/openclaw");
+        std::fs::create_dir_all(&bundle).expect("bundle dir");
+        std::fs::write(bundle.join("openclaw.plugin.json"), b"{}").expect("bundle file");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![first_datadir.clone(), second_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![first_datadir, second_datadir];
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "openclaw")
+            .expect("row");
+        assert_eq!(
+            entry.resource_root.as_deref(),
+            Some(bundle.as_path()),
+            "a leading skeleton must not swallow the valid bundle in a later root"
+        );
+    }
+
+    /// A convention root that satisfies the driver's native marker but
+    /// lacks the contract-declared bundle entry must not be surfaced:
+    /// enable and the source probe honor the declared entry, so scan
+    /// showing that root would advertise a path they reject.
+    #[test]
+    fn scan_convention_declared_entry_overrides_native_marker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
+        let contract = r#"
+[component]
+name = "tokenless"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "cosh"
+adapter_type = "extension"
+source = "adapters/cosh"
+
+[adapters.bundle]
+entry = "custom-entry.json"
+"#;
+        write_contract_with_content(&datadir, "tokenless", contract);
+
+        // The native cosh manifest passes the default probe, but the
+        // contract-declared entry is missing.
+        let convention = datadir.join("adapters/tokenless/cosh");
+        std::fs::create_dir_all(&convention).expect("convention dir");
+        std::fs::write(convention.join("cosh-extension.json"), b"{}").expect("native manifest");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![datadir.clone()];
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "cosh")
+            .expect("row");
+        assert!(
+            entry.resource_root.is_none(),
+            "a root missing the declared bundle entry must not be surfaced"
+        );
+
+        // Adding the declared entry makes the root valid again.
+        std::fs::write(convention.join("custom-entry.json"), b"{}").expect("declared entry");
+        let report = manager.scan().expect("scan with entry");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "cosh")
+            .expect("row with entry");
+        assert_eq!(
+            entry.resource_root.as_deref(),
+            Some(convention.as_path()),
+            "the root must reappear once the declared entry exists"
+        );
+    }
+
     // -- contract-driven resource root discovery --------------------------------
 
     /// Convention path still works when manifest has no dest or no manifest.
@@ -3493,7 +4448,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
 
         // Contract without dest.
         write_contract_with_content(
@@ -3552,6 +4513,9 @@ source = "adapters/openclaw"
 
         let convention = datadir.join("adapters").join("tokenless").join("openclaw");
         std::fs::create_dir_all(&convention).expect("mkdir convention");
+        // Discovery only surfaces real bundles; an empty directory would be
+        // treated as a stale skeleton, so give the bundle some content.
+        std::fs::write(convention.join("openclaw.plugin.json"), b"{}").expect("bundle file");
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager =
@@ -3583,7 +4547,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract with custom dest.
         write_contract_with_content(
@@ -3622,7 +4592,7 @@ source = "adapters/openclaw"
         );
 
         // resolve_resource_root (used by enable) must return the custom path.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -3648,7 +4618,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract with custom dest, but DO NOT create the directory.
         write_contract_with_content(
@@ -3682,7 +4658,7 @@ source = "adapters/openclaw"
 
         // resolve_resource_root: must return ContractResourceRootNotFound,
         // NOT silently fall back to convention.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -3714,7 +4690,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract with custom dest — directory does NOT exist.
         write_contract_with_content(
@@ -3752,7 +4734,7 @@ source = "adapters/openclaw"
         );
 
         // resolve_resource_root must error, not fall back.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -3776,13 +4758,21 @@ source = "adapters/openclaw"
     #[test]
     fn user_mode_uses_system_contract_dest() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
         // System has sec-core adopted with a custom dest.
-        seed_installed_state(&sys_state, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            &system_layout.prefix,
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
         write_contract_with_content(
             &sys_data,
             "sec-core",
@@ -3794,15 +4784,12 @@ source = "adapters/openclaw"
         std::fs::write(custom_root.join("plugin.json"), b"{}").expect("write");
 
         // User state is empty.
-        std::fs::create_dir_all(&user_state).expect("mkdir user_state");
-        InstalledState::default()
+        std::fs::create_dir_all(&user_state).expect("mkdir user state");
+        StateStore::empty_for_layout(&user_layout)
             .save(&user_state.join("installed.toml"))
             .expect("save empty user state");
 
-        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state,
@@ -3837,12 +4824,20 @@ source = "adapters/openclaw"
     #[test]
     fn user_mode_skill_source_uses_system_datadir() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
-        seed_installed_state(&sys_state, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            &system_layout.prefix,
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -3871,15 +4866,12 @@ source = "{datadir}/skills/code-scanner/"
         std::fs::write(skill_source.join("manifest.json"), b"{}").expect("write");
 
         // User state empty.
-        std::fs::create_dir_all(&user_state).expect("mkdir user_state");
-        InstalledState::default()
+        std::fs::create_dir_all(&user_state).expect("mkdir user state");
+        StateStore::empty_for_layout(&user_layout)
             .save(&user_state.join("installed.toml"))
             .expect("save empty user state");
 
-        let user_layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(user_layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state,
@@ -3893,7 +4885,7 @@ source = "{datadir}/skills/code-scanner/"
         manager.all_datadir_roots = vec![sys_data.clone()];
 
         // Resolve resource root — must come from system datadir.
-        let state = InstalledState::load(&manager.state_path).expect("load state");
+        let state = load_written_state(&manager.state_path);
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -3936,20 +4928,25 @@ source = "{datadir}/skills/code-scanner/"
     #[test]
     fn user_component_does_not_fallback_to_system_contract() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
         // User state has tokenless installed, no contract anywhere in user scope.
-        seed_installed_state(&user_state, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &user_state,
+            crate::state::InstallMode::User,
+            &user_layout.prefix,
+            "tokenless",
+            ObjectStatus::Installed,
+        );
         // System datadir has a valid contract.
         write_contract(&sys_data, "tokenless");
 
-        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state.clone(),
@@ -3989,7 +4986,13 @@ source = "{datadir}/skills/code-scanner/"
         let sys_data = tmp.path().join("sys_data");
         let pkg_data = tmp.path().join("pkg_data");
 
-        seed_installed_state(&sys_state, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
         // Contract in pkg_data (simulates /usr/share vs /usr/local/share).
         write_contract(&pkg_data, "tokenless");
 
@@ -4025,7 +5028,13 @@ source = "{datadir}/skills/code-scanner/"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract lives under the package datadir (simulates RPM install).
         write_contract(&package_datadir, "sec-core");
@@ -4064,7 +5073,7 @@ source = "{datadir}/skills/code-scanner/"
         );
 
         // Verify resolve_resource_root returns the package datadir path.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -4097,7 +5106,13 @@ source = "{datadir}/skills/code-scanner/"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -4141,7 +5156,7 @@ source = "{datadir}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![package_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -4190,25 +5205,30 @@ source = "{datadir}/skills/code-scanner/"
     #[test]
     fn user_scan_includes_system_component_via_system_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
         // Only system state has tokenless; contract in system datadir.
-        seed_installed_state(&sys_state, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            &system_layout.prefix,
+            "tokenless",
+            ObjectStatus::Installed,
+        );
         write_contract(&sys_data, "tokenless");
 
         // User state is empty.
-        std::fs::create_dir_all(&user_state).expect("mkdir user_state");
-        InstalledState::default()
+        std::fs::create_dir_all(&user_state).expect("mkdir user state");
+        StateStore::empty_for_layout(&user_layout)
             .save(&user_state.join("installed.toml"))
             .expect("save empty user state");
 
-        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state,
@@ -4752,7 +5772,13 @@ source = "{datadir}/skills/code-scanner/"
         let pkg_datadir = tmp.path().join("usr/share/anolisa");
         let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract lives under pkg_datadir (simulates RPM install to
         // /usr/share/anolisa). No contract under local_datadir.
@@ -4801,7 +5827,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -4861,7 +5887,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let pkg_datadir = tmp.path().join("usr/share/anolisa");
         let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let package_contract = format!(
             r#"
@@ -4912,7 +5944,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -4964,7 +5996,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let pkg_datadir = tmp.path().join("usr/share/anolisa");
         let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = format!(
             r#"
@@ -5024,7 +6062,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -5070,7 +6108,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let state_dir = tmp.path().join("state");
         let pkg_datadir = tmp.path().join("pkg_data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = valid_contract_toml("sec-core");
         write_contract(&pkg_datadir, "sec-core");
@@ -5090,7 +6134,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (_manifest, _scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -5114,7 +6158,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "os-skills",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -5169,7 +6219,7 @@ dest = "{datadir}/skills"
 
         // enable path: resolve_resource_root must also prefer the package
         // datadir.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("os-skills", &state)
             .expect("load manifest");
@@ -5201,7 +6251,13 @@ dest = "{datadir}/skills"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "os-skills",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -5236,7 +6292,7 @@ dest = "{datadir}/skills"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), package_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("os-skills", &state)
             .expect("load manifest");
@@ -5274,7 +6330,13 @@ dest = "{datadir}/skills"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "os-skills",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -5367,6 +6429,7 @@ dest = "{datadir}/skills"
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources,
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "state_dir".to_string(),
@@ -5513,6 +6576,7 @@ dest = "{datadir}/skills"
                 kind: ClaimResourceKind::FrameworkConfig {
                     framework: "openclaw".to_string(),
                     key: "plugins.entries.test-comp.enabled".to_string(),
+                    state: crate::adapter::claim::ConfigApplyState::Applied,
                 },
             }],
             Vec::new(),
@@ -5550,6 +6614,7 @@ dest = "{datadir}/skills"
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "hermes_home".to_string(),
@@ -5621,6 +6686,7 @@ dest = "{datadir}/skills"
             bundle_digest: None,
             driver_schema: 1,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "hermes_home".to_string(),

@@ -1,0 +1,370 @@
+//! Multi-line prompt draft card runtime (#1721 D13-D15).
+//!
+//! Consumes the `component == "prompt_draft"` lifecycle events forwarded by
+//! the shell host (open/changed/submit/cancel), keeps the card state on
+//! [`InlineState`], and redraws the V2 rounded card in place with the same
+//! height-accounting approach as the question panel: cyan border while
+//! editing, dim frozen card after submit/cancel (D15).
+
+use std::io::Write;
+
+use unicode_width::UnicodeWidthChar;
+
+use crate::i18n::MessageId;
+use crate::runtime::state::InlineState;
+use crate::types::{ShellEvent, ShellEventKind};
+
+/// Active draft card bookkeeping (viewport snapshot + rendered height).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PromptDraftCardState {
+    pub(crate) id: String,
+    pub(crate) text: String,
+    pub(crate) rows: Vec<String>,
+    pub(crate) hidden_above: usize,
+    pub(crate) hidden_below: usize,
+    pub(crate) cursor: (usize, usize),
+    pub(crate) panel_height: usize,
+    /// First paint opens on a fresh line below the bash prompt (relay
+    /// path); the slash path starts at a fresh column already (#1932).
+    pub(crate) line_break_before: bool,
+}
+
+/// Discoverability state for the multi-line prompt entries: the one-time
+/// soft-newline tip (#1721 T-c) and the failure-insight entry hint (#1932).
+#[derive(Default)]
+pub(crate) struct PromptEntryHints {
+    /// A soft-newline shortcut was observed on the bash-owned passthrough
+    /// path; surface a one-time tip at the next prompt-ready boundary.
+    pub(crate) pending_soft_newline_tip: bool,
+    pub(crate) shown_soft_newline_tip: bool,
+    /// A multi-line bracketed paste was relayed straight to bash this
+    /// prompt cycle: arms the failure-insight multi-line entry hint.
+    pub(crate) multiline_paste_observed: bool,
+    /// Session-scoped cap: at most two nudges per session.
+    pub(crate) multiline_entry_hint_count: u8,
+}
+
+/// Panel width aligned with every other card: the renderer's standard
+/// width follows the terminal (clamped), same as approval/question panels.
+fn card_width() -> usize {
+    (crate::ui::RatatuiInlineRenderer::for_terminal().panel_standard_width() as usize).max(32)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CardPhase {
+    Editing,
+    Submitted,
+    Cancelled,
+}
+
+/// Opens a fresh prompt-draft card immediately (#1932): shared by the
+/// relay-driven `open` lifecycle event and the `/draft` slash entry. The
+/// pending card capture picks the draft up on the next controller pass.
+/// `line_break_before` distinguishes the relay path (cursor still sits on
+/// the bash prompt line, the card must open on a fresh line) from the
+/// slash path (the dispatcher already left the cursor at a fresh column).
+pub(crate) fn open_prompt_draft<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+    text: String,
+    line_break_before: bool,
+) -> std::io::Result<()> {
+    state.prompt_draft_seq += 1;
+    let id = format!("draft-{}", state.prompt_draft_seq);
+    // The capture side owns the editor; mirror its initial viewport so the
+    // first paint happens before any Changed snapshot arrives.
+    let editor = crate::raw_input::PromptDraftEditor::from_text(&text);
+    let view = editor.viewport();
+    let mut card = PromptDraftCardState {
+        id,
+        text,
+        rows: view.rows,
+        hidden_above: view.hidden_above,
+        hidden_below: view.hidden_below,
+        cursor: view.cursor,
+        panel_height: 0,
+        line_break_before,
+    };
+    draw_card(&mut card, state, output, CardPhase::Editing)?;
+    state.prompt_draft = Some(card);
+    Ok(())
+}
+
+pub(crate) fn handle_prompt_draft_events<W: Write>(
+    events: &[ShellEvent],
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    for event in events {
+        if event.kind != ShellEventKind::UserInputIntercepted
+            || event.component.as_deref() != Some("prompt_draft")
+        {
+            continue;
+        }
+        let payload = event.input.as_deref().unwrap_or("{}");
+        let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+        match event.message.as_deref() {
+            Some("open") => {
+                let text = value["text"].as_str().unwrap_or_default().to_string();
+                open_prompt_draft(state, output, text, true)?;
+            }
+            Some("changed") => {
+                let Some(mut card) = state.prompt_draft.take() else {
+                    continue;
+                };
+                if value["id"].as_str() != Some(card.id.as_str()) {
+                    state.prompt_draft = Some(card);
+                    continue;
+                }
+                card.text = value["text"].as_str().unwrap_or_default().to_string();
+                card.rows = value["rows"]
+                    .as_array()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|row| row.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                card.hidden_above = value["hidden_above"].as_u64().unwrap_or(0) as usize;
+                card.hidden_below = value["hidden_below"].as_u64().unwrap_or(0) as usize;
+                card.cursor = (
+                    value["cursor_row"].as_u64().unwrap_or(0) as usize,
+                    value["cursor_col"].as_u64().unwrap_or(0) as usize,
+                );
+                draw_card(&mut card, state, output, CardPhase::Editing)?;
+                state.prompt_draft = Some(card);
+            }
+            Some("submit") => {
+                let Some(mut card) = state.prompt_draft.take() else {
+                    continue;
+                };
+                // The agent turn starts via the intercept event pushed in the
+                // same batch; here the card just freezes as history.
+                draw_card(&mut card, state, output, CardPhase::Submitted)?;
+            }
+            Some("cancel") => {
+                let Some(mut card) = state.prompt_draft.take() else {
+                    continue;
+                };
+                draw_card(&mut card, state, output, CardPhase::Cancelled)?;
+                // D15: restore the bash prompt after cancelling composition.
+                state.trigger_pty_prompt = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum()
+}
+
+/// One card content row: clipped to the budget, cursor cell inverted.
+fn content_row(row: &str, cursor_col: Option<usize>, budget: usize, dim: bool) -> String {
+    let mut cells: Vec<String> = Vec::new();
+    let mut used = 0;
+    let mut clipped = false;
+    for (index, ch) in row.chars().enumerate() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > budget.saturating_sub(1) {
+            clipped = true;
+            break;
+        }
+        if Some(index) == cursor_col {
+            cells.push(format!("\x1b[7m{ch}\x1b[27m"));
+        } else {
+            cells.push(ch.to_string());
+        }
+        used += width;
+    }
+    let char_count = row.chars().count();
+    if clipped {
+        cells.push("…".to_string());
+        used += 1;
+    } else if cursor_col.is_some_and(|col| col >= char_count) && used < budget {
+        // Cursor sits at end-of-line: render an inverted space cell.
+        cells.push("\x1b[7m \x1b[27m".to_string());
+        used += 1;
+    }
+    let body = cells.concat();
+    let pad = " ".repeat(budget.saturating_sub(used));
+    if dim {
+        format!("\x1b[2m{body}{pad}\x1b[22m")
+    } else {
+        format!("{body}{pad}")
+    }
+}
+
+fn draw_card<W: Write>(
+    card: &mut PromptDraftCardState,
+    state: &mut InlineState,
+    output: &mut W,
+    phase: CardPhase,
+) -> std::io::Result<()> {
+    let i18n = state.i18n();
+    let title = i18n.t(MessageId::PromptDraftTitle);
+    let footer = match phase {
+        CardPhase::Editing => i18n.t(MessageId::PromptDraftFooterEditing),
+        CardPhase::Submitted => i18n.t(MessageId::PromptDraftFooterSubmitted),
+        CardPhase::Cancelled => i18n.t(MessageId::PromptDraftFooterCancelled),
+    };
+    let border = match phase {
+        CardPhase::Editing => "\x1b[36m",
+        CardPhase::Submitted | CardPhase::Cancelled => "\x1b[2m",
+    };
+    let reset = "\x1b[0m";
+    let width = card_width();
+    let budget = width - 4;
+    let dim_body = phase != CardPhase::Editing;
+
+    let mut lines: Vec<String> = Vec::new();
+    let title_text = format!(" {title} ");
+    let title_pad = width.saturating_sub(2 + columns(&title_text));
+    lines.push(format!(
+        "{border}╭{reset}\x1b[2m{title_text}\x1b[22m{border}{}╮{reset}",
+        "─".repeat(title_pad)
+    ));
+    if card.hidden_above > 0 {
+        let marker = format!("… ↑ {}", card.hidden_above);
+        lines.push(format!(
+            "{border}│{reset} \x1b[2m{marker}{}\x1b[22m {border}│{reset}",
+            " ".repeat(budget.saturating_sub(columns(&marker)))
+        ));
+    }
+    for (row_index, row) in card.rows.iter().enumerate() {
+        let cursor_col = if phase == CardPhase::Editing && row_index == card.cursor.0 {
+            Some(card.cursor.1)
+        } else {
+            None
+        };
+        let body = content_row(row, cursor_col, budget, dim_body);
+        lines.push(format!("{border}│{reset} {body} {border}│{reset}"));
+    }
+    if card.hidden_below > 0 {
+        let marker = format!("… ↓ {}", card.hidden_below);
+        lines.push(format!(
+            "{border}│{reset} \x1b[2m{marker}{}\x1b[22m {border}│{reset}",
+            " ".repeat(budget.saturating_sub(columns(&marker)))
+        ));
+    }
+    let footer_text = format!(" {footer} ");
+    let footer_pad = width.saturating_sub(2 + columns(&footer_text));
+    lines.push(format!(
+        "{border}╰{reset}\x1b[2m{footer_text}\x1b[22m{border}{}╯{reset}",
+        "─".repeat(footer_pad)
+    ));
+
+    // In-place redraw: climb over the previous frame, clear, repaint. The
+    // frame may shrink (viewport, hidden markers), so clear the leftovers.
+    if card.panel_height > 0 {
+        write!(output, "\x1b[{}A", card.panel_height)?;
+    } else if card.line_break_before {
+        // First paint: leave the bash prompt line untouched above the card
+        // (the inline candidate echo was already erased by the relay) and
+        // open the card on a fresh line.
+        write!(output, "\x1b[?25l\r\n")?;
+    } else {
+        // First paint from the slash dispatcher: the cursor already sits
+        // at a fresh column, so only hide it (no extra blank line).
+        write!(output, "\x1b[?25l")?;
+    }
+    let repaint_rows = card.panel_height.max(lines.len());
+    for index in 0..repaint_rows {
+        write!(output, "\r\x1b[2K")?;
+        if let Some(line) = lines.get(index) {
+            write!(output, "{line}")?;
+        }
+        write!(output, "\r\n")?;
+    }
+    if repaint_rows > lines.len() {
+        write!(output, "\x1b[{}A", repaint_rows - lines.len())?;
+    }
+    if phase != CardPhase::Editing {
+        write!(output, "\x1b[?25h")?;
+    }
+    output.flush()?;
+    card.panel_height = lines.len();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card_with_rows(rows: &[&str], cursor: (usize, usize)) -> PromptDraftCardState {
+        PromptDraftCardState {
+            id: "draft-1".to_string(),
+            text: rows.join("\n"),
+            rows: rows.iter().map(|row| row.to_string()).collect(),
+            hidden_above: 0,
+            hidden_below: 0,
+            cursor,
+            panel_height: 0,
+            line_break_before: true,
+        }
+    }
+
+    #[test]
+    fn slash_first_paint_skips_the_extra_blank_line() {
+        let mut state = InlineState::default();
+        let mut card = card_with_rows(&[""], (0, 0));
+        card.line_break_before = false;
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut card, &mut state, &mut out, CardPhase::Editing).expect("draw");
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(
+            rendered.starts_with("\x1b[?25l\r\x1b[2K"),
+            "slash-opened card must not emit a leading blank line: {rendered:?}"
+        );
+
+        let mut relay_card = card_with_rows(&[""], (0, 0));
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut relay_card, &mut state, &mut out, CardPhase::Editing).expect("draw");
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(
+            rendered.starts_with("\x1b[?25l\r\n"),
+            "relay-opened card keeps the fresh-line break: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn editing_card_renders_border_rows_and_cursor_cell() {
+        let mut state = InlineState::default();
+        let mut card = card_with_rows(&["请帮我分析系统负载", "给出优化建议"], (1, 6));
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut card, &mut state, &mut out, CardPhase::Editing).expect("draw");
+        let rendered = String::from_utf8_lossy(&out).into_owned();
+        assert!(rendered.contains("╭"), "top border: {rendered}");
+        assert!(rendered.contains("请帮我分析系统负载"));
+        assert!(rendered.contains("\x1b[7m"), "cursor cell must invert");
+        assert!(rendered.contains("\x1b[36m"), "editing border is cyan");
+        assert_eq!(card.panel_height, 4, "top + 2 rows + footer");
+    }
+
+    #[test]
+    fn frozen_card_dims_and_restores_cursor() {
+        let mut state = InlineState::default();
+        let mut card = card_with_rows(&["草稿内容"], (0, 0));
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut card, &mut state, &mut out, CardPhase::Cancelled).expect("draw");
+        let rendered = String::from_utf8_lossy(&out).into_owned();
+        assert!(!rendered.contains("\x1b[36m"), "no cyan when frozen");
+        assert!(rendered.contains("\x1b[?25h"), "cursor must come back");
+    }
+
+    #[test]
+    fn hidden_line_markers_render_dimmed_counters() {
+        let mut state = InlineState::default();
+        let mut card = card_with_rows(&["视口行"], (0, 0));
+        card.hidden_above = 2;
+        card.hidden_below = 3;
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut card, &mut state, &mut out, CardPhase::Editing).expect("draw");
+        let rendered = String::from_utf8_lossy(&out).into_owned();
+        assert!(rendered.contains("… ↑ 2"), "above marker: {rendered}");
+        assert!(rendered.contains("… ↓ 3"), "below marker: {rendered}");
+    }
+}

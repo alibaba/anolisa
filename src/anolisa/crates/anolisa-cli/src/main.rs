@@ -9,6 +9,8 @@ mod progress;
 mod repo_config;
 mod resolution;
 mod response;
+#[cfg(test)]
+mod test_support;
 
 use std::io;
 use std::process::ExitCode;

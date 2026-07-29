@@ -14,13 +14,18 @@ impl ShellHandoffState {
         self.approved.push_back(PendingApprovedShellHandoff {
             request,
             emitted_at: None,
+            emitted_at_event_index: None,
             timeout_interrupt_sent: false,
         });
     }
 
-    pub(crate) fn emit_next_approved(&mut self) -> Option<ShellHandoffRequest> {
+    /// `event_index` is the shell-event count observed when the handoff is
+    /// written to the PTY; the untracked-closure fallback only considers
+    /// `ShellReady` events strictly after this index.
+    pub(crate) fn emit_next_approved(&mut self, event_index: usize) -> Option<ShellHandoffRequest> {
         let mut handoff = self.approved.pop_front()?;
         handoff.emitted_at = Some(Instant::now());
+        handoff.emitted_at_event_index = Some(event_index);
         handoff.timeout_interrupt_sent = false;
         let request = handoff.request.clone();
         self.pending.push_back(handoff);
@@ -71,12 +76,17 @@ impl ShellHandoffState {
 pub(crate) struct PendingApprovedShellHandoff {
     request: ShellHandoffRequest,
     emitted_at: Option<Instant>,
+    emitted_at_event_index: Option<usize>,
     timeout_interrupt_sent: bool,
 }
 
 impl PendingApprovedShellHandoff {
     pub(crate) fn request(&self) -> &ShellHandoffRequest {
         &self.request
+    }
+
+    pub(crate) fn emitted_at_event_index(&self) -> Option<usize> {
+        self.emitted_at_event_index
     }
 
     pub(crate) fn timeout_interrupt_sent(&self) -> bool {

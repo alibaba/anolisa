@@ -11,6 +11,7 @@ import {
   decryptCredential,
 } from '../utils/credential-encryptor.js';
 import { Storage } from '../config/storage.js';
+import { loadCoshNgAuth } from '../config/coshNgAuth.js';
 
 const ALIYUN_CREDS_FILENAME = 'aliyun_creds.json';
 
@@ -110,8 +111,52 @@ export async function saveAliyunCredentials(
  * 从磁盘加载阿里云凭证。
  * 支持加密格式（enc: 前缀）和明文 JSON（向前兼容）。
  * 若存在 STS 凭证则返回 STS 类型，否则返回普通 AK/SK 类型。
+ *
+ * The native `aliyun_creds.json` wins. Only when it is absent is the long-lived
+ * AK/SK recorded in cosh-ng's `config.toml` reused read-only (see
+ * {@link loadCoshNgAuth}), so switching back with `cosh-switch` does not force
+ * re-authentication. A corrupt or unreadable native store keeps the prior
+ * re-authentication behavior instead of silently switching identities.
  */
 export async function loadAliyunCredentials(): Promise<AliyunCredentialsWithSTS | null> {
+  const native = await loadNativeAliyunCredentials();
+  if (native.status === 'loaded') {
+    return native.credentials;
+  }
+  if (native.status === 'invalid') {
+    return null;
+  }
+  return loadCoshNgAliyunCredentials();
+}
+
+/**
+ * Read-only fallback to cosh-ng's long-lived AK/SK.
+ *
+ * Only ever yields {@link AliyunCredentials}: both the ECS RAM role flow and
+ * temporary STS credentials are refused outright by {@link loadCoshNgAuth}.
+ * That is required rather than merely cautious - the generator treats any
+ * `securityToken` as STS, and on expiry `refreshSTSCredentials()` persists the
+ * refreshed pair to `aliyun_creds.json`, at which point the fallback would no
+ * longer be read-only.
+ */
+function loadCoshNgAliyunCredentials(): AliyunCredentials | null {
+  const coshNgAuth = loadCoshNgAuth();
+  if (coshNgAuth?.kind !== 'aliyun') {
+    return null;
+  }
+
+  return {
+    accessKeyId: coshNgAuth.accessKeyId,
+    accessKeySecret: coshNgAuth.accessKeySecret,
+  };
+}
+
+type NativeAliyunCredentialsResult =
+  | { status: 'loaded'; credentials: AliyunCredentialsWithSTS }
+  | { status: 'absent' }
+  | { status: 'invalid' };
+
+async function loadNativeAliyunCredentials(): Promise<NativeAliyunCredentialsResult> {
   const filePath = getAliyunCredsPath();
   try {
     const content = await fs.readFile(filePath, 'utf-8');
@@ -119,7 +164,7 @@ export async function loadAliyunCredentials(): Promise<AliyunCredentialsWithSTS 
     if (decrypted === undefined) {
       // Decryption failed (e.g. salt changed) — treat as corrupted
       console.warn('Failed to decrypt Aliyun credentials file');
-      return null;
+      return { status: 'invalid' };
     }
 
     const credentials = JSON.parse(decrypted) as AliyunCredentialsWithSTS;
@@ -127,17 +172,17 @@ export async function loadAliyunCredentials(): Promise<AliyunCredentialsWithSTS 
     // Validate credentials structure
     if (!credentials.accessKeyId || !credentials.accessKeySecret) {
       console.warn('Invalid Aliyun credentials format in file');
-      return null;
+      return { status: 'invalid' };
     }
 
-    return credentials;
+    return { status: 'loaded', credentials };
   } catch (error: unknown) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
       // File doesn't exist
-      return null;
+      return { status: 'absent' };
     }
     console.warn('Failed to load Aliyun credentials:', error);
-    return null;
+    return { status: 'invalid' };
   }
 }
 

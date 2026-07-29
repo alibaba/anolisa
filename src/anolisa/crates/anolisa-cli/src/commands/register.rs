@@ -1,10 +1,11 @@
 use anolisa_core::{
-    ConsentState, HistoryAction, RegisterSource, RegistrationManager, TelemetryConfig,
-    TelemetryStarter, current_operator, require_root,
+    ConsentState, HistoryAction, LegacyIlogtail, RegisterSource, RegistrationManager,
+    TelemetryChannel, current_operator, require_root,
 };
 use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 
+use crate::commands::telemetry;
 use crate::context::CliContext;
 use crate::response::CliError;
 
@@ -37,11 +38,15 @@ pub struct UnregisterArgs {
 }
 
 /// Dispatch `register` subcommands or default register action
-pub fn handle_register_group(args: RegisterArgs, _ctx: &CliContext) -> Result<(), CliError> {
-    let mgr = RegistrationManager::new();
+pub fn handle_register_group(args: RegisterArgs, ctx: &CliContext) -> Result<(), CliError> {
     match args.command {
-        None => handle_register(&mgr, args.yes),
-        Some(RegisterCommands::Status { json }) => handle_status(&mgr, json),
+        None => {
+            // `--yes` is still accepted for script backward-compat but ignored:
+            // the deprecated forwarder no longer prompts.
+            let _ = args.yes;
+            handle_register(ctx)
+        }
+        Some(RegisterCommands::Status { json }) => handle_status(&RegistrationManager::new(), json),
     }
 }
 
@@ -53,89 +58,24 @@ pub fn handle_unregister_cmd(args: UnregisterArgs, _ctx: &CliContext) -> Result<
 
 // ── register ──────────────────────────────────────────────────────────────────
 
-fn handle_register(mgr: &RegistrationManager, yes: bool) -> Result<(), CliError> {
-    require_root().map_err(|e| CliError::Runtime {
-        command: "register".to_string(),
-        reason: e.to_string(),
-    })?;
+fn handle_register(ctx: &CliContext) -> Result<(), CliError> {
+    // `register` is retired in the opt-out model: collection is on by default,
+    // so an explicit opt-in verb is redundant. Keep it working as a thin,
+    // deprecated alias that forwards to `telemetry enable` (the real,
+    // reboot-persistent bring-up), then decommissions the legacy ilogtail
+    // channel. Consent bookkeeping is intentionally left to sysom/console and
+    // the `unregister` withdrawal path.
+    eprintln!("warning: 'anolisa register' is deprecated and will be removed in a future release.");
+    eprintln!(
+        "         Collection is on by default; use 'anolisa telemetry enable' / 'telemetry link'."
+    );
 
-    if mgr.read_state() == ConsentState::Registered {
-        println!("Already registered.");
-        println!("Use 'anolisa register status' to check.");
-        return Ok(());
-    }
+    telemetry::handle_enable(ctx)?;
 
-    if mgr.is_sysom_registered() {
-        println!("Already registered (via sysom).");
-        println!("Use 'anolisa register status' to check.");
-        return Ok(());
-    }
-
-    let operator = current_operator();
-
-    if !yes {
-        if !std::io::stdin().is_terminal() {
-            return Err(CliError::Runtime {
-                command: "register".to_string(),
-                reason: "non-interactive session detected; pass --yes to confirm registration"
-                    .to_string(),
-            });
-        }
-        print_register_banner();
-        println!();
-        if !prompt_yn("Register? [y/N]: ", false) {
-            println!("Cancelled.");
-            return Ok(());
-        }
-    }
-
-    let telemetry_cfg = build_telemetry_config();
-    let starter = TelemetryStarter::new(telemetry_cfg);
-    if let Err(e) = starter.start() {
-        return Err(CliError::Runtime {
-            command: "register".to_string(),
-            reason: format!(
-                "unable to start usage report service: {e}\n  Please check network connectivity and try again."
-            ),
-        });
-    }
-
-    if let Err(e) = mgr.do_register(&operator, RegisterSource::Cli) {
-        // Compensate: rollback the telemetry setup we just started, but only if the
-        // system is NOT in Registered state.  Another process may have raced
-        // us and successfully registered; in that case its telemetry config is
-        // valid and we must NOT tear it down.
-        if mgr.read_state() != ConsentState::Registered
-            && let Err(rollback_err) = starter.stop()
-        {
-            eprintln!("warn: rollback of telemetry start also failed: {rollback_err}");
-        }
-        return Err(CliError::Runtime {
-            command: "register".to_string(),
-            reason: e.to_string(),
-        });
-    }
-
-    println!();
-    println!("Registered successfully.");
-    println!("  Status:        registered");
-    if let Some(rec) = mgr.read_record()
-        && let Some(entry) = last_register_entry(&rec)
-    {
-        println!(
-            "  Registered:    {}",
-            entry.timestamp.format("%Y-%m-%dT%H:%M:%SZ")
-        );
-        println!("  Operator:      {}", entry.operator);
-    }
-    println!("  Data Reporting: active");
-
-    if !mgr.is_agentsight_running() {
-        println!();
-        println!(
-            "  Note: agentsight is not running. Usage report may not work until agentsight is started."
-        );
-    }
+    // Upgrade migration: an older ANOLISA registered through the shared ilogtail
+    // daemon by writing SLS account files. Now that we ship via the self-hosted
+    // uploader, decommission that legacy channel so it does not double-upload.
+    decommission_legacy_ilogtail();
 
     Ok(())
 }
@@ -168,7 +108,7 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
             }
             println!("You are about to unregister from the Agentic OS Co-Build Program.");
             println!(
-                "Local logs are preserved; you can re-register anytime with 'sudo anolisa register'."
+                "Local logs are preserved; you can re-enable anytime with 'sudo anolisa telemetry enable'."
             );
             println!();
             if !prompt_yn("Unregister? [y/N]: ", false) {
@@ -187,26 +127,50 @@ fn handle_unregister(mgr: &RegistrationManager, force: bool) -> Result<(), CliEr
             })?;
     }
 
-    // Attempt to tear down telemetry infrastructure.
-    // Consent is already recorded above; this is best-effort cleanup.
-    let telemetry_cfg = build_telemetry_config();
-    if let Err(e) = TelemetryStarter::new(telemetry_cfg).stop() {
-        eprintln!("error: consent recorded as UNREGISTERED, but telemetry teardown failed: {e}");
+    // Disable default collection: write the opt-out marker so components stop
+    // writing and the uploader loop self-exits. Consent is already recorded
+    // above; this is best-effort cleanup. Already-buffered data is preserved.
+    if let Err(e) = TelemetryChannel::new().disable_collection() {
+        eprintln!("error: consent recorded as UNREGISTERED, but disabling collection failed: {e}");
         eprintln!("  The system will NOT upload new data (consent denied),");
-        eprintln!("  but residual ilogtail configuration may remain.");
+        eprintln!("  but the opt-out marker may not have been written.");
         eprintln!("  Retry with: sudo anolisa unregister --force");
         return Err(CliError::Runtime {
             command: "unregister".to_string(),
             reason: format!(
-                "telemetry teardown failed: {e}. Consent is UNREGISTERED; retry with --force."
+                "disabling collection failed: {e}. Consent is UNREGISTERED; retry with --force."
             ),
         });
     }
 
     println!("Unregistered. Data reporting stopped.");
-    println!("  Local logs preserved. To re-enable: sudo anolisa register");
+    println!("  Local logs preserved. To re-enable: sudo anolisa telemetry enable");
+
+    // Withdrawing consent must also cut the legacy ilogtail channel: older
+    // ANOLISA versions uploaded through the shared daemon via SLS account
+    // files, which would otherwise keep shipping after opt-out.
+    decommission_legacy_ilogtail();
 
     Ok(())
+}
+
+/// Best-effort teardown of the pre-self-hosted ilogtail upload channel.
+///
+/// Removes the account files configured in `/etc/anolisa/legacy-accounts.json`
+/// (idempotent). If the configuration file is missing, decommission is a
+/// no-op so downstream distributions without the legacy channel are unaffected.
+/// A warning is emitted on failure but the caller's outcome is unaffected.
+fn decommission_legacy_ilogtail() {
+    match LegacyIlogtail::new().decommission() {
+        Ok(removed) if !removed.is_empty() => {
+            eprintln!(
+                "note: decommissioned legacy ilogtail upload channel ({} file(s)).",
+                removed.len()
+            );
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("warn: could not fully decommission legacy ilogtail channel: {e}"),
+    }
 }
 
 // ── status ────────────────────────────────────────────────────────────────────
@@ -221,10 +185,14 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
         return Ok(());
     }
 
+    println!(
+        "Note: 'anolisa register status' is deprecated; use 'anolisa telemetry status' for telemetry collection state."
+    );
     println!("═══════════════════════════════════════");
     println!("  ANOLISA Registration Status");
     println!("═══════════════════════════════════════");
     println!("  Product:       {}", product_type.display_name());
+    println!();
     println!();
 
     // sysom service registration (sysak_meta is active)
@@ -259,7 +227,7 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
             println!("  Data Reporting: disabled (local only)");
             println!();
             println!("  You haven't decided whether to enable data reporting.");
-            println!("  Run 'sudo anolisa register' to enable.");
+            println!("  Run 'sudo anolisa telemetry enable' to enable.");
         }
         ConsentState::Unregistered => {
             println!("  Consent State: UNREGISTERED");
@@ -274,7 +242,7 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
                 );
             }
             println!();
-            println!("  To enable registration: sudo anolisa register");
+            println!("  To enable: sudo anolisa telemetry enable");
         }
         ConsentState::Registered => {
             println!("  Consent State: REGISTERED");
@@ -374,69 +342,5 @@ fn prompt_yn(prompt: &str, default: bool) -> bool {
         "n" | "no" => false,
         "" => default,
         _ => false,
-    }
-}
-
-fn build_telemetry_config() -> TelemetryConfig {
-    let mut cfg = TelemetryConfig::default();
-    if let Some(id) = read_sls_account_id_override() {
-        cfg.sls_account_id = id;
-    }
-    cfg
-}
-
-fn read_sls_account_id_override() -> Option<String> {
-    if let Ok(val) = std::env::var("ANOLISA_SLS_ACCOUNT_ID") {
-        let v = val.trim().to_string();
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    let content = std::fs::read_to_string("/etc/anolisa/ilogtail.cfg").ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        if let Some(val) = line.strip_prefix("SLS_ACCOUNT_ID=") {
-            let v = val.trim().trim_matches('"').trim_matches('\'').to_string();
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
-
-fn print_register_banner() {
-    let lines = [
-        "Join the Agentic OS Co-Build Program",
-        "",
-        "Agentic OS \u{2014} the operating system for the Agent era.",
-        "Register to the central platform to unlock full observability",
-        "and personalized intelligence for your instances.",
-        "",
-        "What you'll get:",
-        "",
-        "  \u{2726} Token dashboard on Alibaba Cloud Console \u{2014} cost",
-        "    breakdown & usage trends for all instances under",
-        "    your account, in one place",
-        "  \u{2726} Smarter, personalized cosh \u{2014} learns from real-world",
-        "    scenarios across the fleet; model routing, Token",
-        "    compression & Skill recommendations tailored to",
-        "    your workload",
-        "  \u{2726} Co-build privileges \u{2014} early access to beta Skills",
-        "    and new model adaptations, plus a direct vote on",
-        "    our next P0 priorities",
-        "",
-        "Registration is lightweight: a single 'anolisa register'",
-        "command. Component metrics and instance ID (with your",
-        "explicit consent per PIPL) will be reported to help",
-        "improve the platform. You can revoke anytime via",
-        "'sudo anolisa unregister'.",
-    ];
-
-    for line in &lines {
-        println!("{line}");
     }
 }

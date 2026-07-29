@@ -7,7 +7,6 @@ Coverage targets:
   - Trace context injection
 """
 
-import importlib.util
 import io
 import json
 import os
@@ -18,6 +17,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 # ---------------------------------------------------------------------------
 # Hook path & module import
@@ -30,34 +30,10 @@ _HOOKS_DIR = str(
     / "hooks-plugin"
     / "hooks"
 )
-if _HOOKS_DIR not in sys.path:
-    sys.path.insert(0, _HOOKS_DIR)
-
-# Temporarily register codex's trace_context so the hook's internal
-# "from trace_context import ..." resolves to the codex version,
-# not cosh-extension's same-named module that may already be cached.
-_saved_tc = sys.modules.pop("trace_context", None)
-_tc_spec = importlib.util.spec_from_file_location(
-    "trace_context", os.path.join(_HOOKS_DIR, "trace_context.py")
-)
-_tc_mod = importlib.util.module_from_spec(_tc_spec)
-sys.modules["trace_context"] = _tc_mod
-_tc_spec.loader.exec_module(_tc_mod)
-
-# Register hook under a unique sys.modules key to avoid collision.
-_spec = importlib.util.spec_from_file_location(
+prompt_scanner_hook = load_standalone_hook(
     "codex_prompt_scanner_hook",
-    os.path.join(_HOOKS_DIR, "prompt_scanner_hook.py"),
+    Path(_HOOKS_DIR) / "prompt_scanner_hook.py",
 )
-prompt_scanner_hook = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = prompt_scanner_hook
-_spec.loader.exec_module(prompt_scanner_hook)
-
-# Restore original trace_context to avoid polluting other test modules.
-if _saved_tc is not None:
-    sys.modules["trace_context"] = _saved_tc
-else:
-    sys.modules.pop("trace_context", None)
 
 _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "prompt_scanner_hook.py")
 

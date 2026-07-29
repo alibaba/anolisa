@@ -37,7 +37,7 @@ use super::claim::{
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
-    FrameworkCommand, FrameworkDriver, HostEnv, find_binary_in_path,
+    FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
 use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
 
@@ -71,6 +71,14 @@ impl Default for QwenCodeDriver {
 impl FrameworkDriver for QwenCodeDriver {
     fn name(&self) -> &'static str {
         "qwencode"
+    }
+
+    fn probe_bundle(&self, resource_root: &Path, _declared_entry: Option<&str>) -> bool {
+        // Mirrors read_bundle's mandatory check: the Qwen-native root
+        // manifest must be present. The declared entry is ignored here —
+        // read_bundle rejects any entry other than the native manifest,
+        // so consulting it could only make this probe stricter.
+        resource_root.join(QWEN_MANIFEST).is_file()
     }
 
     fn detect(&self, _env: &HostEnv) -> DetectResult {
@@ -179,7 +187,7 @@ impl FrameworkDriver for QwenCodeDriver {
         &self,
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
-    ) -> Result<AdapterClaim, AdapterError> {
+    ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let plugin = bundle_plugin(bundle)?;
         let home =
             qwen_home(ctx.user_home.as_deref()).ok_or_else(|| AdapterError::FrameworkCli {
@@ -205,7 +213,7 @@ impl FrameworkDriver for QwenCodeDriver {
             },
         ];
 
-        Ok(AdapterClaim {
+        let claim = AdapterClaim {
             claim_schema: CLAIM_SCHEMA_VERSION,
             component: ctx.component.clone(),
             framework: self.name().to_string(),
@@ -216,15 +224,23 @@ impl FrameworkDriver for QwenCodeDriver {
             bundle_digest: bundle.digest.clone(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources,
             driver_payload: DriverPayload::QwenCode(QwenCodeClaim {
                 extension_dir_resource: RES_EXTENSION_DIR.to_string(),
                 plugin_resource: RES_PLUGIN.to_string(),
             }),
-        })
+        };
+        Ok((claim, PreparedEnable::None))
     }
 
-    fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
+    fn apply_enable(
+        &self,
+        claim: &mut AdapterClaim,
+        _prepared: &PreparedEnable,
+        ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::EnableProgress,
+    ) -> Result<(), AdapterError> {
         let layout = QwenLayout::from_claim(claim)?;
         ensure_current_home(&layout, ctx)?;
         ensure_supported_version(&layout.home, ctx)?;
@@ -1473,6 +1489,8 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: false,
             ops,
         }
@@ -1483,7 +1501,9 @@ mod tests {
         ctx: &DriverCtx,
     ) -> Result<AdapterClaim, AdapterError> {
         let bundle = driver.read_bundle(ctx)?;
-        driver.prepare_enable(&bundle, ctx)
+        driver
+            .prepare_enable(&bundle, ctx)
+            .map(|(claim, _prepared)| claim)
     }
 
     fn seed_owned_link(home: &Path, source: &Path) {
@@ -1513,9 +1533,11 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        driver.apply_enable(&claim, &ctx).expect("enable");
+        driver
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
+            .expect("enable");
         assert_eq!(
             ops.commands(),
             vec![
@@ -1560,9 +1582,11 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
-        driver.apply_enable(&claim, &ctx).expect("re-enable");
+        driver
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
+            .expect("re-enable");
         assert_eq!(
             ops.commands(),
             vec![
@@ -1593,10 +1617,10 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
         let error = driver
-            .apply_enable(&claim, &ctx)
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
             .expect_err("missing postcondition must fail");
         assert!(matches!(error, AdapterError::FrameworkCli { .. }));
         assert_eq!(
@@ -1620,10 +1644,10 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
         let error = driver
-            .apply_enable(&claim, &ctx)
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
             .expect_err("foreign extension must be preserved");
         assert!(matches!(error, AdapterError::InvalidAdapterInput { .. }));
         assert_eq!(ops.commands(), vec![vec!["--version".to_string()]]);
@@ -1646,10 +1670,10 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
         let error = driver
-            .apply_enable(&claim, &ctx)
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
             .expect_err("malformed shared state must fail closed");
         assert!(matches!(error, AdapterError::FrameworkCli { .. }));
         assert_eq!(ops.commands(), vec![vec!["--version".to_string()]]);
@@ -1820,10 +1844,10 @@ mod tests {
         let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
         let ctx = ctx(&resource, &user_home, &ops, &layout);
         let driver = QwenCodeDriver::new();
-        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
 
         let error = driver
-            .apply_enable(&claim, &ctx)
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
             .expect_err("old Qwen must fail");
         assert!(matches!(error, AdapterError::FrameworkCli { .. }));
         assert_eq!(ops.commands(), vec![vec!["--version".to_string()]]);
@@ -1968,7 +1992,7 @@ mod tests {
         }
 
         let error = driver
-            .apply_enable(&claim, &ctx)
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
             .expect_err("malformed payload must fail");
         assert!(matches!(error, AdapterError::BundleInvalid { .. }));
         assert!(ops.commands().is_empty());

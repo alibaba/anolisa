@@ -222,6 +222,24 @@ impl GenAIBuilder {
     ///
     /// Returns `None` if the request path is not a known LLM API endpoint or
     /// the body cannot be parsed at all.
+    ///
+    /// 本函数只会在调用方已经判定"这次追踪的调用不会再正常收到 `finish_reason`"
+    /// 的场景下被调用，覆盖两类情况：
+    /// 1. 进程已确认退出（`ProcMon::Exit` 触发的即时崩溃检测、定期扫描发现的
+    ///    死 PID 清理）；
+    /// 2. 进程仍存活，但连接/SSE 流已超过空闲超时（默认 60s 无数据）被判定为
+    ///    手动中断或流已放弃（`snapshot_idle_connections`）。
+    ///
+    /// 因此本函数总是会额外驱逐 `(agent_name, pid, last_user_text)` 对应的
+    /// conversation anchor，给这两类中断场景提供与 `call_builder.rs` 中
+    /// `finish_reason` 终止态同等的轮结束信号：避免未来该 PID 复用相同固定
+    /// 文案（如系统 recap nudge，或用户重发一模一样的 prompt）时，被误判成
+    /// 同一轮尚未结束的旧对话。
+    ///
+    /// 即使原连接后续意外恢复并正常完成（空闲超时属于启发式判断，可能误判），
+    /// 驱逐锚点也不会产生错误结果：该调用完成时仍会通过正常路径重新调用
+    /// `resolve_conversation_id`，用它自己的 `response_id` 重新锚定，效果与
+    /// 未驱逐时一致——只要驱逐后、真正完成前没有其他调用抢占了这个 key。
     pub fn build_pending_from_request(
         &self,
         request: &ParsedRequest,
@@ -392,6 +410,15 @@ impl GenAIBuilder {
                     &last_user_text,
                 ))
             });
+
+        // 若调用方已确认本次调用不会再有后续 finish_reason（进程崩溃 /
+        // 本函数只在中断场景下被调用（进程崩溃/异常退出，或连接空闲超时被
+        // 判定为中断），此轮对话不会再有后续 finish_reason 信号。在这里显式
+        // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
+        // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
+        // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
+        self.id_resolver
+            .finish_conversation(agent_name_str, pid_i32, &last_user_text);
 
         Some(PendingCallInfo {
             call_id,
@@ -638,5 +665,50 @@ mod tests {
         assert!(pending.user_query.is_none());
         assert!(pending.input_messages.is_none());
         assert!(pending.system_instructions.is_none());
+    }
+
+    #[test]
+    fn test_build_pending_from_request_evicts_conversation_anchor() {
+        // build_pending_from_request 只在中断场景（进程崩溃或空闲超时）下被
+        // 调用，因此总是会驱逐 conversation 锚点：固定文本先通过正常路径
+        // 锁定一个 conversation_id，然后该轮调用确认不会再有 finish_reason，
+        // 再次调用 `build_pending_from_request` 应驱逐该锚点，使同 PID
+        // 同固定文本的下一轮对话重新锚定。
+        let builder = GenAIBuilder::new();
+        let pid = 1i32;
+        let text = "hello";
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let cache = std::collections::HashMap::new();
+
+        // 先跑一次拿到 build_pending_from_request 实际解析出的 agent_name
+        // （测试环境下可能因为 `/proc/1/comm` 真实存在而解析成实际进程名，
+        // 不一定是 make_request 里设置的 "test"，所以直接从返回值里读，
+        // 保证后面手动调用 `resolve_conversation_id` 时用的 key 与它一致）。
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .expect("LLM path should create pending");
+        let agent_name = pending.agent_name.clone().unwrap_or_default();
+
+        // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
+        let turn1 = builder
+            .id_resolver
+            .resolve_conversation_id(&agent_name, pid, text, "resp-1")
+            .unwrap();
+
+        // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
+        builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .expect("LLM path should create pending");
+
+        // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
+        let turn2 = builder
+            .id_resolver
+            .resolve_conversation_id(&agent_name, pid, text, "resp-2")
+            .unwrap();
+        assert_ne!(
+            turn1, turn2,
+            "build_pending_from_request 应驱逐锚点，让相同文本开启新的一轮对话"
+        );
     }
 }

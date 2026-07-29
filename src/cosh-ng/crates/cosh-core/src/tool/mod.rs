@@ -1,10 +1,18 @@
+pub(crate) mod ask_user_question;
 pub mod edit;
+mod file_patterns;
+mod glob;
 pub mod grep;
+mod list_directory;
+pub mod mcp;
 pub mod read_file;
+mod read_many_files;
+mod save_memory;
 pub mod shell;
 pub mod shell_evidence;
 pub mod skill;
 pub mod todo;
+mod web_fetch;
 pub mod write_file;
 
 use std::collections::HashMap;
@@ -17,12 +25,60 @@ use serde_json::Value;
 use crate::provider::ToolDeclaration;
 use crate::skill::{SkillConfig, SkillManager};
 
+/// Expand `~`, `~/...`, or `~user/...` to the appropriate home directory.
+///
+/// - `~` or `~/foo` → current user's home directory
+/// - `~user/foo` → specified user's home directory (via passwd lookup)
+/// - If the user is not found, falls back to treating the path as-is.
+pub(super) fn expand_tilde(path_str: &str) -> PathBuf {
+    if path_str == "~" {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from(path_str))
+    } else if let Some(rest) = path_str.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|home| home.join(rest.trim_start_matches(std::path::MAIN_SEPARATOR)))
+            .unwrap_or_else(|| PathBuf::from(path_str))
+    } else if let Some(user_path) = path_str.strip_prefix('~') {
+        // ~user or ~user/rest
+        let (username, rest) = match user_path.find('/') {
+            Some(idx) => (&user_path[..idx], Some(&user_path[idx + 1..])),
+            None => (user_path, None),
+        };
+        let home = nix::unistd::User::from_name(username)
+            .ok()
+            .flatten()
+            .map(|u| u.dir);
+        match (home, rest) {
+            (Some(h), Some(r)) => h.join(r.trim_start_matches(std::path::MAIN_SEPARATOR)),
+            (Some(h), None) => h,
+            (None, _) => PathBuf::from(path_str),
+        }
+    } else {
+        PathBuf::from(path_str)
+    }
+}
+
+/// Resolve a path string, expanding `~` and relative paths against `cwd`.
+pub(super) fn resolve_path(path_str: &str, cwd: &std::path::Path) -> PathBuf {
+    let expanded = expand_tilde(path_str);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolKind {
     ReadOnly,
+    /// A network request that can reach services outside the local process.
+    Network,
     FileEdit,
     ShellExec,
     ShellEvidence,
+    /// An external tool discovered from a configured MCP server.
+    Mcp,
+    /// A tool contributed by an extension-owned external runtime.
+    External,
     Other,
 }
 
@@ -68,6 +124,7 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     skill_manager: Option<Arc<SkillManager>>,
+    ask_user_question_enabled: bool,
 }
 
 impl ToolRegistry {
@@ -75,6 +132,7 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             skill_manager: None,
+            ask_user_question_enabled: true,
         }
     }
 
@@ -86,10 +144,50 @@ impl ToolRegistry {
         self.tools.get(name).map(|t| t.as_ref())
     }
 
+    /// Returns whether a tool name has already been registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<_> = self.tools.keys().cloned().collect();
+        if self.ask_user_question_enabled {
+            names.push("ask_user_question".to_string());
+        }
         names.sort();
         names
+    }
+
+    pub fn retain_selected_tools(&mut self, selection: &str) -> Result<(), String> {
+        if selection == "default" {
+            return Ok(());
+        }
+
+        let selected: std::collections::HashSet<_> = selection
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        let available: std::collections::HashSet<_> = self
+            .tools
+            .keys()
+            .map(String::as_str)
+            .chain(std::iter::once("ask_user_question"))
+            .collect();
+        let mut unknown: Vec<_> = selected.difference(&available).copied().collect();
+        unknown.sort_unstable();
+        if !unknown.is_empty() {
+            return Err(format!("unknown tools: {}", unknown.join(",")));
+        }
+
+        self.tools
+            .retain(|name, _| selected.contains(name.as_str()));
+        self.ask_user_question_enabled = selected.contains("ask_user_question");
+        Ok(())
+    }
+
+    pub fn supports_ask_user_question(&self) -> bool {
+        self.ask_user_question_enabled
     }
 
     pub fn with_defaults(skill_manager: Arc<SkillManager>) -> Self {
@@ -99,7 +197,12 @@ impl ToolRegistry {
         registry.register(Box::new(write_file::WriteFileTool));
         registry.register(Box::new(edit::EditTool));
         registry.register(Box::new(grep::GrepTool));
+        registry.register(Box::new(glob::GlobTool));
+        registry.register(Box::new(list_directory::ListDirectoryTool));
+        registry.register(Box::new(read_many_files::ReadManyFilesTool));
+        registry.register(Box::new(save_memory::SaveMemoryTool));
         registry.register(Box::new(todo::TodoTool::new()));
+        registry.register(Box::new(web_fetch::WebFetchTool::new()));
         registry.register(Box::new(skill::SkillTool::new(Arc::clone(&skill_manager))));
         registry.skill_manager = Some(skill_manager);
         registry
@@ -157,40 +260,9 @@ impl ToolRegistry {
                 parameters: t.parameters_schema(),
             })
             .collect();
-        decls.push(ToolDeclaration {
-            name: "ask_user_question".to_string(),
-            description: "Ask the user a question. Use this when you need clarification or want the user to choose between options.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The question to ask the user"
-                    },
-                    "options": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": { "type": "string" },
-                                "description": { "type": "string" }
-                            },
-                            "required": ["label"]
-                        },
-                        "description": "Options for the user to choose from"
-                    },
-                    "allow_free_text": {
-                        "type": "boolean",
-                        "description": "Whether to allow free-text input (default: true)"
-                    },
-                    "multi_select": {
-                        "type": "boolean",
-                        "description": "Whether to allow selecting multiple options (default: false)"
-                    }
-                },
-                "required": ["question"]
-            }),
-        });
+        if self.ask_user_question_enabled {
+            decls.push(ask_user_question::declaration());
+        }
         decls.sort_by(|a, b| a.name.cmp(&b.name));
         decls
     }
@@ -199,6 +271,12 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn current_user() -> Option<nix::unistd::User> {
+        nix::unistd::User::from_uid(nix::unistd::Uid::current())
+            .ok()
+            .flatten()
+    }
 
     struct DummyTool;
 
@@ -244,7 +322,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool));
         let names = registry.names();
-        assert_eq!(names, vec!["dummy"]);
+        assert_eq!(names, vec!["ask_user_question", "dummy"]);
     }
 
     #[test]
@@ -255,6 +333,76 @@ mod tests {
         assert_eq!(decls.len(), 2);
         assert!(decls.iter().any(|d| d.name == "dummy"));
         assert!(decls.iter().any(|d| d.name == "ask_user_question"));
+    }
+
+    #[test]
+    fn empty_tool_selection_removes_builtin_and_pseudo_tools() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+
+        registry
+            .retain_selected_tools("")
+            .expect("empty selection is valid");
+
+        assert!(registry.names().is_empty());
+        assert!(registry.declarations().is_empty());
+    }
+
+    #[test]
+    fn named_tool_selection_is_consistent_across_names_and_declarations() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+
+        registry
+            .retain_selected_tools("read_file,ask_user_question")
+            .expect("known selection");
+
+        assert_eq!(
+            registry.names(),
+            vec!["ask_user_question".to_string(), "read_file".to_string()]
+        );
+        let declaration_names: Vec<_> = registry
+            .declarations()
+            .into_iter()
+            .map(|declaration| declaration.name)
+            .collect();
+        assert_eq!(declaration_names, registry.names());
+    }
+
+    #[test]
+    fn default_tool_selection_preserves_existing_tools() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+        let before = registry.names();
+
+        registry
+            .retain_selected_tools("default")
+            .expect("default selection");
+
+        assert_eq!(registry.names(), before);
+    }
+
+    #[test]
+    fn defaults_include_restored_core_tools() {
+        let registry = ToolRegistry::with_defaults_for_test();
+
+        for name in [
+            "glob",
+            "list_directory",
+            "read_many_files",
+            "save_memory",
+            "web_fetch",
+        ] {
+            assert!(registry.contains(name), "missing default tool: {name}");
+        }
+    }
+
+    #[test]
+    fn unknown_tool_selection_is_rejected() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+
+        let error = registry
+            .retain_selected_tools("read_file,missing_tool")
+            .expect_err("unknown tool must fail closed");
+
+        assert!(error.contains("missing_tool"));
     }
 
     #[test]
@@ -309,5 +457,85 @@ mod tests {
         let err = ToolResult::error("failed");
         assert!(err.is_error);
         assert_eq!(err.output, "failed");
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde() {
+        let result = expand_tilde("~");
+        let home = dirs::home_dir().expect("home dir should exist");
+        assert_eq!(result, home);
+    }
+
+    #[test]
+    fn expand_tilde_with_subpath() {
+        let result = expand_tilde("~/foo/bar");
+        let home = dirs::home_dir().expect("home dir should exist");
+        assert_eq!(result, home.join("foo/bar"));
+        assert_eq!(expand_tilde("~/src/*.rs"), home.join("src/*.rs"));
+    }
+
+    #[test]
+    fn expand_tilde_with_repeated_separator() {
+        let result = expand_tilde("~//tmp/file");
+        let home = dirs::home_dir().expect("home dir should exist");
+        assert_eq!(result, home.join("tmp/file"));
+    }
+
+    #[test]
+    fn expand_tilde_user_root() {
+        if let Some(user) = current_user() {
+            let tilde_user = format!("~{}", user.name);
+            let result = expand_tilde(&tilde_user);
+            assert_eq!(result, user.dir);
+        }
+    }
+
+    #[test]
+    fn expand_tilde_user_with_subpath() {
+        if let Some(user) = current_user() {
+            let tilde_user = format!("~{}/documents/file.txt", user.name);
+            let result = expand_tilde(&tilde_user);
+            assert_eq!(result, user.dir.join("documents/file.txt"));
+        }
+    }
+
+    #[test]
+    fn expand_tilde_user_with_repeated_separator() {
+        if let Some(user) = current_user() {
+            let tilde_user = format!("~{}//tmp/file", user.name);
+            let result = expand_tilde(&tilde_user);
+            assert_eq!(result, user.dir.join("tmp/file"));
+        }
+    }
+
+    #[test]
+    fn expand_tilde_unknown_user_falls_back() {
+        let result = expand_tilde("~nonexistent_user_xyz_12345/file.txt");
+        assert_eq!(
+            result,
+            PathBuf::from("~nonexistent_user_xyz_12345/file.txt")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde_passthrough() {
+        let result = expand_tilde("relative/path");
+        assert_eq!(result, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn resolve_path_tilde_is_absolute() {
+        let cwd = std::path::Path::new("/tmp");
+        let result = resolve_path("~/test.rs", cwd);
+        assert!(result.is_absolute());
+        assert!(!result.starts_with(cwd));
+        assert!(result.ends_with("test.rs"));
+    }
+
+    #[test]
+    fn resolve_path_relative_joins_cwd() {
+        let cwd = std::path::Path::new("/workspace");
+        let result = resolve_path("src/main.rs", cwd);
+        assert_eq!(result, PathBuf::from("/workspace/src/main.rs"));
     }
 }

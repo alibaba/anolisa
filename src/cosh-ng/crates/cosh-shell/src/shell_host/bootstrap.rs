@@ -58,6 +58,7 @@ fn start_shell_session(
             &marker_token,
             &recovery_request_file_str,
             &handoff_request_file_str,
+            config.input_classifier.ai_enabled(),
         ),
     )?;
     fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
@@ -115,6 +116,9 @@ fn start_shell_session(
     let mut parser = OscParser::new(config.session_id.clone(), output_ref_dir, marker_token);
     if let Some(observer) = config.shell_environment_observer.clone() {
         parser = parser.with_environment_observer(observer);
+    }
+    if let Some(observer) = config.shell_history_file_observer.clone() {
+        parser = parser.with_history_file_observer(observer);
     }
     push_shell_started_event(&mut parser, config);
 

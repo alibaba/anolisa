@@ -41,7 +41,7 @@ use super::claim::{
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
-    FrameworkCommand, FrameworkDriver, HostEnv, find_binary_in_path,
+    FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
 use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
 
@@ -83,6 +83,14 @@ impl Default for ClaudeCodeDriver {
 impl FrameworkDriver for ClaudeCodeDriver {
     fn name(&self) -> &'static str {
         "claude-code"
+    }
+
+    fn probe_bundle(&self, resource_root: &Path, _declared_entry: Option<&str>) -> bool {
+        // Mirrors read_bundle's mandatory checks: a Claude Code bundle
+        // requires both the marketplace and the plugin manifest,
+        // regardless of any contract-declared entry.
+        resource_root.join(MARKETPLACE_MANIFEST).is_file()
+            && resource_root.join(PLUGIN_MANIFEST).is_file()
     }
 
     fn detect(&self, _env: &HostEnv) -> DetectResult {
@@ -200,7 +208,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
         &self,
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
-    ) -> Result<AdapterClaim, AdapterError> {
+    ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let plugin = plugin_name(bundle, ctx);
         let marketplace = marketplace_name(&ctx.component);
         validate_plugin_id(&plugin)?;
@@ -225,26 +233,36 @@ impl FrameworkDriver for ClaudeCodeDriver {
             },
         ];
 
-        Ok(AdapterClaim {
-            claim_schema: CLAIM_SCHEMA_VERSION,
-            component: ctx.component.clone(),
-            framework: self.name().to_string(),
-            plugin_id: Some(plugin),
-            adapter_type: ctx.adapter_type.clone(),
-            enabled_at: now_iso8601(),
-            resource_root: bundle.resource_root.clone(),
-            bundle_digest: bundle.digest.clone(),
-            driver_schema: DRIVER_SCHEMA_VERSION,
-            status: ClaimStatus::Enabled,
-            resources,
-            driver_payload: DriverPayload::ClaudeCode(ClaudeCodeClaim {
-                marketplace_resource: RES_MARKETPLACE.to_string(),
-                plugin_resource: RES_PLUGIN.to_string(),
-            }),
-        })
+        Ok((
+            AdapterClaim {
+                claim_schema: CLAIM_SCHEMA_VERSION,
+                component: ctx.component.clone(),
+                framework: self.name().to_string(),
+                plugin_id: Some(plugin),
+                adapter_type: ctx.adapter_type.clone(),
+                enabled_at: now_iso8601(),
+                resource_root: bundle.resource_root.clone(),
+                bundle_digest: bundle.digest.clone(),
+                driver_schema: DRIVER_SCHEMA_VERSION,
+                status: ClaimStatus::Enabled,
+                notices: Vec::new(),
+                resources,
+                driver_payload: DriverPayload::ClaudeCode(ClaudeCodeClaim {
+                    marketplace_resource: RES_MARKETPLACE.to_string(),
+                    plugin_resource: RES_PLUGIN.to_string(),
+                }),
+            },
+            PreparedEnable::None,
+        ))
     }
 
-    fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
+    fn apply_enable(
+        &self,
+        claim: &mut AdapterClaim,
+        _prepared: &PreparedEnable,
+        ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::EnableProgress,
+    ) -> Result<(), AdapterError> {
         let plugin = claim_plugin(claim).ok_or_else(|| AdapterError::BundleInvalid {
             root: claim.resource_root.clone(),
             reason: "claude-code receipt has no plugin resource".to_string(),
@@ -780,6 +798,8 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: true,
             ops: &ops,
         };
@@ -851,6 +871,8 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: true,
             ops: &ops,
         };

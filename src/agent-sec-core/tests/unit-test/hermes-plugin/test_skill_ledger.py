@@ -11,14 +11,11 @@ from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+from hermes_plugin_src.capabilities.skill_ledger import SkillLedgerCapability
+from hermes_plugin_src.cli_runner import CliResult
+from hermes_plugin_src.registry import load_config, register_capabilities
 
 _HERMES_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "hermes-plugin"
-sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
-
-from src.capabilities.skill_ledger import SkillLedgerCapability  # noqa: E402
-from src.cli_runner import CliResult  # noqa: E402
-from src.registry import load_config, register_capabilities  # noqa: E402
-
 _DEFAULT_MESSAGE = object()
 
 
@@ -138,7 +135,7 @@ class TestSkillLedgerHooks:
             "skill-discover/SKILL.md",
         ],
     )
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_skillfs_inplace_sentinel_does_not_bypass_ledger(
         self, mock_cli, tmp_path, sentinel
     ):
@@ -170,7 +167,7 @@ class TestSkillLedgerHooks:
         )
         assert output is None
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_skillfs_inplace_root_debug_policy_only_logs(
         self, mock_cli, tmp_path, caplog
     ):
@@ -194,7 +191,7 @@ class TestSkillLedgerHooks:
             "暂不支持Hermes场景" in record.message for record in caplog.records
         )
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_skillfs_inplace_root_block_policy_uses_ledger_result(
         self, mock_cli, tmp_path
     ):
@@ -213,7 +210,7 @@ class TestSkillLedgerHooks:
         mock_cli.assert_called_once()
         assert output is None
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_hidden_nested_skill_is_forwarded_as_canonical_path(
         self, mock_cli, tmp_path
     ):
@@ -235,8 +232,8 @@ class TestSkillLedgerHooks:
             trace_context={"agent_name": "hermes", "session_id": "s1"},
         )
 
-    @patch("src.capabilities.skill_ledger.Path.rglob")
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.Path.rglob")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_skill_file_traversal_loop_fails_open_with_short_notice(
         self, mock_cli, mock_rglob, tmp_path
     ):
@@ -257,7 +254,7 @@ class TestSkillLedgerHooks:
             == "暂不支持Hermes场景，请自行关注skill安全性。\n\nassistant response"
         )
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_pass_allows_without_warning(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/pass-skill")
@@ -273,7 +270,7 @@ class TestSkillLedgerHooks:
             cap._on_transform_llm_output("assistant response", session_id="s1") is None
         )
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_warn_allows_without_warning(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/warn-skill")
@@ -289,7 +286,7 @@ class TestSkillLedgerHooks:
             cap._on_transform_llm_output("assistant response", session_id="s1") is None
         )
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_user_decision_summary_allows_without_warning(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/allowed-risk")
@@ -310,7 +307,7 @@ class TestSkillLedgerHooks:
             cap._on_transform_llm_output("assistant response", session_id="s1") is None
         )
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_passes_hermes_trace_context_to_cli(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/pass-skill")
@@ -336,7 +333,7 @@ class TestSkillLedgerHooks:
         "status",
         ["none", "drifted", "deny", "tampered", "error", "unknown"],
     )
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_non_pass_default_ask_policy_falls_back_to_warning(
         self, mock_cli, tmp_path, status, caplog
     ):
@@ -357,7 +354,7 @@ class TestSkillLedgerHooks:
         assert any(f"status={status}" in record.message for record in caplog.records)
 
     @pytest.mark.parametrize("status", ["deny", "drifted"])
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_debug_policy_logs_and_allows(self, mock_cli, tmp_path, status, caplog):
         root = tmp_path / "skills"
         _make_skill(root, "devops/risky")
@@ -380,7 +377,7 @@ class TestSkillLedgerHooks:
         "status",
         ["none", "warn", "drifted", "deny", "tampered", "error", "unknown"],
     )
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_warn_policy_allows_and_prepends_warning(self, mock_cli, tmp_path, status):
         root = tmp_path / "skills"
         _make_skill(root, "devops/risky")
@@ -397,7 +394,7 @@ class TestSkillLedgerHooks:
         assert f"status={status}" in output
         assert output.endswith("assistant response")
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_legacy_enable_block_false_maps_to_warn(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/risky")
@@ -413,7 +410,7 @@ class TestSkillLedgerHooks:
         assert output.startswith("[agent-sec-core skill-ledger warning]")
         assert "status=warn" in output
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_legacy_enable_block_true_maps_to_block(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "security/blocked")
@@ -426,7 +423,7 @@ class TestSkillLedgerHooks:
         assert result["action"] == "block"
         assert "status=deny" in result["message"]
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_drifted_warning_uses_response_text_and_logs_status(
         self, mock_cli, tmp_path, caplog
     ):
@@ -449,7 +446,7 @@ class TestSkillLedgerHooks:
         assert output.endswith("assistant response")
         assert any("status=drifted" in record.message for record in caplog.records)
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_runtime_hermes_session_context_bridges_missing_pre_session_id(
         self, mock_cli, tmp_path, monkeypatch
     ):
@@ -475,7 +472,7 @@ class TestSkillLedgerHooks:
         assert output.endswith("assistant response")
         assert second is None
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_mismatched_keys_do_not_use_pending_warning_fallback(
         self, mock_cli, tmp_path, monkeypatch
     ):
@@ -495,7 +492,7 @@ class TestSkillLedgerHooks:
         assert output is None
         assert list(cap._warnings_by_context) == ["task_id:t1"]
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_block_policy_blocks_message_without_warning(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "security/blocked")
@@ -509,7 +506,7 @@ class TestSkillLedgerHooks:
         assert "status=deny" in result["message"]
         assert cap._on_transform_llm_output("assistant response", run_id="r1") is None
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_block_policy_allows_when_summary_has_no_message(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "security/warn-only")
@@ -521,7 +518,7 @@ class TestSkillLedgerHooks:
         assert result is None
         assert cap._on_transform_llm_output("assistant response") is None
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_nonzero_exit_with_valid_json_still_uses_status(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/drifted")
@@ -540,7 +537,7 @@ class TestSkillLedgerHooks:
             CliResult(stdout="not-json", stderr="", exit_code=0),
         ],
     )
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_cli_failure_paths_fail_open(self, mock_cli, tmp_path, cli_result):
         root = tmp_path / "skills"
         _make_skill(root, "devops/flaky")
@@ -552,7 +549,7 @@ class TestSkillLedgerHooks:
         assert result is None
         assert cap._on_transform_llm_output("assistant response") is None
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_unresolved_skill_fails_open_without_cli(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         cap = _make_capability(root, policy="warn")
@@ -562,7 +559,7 @@ class TestSkillLedgerHooks:
         assert result is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_warning_context_cache_is_bounded(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/risky")
@@ -580,7 +577,7 @@ class TestSkillLedgerHooks:
         assert len(cap._warnings_by_context) == 2
         assert "session_id:s0" not in cap._warnings_by_context
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_warning_without_context_is_not_injected_into_later_session(
         self, mock_cli, tmp_path
     ):
@@ -595,7 +592,7 @@ class TestSkillLedgerHooks:
         assert output is None
         assert cap._warnings_by_context == {}
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_warning_with_context_is_not_consumed_by_contextless_transform(
         self, mock_cli, tmp_path
     ):
@@ -610,7 +607,7 @@ class TestSkillLedgerHooks:
         output = cap._on_transform_llm_output("assistant response", session_id="s1")
         assert output.startswith("[agent-sec-core skill-ledger warning]")
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_zero_max_warnings_disables_visible_injection(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/risky")
@@ -650,7 +647,7 @@ class TestSkillLedgerHooks:
 class TestSkillResolution:
     """Hermes local skill name resolution tests."""
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_resolves_by_category_name(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         skill_dir = _make_skill(root, "mlops/axolotl")
@@ -661,7 +658,7 @@ class TestSkillResolution:
 
         assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_symlink_skills_root_preserves_canonical_path(self, mock_cli, tmp_path):
         physical_root = tmp_path / "physical-skills"
         _make_skill(physical_root, "mlops/axolotl")
@@ -676,7 +673,7 @@ class TestSkillResolution:
         assert mock_cli.call_args[0][0][-1] == str(canonical_skill_dir)
         assert canonical_skill_dir != canonical_skill_dir.resolve()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_frontmatter_name_is_not_used_for_resolution(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(
@@ -691,7 +688,7 @@ class TestSkillResolution:
 
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_supporting_file_path_does_not_override_name(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         skill_dir = _make_skill(root, "tools/name-wins")
@@ -709,7 +706,7 @@ class TestSkillResolution:
 
         assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_file_path_without_name_fails_open(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "tools/relative")
@@ -723,7 +720,7 @@ class TestSkillResolution:
         assert result is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_ignored_internal_dirs_are_not_resolved(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, ".archive/hidden")
@@ -734,7 +731,7 @@ class TestSkillResolution:
         assert result is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_qualified_internal_dir_is_not_resolved(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         root.mkdir()
@@ -748,7 +745,7 @@ class TestSkillResolution:
         assert result is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_qualified_symlink_escape_is_not_resolved(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         outside = tmp_path / "outside"
@@ -765,7 +762,7 @@ class TestSkillResolution:
         assert result is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_ambiguous_bare_name_fails_open_without_cli(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "devops/duplicate")
@@ -777,7 +774,7 @@ class TestSkillResolution:
         assert result is None
         mock_cli.assert_not_called()
 
-    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_qualified_plugin_style_name_is_skipped(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "plugin/skill")

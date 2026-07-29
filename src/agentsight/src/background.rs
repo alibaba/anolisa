@@ -445,14 +445,14 @@ mod tests {
         Mutex::new(None)
     }
 
-    // Serializes tests that read or write the process-global dynamic logtail
-    // path (`genai::logtail::DYNAMIC_LOGTAIL_PATH`); cargo runs tests in parallel
-    // and would otherwise let them clobber each other's path assertions.
-    static SLS_PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
-
+    // Serializes tests that read or write the process-global SLS_LOGTAIL_FILE
+    // env var or dynamic logtail path. Cargo runs tests in parallel and would
+    // otherwise let them clobber each other's path assertions.
     fn lock_sls_path() -> std::sync::MutexGuard<'static, ()> {
         // Recover from poisoning so one failing test does not cascade-panic the rest.
-        SLS_PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::genai::logtail::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]

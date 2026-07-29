@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use regex::Regex;
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{HookDefinition, HooksConfig};
+use crate::provider::ToolDeclaration;
 
 // ─── Hook Event Names ────────────────────────────────────────────────
 
@@ -94,6 +95,12 @@ pub struct PreToolUseResult {
 pub struct PostToolUseResult {
     pub decision: HookDecision,
     pub additional_context: Option<String>,
+    /// Replacement for the original tool response, emitted by transformation
+    /// hooks (e.g. tokenless response compression).  When present and the
+    /// decision is not Block, the runtime uses this text as the model-visible
+    /// tool result instead of the original output.  `additional_context` is
+    /// still appended after the replacement.
+    pub updated_tool_response: Option<String>,
     pub notifications: Vec<HookNotification>,
 }
 
@@ -133,6 +140,11 @@ pub struct PostToolUseFailureResult {
 #[derive(Debug, Clone)]
 pub struct BeforeModelResult {
     pub notifications: Vec<HookNotification>,
+    /// Tool declarations rewritten by a BeforeModel hook, e.g. schema
+    /// compression. Only ever applies to the provider call that fired the hook:
+    /// the ToolRegistry is untouched, so the next turn starts from the original
+    /// declarations again. `None` means "use the originals".
+    pub updated_tools: Option<Vec<ToolDeclaration>>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +345,19 @@ impl HookSystem {
             .or_else(|| specific.get("additionalContext").and_then(|v| v.as_str()))
     }
 
+    /// Read `updated_tool_response` / `updatedToolResponse` from hook output.
+    /// Accepts both snake_case (cosh-ng convention) and camelCase
+    /// (copilot-shell convention).  Returns `None` when the field is absent,
+    /// not a string, or empty — callers treat all three cases as "no
+    /// replacement requested".
+    fn pick_updated_tool_response(specific: &Value) -> Option<&str> {
+        specific
+            .get("updated_tool_response")
+            .and_then(|v| v.as_str())
+            .or_else(|| specific.get("updatedToolResponse").and_then(|v| v.as_str()))
+            .filter(|s| !s.is_empty())
+    }
+
     /// 把 tool 输出文本包装为 copilot-shell 协议要求的 JSON 对象。
     /// 对齐 copilot-shell 行为：始终将原始文本作为 llmContent/returnDisplay
     /// 传递，即使文本本身是合法 JSON。copilot-shell 的 coreToolScheduler
@@ -433,6 +458,7 @@ impl HookSystem {
             return PostToolUseResult {
                 decision: HookDecision::Passthrough,
                 additional_context: None,
+                updated_tool_response: None,
                 notifications: vec![],
             };
         }
@@ -447,6 +473,7 @@ impl HookSystem {
             return PostToolUseResult {
                 decision: HookDecision::Passthrough,
                 additional_context: None,
+                updated_tool_response: None,
                 notifications: vec![],
             };
         }
@@ -626,10 +653,12 @@ impl HookSystem {
         cwd: &str,
         model: &str,
         messages: &[crate::provider::Message],
+        tools: &[ToolDeclaration],
     ) -> BeforeModelResult {
         if !self.enabled {
             return BeforeModelResult {
                 notifications: vec![],
+                updated_tools: None,
             };
         }
 
@@ -637,11 +666,13 @@ impl HookSystem {
         if defs.is_empty() {
             return BeforeModelResult {
                 notifications: vec![],
+                updated_tools: None,
             };
         }
 
-        // 对齐 copilot-shell hookTranslator.toHookLLMRequest 格式：
-        // llm_request 包含 model 和 messages 数组。
+        // Mirrors copilot-shell's hookTranslator.toHookLLMRequest shape:
+        // llm_request carries the model, the messages array, and the tool
+        // declarations at config.tools.
         let hook_messages: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| {
@@ -656,17 +687,37 @@ impl HookSystem {
             "llm_request": {
                 "model": model,
                 "messages": hook_messages,
+                "config": {
+                    "tools": tools,
+                },
             },
         });
         let input = self.build_input(session_id, cwd, HookEventName::BeforeModel, event_data);
         let outputs = self.run_hooks(&defs, &input).await;
 
         let mut notifications = Vec::new();
+        let mut updated_tools = None;
         for (i, out) in outputs {
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
+            // Last valid full array in configuration order wins; a rejected
+            // array leaves an earlier hook's accepted one in place.
+            if let Some(candidate) = extract_updated_tools(&out.hook_specific_output) {
+                match validate_updated_tools(tools, candidate) {
+                    Ok(validated) => updated_tools = Some(validated),
+                    Err(reason) => {
+                        tracing::warn!(
+                            target: "cosh_hook",
+                            "Hook '{name}' tool declaration update rejected: {reason}"
+                        );
+                    }
+                }
+            }
         }
-        BeforeModelResult { notifications }
+        BeforeModelResult {
+            notifications,
+            updated_tools,
+        }
     }
 
     pub async fn fire_after_model(
@@ -767,7 +818,10 @@ impl HookSystem {
         defs: &[&HookDefinition],
         input: &HookInput,
     ) -> Vec<(usize, HookOutput)> {
-        let input_json = crate::redaction::to_redacted_json(input);
+        let input_json = crate::redaction::to_redacted_json_with_schemas(
+            input,
+            crate::redaction::TOOL_DECLARATION_PATHS,
+        );
 
         if Self::is_sequential(defs) {
             let mut results = Vec::new();
@@ -783,9 +837,10 @@ impl HookSystem {
                 .map(|(i, def)| {
                     let json = input_json.clone();
                     let cmd = def.command.clone();
+                    let env = def.env.clone();
                     let timeout = Self::timeout_for(def);
                     async move {
-                        let output = Self::run_hook_cmd(&cmd, &json, timeout).await;
+                        let output = Self::run_hook_cmd(&cmd, &env, &json, timeout).await;
                         (i, output)
                     }
                 })
@@ -795,44 +850,64 @@ impl HookSystem {
     }
 
     async fn run_single_hook(def: &HookDefinition, input_json: &str) -> HookOutput {
-        Self::run_hook_cmd(&def.command, input_json, Self::timeout_for(def)).await
+        Self::run_hook_cmd(&def.command, &def.env, input_json, Self::timeout_for(def)).await
     }
 
-    async fn run_hook_cmd(command: &str, input_json: &str, timeout: Duration) -> HookOutput {
-        use tokio::io::AsyncWriteExt;
+    async fn run_hook_cmd(
+        command: &str,
+        env: &BTreeMap<String, String>,
+        input_json: &str,
+        timeout: Duration,
+    ) -> HookOutput {
         use tokio::process::Command;
 
-        let safe_command = crate::redaction::redact_text(command);
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
+        use crate::process::{output_with_timeout, OutputError};
 
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
+        let safe_command = crate::redaction::redact_text(command);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+
+        // `Command` inherits the parent environment by default, so declared
+        // entries override inherited values of the same name for this child
+        // only. Invalid names are dropped with the name (never the value) in
+        // the log.
+        let (valid, invalid): (Vec<_>, Vec<_>) = env
+            .iter()
+            .partition(|(name, _)| crate::config::is_valid_env_name(name));
+        if !invalid.is_empty() {
+            let names: Vec<&str> = invalid.iter().map(|(name, _)| name.as_str()).collect();
+            tracing::warn!(
+                target: "cosh_hook",
+                "Hook '{safe_command}' declares invalid env names, skipped: {}",
+                names.join(", ")
+            );
+        }
+        cmd.envs(valid);
+
+        // Host attribution, applied after the declared map so it takes
+        // precedence over an `env` entry of the same name. This is a
+        // cooperative signal, not a security boundary: the same manifest also
+        // owns `command`, so it can reassign or unset these inside the shell it
+        // asked for. Nothing security-relevant may depend on them.
+        cmd.env("COSH_RUNTIME", "cosh-ng");
+        cmd.env("COSH_NG_VERSION", env!("CARGO_PKG_VERSION"));
+
+        // The deadline covers the stdin write as well: a hook that never
+        // reads stdin must not stall the session, and on timeout the whole
+        // process group is killed instead of leaking grandchildren.
+        let result = output_with_timeout(cmd, Some(input_json.as_bytes().to_vec()), timeout).await;
+
+        let output = match result {
+            Ok(o) => o,
+            Err(OutputError::Spawn(e)) => {
                 tracing::error!(target: "cosh_hook", "Failed to spawn hook '{safe_command}': {e}");
                 return HookOutput::default();
             }
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input_json.as_bytes()).await;
-            let _ = stdin.shutdown().await;
-        }
-
-        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-
-        let output = match result {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
+            Err(OutputError::Io(e)) => {
                 tracing::error!(target: "cosh_hook", "Hook '{safe_command}' execution failed: {e}");
                 return HookOutput::default();
             }
-            Err(_) => {
+            Err(OutputError::Timeout) => {
                 tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' timed out");
                 return HookOutput::default();
             }
@@ -886,7 +961,10 @@ impl HookSystem {
             .system_message
             .map(|value| crate::redaction::redact_text(&value));
         if let Some(value) = &mut output.hook_specific_output {
-            crate::redaction::redact_value(value);
+            crate::redaction::redact_value_with_schemas(
+                value,
+                crate::redaction::TOOL_DECLARATION_PATHS,
+            );
         }
         output
     }
@@ -932,6 +1010,7 @@ impl HookSystem {
     ) -> PostToolUseResult {
         let mut decision = HookDecision::Passthrough;
         let mut additional_context: Option<String> = None;
+        let mut updated_tool_response: Option<String> = None;
         let mut notifications = Vec::new();
 
         for (i, out) in outputs {
@@ -940,11 +1019,19 @@ impl HookSystem {
 
             decision = fold_decision(decision, out.decision.as_deref(), out.reason.clone());
             fold_additional_context(&mut additional_context, &out.hook_specific_output);
+
+            // Last valid replacement wins (configuration order).
+            if let Some(ref specific) = out.hook_specific_output {
+                if let Some(replacement) = Self::pick_updated_tool_response(specific) {
+                    updated_tool_response = Some(replacement.to_string());
+                }
+            }
         }
 
         PostToolUseResult {
             decision,
             additional_context,
+            updated_tool_response,
             notifications,
         }
     }
@@ -1098,6 +1185,80 @@ fn fold_additional_context(current: &mut Option<String>, specific: &Option<Value
     }
 }
 
+/// Read a BeforeModel hook's replacement tool array out of its
+/// `hook_specific_output`. `llm_request.config.tools` is canonical;
+/// `llm_request.tools` is accepted so hooks written against the older position
+/// keep working during migration.
+fn extract_updated_tools(specific: &Option<Value>) -> Option<&Value> {
+    let llm_request = specific.as_ref()?.get("llm_request")?;
+    llm_request
+        .get("config")
+        .and_then(|config| config.get("tools"))
+        .or_else(|| llm_request.get("tools"))
+}
+
+/// Accept a hook's tool array only if it is the *same tool set* as the host
+/// declared — same count, same names, same order. That confines hooks to
+/// rewriting `description` and `parameters` (the schema-compression use case)
+/// and keeps them from silently adding, dropping, or reordering tools, which
+/// would change tool-selection semantics. Tool filtering belongs to a separate
+/// protocol.
+fn validate_updated_tools(
+    original: &[ToolDeclaration],
+    candidate: &Value,
+) -> Result<Vec<ToolDeclaration>, String> {
+    let Some(entries) = candidate.as_array() else {
+        return Err("expected a JSON array of tool declarations".to_string());
+    };
+    if entries.len() != original.len() {
+        return Err(format!(
+            "expected {} tool declarations, got {}",
+            original.len(),
+            entries.len()
+        ));
+    }
+
+    let mut updated = Vec::with_capacity(entries.len());
+    for (entry, expected) in entries.iter().zip(original) {
+        let tool: ToolDeclaration = serde_json::from_value(entry.clone())
+            .map_err(|error| format!("invalid tool declaration: {error}"))?;
+        if tool.name != expected.name {
+            return Err(format!(
+                "tool name changed: expected '{}', got '{}'",
+                expected.name, tool.name
+            ));
+        }
+        if !tool.parameters.is_object() {
+            return Err(format!("tool '{}' parameters must be an object", tool.name));
+        }
+        updated.push(tool);
+    }
+
+    // The turn's compaction prefix estimate is computed from the original
+    // declarations before this hook runs, so a rewrite that grows them would
+    // make the runtime under-account the real request, skip an emergency
+    // compaction it needed, and overflow the provider context. The 1024-token
+    // prefix reserve cannot absorb unbounded growth. Requiring the rewrite to
+    // be no larger keeps the estimate conservative and matches the contract
+    // this protocol already advertises: compression, not expansion.
+    let original_tokens = estimate_declaration_tokens(original);
+    let updated_tokens = estimate_declaration_tokens(&updated);
+    if updated_tokens > original_tokens {
+        return Err(format!(
+            "tool declarations grew from ~{original_tokens} to ~{updated_tokens} tokens; \
+             BeforeModel may only compress declarations"
+        ));
+    }
+
+    Ok(updated)
+}
+
+/// Estimates the declarations the same way the compaction prefix estimate does,
+/// so the two cannot disagree about whether a rewrite fits.
+fn estimate_declaration_tokens(tools: &[ToolDeclaration]) -> u64 {
+    crate::compaction::estimate_text_tokens(&serde_json::to_string(tools).unwrap_or_default())
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1188,6 +1349,7 @@ mod tests {
             matcher: Some("run_shell.*".to_string()),
             timeout: None,
             sequential: None,
+            env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "run_shell_command"));
         assert!(!HookSystem::matches_tool(&def, "read_file"));
@@ -1201,6 +1363,7 @@ mod tests {
             matcher: None,
             timeout: None,
             sequential: None,
+            env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "any_tool"));
     }
@@ -1216,6 +1379,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1254,6 +1418,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: None,
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1278,6 +1443,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_prompt_hook_receives_redacted_input() {
+        let secret = "sk-user-prompt-hook-secret";
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![HookDefinition {
+                command: format!(
+                    r#"python3 -c 'import json,sys; prompt=json.load(sys.stdin)["prompt"]; redacted="<redacted>" in prompt and "{secret}" not in prompt; print(json.dumps({{"decision":"allow" if redacted else "block"}}))'"#
+                ),
+                name: Some("prompt-redaction-probe".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+                env: Default::default(),
+            }],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let system = HookSystem::from_config(&config);
+
+        let result = system
+            .fire_user_prompt_submit(
+                "session-1",
+                "/tmp",
+                &format!("write api_key={secret} to the config"),
+            )
+            .await;
+
+        assert_eq!(result.decision, HookDecision::Allow);
+    }
+
+    #[tokio::test]
     async fn exit_code_2_means_block() {
         let config = HooksConfig {
             enabled: true,
@@ -1288,6 +1489,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1313,6 +1515,7 @@ mod tests {
             matcher: Some(matcher.to_string()),
             timeout: None,
             sequential: None,
+            env: Default::default(),
         }
     }
 
@@ -1369,6 +1572,244 @@ mod tests {
     fn pick_additional_context_returns_none_when_absent() {
         let v = serde_json::json!({"other": "x"});
         assert_eq!(HookSystem::pick_additional_context(&v), None);
+    }
+
+    // ===== BeforeModel tool declaration rewriting (#1616) =====
+
+    fn shell_declaration() -> ToolDeclaration {
+        ToolDeclaration {
+            name: "shell".to_string(),
+            description: "run a shell command".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            }),
+        }
+    }
+
+    fn updated_tools_output(tools: Value) -> Option<Value> {
+        Some(serde_json::json!({"llm_request": {"config": {"tools": tools}}}))
+    }
+
+    #[test]
+    fn extract_updated_tools_prefers_canonical_config_position() {
+        let specific = Some(serde_json::json!({
+            "llm_request": {
+                "config": {"tools": [{"name": "canonical"}]},
+                "tools": [{"name": "legacy"}],
+            }
+        }));
+        let tools = extract_updated_tools(&specific).unwrap();
+        assert_eq!(tools[0]["name"], "canonical");
+    }
+
+    #[test]
+    fn extract_updated_tools_falls_back_to_legacy_position() {
+        let specific = Some(serde_json::json!({
+            "llm_request": {"tools": [{"name": "legacy"}]}
+        }));
+        let tools = extract_updated_tools(&specific).unwrap();
+        assert_eq!(tools[0]["name"], "legacy");
+    }
+
+    #[test]
+    fn validate_updated_tools_accepts_compressed_description_and_schema() {
+        let original = vec![shell_declaration()];
+        let candidate = serde_json::json!([{
+            "name": "shell",
+            "description": "run",
+            "parameters": {"type": "object"},
+        }]);
+
+        let updated = validate_updated_tools(&original, &candidate).unwrap();
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].description, "run");
+    }
+
+    #[test]
+    fn validate_updated_tools_rejects_malformed_arrays() {
+        let original = vec![shell_declaration()];
+        for candidate in [
+            // not an array
+            serde_json::json!({"tools": []}),
+            // missing required field
+            serde_json::json!([{"name": "shell", "parameters": {"type": "object"}}]),
+            // parameters is not a JSON object
+            serde_json::json!([{"name": "shell", "description": "run", "parameters": "object"}]),
+            // renamed tool
+            serde_json::json!([{"name": "sh", "description": "run", "parameters": {}}]),
+            // added tool
+            serde_json::json!([
+                {"name": "shell", "description": "run", "parameters": {}},
+                {"name": "extra", "description": "x", "parameters": {}},
+            ]),
+            // dropped tool
+            serde_json::json!([]),
+        ] {
+            assert!(
+                validate_updated_tools(&original, &candidate).is_err(),
+                "should reject {candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_updated_tools_rejects_expanded_declarations() {
+        let original = vec![shell_declaration()];
+
+        // Same tool set, but a description and schema far larger than the
+        // original — the compaction prefix estimate was already fixed from the
+        // originals, so accepting this would under-account the real request.
+        let candidate = serde_json::json!([{
+            "name": "shell",
+            "description": "x".repeat(4096),
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "y".repeat(4096)}},
+            },
+        }]);
+
+        let error = validate_updated_tools(&original, &candidate).unwrap_err();
+        assert!(error.contains("may only compress"), "{error}");
+    }
+
+    #[test]
+    fn validate_updated_tools_allows_unchanged_size() {
+        let original = vec![shell_declaration()];
+        let candidate = serde_json::to_value(&original).unwrap();
+
+        assert!(validate_updated_tools(&original, &candidate).is_ok());
+    }
+
+    #[test]
+    fn validate_updated_tools_rejects_reordered_tools() {
+        let original = vec![
+            shell_declaration(),
+            ToolDeclaration {
+                name: "read_file".to_string(),
+                description: "read".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let candidate = serde_json::json!([
+            {"name": "read_file", "description": "read", "parameters": {"type": "object"}},
+            {"name": "shell", "description": "run", "parameters": {"type": "object"}},
+        ]);
+
+        assert!(validate_updated_tools(&original, &candidate).is_err());
+    }
+
+    #[tokio::test]
+    async fn before_model_input_carries_full_tool_declarations() {
+        let config = HooksConfig {
+            enabled: true,
+            before_model: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; t=json.load(sys.stdin)["llm_request"]["config"]["tools"]; print(json.dumps({"systemMessage": t[0]["name"]+"|"+t[0]["description"]+"|"+t[0]["parameters"]["properties"]["command"]["type"]}))'"#.to_string(),
+                name: Some("inspect".to_string()),
+                matcher: None,
+                timeout: Some(10_000),
+                sequential: None,
+                env: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let sys = HookSystem::from_config(&config);
+
+        let result = sys
+            .fire_before_model("s1", "/tmp", "m", &[], &[shell_declaration()])
+            .await;
+
+        assert_eq!(
+            result.notifications[0].message,
+            "shell|run a shell command|string"
+        );
+        assert!(result.updated_tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn before_model_last_valid_tool_array_wins_over_later_invalid_one() {
+        let config = HooksConfig {
+            enabled: true,
+            before_model: vec![
+                HookDefinition {
+                    command: r#"python3 -c 'print("""{"hookSpecificOutput":{"llm_request":{"config":{"tools":[{"name":"shell","description":"first","parameters":{"type":"object"}}]}}}}""")'"#.to_string(),
+                    name: Some("first".to_string()),
+                    matcher: None,
+                    timeout: Some(10_000),
+                    sequential: None,
+                    env: Default::default(),
+                },
+                HookDefinition {
+                    command: r#"python3 -c 'print("""{"hookSpecificOutput":{"llm_request":{"config":{"tools":[{"name":"renamed","description":"second","parameters":{"type":"object"}}]}}}}""")'"#.to_string(),
+                    name: Some("second".to_string()),
+                    matcher: None,
+                    timeout: Some(10_000),
+                    sequential: None,
+                    env: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let sys = HookSystem::from_config(&config);
+
+        let result = sys
+            .fire_before_model("s1", "/tmp", "m", &[], &[shell_declaration()])
+            .await;
+
+        let updated = result.updated_tools.expect("first hook's array applies");
+        assert_eq!(updated[0].description, "first");
+    }
+
+    #[test]
+    fn hook_output_tool_schemas_survive_redaction() {
+        let output = HookOutput {
+            decision: None,
+            reason: None,
+            system_message: None,
+            hook_specific_output: updated_tools_output(serde_json::json!([{
+                "name": "shell",
+                "description": "pass --token secret-in-description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "api_key": {"type": "string"},
+                        "token": {"type": "string"},
+                    },
+                },
+            }])),
+        };
+
+        let output = HookSystem::redact_hook_output(output);
+        let tools = extract_updated_tools(&output.hook_specific_output).unwrap();
+
+        assert_eq!(
+            tools[0]["parameters"]["properties"]["api_key"]["type"],
+            "string"
+        );
+        assert_eq!(
+            tools[0]["parameters"]["properties"]["token"]["type"],
+            "string"
+        );
+        // String leaves inside the exempt subtree still lose secret shapes.
+        assert_eq!(tools[0]["description"], "pass --token <redacted>");
+    }
+
+    #[test]
+    fn hook_output_outside_tool_schemas_is_still_redacted() {
+        let output = HookOutput {
+            decision: None,
+            reason: None,
+            system_message: None,
+            hook_specific_output: Some(serde_json::json!({
+                "api_key": "leaked-value",
+            })),
+        };
+
+        let output = HookSystem::redact_hook_output(output);
+        let specific = output.hook_specific_output.unwrap();
+
+        assert_eq!(specific["api_key"], "<redacted>");
     }
 
     // ===== Task 3: tool_response 包装 =====
@@ -1436,6 +1877,7 @@ mod tests {
                 matcher: Some("^run_shell_command$".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1477,6 +1919,7 @@ mod tests {
                 matcher: Some("skill".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                env: Default::default(),
             }],
             post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
@@ -1505,5 +1948,346 @@ mod tests {
             result.additional_context.as_deref(),
             Some("/skills/demo/SKILL.md"),
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_timeout_kills_process_group() {
+        use crate::process::test_support::*;
+
+        let _fixture_guard = exclusive_process_tree_test().await;
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let pid_file = dir.path().join("pids");
+        let script = leak_script(&marker, &pid_file);
+
+        let out =
+            HookSystem::run_hook_cmd(&script, &BTreeMap::new(), "{}", Duration::from_millis(300))
+                .await;
+        assert!(
+            out.decision.is_none(),
+            "timed-out hook must fall back to the default output"
+        );
+
+        let pids = read_pids(&pid_file);
+        let _cleanup = PidCleanup(pids.clone());
+        for pid in &pids {
+            assert_process_gone(*pid);
+        }
+        release_marker_probe(&marker);
+        assert!(!marker.exists(), "grandchild survived the hook timeout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_ignoring_stdin_respects_deadline() {
+        // Payload larger than the pipe buffer: the old implementation
+        // blocked in the stdin write before the timeout even started.
+        let payload = "x".repeat(1 << 20);
+        let started = std::time::Instant::now();
+        let out = HookSystem::run_hook_cmd(
+            "sleep 30",
+            &BTreeMap::new(),
+            &payload,
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(out.decision.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stdin write must be bounded by the hook deadline"
+        );
+    }
+
+    // ─── #1617: hook env tests ───────────────────────────────────────
+
+    // Runs a hook that reports `$probe`, `$COSH_RUNTIME` and
+    // `$COSH_NG_VERSION` as seen by the child, joined with `|`.
+    async fn probe_env(probe: &str, env: BTreeMap<String, String>) -> Vec<String> {
+        let config = HooksConfig {
+            enabled: true,
+            session_start: vec![HookDefinition {
+                command: format!(
+                    r#"python3 -c 'import json,os; print(json.dumps({{"systemMessage": "|".join(os.environ.get(name,"<unset>") for name in ["{probe}","COSH_RUNTIME","COSH_NG_VERSION"])}}))'"#
+                ),
+                name: Some("probe".to_string()),
+                timeout: Some(10_000),
+                env,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys.fire_session_start("s1", "/tmp").await;
+        result
+            .notifications
+            .first()
+            .expect("hook system message")
+            .message
+            .split('|')
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn hook_env_overrides_inherited_value_without_touching_the_parent() {
+        // HOME is inherited from the parent; the hook shadows it for its own
+        // child process only.
+        let inherited = std::env::var("HOME").expect("HOME is set in the test environment");
+        assert_ne!(inherited, "from-hook");
+
+        let baseline = probe_env("HOME", BTreeMap::new()).await;
+        assert_eq!(baseline[0], inherited, "child must inherit the parent env");
+
+        let fields = probe_env(
+            "HOME",
+            BTreeMap::from([("HOME".to_string(), "from-hook".to_string())]),
+        )
+        .await;
+
+        assert_eq!(fields[0], "from-hook");
+        // Host-owned attribution reaches the child.
+        assert_eq!(fields[1], "cosh-ng");
+        assert_eq!(fields[2], env!("CARGO_PKG_VERSION"));
+        // The host process itself is never mutated — no std::env::set_var.
+        assert_eq!(std::env::var("HOME").unwrap(), inherited);
+    }
+
+    // Covers precedence only. The host values are a cooperative signal, not a
+    // security boundary — the manifest also owns `command` and can reassign
+    // them inside its own shell — so this proves nothing stronger than that a
+    // declared `env` entry loses to the host's.
+    #[tokio::test]
+    async fn host_attribution_overrides_declared_hook_env() {
+        let fields = probe_env(
+            "COSH_RUNTIME",
+            BTreeMap::from([
+                ("COSH_RUNTIME".to_string(), "copilot-shell".to_string()),
+                ("COSH_NG_VERSION".to_string(), "99.99.99".to_string()),
+            ]),
+        )
+        .await;
+
+        assert_eq!(fields[1], "cosh-ng");
+        assert_eq!(fields[2], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn hook_env_with_invalid_name_is_dropped_and_hook_still_runs() {
+        let fields = probe_env(
+            "HOME",
+            BTreeMap::from([
+                ("HOME".to_string(), "kept".to_string()),
+                ("1INVALID".to_string(), "dropped".to_string()),
+                ("WITH-DASH".to_string(), "dropped".to_string()),
+            ]),
+        )
+        .await;
+
+        assert_eq!(fields[0], "kept");
+    }
+
+    #[test]
+    fn env_name_validation_follows_posix_rules() {
+        for name in ["PATH", "_UNDERSCORE", "A1", "_"] {
+            assert!(crate::config::is_valid_env_name(name), "{name}");
+        }
+        for name in ["", "1LEADING", "WITH-DASH", "WITH SPACE", "a=b", "ä"] {
+            assert!(!crate::config::is_valid_env_name(name), "{name}");
+        }
+    }
+
+    // ─── #1614: updated_tool_response tests ──────────────────────────
+
+    #[test]
+    fn pick_updated_tool_response_snake_case() {
+        let specific = serde_json::json!({
+            "updated_tool_response": "compressed content"
+        });
+        assert_eq!(
+            HookSystem::pick_updated_tool_response(&specific),
+            Some("compressed content")
+        );
+    }
+
+    #[test]
+    fn pick_updated_tool_response_camel_case() {
+        let specific = serde_json::json!({
+            "updatedToolResponse": "compressed content"
+        });
+        assert_eq!(
+            HookSystem::pick_updated_tool_response(&specific),
+            Some("compressed content")
+        );
+    }
+
+    #[test]
+    fn pick_updated_tool_response_absent() {
+        let specific = serde_json::json!({
+            "additionalContext": "some context"
+        });
+        assert_eq!(HookSystem::pick_updated_tool_response(&specific), None);
+    }
+
+    #[test]
+    fn pick_updated_tool_response_empty_string() {
+        let specific = serde_json::json!({
+            "updatedToolResponse": ""
+        });
+        assert_eq!(HookSystem::pick_updated_tool_response(&specific), None);
+    }
+
+    #[test]
+    fn pick_updated_tool_response_non_string() {
+        let specific = serde_json::json!({
+            "updatedToolResponse": 42
+        });
+        assert_eq!(HookSystem::pick_updated_tool_response(&specific), None);
+    }
+
+    #[test]
+    fn pick_updated_tool_response_snake_case_priority() {
+        // When both are present, snake_case wins (cosh-ng convention).
+        let specific = serde_json::json!({
+            "updated_tool_response": "snake value",
+            "updatedToolResponse": "camel value"
+        });
+        assert_eq!(
+            HookSystem::pick_updated_tool_response(&specific),
+            Some("snake value")
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_hook_emits_updated_tool_response() {
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "compressed!", "additionalContext": "env-hint"}}))'"#.to_string(),
+                name: Some("compressor".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+                env: Default::default(),
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original output here",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.updated_tool_response.as_deref(),
+            Some("compressed!"),
+            "Hook should emit updatedToolResponse"
+        );
+        assert_eq!(
+            result.additional_context.as_deref(),
+            Some("env-hint"),
+            "Hook should still emit additionalContext for attribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_last_replacement_wins() {
+        // Two hooks both emit updatedToolResponse; last one in config order wins.
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![
+                HookDefinition {
+                    command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "first"}}))'"#.to_string(),
+                    name: Some("first-hook".to_string()),
+                    matcher: None,
+                    timeout: Some(5000),
+                    sequential: None,
+                    env: Default::default(),
+                },
+                HookDefinition {
+                    command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "second"}}))'"#.to_string(),
+                    name: Some("second-hook".to_string()),
+                    matcher: None,
+                    timeout: Some(5000),
+                    sequential: None,
+                    env: Default::default(),
+                },
+            ],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.updated_tool_response.as_deref(),
+            Some("second"),
+            "Last valid replacement should win in configuration order"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_no_replacement_when_absent() {
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"additionalContext": "just context"}}))'"#.to_string(),
+                name: Some("context-only".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+                env: Default::default(),
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "original output",
+                None,
+            )
+            .await;
+        assert_eq!(
+            result.updated_tool_response, None,
+            "No replacement when hook doesn't emit updatedToolResponse"
+        );
+        assert_eq!(result.additional_context.as_deref(), Some("just context"),);
     }
 }

@@ -24,6 +24,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 # Path to the standalone cosh hook script
 _COSH_HOOK = str(
@@ -34,8 +35,10 @@ _COSH_HOOK = str(
     / "skill_ledger_hook.py"
 )
 
-sys.path.insert(0, str(Path(_COSH_HOOK).parent))
-import skill_ledger_hook  # noqa: E402
+skill_ledger_hook = load_standalone_hook(
+    "cosh_skill_ledger_hook",
+    Path(_COSH_HOOK),
+)
 
 _COSH_MANIFEST = Path(_COSH_HOOK).parents[1] / "cosh-extension.json"
 

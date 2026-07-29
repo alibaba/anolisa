@@ -37,7 +37,7 @@ use crate::interruption::{DetectorConfig, InterruptionDetector, recover_oom_even
 use crate::parser::Parser;
 use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
-use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
+use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore, sibling_db_path};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
 use crate::tokenizer::LlmTokenizer;
 
@@ -463,10 +463,7 @@ impl AgentSight {
         // Initialize interruption store only when interruption detection is enabled.
         let interruption_store: Option<Arc<InterruptionStore>> =
             if config.features.interruption_detection_enabled {
-                let db_path = GenAISqliteStore::default_path()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                    .join("interruption_events.db");
+                let db_path = sibling_db_path("interruption_events.db");
                 match InterruptionStore::new_with_path(&db_path) {
                     Ok(store) => {
                         log::info!("Interruption events store initialized at {db_path:?}");
@@ -514,6 +511,27 @@ impl AgentSight {
         }
         if let Some(ref sqlite_store) = genai_sqlite_store {
             crate::background::start_stale_scanner(Arc::clone(sqlite_store), Arc::clone(&running));
+        }
+
+        // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
+        // Feature-gated (default off); the thread shares `running` as stop flag.
+        if config.features.trajectory_collection_enabled {
+            let collector_config = agentsight_trajectory_collector::CollectorConfig {
+                scan_interval_secs: config.features.trajectory_scan_interval_secs,
+                scan_dirs: config
+                    .features
+                    .trajectory_scan_dirs
+                    .as_ref()
+                    .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
+                db_path: sibling_db_path("trajectories.db"),
+            };
+            let stop = Arc::clone(&running);
+            std::thread::Builder::new()
+                .name("trajectory-collector".to_string())
+                .spawn(move || {
+                    agentsight_trajectory_collector::run_collector_loop(&collector_config, &stop);
+                })
+                .ok();
         }
 
         Ok(AgentSight {
@@ -758,8 +776,17 @@ impl AgentSight {
                 }
             }
 
-            if !output.events.is_empty() {
-                if output.pending_response_id.is_some() {
+            // FFI fallback: when every built LLM event is semantically empty
+            // (the underlying body format could not be parsed into
+            // `AgentsightLLMData`), skip the useless LLM event and fall through
+            // to raw-HTTP (`AgentsightHttpsData`) reporting instead. Only in FFI
+            // mode; requires *all* events to be empty LLM calls so we never drop
+            // a meaningful event.
+            let ffi_https_fallback =
+                self.ffi_sender.is_some() && events_are_empty_llm(&output.events);
+
+            if !output.events.is_empty() && !ffi_https_fallback {
+                if let Some(response_id) = output.pending_response_id {
                     // Session_id not yet resolved — queue for deferred resolution.
                     // Write a pending row NOW so crash detection can see this call
                     // during the deferral window (up to PENDING_SESSION_TIMEOUT).
@@ -776,12 +803,12 @@ impl AgentSight {
                     } else {
                         log::warn!(
                             "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
-                            output.pending_response_id.as_deref().unwrap_or("unknown")
+                            response_id
                         );
                     }
                     self.pending_genai.push(PendingGenAI {
                         events: output.events,
-                        response_id: output.pending_response_id.unwrap(),
+                        response_id,
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });
@@ -833,10 +860,12 @@ impl AgentSight {
                     self.detect_and_store_interruptions(&output.events);
                 }
             } else if let Some(ref sender) = self.ffi_sender {
-                // No LLM event produced — send plain HTTP data via FFI channel
+                // Either no LLM event was produced, or all LLM events were
+                // semantically empty (fallback). The FFI sender suppresses
+                // raw HTTPS before cloning or enqueueing when it is disabled.
                 for ar in &analysis_results {
                     if let crate::analyzer::AnalysisResult::Http(record) = ar {
-                        sender.send(FfiEvent::Https(record.clone()));
+                        sender.send_https(record);
                     }
                 }
             }
@@ -1034,6 +1063,27 @@ impl AgentSight {
     /// column on the corresponding `genai_events` row when SQLite is in use.
     fn detect_and_store_interruptions(&self, events: &[GenAISemanticEvent]) {
         if let Some(ref istore) = self.interruption_store {
+            // Build a call_id → (session_id, conversation_id) lookup from
+            // LLMCall events in this batch, so ToolUse events can inherit
+            // the conversation context of their parent call.
+            let call_context: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+                events
+                    .iter()
+                    .filter_map(|e| {
+                        if let GenAISemanticEvent::LLMCall(c) = e {
+                            Some((
+                                c.call_id.clone(),
+                                (
+                                    c.metadata.get("session_id").cloned(),
+                                    c.metadata.get("conversation_id").cloned(),
+                                ),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
             for event in events {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
                     let interruptions = self.interruption_detector.detect(llm_call);
@@ -1177,6 +1227,47 @@ impl AgentSight {
                                 }
                             }
                         }
+                    }
+                } else if let GenAISemanticEvent::ToolUse(tool) = event {
+                    // ── Tool failure detection ──────────────────────────────
+                    let (session_id, conversation_id) = tool
+                        .parent_llm_call_id
+                        .as_ref()
+                        .and_then(|cid| call_context.get(cid))
+                        .cloned()
+                        .unwrap_or((None, None));
+                    let interruptions = self.interruption_detector.detect_tool_use(
+                        tool,
+                        session_id,
+                        conversation_id,
+                    );
+                    for ie in &interruptions {
+                        // Deduplicate against unresolved interruptions already recorded
+                        // for this conversation, mirroring the LLMCall path above: a
+                        // tool that keeps failing the same way in a loop should not
+                        // flood the store with one row per attempt.
+                        if let Some(ref cid) = ie.conversation_id {
+                            let error_msg = tool.error.as_deref();
+                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
+                            {
+                                log::debug!(
+                                    "Skipping duplicate {:?} for conversation_id={} tool={}",
+                                    ie.interruption_type,
+                                    cid,
+                                    tool.tool_name
+                                );
+                                continue;
+                            }
+                        }
+                        if let Err(e) = istore.insert(ie) {
+                            log::warn!("Failed to store tool_failure interruption: {e}");
+                        }
+                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
+                        log::warn!(
+                            "ToolFailure detected: tool={} error={:?}",
+                            tool.tool_name,
+                            tool.error
+                        );
                     }
                 }
             }
@@ -1925,6 +2016,20 @@ impl Drop for AgentSight {
 ///
 /// Extracted as a free function so the persistence policy is unit-testable
 /// without constructing a full `AgentSight` instance.
+/// Whether FFI reporting should fall back from LLM to raw-HTTP.
+///
+/// True when there is at least one event and *every* event is a semantically
+/// empty `LLMCall` (no parsed request/response messages). Any non-`LLMCall`
+/// event or any non-empty call disables the fallback so a meaningful event is
+/// never dropped.
+fn events_are_empty_llm(events: &[GenAISemanticEvent]) -> bool {
+    !events.is_empty()
+        && events.iter().all(|e| match e {
+            GenAISemanticEvent::LLMCall(call) => call.is_semantically_empty(),
+            _ => false,
+        })
+}
+
 fn complete_deferred_genai(
     events: &[GenAISemanticEvent],
     sqlite_store: Option<&Arc<GenAISqliteStore>>,
@@ -2265,5 +2370,45 @@ mod tests {
         let bytes = pending.estimated_bytes();
         // 1 event × 512 bytes estimate
         assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
+    }
+
+    // ── Tests for the AgentsightHttpsData fallback path ──
+
+    #[test]
+    fn test_events_are_empty_llm() {
+        use crate::genai::semantic::{InputMessage, MessagePart};
+
+        // No events → no fallback.
+        assert!(!events_are_empty_llm(&[]));
+
+        // A single semantically empty LLM call → fallback.
+        let empty = GenAISemanticEvent::LLMCall(make_test_llm_call("c1"));
+        assert!(events_are_empty_llm(std::slice::from_ref(&empty)));
+
+        // A call with parsed request messages → no fallback.
+        let mut call = make_test_llm_call("c2");
+        call.request.messages.push(InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "hi".to_string(),
+            }],
+            name: None,
+        });
+        assert!(!events_are_empty_llm(&[GenAISemanticEvent::LLMCall(call)]));
+
+        // A non-LLM event alongside an empty call disables the fallback.
+        let tool = GenAISemanticEvent::ToolUse(crate::genai::semantic::ToolUse {
+            tool_use_id: "t1".to_string(),
+            timestamp_ns: 0,
+            tool_name: "grep".to_string(),
+            arguments: serde_json::Value::Null,
+            result: None,
+            duration_ns: None,
+            success: true,
+            error: None,
+            parent_llm_call_id: None,
+            pid: 1,
+        });
+        assert!(!events_are_empty_llm(&[empty, tool]));
     }
 }

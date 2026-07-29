@@ -26,44 +26,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::telemetry::common::{ProductType, detect_product_type};
+
 /// Current register.json schema version
 pub const REGISTER_SCHEMA_VERSION: &str = "2";
 
 /// Maximum number of history entries to retain in register.json
 const MAX_HISTORY_ENTRIES: usize = 100;
-
-// ── Product type ─────────────────────────────────────────────────────
-
-/// Product type, read from the `PRODUCT_TYPE` field in `/etc/anolisa-release`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProductType {
-    /// Alibaba Cloud ECS
-    Ecs,
-    /// Simple Application Server (SWAS)
-    Swas,
-    /// Elastic Desktop Service (EDS)
-    Eds,
-    /// Unknown / self-hosted environment
-    Unknown,
-}
-
-impl ProductType {
-    pub fn display_name(&self) -> &str {
-        match self {
-            ProductType::Ecs => "ECS",
-            ProductType::Swas => "Simple Application Server",
-            ProductType::Eds => "Elastic Desktop Service",
-            ProductType::Unknown => "Unknown",
-        }
-    }
-}
-
-impl std::fmt::Display for ProductType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.display_name())
-    }
-}
 
 // ── History tracking (schema v2) ────────────────────────────────────
 
@@ -107,6 +76,12 @@ pub struct RegisterRecord {
     /// migration from schema v1. Omitted when missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RegisterSource>,
+    /// Opaque telemetry link id (UUIDv4). Orthogonal to the register state
+    /// machine: managed only by `telemetry link` / `unlink`, defaults to
+    /// `None`, and omitted from serialization when absent so existing
+    /// register.json files migrate transparently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
 }
 
 impl RegisterRecord {
@@ -148,6 +123,7 @@ impl From<RegisterRecordV1> for RegisterRecord {
                     state: v1.state,
                     history: Vec::new(),
                     source: v1.source,
+                    link_id: None,
                 };
             }
         };
@@ -161,6 +137,7 @@ impl From<RegisterRecordV1> for RegisterRecord {
             state: v1.state,
             history: vec![entry],
             source: v1.source,
+            link_id: None,
         }
     }
 }
@@ -214,21 +191,6 @@ impl Default for RegistrationManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ── Product type detection ─────────────────────────────────────────
-
-/// Parse the non-empty `PRODUCT_TYPE` value from `/etc/anolisa-release` content.
-pub(crate) fn find_product_type_in_release(content: &str) -> Option<&str> {
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix("PRODUCT_TYPE=") {
-            let pt = val.trim();
-            if !pt.is_empty() {
-                return Some(pt);
-            }
-        }
-    }
-    None
 }
 
 impl RegistrationManager {
@@ -408,6 +370,7 @@ impl RegistrationManager {
             state: RegisterState::Init,
             history: Vec::new(),
             source: None,
+            link_id: None,
         });
 
         record.state = RegisterState::Registered;
@@ -444,6 +407,7 @@ impl RegistrationManager {
             state: RegisterState::Init,
             history: Vec::new(),
             source: None,
+            link_id: None,
         });
 
         record.state = RegisterState::Unregistered;
@@ -455,6 +419,54 @@ impl RegistrationManager {
 
         self.atomic_write(&record)?;
         Ok(())
+    }
+
+    // ── Telemetry link id (orthogonal to state machine) ──────────────
+
+    /// Set the telemetry `link_id` without touching the register `state`.
+    ///
+    /// Telemetry linking and registration are orthogonal: linking only
+    /// records the opaque id so the uploader can route named traffic. If
+    /// register.json does not exist yet it is created in `Init` state with
+    /// no history entry. Uses the same lock + atomic write as the state
+    /// transitions to stay TOCTOU-safe.
+    pub fn do_link(&self, link_id: &str) -> Result<(), SubscriptionError> {
+        let _lock = self.acquire_lock()?;
+        let (_current, existing) = self.read_state_and_record();
+        let mut record = existing.unwrap_or_else(|| RegisterRecord {
+            schema_version: REGISTER_SCHEMA_VERSION.to_string(),
+            state: RegisterState::Init,
+            history: Vec::new(),
+            source: None,
+            link_id: None,
+        });
+        record.link_id = Some(link_id.to_string());
+        self.atomic_write(&record)?;
+        Ok(())
+    }
+
+    /// Clear the telemetry `link_id` without touching the register `state`.
+    ///
+    /// No-op (still `Ok`) when register.json is missing or already unlinked.
+    pub fn do_unlink(&self) -> Result<(), SubscriptionError> {
+        let _lock = self.acquire_lock()?;
+        let (_current, existing) = self.read_state_and_record();
+        let mut record = match existing {
+            Some(rec) => rec,
+            None => return Ok(()),
+        };
+        if record.link_id.is_none() {
+            return Ok(());
+        }
+        record.link_id = None;
+        self.atomic_write(&record)?;
+        Ok(())
+    }
+
+    /// Read the telemetry `link_id`, if any (used by the uploader to route
+    /// anonymous vs named traffic). Returns `None` on any read error.
+    pub fn read_link_id(&self) -> Option<String> {
+        self.read_record().and_then(|rec| rec.link_id)
     }
 
     // ── Atomic write ────────────────────────────────────────────────────
@@ -509,17 +521,7 @@ impl RegistrationManager {
 
     /// Read `PRODUCT_TYPE` from `/etc/anolisa-release`, falling back to `Unknown`.
     pub fn detect_product_type(&self) -> ProductType {
-        fs::read_to_string(&self.release_path)
-            .ok()
-            .and_then(|content| {
-                find_product_type_in_release(&content).map(|pt| match pt {
-                    "ecs" => ProductType::Ecs,
-                    "swas" => ProductType::Swas,
-                    "eds" => ProductType::Eds,
-                    _ => ProductType::Unknown,
-                })
-            })
-            .unwrap_or(ProductType::Unknown)
+        detect_product_type(&self.release_path)
     }
 
     /// Detect whether sysom services are active (sysak_meta active).
@@ -583,6 +585,14 @@ pub fn current_operator() -> String {
         .or_else(|_| std::env::var("USER"))
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Generate a fresh opaque telemetry link id (UUIDv4).
+///
+/// Lives in core so the CLI can obtain a link id without taking a direct
+/// `uuid` dependency.
+pub fn generate_link_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 // ── Error types ───────────────────────────────────────────────────────
@@ -808,5 +818,72 @@ mod tests {
         assert_eq!(rec.schema_version, "2");
         assert_eq!(rec.state, RegisterState::Init);
         assert!(rec.history.is_empty());
+    }
+
+    #[test]
+    fn test_link_creates_record_without_touching_state() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+
+        // No register.json yet: link creates it in Init state.
+        m.do_link("abc-123").unwrap();
+        assert_eq!(m.read_state(), ConsentState::InitFresh);
+        assert_eq!(m.read_link_id(), Some("abc-123".to_string()));
+        let rec = m.read_record().unwrap();
+        assert_eq!(rec.state, RegisterState::Init);
+        assert!(rec.history.is_empty());
+    }
+
+    #[test]
+    fn test_link_preserves_registered_state() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        m.do_register("admin", RegisterSource::Cli).unwrap();
+
+        m.do_link("link-xyz").unwrap();
+        assert_eq!(m.read_state(), ConsentState::Registered);
+        assert_eq!(m.read_link_id(), Some("link-xyz".to_string()));
+        // link must not add history entries.
+        assert_eq!(m.read_record().unwrap().history.len(), 1);
+    }
+
+    #[test]
+    fn test_unlink_clears_link_id_only() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        m.do_register("admin", RegisterSource::Cli).unwrap();
+        m.do_link("link-xyz").unwrap();
+
+        m.do_unlink().unwrap();
+        assert_eq!(m.read_link_id(), None);
+        assert_eq!(m.read_state(), ConsentState::Registered);
+    }
+
+    #[test]
+    fn test_unlink_missing_file_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        // No register.json: unlink is a no-op success.
+        m.do_unlink().unwrap();
+        assert_eq!(m.read_link_id(), None);
+        assert!(!m.register_path.exists());
+    }
+
+    #[test]
+    fn test_link_id_absent_by_default() {
+        let dir = TempDir::new().unwrap();
+        let m = mgr(&dir);
+        m.do_register("admin", RegisterSource::Cli).unwrap();
+        assert_eq!(m.read_link_id(), None);
+        // Serialized form omits link_id when None.
+        let raw = fs::read_to_string(&m.register_path).unwrap();
+        assert!(!raw.contains("link_id"));
+    }
+
+    #[test]
+    fn test_generate_link_id_is_uuid_v4() {
+        let id = generate_link_id();
+        let parsed = uuid::Uuid::parse_str(&id).unwrap();
+        assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
     }
 }

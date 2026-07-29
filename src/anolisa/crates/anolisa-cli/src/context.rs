@@ -12,8 +12,11 @@
 
 use std::path::PathBuf;
 
+use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::privilege;
 use clap::ValueEnum;
+
+use crate::packaged::PackagedDataProbe;
 
 /// Where ANOLISA installs files: user-mode (`file-hierarchy(7)` under `$HOME`)
 /// or system-mode (FHS under `/usr/local`, redirectable via `--prefix`).
@@ -49,6 +52,25 @@ pub struct CliContext {
     pub verbose: bool,
     pub quiet: bool,
     pub no_color: bool,
+    layouts: ResolvedLayouts,
+    packaged_data_probe: PackagedDataProbe,
+}
+
+/// Filesystem layouts resolved once at the process boundary.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedLayouts {
+    writable: FsLayout,
+    visible_system: FsLayout,
+}
+
+impl ResolvedLayouts {
+    /// Build an explicit layout snapshot.
+    pub(crate) fn new(writable: FsLayout, visible_system: FsLayout) -> Self {
+        Self {
+            writable,
+            visible_system,
+        }
+    }
 }
 
 /// Resolve the effective install mode from the explicit CLI value and a
@@ -74,6 +96,14 @@ impl CliContext {
     pub fn from_cli(cli: &crate::commands::Cli) -> Self {
         let effective_uid = privilege::effective_uid();
         let effective_mode = resolve_install_mode(cli.install_mode, effective_uid);
+        let visible_system = FsLayout::system(cli.prefix.clone());
+        let writable = match effective_mode {
+            InstallMode::System => visible_system.clone(),
+            InstallMode::User => {
+                let home = anolisa_env::EnvService::detect().home;
+                FsLayout::user(home)
+            }
+        };
 
         Self {
             install_mode: effective_mode,
@@ -83,7 +113,58 @@ impl CliContext {
             verbose: cli.verbose,
             quiet: cli.quiet,
             no_color: cli.no_color,
+            layouts: ResolvedLayouts::new(writable, visible_system),
+            packaged_data_probe: PackagedDataProbe::detect(),
         }
+    }
+
+    /// Build a context around already-resolved process inputs.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_resolved(
+        install_mode: InstallMode,
+        prefix: Option<PathBuf>,
+        json: bool,
+        dry_run: bool,
+        verbose: bool,
+        quiet: bool,
+        no_color: bool,
+        layouts: ResolvedLayouts,
+        packaged_data_probe: PackagedDataProbe,
+    ) -> Self {
+        Self {
+            install_mode,
+            prefix,
+            json,
+            dry_run,
+            verbose,
+            quiet,
+            no_color,
+            layouts,
+            packaged_data_probe,
+        }
+    }
+
+    /// Override packaged-data discovery for an isolated test context.
+    #[cfg(test)]
+    pub(crate) fn with_packaged_data_root(mut self, root: PathBuf) -> Self {
+        self.packaged_data_probe = PackagedDataProbe::from_inputs(Some(root), None);
+        self
+    }
+
+    /// Current invocation's writable filesystem layout.
+    pub(crate) fn layout(&self) -> &FsLayout {
+        &self.layouts.writable
+    }
+
+    /// System layout visible to a user-mode invocation.
+    pub(crate) fn visible_system_layout(&self) -> &FsLayout {
+        &self.layouts.visible_system
+    }
+
+    /// Packaged-data discovery inputs captured at process startup.
+    pub(crate) fn packaged_data_probe(&self) -> &PackagedDataProbe {
+        &self.packaged_data_probe
     }
 }
 

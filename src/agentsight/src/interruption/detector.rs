@@ -3,9 +3,13 @@
 //! # Online path (called immediately after each LLMCall is built)
 //! `InterruptionDetector::detect(call)` checks a single call against all
 //! single-call rules and returns any detected interruption events.
+//!
+//! # Tool-use path
+//! `InterruptionDetector::detect_tool_use(tool)` inspects a `ToolUse` event
+//! and returns a `tool_failure` interruption if the tool execution failed.
 
 use super::types::{InterruptionEvent, InterruptionType};
-use crate::genai::semantic::LLMCall;
+use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 
 /// Whether the finish reason indicates a normal (non-truncated) end of generation.
 fn is_normal_finish(reason: Option<&str>) -> bool {
@@ -99,12 +103,120 @@ fn summarize_error_value(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn is_unauthorized_error_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("permission denied")
+        || lower.contains("permission_denied")
+        || lower.contains("forbidden")
+        || lower.contains("sandbox")
+        || lower.contains("not allowed")
+        || lower.contains("access denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("eperm")
+        || lower.contains("eacces")
+}
+
+/// Checks for structured/specific tool-failure signals in free-form text.
+///
+/// Deliberately excludes generic words like "exception" or "failed" that
+/// commonly appear in normal, non-error tool output (e.g. "handled the
+/// exception gracefully"), which would otherwise cause false positives.
+fn text_has_tool_error_signal(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("traceback")
+        || lower.contains("exit code")
+        || lower.contains("no such file or directory")
+        || lower.contains("permission denied")
+        || lower.contains("command not found")
+        || lower.contains("eacces")
+        || lower.contains("eperm")
+        || lower.contains("\"status\": \"error\"")
+        || lower.contains("\"status\":") && lower.contains("\"error\"")
+}
+
+fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if let Some(error) = tool_response_failure_text(&parsed) {
+                    return Some(error);
+                }
+            }
+            if text_has_tool_error_signal(trimmed) {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(tool_response_failure_text),
+        serde_json::Value::Object(map) => {
+            let explicit_error = map
+                .get("is_error")
+                .or_else(|| map.get("isError"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+                || map
+                    .get("success")
+                    .and_then(|value| value.as_bool())
+                    .is_some_and(|success| !success)
+                || map
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+
+            let nested_error = ["error", "message", "content", "response", "details"]
+                .iter()
+                .filter_map(|key| map.get(*key))
+                .find_map(tool_response_failure_text);
+
+            if let Some(error) = nested_error {
+                return Some(error);
+            }
+
+            if explicit_error {
+                return Some(value.to_string());
+            }
+
+            map.values().find_map(tool_response_failure_text)
+        }
+        _ => None,
+    }
+}
+
+fn traced_tool_failure(call: &LLMCall) -> Option<(&'static str, Option<String>, String)> {
+    let request_parts = call
+        .request
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter());
+    let response_parts = call
+        .response
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter());
+
+    request_parts.chain(response_parts).find_map(|part| {
+        if let MessagePart::ToolCallResponse { id, response } = part {
+            tool_response_failure_text(response)
+                .map(|error| ("tool_call_response", id.clone(), error))
+        } else {
+            None
+        }
+    })
+}
+
 /// Configuration for the interruption detector
 pub struct DetectorConfig {
     /// Ratio of output_tokens / max_tokens that triggers token_limit (default: 0.95)
     pub token_limit_ratio: f64,
     /// Minimum call duration to consider sse_truncated (avoid fast-fail false positives)
     pub sse_min_duration_ns: u64,
+    /// Call duration threshold that triggers slow_response (default: 120 seconds)
+    pub slow_response_ns_threshold: u64,
 }
 
 impl Default for DetectorConfig {
@@ -112,6 +224,7 @@ impl Default for DetectorConfig {
         DetectorConfig {
             token_limit_ratio: 0.95,
             sse_min_duration_ns: 1_000_000_000, // 1 second
+            slow_response_ns_threshold: 120_000_000_000, // 120 seconds
         }
     }
 }
@@ -155,11 +268,15 @@ impl InterruptionDetector {
     ///   3. NetworkTimeout  — 408/504
     ///   4. ServiceUnavailable — 502/503
     ///   5. ContextOverflow — keywords in error body
+    ///   5.5. ResourceExhaustion — quota/billing keywords
     ///   6. SafetyFilter    — finish_reason == "content_filter"
+    ///   6.5. StateMachineError — protocol/state keywords
     ///   7. LlmError        — generic HTTP >= 400 fallback
     ///   8. SseTruncated    — SSE stream ended prematurely
     ///   9. TokenLimit      — finish_reason == "length" + ratio
     ///  10. ContextOverflow via finish_reason heuristic
+    ///  11. EmptyResponse   — HTTP 200 but no output messages
+    ///  12. SlowResponse    — successful but duration > threshold
     pub fn detect(&self, call: &LLMCall) -> Vec<InterruptionEvent> {
         if !self.enabled {
             return Vec::new();
@@ -342,6 +459,40 @@ impl InterruptionDetector {
             return events; // context overflow supersedes all other rules
         }
 
+        // ── 5.5 Resource exhaustion (quota / billing / spending limits) ───
+        // Distinct from per-minute rate limiting (Rule 2): these are harder
+        // limits that typically require user action (upgrade plan, add credits).
+        let is_resource_exhaustion = status_code == 402
+            || combined_error.contains("quota")
+            || combined_error.contains("billing")
+            || combined_error.contains("insufficient")
+            || combined_error.contains("usage_limit")
+            || combined_error.contains("daily limit")
+            || combined_error.contains("monthly limit")
+            || combined_error.contains("spending limit")
+            || combined_error.contains("credit")
+            || combined_error.contains("exhausted")
+            || combined_error.contains("allowance");
+        if is_resource_exhaustion {
+            let detail = serde_json::json!({
+                "model": call.model,
+                "status_code": status_code,
+                "error": effective_error,
+            });
+            events.push(InterruptionEvent::new(
+                InterruptionType::ResourceExhaustion,
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
+                call.end_timestamp_ns as i64,
+                Some(detail),
+            ));
+            return events;
+        }
+
         // ── 6. SafetyFilter (finish_reason == "content_filter") ───────────────
         // 必须在 LlmError 之前检查：部分厂商对 content_filter 返回 200 + finish_reason
         let finish_reason = call
@@ -357,6 +508,36 @@ impl InterruptionDetector {
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::SafetyFilter,
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
+                call.end_timestamp_ns as i64,
+                Some(detail),
+            ));
+            return events;
+        }
+
+        // ── 6.5 State machine / protocol error ──────────────────────────────
+        // Agent received a response that violates expected protocol state,
+        // e.g. malformed response structure or invalid state transition.
+        let is_state_error = combined_error.contains("invalid state")
+            || combined_error.contains("protocol error")
+            || combined_error.contains("malformed")
+            || combined_error.contains("unexpected response")
+            || combined_error.contains("invalid transition")
+            || combined_error.contains("parse error")
+            || combined_error.contains("deserialization");
+        if is_state_error {
+            let detail = serde_json::json!({
+                "model": call.model,
+                "status_code": status_code,
+                "error": effective_error,
+            });
+            events.push(InterruptionEvent::new(
+                InterruptionType::StateMachineError,
                 session_id.clone(),
                 trace_id.clone(),
                 conversation_id.clone(),
@@ -478,7 +659,138 @@ impl InterruptionDetector {
             }
         }
 
+        // ── 11. Tool failure from traced tool_result/tool_call_response ─────────
+        // Some agents include actual tool execution results in the next LLMCall
+        // request history.  Detect failed tool results directly from that trace
+        // data even when no standalone ToolUse event is emitted.
+        if events.is_empty() {
+            if let Some((source, tool_use_id, error)) = traced_tool_failure(call) {
+                let itype = if is_unauthorized_error_text(&error) {
+                    InterruptionType::UnauthorizedAction
+                } else {
+                    InterruptionType::ToolFailure
+                };
+                let detail = serde_json::json!({
+                    "model": call.model,
+                    "source": source,
+                    "tool_use_id": tool_use_id,
+                    "error": error,
+                });
+                events.push(InterruptionEvent::new(
+                    itype,
+                    session_id.clone(),
+                    trace_id.clone(),
+                    conversation_id.clone(),
+                    call_id.clone(),
+                    pid,
+                    agent_name.clone(),
+                    call.end_timestamp_ns as i64,
+                    Some(detail),
+                ));
+            }
+        }
+
+        // ── 12. Slow response (successful call but duration exceeds threshold) ─
+        // Catches cases where the LLM eventually succeeded but took unusually
+        // long, degrading user experience.  This intentionally runs before
+        // EmptyResponse so long-running calls are reported as latency issues.
+        if events.is_empty()
+            && status_code < 400
+            && call.error.is_none()
+            && stream_error.is_none()
+            && call.duration_ns >= self.config.slow_response_ns_threshold
+        {
+            let detail = serde_json::json!({
+                "model": call.model,
+                "duration_ms": call.duration_ns / 1_000_000,
+                "threshold_ms": self.config.slow_response_ns_threshold / 1_000_000,
+            });
+            events.push(InterruptionEvent::new(
+                InterruptionType::SlowResponse,
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
+                call.end_timestamp_ns as i64,
+                Some(detail),
+            ));
+        }
+
+        // ── 13. Empty response (200 OK but no output messages and no error) ─────
+        // Catches cases where the LLM returned an empty body or zero messages
+        // without any error signal — the call “succeeded” but produced nothing useful.
+        if events.is_empty()
+            && status_code < 400
+            && call.error.is_none()
+            && stream_error.is_none()
+            && call.response.messages.is_empty()
+        {
+            let detail = serde_json::json!({
+                "model": call.model,
+                "duration_ms": call.duration_ns / 1_000_000,
+                "note": "HTTP 200 but no output messages",
+            });
+            events.push(InterruptionEvent::new(
+                InterruptionType::EmptyResponse,
+                session_id.clone(),
+                trace_id.clone(),
+                conversation_id.clone(),
+                call_id.clone(),
+                pid,
+                agent_name.clone(),
+                call.end_timestamp_ns as i64,
+                Some(detail),
+            ));
+        }
+
         events
+    }
+
+    /// Inspect a `ToolUse` event and return a `tool_failure` or
+    /// `unauthorized_action` interruption if the tool execution failed.
+    ///
+    /// When the failure error message contains permission-related keywords
+    /// (permission denied, sandbox, forbidden, etc.), the event is classified
+    /// as `UnauthorizedAction`; otherwise it falls back to `ToolFailure`.
+    pub fn detect_tool_use(
+        &self,
+        tool: &ToolUse,
+        session_id: Option<String>,
+        conversation_id: Option<String>,
+    ) -> Vec<InterruptionEvent> {
+        if !self.enabled || tool.success {
+            return Vec::new();
+        }
+
+        // Classify permission-related tool failures as UnauthorizedAction
+        let error_lower = tool.error.as_deref().unwrap_or("").to_ascii_lowercase();
+        let is_unauthorized = is_unauthorized_error_text(&error_lower);
+
+        let itype = if is_unauthorized {
+            InterruptionType::UnauthorizedAction
+        } else {
+            InterruptionType::ToolFailure
+        };
+
+        let detail = serde_json::json!({
+            "tool_name": tool.tool_name,
+            "tool_use_id": tool.tool_use_id,
+            "error": tool.error,
+            "duration_ms": tool.duration_ns.map(|d| d / 1_000_000),
+        });
+        vec![InterruptionEvent::new(
+            itype,
+            session_id,
+            None,
+            conversation_id,
+            None,
+            Some(tool.pid),
+            None,
+            tool.timestamp_ns as i64,
+            Some(detail),
+        )]
     }
 }
 
@@ -527,7 +839,15 @@ mod tests {
     #[test]
     fn test_no_interruption_for_normal_call() {
         let detector = InterruptionDetector::default();
-        let call = make_base_call();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "Hello".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
         let events = detector.detect(&call);
         assert!(events.is_empty());
     }
@@ -618,6 +938,13 @@ mod tests {
         call.metadata
             .insert("is_sse".to_string(), "true".to_string());
         call.duration_ns = 500_000_000; // < 1 second min
+        // Add messages to prevent EmptyResponse from firing
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
         let events = detector.detect(&call);
         assert!(events.is_empty());
     }
@@ -737,6 +1064,7 @@ mod tests {
         let config = DetectorConfig {
             token_limit_ratio: 0.8,
             sse_min_duration_ns: 500_000_000,
+            slow_response_ns_threshold: 120_000_000_000,
         };
         let detector = InterruptionDetector::new(config);
         let mut call = make_base_call();
@@ -852,6 +1180,12 @@ mod tests {
             r#"{"content":"Run journalctl -u app | grep -i \"timeout\" to inspect timeout logs."}"#
                 .to_string(),
         );
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
 
         let events = detector.detect(&call);
 
@@ -866,6 +1200,12 @@ mod tests {
             r#"{"content":"Use rejectUnauthorized:false only for local TLS smoke tests."}"#
                 .to_string(),
         );
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
 
         let events = detector.detect(&call);
 
@@ -880,6 +1220,12 @@ mod tests {
             r#"{"content":"Document rate limit and too many requests troubleshooting steps."}"#
                 .to_string(),
         );
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
 
         let events = detector.detect(&call);
 
@@ -894,6 +1240,12 @@ mod tests {
             r#"{"content":"Explain service_unavailable and overloaded model symptoms."}"#
                 .to_string(),
         );
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
 
         let events = detector.detect(&call);
 
@@ -908,6 +1260,12 @@ mod tests {
             r#"{"content":"Compare context window, input is too long, and prompt is too long errors."}"#
                 .to_string(),
         );
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
 
         let events = detector.detect(&call);
 
@@ -1199,5 +1557,389 @@ mod tests {
     fn test_disabled_detector_is_disabled() {
         let detector = InterruptionDetector::disabled();
         assert!(!detector.enabled);
+    }
+
+    // ── Rule 11: traced tool_result/tool_call_response ─────────────────────────
+
+    #[test]
+    fn test_detect_tool_failure_from_traced_tool_result() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-read-missing".to_string()),
+                response: serde_json::json!({
+                    "status": "error",
+                    "tool": "read",
+                    "error": "ENOENT: no such file or directory, access '/tmp/missing'"
+                }),
+            }],
+            name: None,
+        }];
+
+        let events = detector.detect(&call);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        let detail: serde_json::Value =
+            serde_json::from_str(events[0].detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["tool_use_id"], "toolu-read-missing");
+        assert_eq!(detail["source"], "tool_call_response");
+    }
+
+    #[test]
+    fn test_detect_unauthorized_action_from_traced_tool_result() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-denied".to_string()),
+                response: serde_json::json!({
+                    "type": "tool_result",
+                    "is_error": true,
+                    "content": "Permission denied: cannot write to /etc"
+                }),
+            }],
+            name: None,
+        }];
+
+        let events = detector.detect(&call);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::UnauthorizedAction
+        );
+    }
+
+    // ── Rule 11: EmptyResponse ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_empty_response() {
+        // HTTP 200, no messages, no error → EmptyResponse
+        let detector = InterruptionDetector::default();
+        let call = make_base_call();
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::EmptyResponse);
+    }
+
+    #[test]
+    fn test_no_empty_response_when_messages_present() {
+        // HTTP 200 with output messages → no EmptyResponse
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "ok".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_no_empty_response_when_error_present() {
+        // HTTP 200 but with error field → LlmError, not EmptyResponse
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.error = Some("some_error".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
+    }
+
+    #[test]
+    fn test_no_empty_response_when_http_error() {
+        // HTTP >= 400, no messages → LlmError, not EmptyResponse
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("status_code".to_string(), "500".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
+    }
+
+    // ── detect_tool_use ────────────────────────────────────────────────────────
+
+    fn make_base_tool_use() -> ToolUse {
+        ToolUse {
+            tool_use_id: "tu-001".to_string(),
+            timestamp_ns: 1_000_000_000,
+            tool_name: "bash".to_string(),
+            arguments: serde_json::json!({"cmd": "ls"}),
+            result: None,
+            duration_ns: Some(500_000_000),
+            success: true,
+            error: None,
+            parent_llm_call_id: Some("call-001".to_string()),
+            pid: 1234,
+        }
+    }
+
+    #[test]
+    fn test_detect_tool_use_failure() {
+        let detector = InterruptionDetector::default();
+        let mut tool = make_base_tool_use();
+        tool.success = false;
+        tool.error = Some("command exited with code 1".to_string());
+
+        let events = detector.detect_tool_use(
+            &tool,
+            Some("sess-1".to_string()),
+            Some("conv-1".to_string()),
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        assert_eq!(events[0].session_id, Some("sess-1".to_string()));
+        assert_eq!(events[0].conversation_id, Some("conv-1".to_string()));
+        assert_eq!(events[0].pid, Some(1234));
+        // Verify detail contains tool info
+        let detail: serde_json::Value =
+            serde_json::from_str(events[0].detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["tool_name"], "bash");
+        assert_eq!(detail["error"], "command exited with code 1");
+    }
+
+    #[test]
+    fn test_detect_tool_use_success_no_event() {
+        let detector = InterruptionDetector::default();
+        let tool = make_base_tool_use();
+        let events = detector.detect_tool_use(&tool, None, None);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_detect_tool_use_disabled_detector() {
+        let detector = InterruptionDetector::disabled();
+        let mut tool = make_base_tool_use();
+        tool.success = false;
+        tool.error = Some("error".to_string());
+        let events = detector.detect_tool_use(&tool, None, None);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_detect_tool_use_failure_no_error_message() {
+        // Tool failed but no error message — still produces event
+        let detector = InterruptionDetector::default();
+        let mut tool = make_base_tool_use();
+        tool.success = false;
+        tool.error = None;
+
+        let events = detector.detect_tool_use(&tool, None, Some("conv-2".to_string()));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+    }
+
+    // ── Rule 5.5: ResourceExhaustion ─────────────────────────────────────────
+
+    #[test]
+    fn test_detect_resource_exhaustion_quota() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.error = Some("quota exceeded for this month".to_string());
+        call.metadata
+            .insert("status_code".to_string(), "402".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ResourceExhaustion
+        );
+    }
+
+    #[test]
+    fn test_detect_resource_exhaustion_billing() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.error = Some("billing limit reached".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ResourceExhaustion
+        );
+    }
+
+    #[test]
+    fn test_detect_resource_exhaustion_400() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("status_code".to_string(), "400".to_string());
+        call.response.raw_body = Some("insufficient credits to complete this request".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ResourceExhaustion
+        );
+    }
+
+    // ── Rule 6.5: StateMachineError ─────────────────────────────────────────
+
+    #[test]
+    fn test_detect_state_machine_error_malformed() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.error = Some("malformed response from upstream".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::StateMachineError
+        );
+    }
+
+    #[test]
+    fn test_detect_state_machine_error_protocol() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("status_code".to_string(), "500".to_string());
+        call.error = Some("protocol error: unexpected response format".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::StateMachineError
+        );
+    }
+
+    // ── Rule 12: SlowResponse ────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_slow_response() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.duration_ns = 150_000_000_000; // 150s > 120s threshold
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "ok".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::SlowResponse);
+    }
+
+    #[test]
+    fn test_no_slow_response_below_threshold() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.duration_ns = 60_000_000_000; // 60s < 120s threshold
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "ok".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_no_slow_response_when_error_present() {
+        // Error calls should be classified by error rules, not SlowResponse
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.duration_ns = 200_000_000_000;
+        call.error = Some("some error".to_string());
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
+    }
+
+    #[test]
+    fn test_detect_slow_response_custom_threshold() {
+        let config = DetectorConfig {
+            token_limit_ratio: 0.95,
+            sse_min_duration_ns: 1_000_000_000,
+            slow_response_ns_threshold: 30_000_000_000, // 30s
+        };
+        let detector = InterruptionDetector::new(config);
+        let mut call = make_base_call();
+        call.duration_ns = 45_000_000_000; // 45s > 30s custom threshold
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::SlowResponse);
+    }
+
+    // ── detect_tool_use: UnauthorizedAction ───────────────────────────────
+
+    #[test]
+    fn test_detect_unauthorized_action_permission_denied() {
+        let detector = InterruptionDetector::default();
+        let mut tool = make_base_tool_use();
+        tool.success = false;
+        tool.error = Some("Permission denied: cannot write to /etc".to_string());
+
+        let events = detector.detect_tool_use(&tool, None, Some("conv-1".to_string()));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::UnauthorizedAction
+        );
+    }
+
+    #[test]
+    fn test_detect_unauthorized_action_sandbox() {
+        let detector = InterruptionDetector::default();
+        let mut tool = make_base_tool_use();
+        tool.success = false;
+        tool.error = Some("sandbox violation: network access denied".to_string());
+
+        let events = detector.detect_tool_use(&tool, None, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::UnauthorizedAction
+        );
+    }
+
+    #[test]
+    fn test_detect_unauthorized_action_eacces() {
+        let detector = InterruptionDetector::default();
+        let mut tool = make_base_tool_use();
+        tool.success = false;
+        tool.error = Some("EACCES: operation not permitted".to_string());
+
+        let events = detector.detect_tool_use(&tool, None, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::UnauthorizedAction
+        );
+    }
+
+    #[test]
+    fn test_tool_failure_not_unauthorized_for_generic_error() {
+        // Generic errors should remain ToolFailure, not UnauthorizedAction
+        let detector = InterruptionDetector::default();
+        let mut tool = make_base_tool_use();
+        tool.success = false;
+        tool.error = Some("command exited with code 1".to_string());
+
+        let events = detector.detect_tool_use(&tool, None, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
     }
 }

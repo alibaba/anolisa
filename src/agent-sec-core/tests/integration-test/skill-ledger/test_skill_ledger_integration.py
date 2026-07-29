@@ -30,6 +30,15 @@ from pathlib import Path
 import agent_sec_cli.security_events as security_events
 import pytest
 from agent_sec_cli.cli import app as cli_app
+from agent_sec_cli.daemon.handlers.security_query import (
+    security_events_list_handler,
+    security_summary_handler,
+)
+from agent_sec_cli.daemon.protocol import DaemonRequest
+from agent_sec_cli.daemon.runtime import DaemonRuntime
+from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
+from agent_sec_cli.security_middleware.result import ActionResult
+from agent_sec_cli.skill_ledger import cli as skill_ledger_cli
 from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.core import decision as decision_core
 from agent_sec_cli.skill_ledger.core import live_root as live_root_core
@@ -1554,6 +1563,131 @@ def test_audit_corrupted_version_file_reports_error_without_traceback(ws):
     )
 
 
+def test_audit_projects_backing_paths_across_cli_events_and_daemon(ws, monkeypatch):
+    """Corrupted manifests expose only the canonical root through public channels."""
+    backing = make_skill(ws.skills_dir, "audit-path-projection", {"f.txt": "safe"})
+    backing_marker = f"{ws.skills_dir.name}/{backing.name}"
+    canonical = ws.root / "fuse-view" / backing.name
+    findings = write_findings_file(
+        ws.fixtures,
+        "audit-path-projection.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    env = ws.env()
+    certified = run_skill_ledger(
+        ["certify", str(backing), "--findings", str(findings)],
+        env_extra=env,
+    )
+    assert certified.returncode == 0, certified.stderr
+
+    meta_dir = backing / ".skill-meta"
+    manifest_path = meta_dir / "versions" / "v000001.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["userDecision"] = {"action": str(backing)}
+    manifest_path.write_text(json.dumps(manifest))
+
+    state_before = {
+        str(path.relative_to(meta_dir)): path.read_bytes()
+        for path in sorted(meta_dir.rglob("*"))
+        if path.is_file()
+    }
+    root = ResolvedSkillRoot(canonical, backing, "skillfs")
+    resolver_calls: list[Path] = []
+
+    def fake_resolve(_resolver, canonical_skill_dir):
+        resolver_calls.append(Path(canonical_skill_dir))
+        return root
+
+    monkeypatch.setattr(live_root_core.SkillRootResolver, "resolve", fake_resolve)
+
+    forwarded: list[ActionResult] = []
+    original_forward = skill_ledger_cli._forward
+
+    def capture_forward(result: ActionResult) -> None:
+        forwarded.append(result)
+        original_forward(result)
+
+    monkeypatch.setattr(skill_ledger_cli, "_forward", capture_forward)
+
+    event_data = ws.root / "events_audit_path_projection"
+    event_data.mkdir()
+    audit_env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
+    reset_security_event_writers()
+    try:
+        cli_result = run_skill_ledger(
+            ["audit", str(canonical)],
+            env_extra=audit_env,
+        )
+    finally:
+        reset_security_event_writers()
+
+    assert resolver_calls == [canonical]
+    assert cli_result.returncode == 1
+    assert "Traceback" not in cli_result.stderr
+    assert str(backing) not in cli_result.stdout + cli_result.stderr
+    assert backing_marker not in cli_result.stdout + cli_result.stderr
+    stdout_result = parse_json_output(cli_result.stdout)
+    assert stdout_result["canonicalSkillDir"] == str(canonical)
+    assert stdout_result["valid"] is False
+    assert stdout_result["versions_checked"] == 1
+    assert any(error["versionId"] == "v000001" for error in stdout_result["errors"])
+
+    assert len(forwarded) == 1
+    action_result = forwarded[0]
+    assert action_result.success is False
+    assert action_result.exit_code == 1
+    assert json.loads(action_result.stdout) == stdout_result
+    assert action_result.data["command"] == "audit"
+    assert action_result.data["valid"] is False
+    assert str(backing) not in json.dumps(action_result.data)
+    assert str(backing) not in action_result.stdout
+    assert str(backing) not in action_result.error
+    assert backing_marker not in json.dumps(action_result.data)
+    assert backing_marker not in action_result.stdout
+    assert backing_marker not in action_result.error
+
+    state_after = {
+        str(path.relative_to(meta_dir)): path.read_bytes()
+        for path in sorted(meta_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert state_after == state_before
+
+    jsonl_events = read_security_events(event_data)
+    audit_jsonl = next(
+        event
+        for event in jsonl_events
+        if event["details"]["result"].get("command") == "audit"
+    )
+    assert audit_jsonl["result"] == "failed"
+    assert audit_jsonl["details"]["result"]["valid"] is False
+    assert str(backing) not in json.dumps(audit_jsonl)
+    assert backing_marker not in json.dumps(audit_jsonl)
+
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(event_data))
+    runtime = DaemonRuntime(socket_path=event_data / "daemon.sock")
+    list_result = security_events_list_handler(
+        DaemonRequest(
+            method="sec.events.list",
+            params={
+                "category": "skill_ledger",
+                "result": "failed",
+                "include_details": True,
+            },
+        ),
+        runtime,
+    )
+    daemon_audit = next(
+        item
+        for item in list_result.data["items"]
+        if item["event_id"] == audit_jsonl["event_id"]
+    )
+    assert daemon_audit["details"]["result"]["command"] == "audit"
+    assert daemon_audit["details"]["result"]["valid"] is False
+    assert str(backing) not in json.dumps(daemon_audit)
+    assert backing_marker not in json.dumps(daemon_audit)
+
+
 def test_audit_verify_snapshots(ws):
     """--verify-snapshots validates snapshot file hashes match manifest."""
     skill = make_skill(ws.skills_dir, "audit-snap", {"s.txt": "snapshot-test"})
@@ -2406,6 +2540,94 @@ def test_show_reports_active_latest_decision_and_root_match(ws):
     assert "allow after review" in out["message"]
     assert out["warnings"]
     assert out["warnings"] == [out["message"]]
+
+
+def test_show_event_flows_through_jsonl_sqlite_and_dashboard(ws, monkeypatch):
+    skill = make_skill(ws.skills_dir, "dashboard-show", {"data.txt": "safe"})
+    findings = write_findings_file(
+        ws.fixtures,
+        "dashboard-show-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    event_data = ws.root / "events_dashboard_show"
+    event_data.mkdir()
+    env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
+
+    reset_security_event_writers()
+    try:
+        certified = run_skill_ledger(
+            ["certify", str(skill), "--findings", str(findings)],
+            env_extra=env,
+        )
+        shown = run_skill_ledger(["show", str(skill)], env_extra=env)
+    finally:
+        reset_security_event_writers()
+
+    assert certified.returncode == 0, certified.stderr
+    assert shown.returncode == 0, shown.stderr
+    stdout_result = parse_json_output(shown.stdout)
+    assert stdout_result["latestStatus"] == "pass"
+    assert "verdict" not in stdout_result
+
+    jsonl_events = read_security_events(event_data)
+    show_jsonl = next(
+        event
+        for event in jsonl_events
+        if event["details"]["result"].get("command") == "show"
+    )
+    assert show_jsonl["details"]["result"]["verdict"] == "pass"
+    assert show_jsonl["details"]["result"]["skill_name"] == skill.name
+
+    sqlite_reader = SqliteEventReader(path=event_data / "security-events.db")
+    try:
+        pass_events = sqlite_reader.query(
+            category="skill_ledger",
+            verdict="pass",
+        )
+        show_sqlite = next(
+            event
+            for event in pass_events
+            if event.details["result"].get("command") == "show"
+        )
+        assert show_sqlite.event_id == show_jsonl["event_id"]
+        assert sqlite_reader.count_by("verdict", category="skill_ledger") == {"pass": 2}
+    finally:
+        sqlite_reader.close()
+
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(event_data))
+    runtime = DaemonRuntime(socket_path=event_data / "daemon.sock")
+    list_result = security_events_list_handler(
+        DaemonRequest(
+            method="sec.events.list",
+            params={"category": "skill_ledger", "verdict": "pass"},
+        ),
+        runtime,
+    )
+    dashboard_show = next(
+        item
+        for item in list_result.data["items"]
+        if item["event_id"] == show_jsonl["event_id"]
+    )
+    assert dashboard_show["verdict"] == "pass"
+    assert dashboard_show["command"] == "show"
+    assert dashboard_show["skill_name"] == skill.name
+    assert "details" not in dashboard_show
+
+    summary_result = security_summary_handler(
+        DaemonRequest(
+            method="sec.summary",
+            params={"category": "skill_ledger", "latest_limit": 10},
+        ),
+        runtime,
+    )
+    summary_show = next(
+        item
+        for item in summary_result.data["latest_events"]
+        if item["event_id"] == show_jsonl["event_id"]
+    )
+    assert summary_show["verdict"] == "pass"
+    assert summary_show["command"] == "show"
+    assert summary_show["skill_name"] == skill.name
 
 
 def test_show_findings_summary_handles_missing_fields_and_empty_findings(ws):

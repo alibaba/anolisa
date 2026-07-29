@@ -61,16 +61,17 @@ pub(crate) use crate::types::{
     GovernedEvent, OutputRefs, Policy, QuestionSelectionMode, ShellEvent, ShellEventKind,
     ShellHandoffRequest,
 };
+pub(crate) use crate::ui::AgentHooksView;
 pub(crate) use crate::ui::{
-    approval_action_at, health_uses_startup_row, hook_approval_action_at, hook_warning_icon,
-    primary_health_prompt_suggestion, render_transcript, ActivityDetailsPanelModel,
+    health_uses_startup_row, hook_warning_icon, render_transcript, ActivityDetailsPanelModel,
     ActivityPanelModel, ActivityRowModel, ActivityToolRowModel, AgentStatusAnimation,
-    ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
-    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
-    CommandAssessmentSummaryModel, HealthBannerModel, HookWarningView, MarkdownStreamBlock,
-    NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
-    RecommendationActionPanelModel, RecommendationPanelModel, ToolInvocationCardModel,
-    ToolInvocationDensity, ToolInvocationTone,
+    ApprovalActionSet, ApprovalDetailsPanelModel, ApprovalJournalEntryModel,
+    ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
+    CommandAssessmentSummaryModel, HealthBannerModel, HelpPanelEntry, HelpPanelGroup,
+    HelpPanelModel, HookEntryView, HookEventGroup, HookStatusPanelModel, HookWarningView,
+    MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel, QuestionInputFeedback,
+    QuestionPanelModel, RatatuiInlineRenderer, RecommendationActionPanelModel,
+    RecommendationPanelModel, ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
 };
 
 #[cfg(test)]
@@ -88,8 +89,9 @@ pub(crate) use crate::activity::runtime::{
 };
 pub(crate) use crate::agent::events::flush_held_agent_events;
 pub(crate) use crate::agent::run::{
-    start_agent_run, start_agent_run_with_origin, stop_active_agent_run_without_rendering,
-    AgentRunOrigin,
+    control_queue_has_capacity, start_agent_run, start_agent_run_control_response,
+    start_agent_run_with_origin_disposition, stop_active_agent_run_without_rendering,
+    AgentRunOrigin, AgentStartDisposition, AgentStartIntent,
 };
 pub(crate) use crate::approval::approved_tool::{
     request_is_executable_bash_tool, request_is_readonly_builtin_tool,

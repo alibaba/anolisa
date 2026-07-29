@@ -171,7 +171,7 @@ def test_trace_context_injects_all_fields(mock_cli) -> None:
     captured = _captured_call(capture)
     assert captured["argv"][0] == "--trace-context"
     assert json.loads(captured["argv"][1]) == {
-        "agent_name": "qwen",
+        "agent_name": "qwen-code",
         "trace_id": "trace-1",
         "session_id": "sess-1",
         "run_id": "turn-1",

@@ -99,7 +99,7 @@ Built with maturin as a Rust native Python extension.
 %systemd_user_preun agent-sec-core.service
 
 %postun -n agent-sec-cli
-%systemd_user_postun agent-sec-core.service
+%systemd_user_postun_with_restart agent-sec-core.service
 
 # =============================================================================
 # Subpackage 2: agent-sec-cosh-hook
@@ -170,12 +170,15 @@ Requires:       python3 < 3.12
 
 %description -n agent-sec-qwen-code-hook
 Qwen Code security extension powered by agent-sec-core.
-Provides lifecycle observability through Qwen Code command hooks.
+Provides prompt and PII policy enforcement, lifecycle observability, and
+managed Skill Ledger validation through Qwen Code command hooks.
 
 %files -n agent-sec-qwen-code-hook
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/scripts/deploy.sh
 %attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/observability_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/pii_checker_hook.py
+%attr(0755,root,root) /opt/agent-sec/qwen-code-extension/hooks/skill_ledger_hook.py
 /opt/agent-sec/qwen-code-extension/
 %license LICENSE
 
@@ -258,6 +261,9 @@ rm -rf $RPM_BUILD_ROOT
 make install-all-for-rpmbuild DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
+* Fri Jul 24 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.9.0-1
+- Update version to 0.9.0
+
 * Fri Jul 10 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.8.0-1
 - Update version to 0.8.0
 

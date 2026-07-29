@@ -235,6 +235,38 @@ pub enum AdapterError {
         /// Parse failure detail.
         reason: String,
     },
+
+    /// An unsafe-plugin-install authorization was passed for a target that
+    /// does not support it — a framework other than OpenClaw, or a
+    /// `skill_bundle` adapter that installs no plugin. Failing loudly keeps
+    /// the explicit safety-bypass from silently doing nothing.
+    #[error(
+        "--allow-unsafe-plugin-install does not apply to {component}/{framework}{}; it is only valid for an OpenClaw plugin adapter",
+        .adapter_type.as_deref().map(|t| format!(" (adapter_type '{t}')")).unwrap_or_default()
+    )]
+    UnsafeInstallNotApplicable {
+        /// Component the caller asked to enable.
+        component: String,
+        /// Framework the adapter targets.
+        framework: String,
+        /// The declared `adapter_type`, when the manifest set one.
+        adapter_type: Option<String>,
+    },
+
+    /// The framework is installed but its detected version does not satisfy
+    /// the adapter's declared version requirement. Enable stops before any
+    /// framework or filesystem mutation and before persisting a receipt.
+    #[error(
+        "framework '{framework}' version {detected} does not satisfy adapter requirement '{required}'"
+    )]
+    FrameworkVersionMismatch {
+        /// Framework whose version was checked.
+        framework: String,
+        /// Version detected on the host.
+        detected: String,
+        /// The adapter's declared requirement.
+        required: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

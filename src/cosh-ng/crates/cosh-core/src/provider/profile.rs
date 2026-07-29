@@ -11,6 +11,17 @@ pub trait ProviderProfile: Send + Sync {
         None
     }
 
+    /// Whether this backend accepts `stream_options: {include_usage: true}`.
+    ///
+    /// Usage telemetry only refines compaction thresholds — a local token
+    /// estimate always exists as a fallback — so it must never become a hard
+    /// dependency. Generic OpenAI-compatible endpoints frequently reject
+    /// unknown `stream_options`, failing the whole model turn, so the default
+    /// is `false`; only profiles verified to support the field opt in.
+    fn supports_stream_usage(&self) -> bool {
+        false
+    }
+
     fn adjust_request(&self, _body: &mut Value) {}
 
     fn auth_header_value(&self, api_key: &str) -> String {
@@ -36,6 +47,10 @@ impl ProviderProfile for DashScopeProfile {
     fn thinking_field(&self) -> Option<&str> {
         Some("reasoning_content")
     }
+
+    fn supports_stream_usage(&self) -> bool {
+        true
+    }
 }
 
 pub struct OpenAIProfile;
@@ -48,6 +63,10 @@ impl ProviderProfile for OpenAIProfile {
     fn max_tokens_field(&self) -> &str {
         "max_completion_tokens"
     }
+
+    fn supports_stream_usage(&self) -> bool {
+        true
+    }
 }
 
 pub struct DeepSeekProfile;
@@ -59,6 +78,10 @@ impl ProviderProfile for DeepSeekProfile {
 
     fn thinking_field(&self) -> Option<&str> {
         Some("reasoning_content")
+    }
+
+    fn supports_stream_usage(&self) -> bool {
+        true
     }
 }
 
@@ -105,6 +128,17 @@ mod tests {
         let p = DeepSeekProfile;
         assert_eq!(p.name(), "deepseek");
         assert_eq!(p.thinking_field(), Some("reasoning_content"));
+    }
+
+    #[test]
+    fn stream_usage_support_is_opt_in() {
+        // Generic endpoints must never receive stream_options; the named
+        // profiles we integrate against do support usage telemetry.
+        assert!(!GenericProfile.supports_stream_usage());
+        assert!(OpenAIProfile.supports_stream_usage());
+        assert!(DashScopeProfile.supports_stream_usage());
+        assert!(DeepSeekProfile.supports_stream_usage());
+        assert!(!profile_from_name("unknown").supports_stream_usage());
     }
 
     #[test]

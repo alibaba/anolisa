@@ -49,17 +49,89 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/draft",
+            usage: "/draft",
+            summary_id: MessageId::HelpSummaryDraft,
+            group: Some("Prompt"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/health",
+            usage: "/health",
+            summary_id: MessageId::HelpSummaryHealth,
+            group: Some("Health"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/status",
+            usage: "/status",
+            summary_id: MessageId::HelpSummaryStatus,
+            group: Some("Status"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/about",
+            usage: "/about",
+            summary_id: MessageId::HelpSummaryStatus,
+            group: None,
+            scope: "read-only",
+            state: SlashCommandState::Hidden,
+        },
+        SlashCommandSpec {
+            name: "/stats",
+            usage: "/stats [model|tools]",
+            summary_id: MessageId::HelpSummaryStats,
+            group: Some("Status"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/auth",
             usage: "/auth",
             summary_id: MessageId::HelpSummaryAuth,
-            group: None,
+            group: Some("Config"),
             scope: "config",
-            state: SlashCommandState::Contextual,
+            state: SlashCommandState::Public,
         },
         SlashCommandSpec {
             name: "/config",
             usage: "/config language [auto|en-US|zh-CN]",
             summary_id: MessageId::HelpSummaryConfig,
+            group: Some("Config"),
+            scope: "config",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/session",
+            usage: "/session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
+            summary_id: MessageId::HelpSummarySession,
+            group: Some("Sessions"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/new",
+            usage: "/new",
+            summary_id: MessageId::HelpSummarySession,
+            group: None,
+            scope: "session",
+            state: SlashCommandState::Hidden,
+        },
+        SlashCommandSpec {
+            name: "/resume",
+            usage: "/resume [id]",
+            summary_id: MessageId::HelpSummarySession,
+            group: None,
+            scope: "session",
+            state: SlashCommandState::Hidden,
+        },
+        SlashCommandSpec {
+            name: "/recommendations",
+            usage: "/recommendations [on|off|status|privacy|clear]",
+            summary_id: MessageId::HelpSummaryRecommendations,
             group: Some("Config"),
             scope: "config",
             state: SlashCommandState::Public,
@@ -114,7 +186,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/audit",
-            usage: "/audit",
+            usage: "/audit status|trace current|export current <dir>",
             summary_id: MessageId::HelpSummaryAudit,
             group: None,
             scope: "read-only",
@@ -130,7 +202,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/extensions",
-            usage: "/extensions [list|detail] [name]",
+            usage: "/extensions <command> [options]",
             summary_id: MessageId::HelpSummaryExtensions,
             group: Some("Registry"),
             scope: "config",
@@ -142,6 +214,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             summary_id: MessageId::HelpSummarySkills,
             group: Some("Registry"),
             scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/mcp",
+            usage: "/mcp [list|connect|inspect|refresh|disconnect|login|logout] [name]",
+            summary_id: MessageId::HelpSummaryMcp,
+            group: Some("Registry"),
+            scope: "config",
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
@@ -307,9 +387,16 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(visible.contains(&"/config language [auto|en-US|zh-CN]"));
+        assert!(visible.contains(&"/auth"));
+        assert!(visible.contains(&"/status"));
+        assert!(visible.contains(&"/stats [model|tools]"));
+        assert!(visible
+            .iter()
+            .any(|usage| usage.starts_with("/session [new|status|list|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));
+        assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
         assert!(!visible.iter().any(|usage| usage.starts_with("/agent")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/explain")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/cancel")));
@@ -318,6 +405,21 @@ mod tests {
         assert!(!visible.iter().any(|usage| usage.starts_with("/select")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/copy")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/debug")));
+    }
+
+    #[test]
+    fn recommendations_and_auth_are_public_config_controls() {
+        for name in ["/recommendations", "/auth"] {
+            let spec = slash_command_registry()
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("public config control spec");
+
+            assert_eq!(spec.group, Some("Config"), "{name}");
+            assert_eq!(spec.scope, "config", "{name}");
+            assert_eq!(spec.state, SlashCommandState::Public, "{name}");
+            assert!(exact_slash_control_commands().any(|candidate| candidate == name));
+        }
     }
 
     #[test]
@@ -342,6 +444,9 @@ mod tests {
             "/copy",
             "/send-to-shell",
             "/debug",
+            "/resume",
+            "/new",
+            "/about",
             "/skill",
             "/approval-mode",
             "/allow",
@@ -378,7 +483,12 @@ mod tests {
     #[test]
     fn shell_marker_exact_tokens_match_registry() {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
-        let marker = include_str!("../shell_host/marker.rs");
+        // Marker scripts live in per-shell owner files under shell_host/marker/.
+        let marker = concat!(
+            include_str!("../shell_host/marker/bash.rs"),
+            "\n",
+            include_str!("../shell_host/marker/zsh.rs")
+        );
         let marker_tokens = marker
             .lines()
             .map(str::trim)
@@ -404,6 +514,39 @@ mod tests {
                 registry.contains(token),
                 "shell marker has unregistered slash token {token}"
             );
+        }
+
+        // Shell routing of exact slash submissions (issue #1718) is only
+        // safe when the shell side can intercept every routed token, so
+        // both bash case lists (_cosh_should_intercept_unknown and
+        // _cosh_is_slash_control_candidate) must each carry the full
+        // registry set, not merely the bash+zsh union checked above.
+        // Case-arm lines end with `)` and every alternative starts with
+        // `/`, which keeps slash-leading comment lines out of the match.
+        let bash_case_lines = include_str!("../shell_host/marker/bash.rs")
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.ends_with(')')
+                    && line
+                        .trim_end_matches(')')
+                        .split('|')
+                        .all(|token| token.trim().starts_with('/'))
+            })
+            .filter(|line| line.contains('|'))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bash_case_lines.len(),
+            2,
+            "expected exactly the two bash slash case lists"
+        );
+        for line in bash_case_lines {
+            let tokens = line
+                .trim_end_matches(')')
+                .split('|')
+                .map(str::trim)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(tokens, registry, "bash case list diverged from registry");
         }
     }
 }

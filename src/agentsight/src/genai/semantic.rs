@@ -308,6 +308,16 @@ impl LLMCall {
         }
     }
 
+    /// Whether this call carries no parsed semantic content.
+    ///
+    /// True when neither the request nor the response produced any structured
+    /// messages — i.e. the underlying body format could not be parsed into
+    /// `AgentsightLLMData`. Used by the FFI dispatch path to decide whether to
+    /// fall back to raw-HTTP (`AgentsightHttpsData`) reporting.
+    pub fn is_semantically_empty(&self) -> bool {
+        self.request.messages.is_empty() && self.response.messages.is_empty()
+    }
+
     /// Set response and calculate duration
     pub fn set_response(&mut self, response: LLMResponse, end_timestamp_ns: u64) {
         self.end_timestamp_ns = end_timestamp_ns;
@@ -403,6 +413,46 @@ mod tests {
         assert_eq!(call.end_timestamp_ns, 5000);
         assert_eq!(call.duration_ns, 4000);
         assert_eq!(call.response.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_is_semantically_empty() {
+        // Request has a user message → not empty.
+        let call = LLMCall::new(
+            "call-3".to_string(),
+            1000,
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            make_request(),
+            100,
+            "test".to_string(),
+        );
+        assert!(!call.is_semantically_empty());
+
+        // Empty request and empty response → semantically empty.
+        let empty = LLMCall::new(
+            "call-4".to_string(),
+            1000,
+            "unknown".to_string(),
+            "unknown".to_string(),
+            LLMRequest {
+                messages: vec![],
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            100,
+            "test".to_string(),
+        );
+        assert!(empty.is_semantically_empty());
     }
 
     #[test]

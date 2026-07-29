@@ -408,6 +408,21 @@ pub(crate) async fn guard_cwd_occupants(workspace: &str) -> Option<ws_ckpt_commo
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn is_mounted_detects_real_mount_point() {
+        // `/proc` is a mount point on every supported (Linux) host, and a fresh
+        // temp dir never is. Guards the workspace-root check in `init`.
+        assert!(is_mounted("/proc").await.unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_mounted(dir.path().to_str().unwrap()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_mounted_ignores_path_below_mount_point() {
+        // Only the mount point itself blocks rename(2); descendants are fine.
+        assert!(!is_mounted("/proc/self").await.unwrap());
+    }
+
     #[test]
     fn unescape_space_and_tab() {
         assert_eq!(unescape_proc_mount("/mnt/my\\040dir"), "/mnt/my dir");

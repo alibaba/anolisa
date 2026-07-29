@@ -783,6 +783,7 @@ mod tests {
                 terminal_output_bytes: 12,
             },
             shell_environment_generation: None,
+            audit_identity: None,
         }
     }
 }

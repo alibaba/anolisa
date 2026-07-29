@@ -29,12 +29,14 @@ description: >
 运行脚本分析历史调用频次，按调用次数决定哪些 skill 进主视图：
 
 ```bash
-# 分析 openclaw session 日志中的 skill 使用频次
-python3 <skill_dir>/scripts/openclaw_skill_cnt.py
+# 分析 openclaw session 日志中的 skill 使用频次（默认读 ~/.openclaw）
+python3 <skill_dir>/scripts/skill_usage_from_session_logs.py
 
-# 分析 copilot-shell (cosh) 的 skill 调用统计
-python3 <skill_dir>/scripts/cosh_skill_cnt.py
+# 分析 copilot-shell (cosh) chat 日志中的 skill 调用统计（默认读 ~/.copilot-shell）
+python3 <skill_dir>/scripts/skill_usage_from_chat_logs.py
 ```
+
+两个脚本都支持 `--logs-dir` 指向自定义日志目录。
 
 输出示例：
 ```
@@ -89,8 +91,9 @@ skills = ["weather", "notion", ...]
 
 **按分析结果手动调整**：直接编辑 views.toml，在两个 skills 列表之间移动 skill 名称。
 
-> ⚠️ views.toml 中的字符串必须与各 SKILL.md frontmatter 的 `name:` 字段完全一致，
-> 否则该技能将从视图中消失。
+> ⚠️ views.toml 中的字符串必须与 skill 的**目录名**完全一致，否则该技能将从视图中
+> 消失。目录名是权威的 skill key；`SKILL.md` frontmatter 里的 `name:` 只是展示元数据，
+> 不参与视图匹配，重命名目录后也不会覆盖目录 key。
 
 ---
 
@@ -109,6 +112,13 @@ ls ~/.openclaw/skills/    # 应只显示主视图 skill + skill-discover
 
 挂载时自动将未出现在 views.toml 中的新 skill 追加到默认视图。
 
+需要长期保持挂载时改用 managed 模式：它启动一个 detached supervisor，worker 意外退出后
+会自动重挂，不需要自己管理 pid file。
+
+```bash
+skillfs mount ~/.openclaw/skills ~/.openclaw/skills --managed
+```
+
 ---
 
 ### STEP 4：验证挂载状态
@@ -126,7 +136,11 @@ tail -f /tmp/skillfs-$(cat /tmp/skillfs.pid).log
 ### STEP 5：卸载
 
 ```bash
-# 优雅卸载（推荐）
+# managed 挂载：用 stop 停止 supervisor 并卸载
+# 非 managed 或残留挂载：stop 也会直接卸载，可作为通用兜底
+skillfs stop ~/.openclaw/skills
+
+# 前台挂载也可以直接向进程发信号
 kill -TERM $(cat /tmp/skillfs.pid)
 sleep 1
 
@@ -143,8 +157,12 @@ PID 文件在卸载成功后自动删除。
 
 ## 关键说明
 
-- SkillFS 是**只读**文件系统；挂载期间 views.toml 对 FUSE 不可见，需修改时先卸载
+- SkillFS **不是只读**文件系统：挂载期间对 skill 的写入（含 install / update / remove）
+  会透传到底层 source 树，写 `SKILL.md` 还会触发重新解析
+- 但 views.toml 是例外：挂载期间它对 FUSE 不可见，需修改时先卸载
 - 不生成 views.toml 也可直接挂载，此时所有 skill 均在主视图中可见
+- 该工作区不能同时作为 ws-ckpt 工作区根初始化 —— in-place 挂载会让 `rename(2)` 返回
+  `EBUSY`。先 `init` 再挂载，或先卸载再 `init`
 
 ---
 
@@ -154,6 +172,6 @@ PID 文件在卸载成功后自动删除。
 |------|----------|
 | `Package fuse3 was not found` | `yum install -y fuse3 fuse3-devel` |
 | `Transport endpoint is not connected` | `fusermount3 -u <mountpoint>` 后重新挂载 |
-| skill 消失于列表 | 统一 SKILL.md `name:` 与 views.toml 字符串 |
+| skill 消失于列表 | 统一 skill 目录名与 views.toml 字符串（不是 SKILL.md 的 `name:`） |
 | skill-discover 不完整 | 重新运行 `skillfs classify` 或手动编辑 views.toml |
 | 原地挂载后无法写 views.toml | 先卸载，编辑，再重新挂载 |

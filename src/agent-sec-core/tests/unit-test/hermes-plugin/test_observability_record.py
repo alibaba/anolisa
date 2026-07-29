@@ -4,15 +4,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_HERMES_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "hermes-plugin"
-sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
-
-from agent_sec_cli.observability import schema  # noqa: E402
-from src.observability.record import ZERO_RUN_ID, build_record  # noqa: E402
-from src.pii_text import text_sha256, value_to_text  # noqa: E402
+from agent_sec_cli.observability import schema
+from hermes_plugin_src.observability.record import ZERO_RUN_ID, build_record
+from hermes_plugin_src.pii_text import text_sha256, value_to_text
 
 
 def _assert_schema_valid(record: dict) -> None:

@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "blake3",
  "rusqlite",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-cli"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "chrono",
  "clap",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "regex",
  "serde_json",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-stats"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "chrono",
  "dirs",

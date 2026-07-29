@@ -40,10 +40,22 @@ require_command agent-sec-cli
 
 EXTENSION_DIR="$(absolute_path "${EXTENSION_DIR}")"
 MANIFEST_PATH="${EXTENSION_DIR}/qwen-extension.json"
-HOOK_PATH="${EXTENSION_DIR}/hooks/observability_hook.py"
+OBSERVABILITY_HOOK_PATH="${EXTENSION_DIR}/hooks/observability_hook.py"
+SKILL_LEDGER_HOOK_PATH="${EXTENSION_DIR}/hooks/skill_ledger_hook.py"
+CODE_SCANNER_HOOK_PATH="${EXTENSION_DIR}/hooks/code_scanner_hook.py"
+TRACE_CONTEXT_PATH="${EXTENSION_DIR}/hooks/trace_context.py"
 
 [[ -f "${MANIFEST_PATH}" ]] || fail "missing extension manifest: ${MANIFEST_PATH}"
-[[ -f "${HOOK_PATH}" ]] || fail "missing observability hook: ${HOOK_PATH}"
+[[ -f "${OBSERVABILITY_HOOK_PATH}" ]] || fail \
+    "missing observability hook: ${OBSERVABILITY_HOOK_PATH}"
+[[ -f "${SKILL_LEDGER_HOOK_PATH}" ]] || fail \
+    "missing skill-ledger hook: ${SKILL_LEDGER_HOOK_PATH}"
+[[ -x "${SKILL_LEDGER_HOOK_PATH}" ]] || fail \
+    "skill-ledger hook is not executable: ${SKILL_LEDGER_HOOK_PATH}"
+[[ -f "${CODE_SCANNER_HOOK_PATH}" ]] || fail \
+    "missing code scanner hook: ${CODE_SCANNER_HOOK_PATH}"
+[[ -f "${TRACE_CONTEXT_PATH}" ]] || fail \
+    "missing trace-context helper: ${TRACE_CONTEXT_PATH}"
 
 EXTENSION_NAME="$(json_field "${MANIFEST_PATH}" name)"
 EXTENSION_VERSION="$(json_field "${MANIFEST_PATH}" version)"

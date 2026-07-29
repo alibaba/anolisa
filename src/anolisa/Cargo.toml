@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.14"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.88"
@@ -49,9 +49,7 @@ nix = { version = "0.29", default-features = false, features = ["user", "fs", "s
 
 # File integrity
 sha2 = "0.10"
-
-# Encoding
-base64 = "0.22"
+xattr = "1.6"
 
 # HTTP download
 ureq = "2.12"

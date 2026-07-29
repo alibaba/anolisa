@@ -44,7 +44,7 @@ install -p -m 0644 agentsight.service %{buildroot}%{_unitdir}/
 install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/agentsight/component.toml
 install -p -m 0644 agentsight.json %{buildroot}%{_sysconfdir}/agentsight/config.json
 install -p -m 0644 README.md %{buildroot}%{_docdir}/agentsight/
-install -p -m 0644 README_CN.md %{buildroot}%{_docdir}/agentsight/
+install -p -m 0644 README_zh.md %{buildroot}%{_docdir}/agentsight/
 install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 
 %post
@@ -64,10 +64,15 @@ install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 %{_unitdir}/agentsight.service
 %{_datadir}/anolisa/components/agentsight/component.toml
 %doc %{_docdir}/agentsight/README.md
-%doc %{_docdir}/agentsight/README_CN.md
+%doc %{_docdir}/agentsight/README_zh.md
 %license %{_docdir}/agentsight/LICENSE
 
 %changelog
+* Tue Jul 28 2026 liyuqing <liyuqing@alibaba-inc.com> - 0.9.0-1
+- Release AgentSight 0.9.0
+- Add optimization dashboard, trajectory collection, and ATIF v1.7 support
+- Fix Anthropic parsing, trajectory collection, dashboard, and trace output issues
+
 * Sat Apr 11 2026 chengshuyi <chengshuyi.csy@alibaba-inc.com> - 0.2.0-1
 - Add systemd service file (agentsight.service)
 - Add systemd post/preun/postun hooks for service management

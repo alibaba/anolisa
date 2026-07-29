@@ -13,6 +13,8 @@ use crate::insight::policy::InterruptionBudget;
 use crate::insight::shell_rewrite::ShellRewriteCatalogService;
 use crate::question::runtime::RuntimeUserQuestion;
 use crate::raw_input::PromptGhostRoute;
+use crate::recommendation::personal_feedback::FrozenPromptBinding;
+use crate::recommendation::personal_state::PersonalizationState;
 use crate::runtime::events::ShellEventCursor;
 use crate::runtime::evidence_requests::EvidenceRequestState;
 use crate::runtime::evidence_state::EvidenceState;
@@ -23,6 +25,8 @@ pub(crate) use crate::runtime::state_prelude::CoshApprovalMode;
 use crate::runtime::state_prelude::{
     first_program_token, ApprovalPanelAction, CommandBlock, GovernedEvent, I18n, Language,
 };
+use crate::runtime::trust_state::ApprovalTrustState;
+use crate::slash::session::SessionControlState;
 use crate::types::AgentContextBinding;
 
 pub(crate) struct AnalysisThrottle {
@@ -90,6 +94,7 @@ pub(crate) struct InlineState {
     pub(crate) evidence_requests: EvidenceRequestState,
     pub(crate) shell_evidence: ShellEvidenceState,
     pub(crate) session_blocks: Vec<CommandBlock>,
+    pub(crate) shell_session_id: Option<String>,
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,
@@ -100,17 +105,26 @@ pub(crate) struct InlineState {
     pub(crate) pending_input_ghost: Option<String>,
     pub(crate) pending_input_ghost_route: PromptGhostRoute,
     pub(crate) pending_input_ghost_binding: Option<PendingInputGhostBinding>,
+    pub(crate) pending_prompt_suggestion_bindings: HashMap<String, PendingInputGhostBinding>,
     pub(crate) shown_shell_rewrite_guidance: bool,
     pub(crate) shown_agent_prompt_guidance: bool,
+    /// Multi-line prompt entry discoverability (#1721 tip, #1932 hint).
+    pub(crate) prompt_entry_hints: crate::runtime::prompt_draft::PromptEntryHints,
+    /// #1721 D13: active multi-line prompt draft card, if any.
+    pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
+    pub(crate) prompt_draft_seq: u64,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
+    pub(crate) personalization: PersonalizationState,
+    pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
 }
 
 #[derive(Clone)]
 pub(crate) enum PendingInputGhostBinding {
-    AgentContext(AgentContextBinding),
+    Health(AgentContextBinding),
     Insight(Box<InsightBinding>),
+    Personal(FrozenPromptBinding),
 }
 
 #[derive(Default)]
@@ -403,9 +417,12 @@ pub(crate) struct QuestionState {
     pub(crate) pending_id: Option<String>,
     pub(crate) active_panel_id: Option<String>,
     pub(crate) active_panel_height: usize,
+    pub(crate) active_panel_cursor_row: Option<usize>,
+    pub(crate) active_panel_width: Option<u16>,
     pub(crate) handled_focus: HashSet<String>,
     pub(crate) handled_answers: HashSet<String>,
     pub(crate) handled_cancellations: HashSet<String>,
+    pub(crate) question_protocol_failure_reported: bool,
 }
 
 #[derive(Default)]
@@ -421,13 +438,14 @@ pub(crate) struct ControlState {
     active_config_language_panel_id: Option<String>,
     active_config_language_panel_height: usize,
     handled_config_actions: HashSet<String>,
+    session: SessionControlState,
     provider_tool: ProviderToolState,
     provider_shell_handoff_run_ids: HashSet<String>,
     interactive_shell_handoffs: Vec<PendingInteractiveShellHandoff>,
     shell_handoff: ShellHandoffState,
     selectable_commands: Vec<String>,
     selectable_after_event_index: Option<usize>,
-    session_trusted_commands: HashSet<String>,
+    pub(crate) trust: ApprovalTrustState,
     event_cursor: ShellEventCursor,
 }
 
@@ -544,6 +562,12 @@ impl ControlState {
     }
     pub(crate) fn clear_active_config_language_panel_id(&mut self) {
         self.active_config_language_panel_id = None;
+    }
+    pub(crate) fn session(&self) -> &SessionControlState {
+        &self.session
+    }
+    pub(crate) fn session_mut(&mut self) -> &mut SessionControlState {
+        &mut self.session
     }
     pub(crate) fn provider_tool(&self) -> &ProviderToolState {
         &self.provider_tool
@@ -725,12 +749,6 @@ impl ControlState {
     pub(crate) fn has_selectable_commands(&self) -> bool {
         !self.selectable_commands.is_empty()
     }
-    pub(crate) fn trust_session_command(&mut self, key: String) {
-        self.session_trusted_commands.insert(key);
-    }
-    pub(crate) fn session_trusted_commands(&self) -> &HashSet<String> {
-        &self.session_trusted_commands
-    }
     pub(crate) fn event_cursor(&self) -> ShellEventCursor {
         self.event_cursor
     }
@@ -868,6 +886,7 @@ impl AnalysisMode {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeApprovalRequest {
     pub(crate) id: String,
+    pub(crate) audit_ref: Option<String>,
     pub(crate) run_id: String,
     pub(crate) origin: AgentRunOrigin,
     pub(crate) session_id: String,
@@ -929,6 +948,7 @@ impl ProviderShellRequestKind {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeApprovalJournalEntry {
     pub(crate) id: String,
+    pub(crate) audit_ref: Option<String>,
     pub(crate) run_id: String,
     pub(crate) source: &'static str,
     pub(crate) kind: ApprovalRequestKind,

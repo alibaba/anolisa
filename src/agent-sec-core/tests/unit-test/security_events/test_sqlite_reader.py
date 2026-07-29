@@ -12,6 +12,10 @@ import pytest
 from agent_sec_cli.security_events.schema import SecurityEvent, extract_verdict
 from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
 from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
+from agent_sec_cli.security_middleware.backends.skill_ledger import (
+    SkillLedgerBackend,
+)
+from agent_sec_cli.security_middleware.result import ActionResult
 
 CORRELATION_BASE_EPOCH = 1_800_000_000.0
 
@@ -1001,6 +1005,76 @@ class TestVerdictSqlFilter:
         assert len(events) == 3
         total = reader.count()
         assert total == 7
+
+
+def test_new_skill_ledger_events_populate_existing_verdict_index(
+    writer: SqliteEventWriter,
+    reader: SqliteEventReader,
+    db_path: str,
+) -> None:
+    backend = SkillLedgerBackend()
+    show_details = backend.build_event_details(
+        ActionResult(
+            success=True,
+            data={
+                "command": "show",
+                "latestStatus": "deny",
+                "skillName": "risky-skill",
+                "latest": {"scanStatus": "deny"},
+                "active": {"scanStatus": "pass"},
+            },
+        ),
+        {"command": "show", "skill_dir": "/opt/skills/risky-skill"},
+    )
+    check_details = backend.build_event_details(
+        ActionResult(
+            success=False,
+            data={
+                "command": "check",
+                "status": "tampered",
+                "skillName": "tampered-skill",
+            },
+        ),
+        {"command": "check", "skill_dir": "/opt/skills/tampered-skill"},
+    )
+    historical_details = {
+        "request": {"command": "show", "skill_dir": "/opt/skills/old"},
+        "result": {
+            "command": "show",
+            "latest_status": "deny",
+            "latest": {"verdict": "deny"},
+        },
+    }
+
+    for event_id, details in (
+        ("new-show", show_details),
+        ("new-check", check_details),
+        ("historical-shape", historical_details),
+    ):
+        writer.write(
+            SecurityEvent(
+                event_id=event_id,
+                event_type="skill_ledger",
+                category="skill_ledger",
+                details=details,
+            )
+        )
+
+    assert [event.event_id for event in reader.query(verdict="deny")] == ["new-show"]
+    assert [event.event_id for event in reader.query(verdict="tampered")] == [
+        "new-check"
+    ]
+    assert reader.count_by("verdict", category="skill_ledger") == {
+        "deny": 1,
+        "tampered": 1,
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        historical_verdict = conn.execute(
+            "SELECT verdict FROM security_events WHERE event_id = ?",
+            ("historical-shape",),
+        ).fetchone()
+    assert historical_verdict == (None,)
 
 
 def _details_verdict(details: dict[str, Any]) -> str | None:

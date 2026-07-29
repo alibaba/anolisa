@@ -10,9 +10,9 @@ fn raw_cli_streaming_tool_approval_renders_before_agent_finishes() {
 
     assert!(output.contains("Preparing a streamed tool request before finishing."));
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Subject: Bash"));
+    assert!(output.contains("Bash · medium risk"));
     assert!(output.contains("$ git status --short"));
-    assert!(output.contains("medium risk"));
+    assert!(!output.contains("Subject: Bash"));
     assert!(!output.contains("Subject: tool Bash"));
     assert!(!output.contains("Command: git status --short"));
     assert!(output.contains("Approved req-1"), "{output}");
@@ -45,13 +45,13 @@ fn raw_cli_approved_bash_tool_prints_native_command_and_stdout() {
     let output = run_raw_cli_ask_with_delayed_input(vec![
         (b"?? stream pwd tool approval\n".to_vec(), Duration::ZERO),
         (b"\n".to_vec(), Duration::from_millis(1_200)),
-        (b"exit\n".to_vec(), Duration::from_millis(300)),
+        (b"exit\n".to_vec(), Duration::from_millis(1_000)),
     ]);
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert!(output.contains("Preparing a streamed pwd request before finishing."));
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Subject: Bash"), "{output}");
+    assert!(output.contains("Bash · "), "{output}");
     assert!(output.contains("$ pwd"), "{output}");
     assert!(output.contains(expected_cwd), "{output}");
     assert!(output.contains("Approved req-1"), "{output}");
@@ -308,7 +308,7 @@ fn raw_cli_denied_bash_tool_does_not_render_stale_executed_claim() {
 
     assert!(output.contains("Preparing a streamed pwd request before finishing."));
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Subject: Bash"), "{output}");
+    assert!(output.contains("Bash · "), "{output}");
     assert!(output.contains("Denied req-1"), "{output}");
     assert!(!output.contains("No command ran."), "{output}");
     assert!(
@@ -341,7 +341,8 @@ fn raw_cli_denied_bash_tool_uses_zh_language_env() {
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert_zh_approval_prompt_visible(&output);
-    assert!(output.contains("对象: Bash"), "{output}");
+    assert!(output.contains("Bash · "), "{output}");
+    assert!(!output.contains("对象: Bash"), "{output}");
     assert!(output.contains("已拒绝 req-1"), "{output}");
     assert!(output.contains("$ pwd"), "{output}");
     assert!(
@@ -373,7 +374,7 @@ fn raw_cli_user_approved_bash_tool_supports_pipe() {
 
     assert!(output.contains("Preparing a piped streamed tool request before finishing."));
     assert_approval_prompt_visible(&output);
-    assert!(output.contains("Subject: Bash"));
+    assert!(output.contains("Bash · "));
     assert!(output.contains("$ ps aux | head"));
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Blocked req-1"), "{output}");

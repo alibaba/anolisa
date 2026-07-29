@@ -33,11 +33,13 @@ ADAPTER_TEMPLATES := \
 # adapter payload tree so the contract is not mixed with adapter resources.
 # Shipped to %{_datadir}/anolisa/components/tokenless/component.toml.
 COMPONENT_CONTRACT := .anolisa/component.toml
+ANOLISA_COMPONENT_MANIFEST := ../anolisa/manifests/components/tokenless/component.toml
 TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
         stamp-adapter-templates generate-component-contract \
+        check-component-contract \
         install uninstall test lint clean \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
@@ -49,6 +51,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
         codex-install codex-uninstall \
         qwencode-install qwencode-uninstall \
         setup help \
+        npm-package npm-package-all npm-publish \
         test-hooks
 
 # Default target
@@ -79,6 +82,23 @@ $(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
 $(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
 	@echo "==> Generating component contract (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+check-component-contract:
+	@tmp=$$(mktemp); \
+		cp "$(COMPONENT_CONTRACT)" "$$tmp"; \
+		trap 'cp "$$tmp" "$(COMPONENT_CONTRACT)"; rm -f "$$tmp"' EXIT; \
+		$(MAKE) -B "$(COMPONENT_CONTRACT)"; \
+		cmp -s "$$tmp" "$(COMPONENT_CONTRACT)" || { \
+			diff -u "$$tmp" "$(COMPONENT_CONTRACT)"; \
+			exit 1; \
+		}
+	@catalog_version=$$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
+		"$(ANOLISA_COMPONENT_MANIFEST)" | head -1); \
+		[ "$$catalog_version" = "$(VERSION)" ] || { \
+			echo "ANOLISA tokenless manifest version '$$catalog_version' does not match $(VERSION)"; \
+			exit 1; \
+		}
+
 
 $(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.json.in Cargo.toml
 	@echo "==> Generating openclaw/package.json (version=$(VERSION))..."
@@ -168,7 +188,7 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks
+test: test-tokenless test-hooks test-integration test-adapters
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -176,7 +196,18 @@ test-tokenless:
 
 test-hooks:
 	@echo "==> Testing copilot-shell hooks..."
+	bash tests/test-run-hook-install-scope.sh
+	bash tests/test-tool-ready-readable-fixer.sh
 	bash tests/run-all-tests.sh
+
+test-integration:
+	@echo "==> Testing hook integration (Python)..."
+	python3 tests/test_compress_response_hook.py
+	python3 tests/test_compress_schema_hook.py
+
+test-adapters:
+	@echo "==> Testing qoder adapter installer..."
+	bash tests/test-qoder-adapter-install.sh
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
@@ -340,6 +371,45 @@ setup: install adapter-install
 	@echo "  toon --version"
 	@echo "  make adapter-scan"
 
+# --- npm Packaging ---
+# Package for current platform only
+npm-package:
+	@echo "==> Packaging anolisa-tokenless for npm (current platform)..."
+	node npm/scripts/package-npm.js
+
+# Package for all supported targets (requires cross-compilation toolchain)
+npm-package-all:
+	@echo "==> Packaging anolisa-tokenless for npm (all platforms)..."
+	node npm/scripts/package-npm.js --all
+
+# Publish all packages to npm registry
+# IMPORTANT: Platform packages must be published BEFORE the root package,
+# because the root package declares them as optionalDependencies.
+# If the root package is published first and a platform package fails,
+# npm will have a package referencing non-existent dependencies.
+#
+# The registry is pinned explicitly: the nested npm/dist/* package roots do
+# NOT inherit npm/.npmrc, so without --registry a user-level registry
+# override could silently win. Already-published name@version pairs are
+# skipped, so a partially failed publish run can simply be re-executed
+# (npm forbids republishing the same version).
+NPM_REGISTRY ?= https://registry.npmjs.org/
+
+npm-publish: npm-package-all
+	@echo "==> Publishing anolisa-tokenless packages to $(NPM_REGISTRY) (platform packages first, root last)..."
+	@set -e; \
+	for pkg in tokenless-linux-x64 tokenless-linux-arm64 tokenless-darwin-x64 tokenless-darwin-arm64 tokenless; do \
+		dir=npm/dist/$$pkg; \
+		name=$$(node -p "require('./$$dir/package.json').name"); \
+		ver=$$(node -p "require('./$$dir/package.json').version"); \
+		if npm view "$$name@$$ver" version --registry=$(NPM_REGISTRY) >/dev/null 2>&1; then \
+			echo "  $$name@$$ver already published — skipping"; \
+		else \
+			echo "  publishing $$name@$$ver..."; \
+			(cd $$dir && npm publish --access public --registry=$(NPM_REGISTRY)); \
+		fi; \
+	done
+
 # Help
 help:
 	@echo "Token-Less Build System"
@@ -373,6 +443,9 @@ help:
 	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
+	@echo "  npm-package       Package for npm (current platform)"
+	@echo "  npm-package-all   Package for npm (all platforms)"
+	@echo "  npm-publish       Build and publish all npm packages"
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"

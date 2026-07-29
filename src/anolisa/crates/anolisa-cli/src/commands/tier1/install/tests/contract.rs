@@ -7,7 +7,6 @@ use tempfile::tempdir;
 
 #[test]
 fn adopt_snapshots_datadir_contract() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
     let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
@@ -21,10 +20,8 @@ fn adopt_snapshots_datadir_contract() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt ok");
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt ok");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");
@@ -38,7 +35,6 @@ fn adopt_snapshots_datadir_contract() {
 
 #[test]
 fn adopt_without_datadir_contract_succeeds_with_warning() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
     // Deliberately do NOT seed a datadir contract.
@@ -51,10 +47,8 @@ fn adopt_without_datadir_contract_succeeds_with_warning() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt must succeed even without a contract");
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt must succeed even without a contract");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");
@@ -66,7 +60,6 @@ fn adopt_without_datadir_contract_succeeds_with_warning() {
 
 #[test]
 fn delegated_install_snapshots_datadir_contract() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let layout = common::resolve_layout(&ctx);
     let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
@@ -77,15 +70,10 @@ fn delegated_install_snapshots_datadir_contract() {
         pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
     )
     .with_origin("anolisa");
-    let exec = RpmExec {
-        query: &fake,
-        txn: &fake,
-        is_root: true,
-    };
     let mut a = args("copilot-shell");
     a.backend = Some("rpm".to_string());
 
-    let outcome = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+    let outcome = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
         .expect("delegated install ok");
     assert_eq!(outcome, InstallOutcome::Installed);
 
@@ -101,7 +89,6 @@ fn delegated_install_snapshots_datadir_contract() {
 
 #[test]
 fn delegated_install_without_datadir_contract_succeeds() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let layout = common::resolve_layout(&ctx);
     // No datadir contract seeded.
@@ -111,15 +98,10 @@ fn delegated_install_without_datadir_contract_succeeds() {
         pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
     )
     .with_origin("anolisa");
-    let exec = RpmExec {
-        query: &fake,
-        txn: &fake,
-        is_root: true,
-    };
     let mut a = args("copilot-shell");
     a.backend = Some("rpm".to_string());
 
-    let outcome = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+    let outcome = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
         .expect("delegated install must succeed without a contract");
     assert_eq!(outcome, InstallOutcome::Installed);
 
@@ -144,8 +126,7 @@ fn adopt_snapshots_packaged_datadir_contract() {
     std::fs::write(contract_dir.join("component.toml"), &contract)
         .expect("write packaged contract");
 
-    // Guard sets ANOLISA_DATA_DIR and restores on drop (panic-safe).
-    let _env_guard = crate::packaged::DataDirEnvGuard::set(&packaged);
+    let ctx = ctx.with_packaged_data_root(packaged);
 
     let q = FakeQuery {
         installed: vec![(
@@ -155,11 +136,8 @@ fn adopt_snapshots_packaged_datadir_contract() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt ok");
-
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt ok");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");
@@ -176,7 +154,6 @@ fn adopt_snapshots_packaged_datadir_contract() {
 
 #[test]
 fn adopt_snapshots_fhs_package_datadir_contract() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let tmp = tempdir().expect("tempdir");
     let prefix = tmp.path().join("sys");
     let ctx = ctx_with_prefix(false, Some(prefix));
@@ -201,11 +178,8 @@ fn adopt_snapshots_fhs_package_datadir_contract() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt ok");
-
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt ok");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");
@@ -222,13 +196,13 @@ fn adopt_snapshots_fhs_package_datadir_contract() {
 
 #[test]
 fn snapshot_datadir_contract_writes_provenance() {
-    let _env_guard = crate::packaged::DataDirEnvGuard::clear();
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
     let contract = component_manifest_toml("sec-core", "1.0.0", &["system"]);
     seed_datadir_contract(&layout, "sec-core", &contract);
 
-    let warnings = snapshot_datadir_contract(&layout, "sec-core", COMMAND);
+    let warnings =
+        snapshot_datadir_contract(&layout, "sec-core", COMMAND, ctx.packaged_data_probe());
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
     let snapshot = common::installed_component_manifest_path(&layout, "sec-core", COMMAND)

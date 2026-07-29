@@ -14,15 +14,12 @@ npm install -g @anolisa/cli
 # Install a component
 anolisa install tokenless
 
-# Enable a capability
-anolisa enable agent-observability
-
 # Check component status
-anolisa status
+anolisa status tokenless
 
 # Manage adapters
-anolisa adapter list
-anolisa adapter enable sec-core openclaw
+anolisa adapter scan
+anolisa adapter enable tokenless openclaw
 ```
 
 ## Platform Support
@@ -31,6 +28,7 @@ anolisa adapter enable sec-core openclaw
 |----------|-------------|---------|
 | Linux | x86_64 | `@anolisa/cli-linux-x64` |
 | Linux | aarch64 | `@anolisa/cli-linux-arm64` |
+| macOS | arm64 | `@anolisa/cli-darwin-arm64` |
 
 The correct platform-specific binary is automatically installed via `optionalDependencies`.
 

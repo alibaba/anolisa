@@ -17,12 +17,24 @@ fn parse_can_use_tool() {
             tool_input,
             tool_use_id,
             hook_requires_approval,
+            ..
         } => {
             assert_eq!(request_id, "req-1");
             assert_eq!(tool_name, "Bash");
             assert_eq!(tool_input["command"], "echo hello");
             assert_eq!(tool_use_id, "toolu_xxx");
             assert!(!hook_requires_approval);
+        }
+        _ => panic!("expected CanUseTool"),
+    }
+}
+
+#[test]
+fn parse_can_use_tool_preserves_audit_reference() {
+    let line = r#"{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo hello"},"tool_use_id":"toolu_xxx","audit_ref":"audit-event-1"}}"#;
+    match parse_control_request(line).expect("parse audit-linked approval") {
+        ControlRequest::CanUseTool { audit_ref, .. } => {
+            assert_eq!(audit_ref.as_deref(), Some("audit-event-1"));
         }
         _ => panic!("expected CanUseTool"),
     }
@@ -821,7 +833,7 @@ fn serialize_user_message_format() {
 
     let s2 = serialize_user_message("hi", None);
     let v2: Value = serde_json::from_str(&s2).unwrap();
-    assert_eq!(v2["session_id"], "default");
+    assert!(v2.get("session_id").is_none());
 }
 
 #[test]

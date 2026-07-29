@@ -1557,6 +1557,78 @@ describe('loadCliConfig deprecated/unknown authType handling', () => {
   });
 });
 
+describe('loadCliConfig cosh-ng fallback precedence', () => {
+  const originalArgv = process.argv;
+
+  // Shape produced by loadCoshNgProviderFallback() and merged as the
+  // lowest-precedence settings layer.
+  const coshNgFallbackSettings = {
+    security: {
+      auth: {
+        selectedType: 'openai',
+        apiKey: 'sk-from-cosh-ng',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        openaiModel: 'model-from-cosh-ng',
+      },
+    },
+    model: { name: 'model-from-cosh-ng' },
+  } as unknown as Settings;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('lets --auth-type override the inherited auth type', async () => {
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    process.argv = ['node', 'script.js', '--auth-type', 'gemini'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_GEMINI,
+    );
+  });
+
+  it('lets --model override the inherited model', async () => {
+    process.argv = ['node', 'script.js', '--model', 'model-from-cli'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getModel()).toBe('model-from-cli');
+  });
+
+  it('lets OPENAI_MODEL override the inherited model', async () => {
+    vi.stubEnv('OPENAI_MODEL', 'model-from-env');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getModel()).toBe('model-from-env');
+  });
+
+  it('uses the inherited model when nothing overrides it', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI,
+    );
+    expect(config.getModelsConfig().getModel()).toBe('model-from-cosh-ng');
+  });
+});
+
 describe('loadCliConfig folderTrust', () => {
   const originalArgv = process.argv;
 

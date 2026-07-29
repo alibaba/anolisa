@@ -50,6 +50,14 @@ fn poll_active_agent_run_with_policy<W: Write>(
 ) -> std::io::Result<()> {
     let mut should_finish = false;
     let mut first_text_fallback: Option<(AgentRequest, AgentRunOrigin, Option<usize>)> = None;
+    // cosh-core emits a versioned
+    // `compaction_recommended_v1:<session>:<gen>:<rev>:<hist>:<usable>` status
+    // at the idle boundary of a turn, delivered just before the turn's
+    // buffered terminal result. Capture the payload here and apply it after
+    // the borrow of the active run is released, so the shell can start the
+    // background compactor from the next safe prompt boundary — bound to the
+    // exact session and revision the recommendation names.
+    let mut pending_recommendation: Option<String> = None;
     loop {
         let pending_interaction_before_poll = state_has_pending_interaction(state);
         let queued_before_held_text = has_queued_run_before_held_text(state);
@@ -360,6 +368,14 @@ fn poll_active_agent_run_with_policy<W: Write>(
             provider_native_shell_result_pending,
             force_hold_output,
         });
+        if let Some(model) = foreground_model_from_event(&event) {
+            state.personalization.foreground_model = Some(model.to_string());
+        }
+        if let AgentEvent::StatusChanged { phase, .. } = &event {
+            if let Some(payload) = phase.strip_prefix("compaction_recommended_v1:") {
+                pending_recommendation = Some(payload.to_string());
+            }
+        }
         render_active_agent_event(active_run, event, output, text_hold_reason)?;
         if provider_progress_observed {
             state
@@ -378,15 +394,26 @@ fn poll_active_agent_run_with_policy<W: Write>(
         }
     }
 
+    // The active-run borrow is released; record any idle-boundary compaction
+    // recommendation so the next `poll_background_compaction` can start the
+    // background compactor without blocking the shell prompt.
+    if let Some(payload) = pending_recommendation {
+        crate::slash::session::note_compaction_recommendation(state, &payload);
+    }
+
     if let Some((fallback, origin, selectable_after_event_index)) = first_text_fallback {
         if let Some(mut active_run) = state.agent_run.active.take() {
             active_run.handle.cancel();
             active_run.status_animation.clear(output)?;
         }
+        // Turn-scope batch consent never outlives its run (issue #1773).
+        state.control.trust.clear_run_batch_consent();
         render_fresh_turn_recovery_notice(state, output)?;
+        // Fresh-turn recovery is an internal fallback continuation.
         start_agent_run_with_origin(
             &fallback,
             origin,
+            AgentStartIntent::InternalBestEffort,
             adapter,
             state,
             output,
@@ -416,6 +443,17 @@ fn poll_active_agent_run_with_policy<W: Write>(
     }
 
     Ok(())
+}
+
+fn foreground_model_from_event(event: &AgentEvent) -> Option<&str> {
+    let AgentEvent::StatusChanged { message, .. } = event else {
+        return None;
+    };
+    message
+        .strip_prefix("model initialized ")
+        .or_else(|| message.strip_prefix("model status: model_switched:"))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
 }
 
 fn shell_evidence_action_signature(action: &crate::adapter::ShellEvidenceAction) -> String {
@@ -615,6 +653,26 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn foreground_model_tracks_initialization_and_runtime_switch() {
+        let initialized = AgentEvent::StatusChanged {
+            run_id: "run".to_string(),
+            phase: "initialized".to_string(),
+            message: "model initialized project-model".to_string(),
+        };
+        let switched = AgentEvent::StatusChanged {
+            run_id: "run".to_string(),
+            phase: "model_switched".to_string(),
+            message: "model status: model_switched:next-model".to_string(),
+        };
+
+        assert_eq!(
+            foreground_model_from_event(&initialized),
+            Some("project-model")
+        );
+        assert_eq!(foreground_model_from_event(&switched), Some("next-model"));
+    }
+
     fn test_active_run() -> ActiveAgentRun {
         let request = AgentRequest {
             id: "request-1".to_string(),
@@ -636,6 +694,7 @@ mod tests {
                     terminal_output_bytes: 0,
                 },
                 shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

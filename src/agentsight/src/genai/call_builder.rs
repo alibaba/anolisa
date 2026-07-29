@@ -66,12 +66,15 @@ impl GenAIBuilder {
         let response = self.build_response(&parsed_message, &http, &token_record);
 
         // Build token usage from TokenRecord
-        let token_usage = token_record.as_ref().map(|t| TokenUsage {
-            input_tokens: t.input_tokens as u32,
-            output_tokens: t.output_tokens as u32,
-            total_tokens: (t.input_tokens + t.output_tokens) as u32,
-            cache_creation_input_tokens: t.cache_creation_tokens.map(|v| v as u32),
-            cache_read_input_tokens: t.cache_read_tokens.map(|v| v as u32),
+        let token_usage = token_record.as_ref().map(|t| {
+            let cache = t.cache_creation_tokens.unwrap_or(0) + t.cache_read_tokens.unwrap_or(0);
+            TokenUsage {
+                input_tokens: t.input_tokens as u32,
+                output_tokens: t.output_tokens as u32,
+                total_tokens: (t.input_tokens + t.output_tokens + cache) as u32,
+                cache_creation_input_tokens: t.cache_creation_tokens.map(|v| v as u32),
+                cache_read_input_tokens: t.cache_read_tokens.map(|v| v as u32),
+            }
         });
 
         // Determine provider and model
@@ -139,6 +142,22 @@ impl GenAIBuilder {
             &last_user_raw,
             &response_id,
         );
+
+        // 若本次响应的 finish_reason 表明本轮对话已经结束（非 tool_calls/tool_use 等
+        // 表示流程尚在继续的取值），显式驱逐 (agent_name, pid, last_user_raw) 对应的
+        // conversation anchor。避免固定模板文本（如系统 recap nudge）被复用于不同真实
+        // 对话轮次时，因永久锚定而得到相同的 conversation_id（即下游的 turn.id），
+        // 进而导致下游按 turn.id 分组的 step 计数逻辑误将新轮对话归入旧轮。
+        if let Some(reason) = response
+            .messages
+            .last()
+            .and_then(|m| m.finish_reason.as_deref())
+        {
+            if Self::is_turn_terminal_finish_reason(reason) {
+                self.id_resolver
+                    .finish_conversation(&agent_name, pid_i32, &last_user_raw);
+            }
+        }
 
         // Extract error message from response body when status_code >= 400
         let error = if http.status_code >= 400 {
@@ -273,6 +292,19 @@ impl GenAIBuilder {
         })
     }
 
+    /// 判断 `finish_reason` 是否意味着本轮对话已经结束。
+    ///
+    /// `tool_calls`（OpenAI）/`tool_use`（Anthropic）/`function_call`（旧式 OpenAI）
+    /// 表示模型请求了工具调用，对话仍将在同一轮内继续；其余取值（`stop` /
+    /// `end_turn` / `length` / `max_tokens` / `content_filter` / `stop_sequence` 等）均意味着
+    /// 本轮对话已经得到最终回复，应视为轮结束。
+    fn is_turn_terminal_finish_reason(reason: &str) -> bool {
+        !matches!(
+            reason.to_ascii_lowercase().as_str(),
+            "tool_calls" | "tool_use" | "function_call"
+        )
+    }
+
     /// Build LLMRequest from parsed message or HTTP record
     fn build_request(&self, message: &Option<ParsedApiMessage>, http: &HttpRecord) -> LLMRequest {
         match message {
@@ -297,18 +329,30 @@ impl GenAIBuilder {
             }
             Some(ParsedApiMessage::AnthropicMessage { request, .. }) => {
                 if let Some(req) = request.as_ref() {
-                    let msgs = req
-                        .messages
-                        .iter()
-                        .map(|m| {
-                            let role = format!("{:?}", m.role).to_lowercase();
-                            InputMessage {
-                                role,
-                                parts: Self::anthropic_message_content_to_parts(&m.content),
+                    let mut msgs: Vec<InputMessage> = Vec::new();
+                    // Anthropic carries the system prompt at the top-level
+                    // "system" field, not in the messages array. Inject it
+                    // as a synthetic system-role message so downstream
+                    // system_instructions extraction (SQLite storage, SLS
+                    // upload, call classification) picks it up.
+                    if let Some(system) = req.system.as_ref() {
+                        let text = system.as_text();
+                        if !text.is_empty() {
+                            msgs.push(InputMessage {
+                                role: "system".to_string(),
+                                parts: vec![MessagePart::Text { content: text }],
                                 name: None,
-                            }
-                        })
-                        .collect();
+                            });
+                        }
+                    }
+                    msgs.extend(req.messages.iter().map(|m| {
+                        let role = format!("{:?}", m.role).to_lowercase();
+                        InputMessage {
+                            role,
+                            parts: Self::anthropic_message_content_to_parts(&m.content),
+                            name: None,
+                        }
+                    }));
                     return LLMRequest {
                         messages: msgs,
                         temperature: req.temperature,
@@ -551,13 +595,10 @@ impl GenAIBuilder {
                                 crate::analyzer::message::AnthropicContentBlock::Thinking {
                                     thinking,
                                     ..
-                                } => {
-                                    // Anthropic thinking: convert to MessagePart::Reasoning
-                                    if !thinking.is_empty() {
-                                        parts.push(MessagePart::Reasoning {
-                                            content: thinking.clone(),
-                                        });
-                                    }
+                                } if !thinking.is_empty() => {
+                                    parts.push(MessagePart::Reasoning {
+                                        content: thinking.clone(),
+                                    });
                                 }
                                 _ => {}
                             }
@@ -703,8 +744,9 @@ mod tests {
     };
     use crate::analyzer::message::types::{
         AnthropicContentBlock, AnthropicMessage as AnthMsg, AnthropicMessageContent,
-        AnthropicRequest, AnthropicResponse, AnthropicUsage, MessageRole, OpenAIChatMessage,
-        OpenAIChoice, OpenAIContent, OpenAIRequest, OpenAIResponse,
+        AnthropicRequest, AnthropicResponse, AnthropicSystemBlock, AnthropicSystemPrompt,
+        AnthropicUsage, MessageRole, OpenAIChatMessage, OpenAIChoice, OpenAIContent, OpenAIRequest,
+        OpenAIResponse,
     };
     use crate::analyzer::{AnalysisResult, HttpRecord, ParsedApiMessage, TokenRecord};
     use crate::response_map::ResponseSessionMapper;
@@ -758,6 +800,64 @@ mod tests {
         let builder = GenAIBuilder::new();
         let http = make_http("/api/health", None, None);
         assert!(build_call(&builder, &[AnalysisResult::Http(http)]).is_none());
+    }
+
+    // ── Verification: HTTPS-fallback trigger for unparsable LLM traffic ──
+    //
+    // An LLM API path whose body cannot be parsed into semantic messages must
+    // still build an LLMCall (path matched), but that call carries no messages,
+    // so `is_semantically_empty()` is true — this is exactly what drives the FFI
+    // divert to AgentsightHttpsData. A parsable exchange must NOT be empty.
+    #[test]
+    fn test_unparsable_llm_traffic_is_semantically_empty() {
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/chat/completions",
+            Some("this is not a valid chat-completions body".to_string()),
+            Some("neither is this a parseable response".to_string()),
+        );
+        let call = build_call(&builder, &[AnalysisResult::Http(http)])
+            .expect("LLM path still builds an LLMCall");
+        assert!(
+            call.is_semantically_empty(),
+            "unparsable LLM body must yield a semantically-empty call (→ HTTPS fallback)"
+        );
+    }
+
+    #[test]
+    fn test_parsable_llm_traffic_is_not_semantically_empty() {
+        let builder = GenAIBuilder::new();
+        let anth_req = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![AnthMsg {
+                role: MessageRole::User,
+                content: AnthropicMessageContent::Text("Hi".to_string()),
+            }],
+            max_tokens: 200,
+            system: None,
+            stream: Some(false),
+            temperature: Some(0.5),
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let parsed = ParsedApiMessage::AnthropicMessage {
+            request: Some(anth_req),
+            response: None,
+        };
+        let http = make_http("/v1/messages", None, None);
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .expect("valid LLM call builds");
+        assert!(
+            !call.is_semantically_empty(),
+            "a parsable LLM exchange must carry messages (no HTTPS fallback)"
+        );
     }
 
     #[test]
@@ -925,7 +1025,7 @@ mod tests {
         let tu = call.token_usage.unwrap();
         assert_eq!(tu.input_tokens, 10);
         assert_eq!(tu.output_tokens, 20);
-        assert_eq!(tu.total_tokens, 30);
+        assert_eq!(tu.total_tokens, 38);
         assert_eq!(tu.cache_creation_input_tokens, Some(5));
         assert_eq!(tu.cache_read_input_tokens, Some(3));
     }
@@ -1016,6 +1116,83 @@ mod tests {
         );
         assert!(!call.request.stream);
         assert!(call.request.tools.is_some());
+    }
+
+    #[test]
+    fn test_build_request_anthropic_with_system_text() {
+        let builder = GenAIBuilder::new();
+        let anth_req = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![AnthMsg {
+                role: MessageRole::User,
+                content: AnthropicMessageContent::Text("Hi".to_string()),
+            }],
+            max_tokens: 200,
+            system: Some(AnthropicSystemPrompt::Text("You are helpful".to_string())),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let parsed = ParsedApiMessage::AnthropicMessage {
+            request: Some(anth_req),
+            response: None,
+        };
+        let http = make_http("/v1/messages", None, None);
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .unwrap();
+        assert_eq!(call.request.messages.len(), 2);
+        assert_eq!(call.request.messages[0].role, "system");
+        assert_eq!(call.request.messages[1].role, "user");
+    }
+
+    #[test]
+    fn test_build_request_anthropic_with_system_blocks() {
+        let builder = GenAIBuilder::new();
+        let anth_req = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![],
+            max_tokens: 200,
+            system: Some(AnthropicSystemPrompt::Blocks(vec![
+                AnthropicSystemBlock {
+                    type_: "text".to_string(),
+                    text: Some("Part 1".to_string()),
+                    cache_control: None,
+                },
+                AnthropicSystemBlock {
+                    type_: "text".to_string(),
+                    text: Some("Part 2".to_string()),
+                    cache_control: None,
+                },
+            ])),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let parsed = ParsedApiMessage::AnthropicMessage {
+            request: Some(anth_req),
+            response: None,
+        };
+        let http = make_http("/v1/messages", None, None);
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .unwrap();
+        assert_eq!(call.request.messages.len(), 1);
+        assert_eq!(call.request.messages[0].role, "system");
     }
 
     #[test]

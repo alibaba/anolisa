@@ -1,30 +1,19 @@
 """Unit tests for cosh-extension/hooks/sandbox-guard.py."""
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 _COSH_EXTENSION_DIR = Path(__file__).resolve().parents[2] / ".." / "cosh-extension"
 _HOOKS_DIR = _COSH_EXTENSION_DIR / "hooks"
-sys.path.insert(0, str(_HOOKS_DIR))
 
-
-def _load_sandbox_guard_hook():
-    hook_path = _HOOKS_DIR / "sandbox-guard.py"
-    spec = importlib.util.spec_from_file_location("sandbox_guard_hook", hook_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sandbox_guard = _load_sandbox_guard_hook()
+sandbox_guard = load_standalone_hook(
+    "cosh_sandbox_guard_hook",
+    _HOOKS_DIR / "sandbox-guard.py",
+)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

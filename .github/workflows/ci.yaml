@@ -47,8 +47,8 @@ on:
         required: false
         type: boolean
         default: false
-      run_anvil:
-        description: 'Force run anvil tests (ignore change detection)'
+      run_blaze:
+        description: 'Force run blaze tests (ignore change detection)'
         required: false
         type: boolean
         default: false
@@ -88,7 +88,7 @@ jobs:
       skillfs: ${{ steps.changes.outputs.skillfs }}
       cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
       ktuner: ${{ steps.changes.outputs.ktuner }}
-      anvil: ${{ steps.changes.outputs.anvil }}
+      blaze: ${{ steps.changes.outputs.blaze }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -152,7 +152,7 @@ jobs:
           if echo "$CHANGED" | grep -q "^src/ktuner/"; then
             KTUNER=true
           fi
-          if echo "$CHANGED" | grep -q "^src/anvil/"; then
+          if echo "$CHANGED" | grep -qE "^src/(anvil|blaze)/"; then
             ANVIL=true
           fi
 
@@ -187,7 +187,7 @@ jobs:
           if [[ "${{ inputs.run_ktuner }}" == "true" ]]; then
             KTUNER=true
           fi
-          if [[ "${{ inputs.run_anvil }}" == "true" ]]; then
+          if [[ "${{ inputs.run_blaze }}" == "true" ]]; then
             ANVIL=true
           fi
 
@@ -201,7 +201,7 @@ jobs:
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
           echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
-          echo "anvil=$ANVIL" >> $GITHUB_OUTPUT
+          echo "blaze=$ANVIL" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -216,7 +216,7 @@ jobs:
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
           echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
           echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
-          echo "| anvil | $ANVIL |" >> $GITHUB_STEP_SUMMARY
+          echo "| blaze | $ANVIL |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Validate component version metadata
@@ -660,13 +660,13 @@ jobs:
       - name: Lint
         run: |
           cd src/agentsight
-          cargo clippy --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests with coverage
         run: |
           cd src/agentsight
-          cargo llvm-cov --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/)'
+          cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs|src/local/)'
 
       - name: Generate coverage summary
         if: always()
@@ -778,6 +778,46 @@ jobs:
         run: |
           cd src/tokenless
           cargo test --workspace -- --test-threads=1
+
+      - name: Run hook integration tests (Python)
+        run: |
+          cd src/tokenless
+          python3 tests/test_compress_response_hook.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: extractions/setup-just@v2
+
+      - name: npm packaging smoke test (native Linux)
+        # rtk v0.43.0 declares rust-version = "1.91", above the 1.89.0 pin
+        # used by the workspace MSRV checks earlier in this job. Only this
+        # packaging step builds rtk, so it runs on its own 1.91 toolchain
+        # via RUSTUP_TOOLCHAIN while the MSRV pin stays intact.
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          make -C src/tokenless npm-package
+          # Install root + platform tarballs into a scratch project and verify
+          # all three binaries actually run. The root install omits registry
+          # optional deps (unpublished during CI); the platform tarball
+          # installed in step 1 satisfies the platform lookup instead.
+          DIST="$GITHUB_WORKSPACE/src/tokenless/npm/dist"
+          SMOKE=$(mktemp -d)
+          cd "$SMOKE"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$DIST"/tokenless-linux-x64/*.tgz
+          npm install --no-audit --no-fund --omit=optional "$DIST"/tokenless/*.tgz
+          ./node_modules/.bin/tokenless --version
+          ./node_modules/.bin/rtk --version
+          ./node_modules/.bin/toon --version
+          # Verify the bundled OpenClaw adapter was built and packaged
+          test -f ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/dist/index.js
+          # Verify adapter install scripts are executable
+          test -x ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/scripts/install.sh
 
   # =========================================================================
   # Step 7: Test ws-ckpt
@@ -908,6 +948,16 @@ jobs:
         with:
           workspaces: src/anolisa
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate npm packaging
+        run: |
+          cd src/anolisa
+          node npm/tests/platforms.test.js
+          node npm/scripts/package-npm.js --validate
+
       - name: Check formatting
         run: |
           cd src/anolisa
@@ -971,8 +1021,41 @@ jobs:
   # =========================================================================
   # Step 11: Test cosh-ng (Rust workspace)
   # =========================================================================
+  # Split into three parallel jobs so the critical path stays within the
+  # five-minute budget: integration (the longest gate, keeps the historical
+  # "Test cosh-ng" check name), fast checks (fmt/clippy/audits/fast gate,
+  # which repeats the audits run-test-gates.sh already performs), and the
+  # release build (no dependency on the test gates).
   test-cosh-ng:
     name: Test cosh-ng
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
+
+      - name: Run process and PTY integration tests
+        env:
+          # Libtest still schedules 16 workers, while the harness gate bounds
+          # live PTY sessions to avoid oversubscribing loaded CI runners.
+          COSH_RAW_CLI_TEST_PARALLELISM: '8'
+        run: |
+          cd src/cosh-ng
+          scripts/run-test-gates.sh integration
+
+  test-cosh-ng-fast:
+    name: Test cosh-ng fast checks
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
@@ -990,7 +1073,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
 
       - name: Check formatting
         run: |
@@ -1002,10 +1085,42 @@ jobs:
           cd src/cosh-ng
           cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run tests
+      - name: Validate stage E2E contract
         run: |
           cd src/cosh-ng
-          cargo test --workspace
+          python3 -m unittest discover -s e2e/tests -v
+          python3 e2e/run.py --plan --profile local
+
+      # run-test-gates.sh fast already runs the layout and inventory audits,
+      # so no separate audit step is needed here.
+      - name: Run fast regression tests
+        run: |
+          cd src/cosh-ng
+          scripts/run-test-gates.sh fast
+
+  test-cosh-ng-release-build:
+    name: Build cosh-ng release
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build release workspace
+        run: |
+          cd src/cosh-ng
+          cargo build --workspace --release --locked
 
   # =========================================================================
   # Step 12: Test ktuner (deterministic kernel-tuning engine)
@@ -1043,12 +1158,12 @@ jobs:
           cargo test
 
   # =========================================================================
-  # Step 13: Test anvil (per-host sandbox daemon)
+  # Step 13: Test blaze (per-host sandbox daemon)
   # =========================================================================
-  test-anvil:
-    name: Test anvil
+  test-blaze:
+    name: Test blaze
     needs: detect-changes
-    if: needs.detect-changes.outputs.anvil == 'true'
+    if: needs.detect-changes.outputs.blaze == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     steps:
       - uses: actions/checkout@v4
@@ -1060,19 +1175,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src/anvil
+          workspaces: src/blaze
 
       - name: Check formatting
         run: |
-          cd src/anvil
+          cd src/blaze
           cargo fmt --all --check
 
       - name: Lint
         run: |
-          cd src/anvil
+          cd src/blaze
           cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
         run: |
-          cd src/anvil
+          cd src/blaze
           cargo test --workspace

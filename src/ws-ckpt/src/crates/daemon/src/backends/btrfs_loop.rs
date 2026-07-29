@@ -13,7 +13,7 @@ use ws_ckpt_common::{DaemonConfig, DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
 
 use super::btrfs_common;
 use crate::util::{is_mounted, run_command, run_command_checked};
-use btrfs_common::{backup_path_for, resolve_symlink_path};
+use btrfs_common::{backup_path_for, recover_orphan_backup, resolve_symlink_path};
 
 pub struct BtrfsLoopBackend {
     pub mount_path: PathBuf,
@@ -57,12 +57,10 @@ impl BtrfsLoopBackend {
         let orig_gid = orig_meta.gid();
 
         let backup_path = backup_path_for(original_path);
-        if tokio::fs::symlink_metadata(&backup_path).await.is_ok() {
-            anyhow::bail!(
-                "refusing to overwrite pre-existing backup {:?}; remove it manually first",
-                backup_path
-            );
-        }
+        // Recover orphan `.pre-init-bak` from an interrupted prior init before
+        // proceeding with Step 3 (rename). See btrfs_common::recover_orphan_backup.
+        recover_orphan_backup(original_path, subvol_path).await?;
+
         tokio::fs::rename(original_path, &backup_path)
             .await
             .context("failed to rename original directory to backup")?;
@@ -326,6 +324,18 @@ impl StorageBackend for BtrfsLoopBackend {
             warn!("failed to remove snapshots dir {:?}: {}", snap_base, e);
         }
 
+        // 6. Clean orphan `.pre-init-bak` if it still exists (prior interrupted
+        //    init). Safe to remove at this point — subvol is gone, original_path
+        //    has been restored as a normal directory in steps above.
+        let backup_path = backup_path_for(original_path);
+        if tokio::fs::symlink_metadata(&backup_path).await.is_ok() {
+            if let Err(e) = tokio::fs::remove_dir_all(&backup_path).await {
+                warn!("failed to clean orphan backup {:?}: {:#}", backup_path, e);
+            } else {
+                info!("cleaned orphan backup {:?} during recover", backup_path);
+            }
+        }
+
         Ok(())
     }
 
@@ -460,9 +470,18 @@ impl StorageBackend for BtrfsLoopBackend {
                 .await
                 .context("Failed to setup loop device")?;
             let loop_device = loop_device.trim().to_string();
-            run_command_checked("mount", &[&loop_device, &mount_path_str])
-                .await
-                .context("Failed to mount btrfs image")?;
+            if let Err(e) = run_command_checked("mount", &[&loop_device, &mount_path_str]).await {
+                // Mount failed after the loop device was attached; detach it so
+                // repeated failures don't leak/exhaust loop devices.
+                if let Err(detach_err) = run_command_checked("losetup", &["-d", &loop_device]).await
+                {
+                    warn!(
+                        "Failed to detach loop device {} after mount failure: {:#}",
+                        loop_device, detach_err
+                    );
+                }
+                return Err(e).context("Failed to mount btrfs image");
+            }
             info!("Mounted {} at {}", loop_device, mount_path_str);
         } else {
             info!("Already mounted at {:?}", self.mount_path);
@@ -875,9 +894,18 @@ async fn create_sparse_image(
     run_command_checked("truncate", &["-s", &img_size.to_string(), img_path])
         .await
         .context("Failed to create sparse image file")?;
-    run_command_checked("mkfs.btrfs", &["-f", img_path])
-        .await
-        .context("Failed to format btrfs image")?;
+    // If mkfs fails, drop the just-truncated (zeroed) file. Leaving it behind
+    // would let the next bootstrap skip formatting (it only checks existence)
+    // and then fail `mount` forever on a superblock-less image.
+    if let Err(e) = run_command_checked("mkfs.btrfs", &["-f", img_path]).await {
+        if let Err(rm_err) = tokio::fs::remove_file(img_path).await {
+            warn!(
+                "Failed to remove half-created image {} after mkfs failure: {:#}",
+                img_path, rm_err
+            );
+        }
+        return Err(e).context("Failed to format btrfs image");
+    }
     Ok(())
 }
 
