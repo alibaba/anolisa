@@ -200,6 +200,7 @@ test-integration:
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_compress_schema_hook.py
+	python3 tests/test_rewrite_hook.py
 
 test-adapters:
 	@echo "==> Testing qoder adapter installer..."

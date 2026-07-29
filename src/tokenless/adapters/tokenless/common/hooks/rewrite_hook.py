@@ -14,6 +14,7 @@ FHS spec: /usr/libexec/anolisa/tokenless/rtk.
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -40,6 +41,73 @@ from hook_utils import (
 
 _MIN_RTK_VERSION = (0, 35, 0)
 _AGENT_ID = resolve_agent_id()
+
+# Shell connectives that terminate a command-list / pipeline segment.
+# A bare `rtk` wrapper can appear at command start or right after one.
+_SEGMENT_OPS = frozenset({"&&", "||", ";", "|", "&"})
+
+
+def _is_env_assignment(token: str) -> bool:
+    """Return True for a leading shell variable assignment (NAME=value)."""
+    name, sep, _ = token.partition("=")
+    if not sep or not name:
+        return False
+    if not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(c.isalnum() or c == "_" for c in name)
+
+
+def _anchor_rtk_prefix(rewritten: str, rtk_bin: str) -> str:
+    """Replace bare `rtk` wrapper tokens with the resolved binary path.
+
+    rtk prints rewrites with a literal `rtk` prefix, which only resolves
+    when the shell executing the tool call has the rtk location on its
+    PATH. Agent runtimes with a trimmed PATH (e.g. IDE tool environments
+    without ~/.local/bin) would fail every rewritten command with exit
+    127 even though the hook resolved rtk successfully. Anchoring makes
+    the rewritten command self-contained.
+
+    The pass swaps the first unquoted `rtk` token of each segment — at
+    command start or right after `&&` / `||` / `;` / `|` / `&`,
+    optionally behind leading environment assignments or wrappers such
+    as `sudo`. It lexes with `posix=False` and no punctuation splitting,
+    so every token keeps its original surface: quoted patterns like
+    `grep -E 'foo|rtk bar'` are never modified, unquoted globs like
+    `*.txt` are not re-quoted into literals, fd redirections (`2>&1`,
+    `2>/dev/null`) and command substitutions (`$(date)`) stay intact,
+    and comment stripping is disabled so a `#` argument cannot truncate
+    the command. Connectives are recognized as whitespace-delimited
+    tokens; an unspaced `cmd1;cmd2` is not split, which only leaves
+    that segment's `rtk` unanchored (conservative, never corrupts).
+    Unparseable input is returned untouched.
+
+    Known limitation: a bare `rtk` token that is another command's
+    argument (e.g. `echo rtk done`) is indistinguishable from a wrapper
+    position inside the rtk-rewrite output domain and gets anchored.
+    Real rtk rewrites do not produce that shape, so this is accepted.
+    """
+    lexer = shlex.shlex(rewritten, posix=False)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return rewritten
+
+    quoted = shlex.quote(rtk_bin)
+    result = list(tokens)
+    wrapped = False
+    for i, token in enumerate(tokens):
+        if token in _SEGMENT_OPS:
+            wrapped = False
+            continue
+        if _is_env_assignment(token):
+            continue
+        if not wrapped and token == "rtk":
+            result[i] = quoted
+            wrapped = True
+
+    return " ".join(result)
 
 
 # -- main --------------------------------------------------------------------
@@ -131,6 +199,8 @@ def main() -> None:
     rewritten = proc.stdout.strip()
     if not rewritten or rewritten == cmd:
         skip()
+
+    rewritten = _anchor_rtk_prefix(rewritten, rtk_bin)
 
     # 7. Build response
     # Emit both formats for runtime compatibility:
