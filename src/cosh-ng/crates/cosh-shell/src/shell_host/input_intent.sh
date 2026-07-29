@@ -28,6 +28,7 @@ _cosh_utf8_han_status() {
   local LC_ALL=C
   local index=0
   local length="${#value}"
+  local found_han=0
   local b1 b2 b3 b4 codepoint
   local _COSH_BYTE_AT_RESULT
 
@@ -80,10 +81,11 @@ _cosh_utf8_han_status() {
        || (codepoint >= 0x4E00 && codepoint <= 0x9FFF)
        || (codepoint >= 0xF900 && codepoint <= 0xFAFF)
        || (codepoint >= 0x20000 && codepoint <= 0x323AF) )); then
-      return 0
+      found_han=1
     fi
   done
 
+  (( found_han == 1 )) && return 0
   return 1
 }
 
@@ -91,11 +93,12 @@ _cosh_command_veto() {
   local input="$1"
   local top_token="$2"
   local context="${3:-}"
+  local top_han_status="${4:-1}"
   local scan="$input"
   local word name
 
   case "$top_token" in
-    ~/*|command|env|sudo|exec|nohup|time|xargs)
+    '~/'*|command|env|sudo|exec|nohup|time|xargs)
       return 0
       ;;
     /*|*/*)
@@ -114,6 +117,50 @@ _cosh_command_veto() {
     *'?') scan="${scan%\?}" ;;
     *'？') scan="${scan%？}" ;;
   esac
+
+  if (( top_han_status == 0 )); then
+    case "$scan" in
+      *'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*[[:cntrl:]]*)
+        return 0
+        ;;
+    esac
+
+    local quote=""
+    local escaped=0
+    local index=0
+    local length="${#scan}"
+    local byte
+    while (( index < length )); do
+      byte="${scan:$index:1}"
+      (( index += 1 ))
+      if [[ "$quote" == "'" ]]; then
+        [[ "$byte" == "'" ]] && quote=""
+        continue
+      fi
+      if (( escaped == 1 )); then
+        escaped=0
+        continue
+      fi
+      case "$byte" in
+        '\') escaped=1 ;;
+        "'") quote="'" ;;
+        '"')
+          if [[ "$quote" == '"' ]]; then
+            quote=""
+          elif [[ -z "$quote" ]]; then
+            quote='"'
+          fi
+          ;;
+        '('|')')
+          [[ -z "$quote" ]] && return 0
+          ;;
+      esac
+    done
+    (( escaped == 1 )) && return 0
+    [[ -n "$quote" ]] && return 0
+    return 1
+  fi
+
   case "$scan" in
     *"'"*|*'"'*|*'\'*|*'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*'('*|*')'*|*'{'*|*'}'*|*'['*|*']'*|*'*'*|*'?'*|*'？'*|*'~'*|*[[:cntrl:]]*)
       return 0
@@ -203,26 +250,34 @@ _cosh_classify_missing() {
   original="$(_cosh_ascii_trim "$1")"
   local top_token="$2"
   local context="${3:-}"
-  local han_status had_question=0 polite=0
+  local original_han_status top_han_status had_question=0 polite=0
   local IFS=$' \t\n'
 
   if [[ -z "$original" || ${#original} -gt 4096 ]]; then
     printf '%s' "unsafe"
     return 0
   fi
-  if _cosh_command_veto "$original" "$top_token" "$context"; then
+  _cosh_utf8_han_status "$original"
+  original_han_status=$?
+  if (( original_han_status == 2 )); then
+    printf '%s' "unsafe"
+    return 0
+  fi
+
+  _cosh_utf8_han_status "$top_token"
+  top_han_status=$?
+  if (( top_han_status == 2 )); then
+    printf '%s' "unsafe"
+    return 0
+  fi
+
+  if _cosh_command_veto "$original" "$top_token" "$context" "$top_han_status"; then
     printf '%s' "command"
     return 0
   fi
 
-  _cosh_utf8_han_status "$original"
-  han_status=$?
-  if (( han_status == 0 )); then
+  if (( original_han_status == 0 )); then
     printf '%s' "natural_language"
-    return 0
-  fi
-  if (( han_status == 2 )); then
-    printf '%s' "unsafe"
     return 0
   fi
 

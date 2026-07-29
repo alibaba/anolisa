@@ -212,6 +212,10 @@ fn strong_natural_language_matrix_is_consistent() {
             "\u{5e2e}\u{6211}\u{770b} ./\u{65e5}\u{5fd7}",
             "\u{5e2e}\u{6211}\u{770b}",
         ),
+        (
+            "\u{5e2e}\u{6211}\u{770b} ./*.log",
+            "\u{5e2e}\u{6211}\u{770b}",
+        ),
         ("review ./report.log", "review"),
     ] {
         assert_bash_zsh(input, top_token, "natural_language");
@@ -277,10 +281,6 @@ fn command_veto_matrix_is_consistent() {
         ),
         (
             "\u{5e2e}\u{6211}\u{770b} \"$PATH\"",
-            "\u{5e2e}\u{6211}\u{770b}",
-        ),
-        (
-            "\u{5e2e}\u{6211}\u{770b} ./*.log",
             "\u{5e2e}\u{6211}\u{770b}",
         ),
         ("review --all", "review"),
@@ -430,8 +430,8 @@ fn missing_path_context_keeps_conservative_vetoes() {
         ("打开./config.toml | cat", "打开./config.toml", "command"),
         // option token still vetoes
         ("./run.sh --all", "./run.sh", "command"),
-        // assignment token still vetoes
-        ("打开./x FOO=bar", "打开./x", "command"),
+        // Han-leading assignment syntax is Tier A.
+        ("打开./x FOO=bar", "打开./x", "natural_language"),
     ] {
         assert_bash_zsh_missing_path(input, top_token, expected);
     }
@@ -455,6 +455,68 @@ fn missing_path_context_invalid_utf8_stays_unsafe() {
             "{shell}"
         );
     }
+}
+
+#[test]
+fn routing_c1_classifier_han_tier_matrix() {
+    for (input, top_token, expected) in [
+        (
+            "使用 git log --since=\"1 day ago\" --format=\"%h %s (%an, %ar)\" 总结",
+            "使用",
+            "natural_language",
+        ),
+        (
+            "解释 --all FOO=bar ./*.log {a,b} ~/x",
+            "解释",
+            "natural_language",
+        ),
+        ("解释一下 (quoted) 的含义", "解释一下", "command"),
+        (
+            "解释一下 \"(quoted)\" 的含义",
+            "解释一下",
+            "natural_language",
+        ),
+        ("你还好吗？ 我想问问", "你还好吗？", "natural_language"),
+        ("解释 ps aux | grep java", "解释", "command"),
+        ("解释 true && touch x", "解释", "command"),
+        ("解释 false || touch x", "解释", "command"),
+        ("解释 \"$HOME\"", "解释", "command"),
+        ("解释 'a>b'", "解释", "command"),
+        ("解释 $((1 + 1))", "解释", "command"),
+        ("解释 <(printf x)", "解释", "command"),
+        ("解释 `printf x`", "解释", "command"),
+        ("解释 \\", "解释", "command"),
+        ("解释 \"unterminated", "解释", "command"),
+        ("解释\t内容", "解释", "command"),
+    ] {
+        assert_bash_zsh(input, top_token, expected);
+    }
+}
+
+#[test]
+fn routing_c1_classifier_validates_full_utf8_before_han() {
+    let mut bytes = "解释".as_bytes().to_vec();
+    bytes.push(0xff);
+    let input = OsString::from_vec(bytes);
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        assert_eq!(
+            classify(shell, &input, "解释").as_deref(),
+            Some("unsafe"),
+            "{shell}"
+        );
+    }
+}
+
+#[test]
+fn routing_c1_missing_path_allows_han_tier_a() {
+    assert_bash_zsh_missing_path(
+        "打开./不存在 --dry-run \"x (preview)\"",
+        "打开./不存在",
+        "natural_language",
+    );
 }
 
 // ENOENT-proof walk (issue #1919 review): dangling symlinks and
