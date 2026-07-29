@@ -96,7 +96,10 @@ fn shell_host_runs_bash_pty_and_emits_command_events() {
         .as_deref()
         .expect("terminal output ref");
     let output_ref_text = std::fs::read_to_string(output_ref).expect("output ref text");
-    assert!(output_ref_text.contains("No such file") || output_ref_text.contains("cannot access"));
+    assert!(
+        output_ref_text.contains("/path/that/does/not/exist"),
+        "{output_ref_text}"
+    );
 }
 
 #[test]
