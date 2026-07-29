@@ -99,21 +99,6 @@ pub(super) fn render_soft_newline_markers(bytes: &[u8]) -> Vec<u8> {
     rendered
 }
 
-/// Replaces real newlines in committed text with the display marker for the
-/// commit echo. Data events (`UserIntercept`) keep the real newlines.
-pub(super) fn render_newline_markers(bytes: &[u8]) -> Vec<u8> {
-    let marker = display_marker();
-    let mut rendered = Vec::with_capacity(bytes.len());
-    for byte in bytes {
-        if *byte == b'\n' {
-            rendered.extend_from_slice(marker);
-        } else {
-            rendered.push(*byte);
-        }
-    }
-    rendered
-}
-
 fn display_marker() -> &'static [u8] {
     if utf8_locale() {
         b"\x1b[2m\xe2\x8f\x8e\x1b[22m" // dim ⏎

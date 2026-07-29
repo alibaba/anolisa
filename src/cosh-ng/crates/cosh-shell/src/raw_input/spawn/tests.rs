@@ -354,6 +354,9 @@ fn ghost_suffix_does_not_consume_input_from_a_new_capture_generation() {
     );
     finish_input_relay(&mut master, &input_tx, &classifier, &input_mode, &mut state)
         .expect("finish relay");
+    let eof_events = input_rx.try_iter().collect::<Vec<_>>();
+    assert!(eof_events.contains(&RawInputEvent::CaptureDrained { generation: 8 }));
+    assert!(!eof_events.contains(&RawInputEvent::EofShutdownRequested));
     master.sync_all().expect("sync test output");
     assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
     fs::remove_file(path).ok();

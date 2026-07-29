@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nix::libc;
 use nix::pty::Winsize;
 
 use crate::raw_input::{
@@ -22,6 +21,7 @@ use super::prompt_replay::{
     prompt_prefixed_replay_bytes, prompt_replay_bytes, PromptReplayTracker,
 };
 
+mod eof_shutdown;
 mod input_events;
 mod input_readiness;
 mod pty_emit;
@@ -37,22 +37,22 @@ use terminal_recovery::{restore_terminal_after_interrupted_command, PendingTermi
 use terminal_size::sync_outer_terminal_winsize;
 
 pub(super) struct RawActionWatchdog {
-    driver_done: Arc<Mutex<Option<Instant>>>,
     grace: Duration,
 }
 
 impl RawActionWatchdog {
-    pub(super) fn new(driver_done: Arc<Mutex<Option<Instant>>>, grace: Duration) -> Self {
-        Self { driver_done, grace }
+    pub(super) fn new(grace: Duration) -> Self {
+        Self { grace }
     }
 
-    fn expired(&self) -> bool {
-        self.driver_done
-            .lock()
-            .ok()
-            .and_then(|done| *done)
-            .is_some_and(|done| done.elapsed() > self.grace)
+    fn expired(&self, driver_completed_at: Option<Instant>) -> bool {
+        driver_completed_at.is_some_and(|done| done.elapsed() > self.grace)
     }
+}
+
+pub(super) struct DriverCompletion {
+    pub(super) result: io::Result<()>,
+    pub(super) completed_at: Instant,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -64,6 +64,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     output: &mut W,
     event_observer: &mut F,
     input_events: &Receiver<RawInputEvent>,
+    driver_completion: &Receiver<DriverCompletion>,
     input_mode: &Arc<Mutex<RawInputMode>>,
     input_generation: &UserPtyInputGeneration,
     last_winsize: &mut Winsize,
@@ -71,7 +72,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     recovery_request_file: &Path,
     handoff_request_file: &Path,
     watchdog: Option<&RawActionWatchdog>,
-) -> io::Result<()>
+) -> io::Result<bool>
 where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
@@ -83,6 +84,8 @@ where
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
     let mut pending_prompt_restore = None;
     let mut input_readiness = RawInputReadinessProbe::from_env();
+    let mut driver_completed_at = None;
+    let mut eof_shutdown = None;
     // #1932 F4: ask the outer terminal to report modifier-carrying editing
     // keys (modifyOtherKeys level 1, e.g. Shift+Enter -> CSI 27;2;13~).
     // Written on the ordered output path after startup rendering settled;
@@ -99,13 +102,22 @@ where
             thread::sleep(Duration::from_millis(10));
             continue;
         }
-        drain_raw_input_events(
+        if drain_raw_input_events(
             input_events,
             parser,
             output,
             prompt,
             &mut native_candidate_echoed_len,
             &mut prompt_replay,
+        )? {
+            request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
+        }
+        poll_driver_completion(
+            driver_completion,
+            master,
+            terminal,
+            child,
+            &mut driver_completed_at,
         )?;
         let mut observer_action = merge_pending_prompt_restore(
             observe_with_input_mode_lock(event_observer, &parser.events, output, input_mode)?,
@@ -153,14 +165,16 @@ where
                     // display cuts produced by that write's echo are
                     // handled: re-drain here, the top-of-loop drain alone
                     // loses that ordering inside this read loop (#1932).
-                    drain_raw_input_events(
+                    if drain_raw_input_events(
                         input_events,
                         parser,
                         output,
                         prompt,
                         &mut native_candidate_echoed_len,
                         &mut prompt_replay,
-                    )?;
+                    )? {
+                        request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
+                    }
                     for (cut, cut_kind) in parser.drain_intervention_display_cuts() {
                         let cut = cut.min(parser.display.len());
                         // Only a real prompt boundary (precmd) confirms the
@@ -284,6 +298,9 @@ where
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) if child.try_wait()?.is_some() => {
+                    if !advance_eof_shutdown(&mut eof_shutdown)? {
+                        break;
+                    }
                     release_held_shell_output(
                         event_observer,
                         &parser.events,
@@ -292,13 +309,17 @@ where
                         &mut display_start,
                         &mut prompt_replay,
                     )?;
-                    return Ok(());
+                    return Ok(eof_shutdown.is_some());
                 }
                 Err(err) => return Err(err),
             }
         }
 
         if child.try_wait()?.is_some() {
+            if !advance_eof_shutdown(&mut eof_shutdown)? {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             release_held_shell_output(
                 event_observer,
                 &parser.events,
@@ -307,10 +328,11 @@ where
                 &mut display_start,
                 &mut prompt_replay,
             )?;
-            return Ok(());
+            return Ok(eof_shutdown.is_some());
         }
+        advance_eof_shutdown(&mut eof_shutdown)?;
         if let Some(watchdog) = watchdog {
-            if watchdog.expired() {
+            if watchdog.expired(driver_completed_at) {
                 child.kill()?;
                 child.wait()?;
                 return Err(io::Error::new(
@@ -328,13 +350,22 @@ where
             thread::sleep(Duration::from_millis(10));
             continue;
         }
-        drain_raw_input_events(
+        if drain_raw_input_events(
             input_events,
             parser,
             output,
             prompt,
             &mut native_candidate_echoed_len,
             &mut prompt_replay,
+        )? {
+            request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
+        }
+        poll_driver_completion(
+            driver_completion,
+            master,
+            terminal,
+            child,
+            &mut driver_completed_at,
         )?;
         observer_action = merge_pending_prompt_restore(
             observe_with_input_mode_lock(event_observer, &parser.events, output, input_mode)?,
@@ -384,6 +415,35 @@ where
         );
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn poll_driver_completion(
+    receiver: &Receiver<DriverCompletion>,
+    master: &File,
+    terminal: &File,
+    child: &mut Child,
+    completed_at: &mut Option<Instant>,
+) -> io::Result<()> {
+    let Ok(completion) = receiver.try_recv() else {
+        return Ok(());
+    };
+    *completed_at = Some(completion.completed_at);
+    if let Err(error) = completion.result {
+        shutdown_and_reap_child(master, terminal, child);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn shutdown_and_reap_child(master: &File, terminal: &File, child: &mut Child) {
+    let mut shutdown = None;
+    if request_eof_shutdown(master, terminal, child, &mut shutdown).is_ok() {
+        while let Ok(false) = advance_eof_shutdown(&mut shutdown) {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn latest_capture_submission_generation(events: &[ShellEvent]) -> Option<u64> {
@@ -590,3 +650,4 @@ fn mark_pending_prompt_replayed(parser: &OscParser, prompt: &[u8], display_start
 #[cfg(test)]
 #[path = "raw_relay_tests.rs"]
 mod tests;
+use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown, EofShutdown};

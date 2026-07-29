@@ -407,35 +407,23 @@ pub(in super::super) fn finish_input_relay(
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
 ) -> io::Result<()> {
-    flush_pending_prompt_ghost_escape(
-        true,
-        Instant::now(),
-        master,
-        input_events,
-        input_classifier,
-        input_mode,
-        state,
-    )?;
-    super::action::flush_pending_delay_escape(
-        true,
-        Instant::now(),
-        master,
-        input_events,
-        input_classifier,
-        input_mode,
-        state,
-    )?;
-    let mode = current_raw_input_mode(input_mode);
-    flush_pending_replaced_prompt_ghost_suffix(
-        true,
-        Instant::now(),
-        &mode,
-        master,
-        input_events,
-        input_classifier,
-        input_mode,
-        state,
-    )?;
+    // EOF is cancellation, not the timeout path. Pending escape/suffix bytes
+    // are Cosh-owned lookahead and must never become PTY input during
+    // shutdown.
+    let current_mode = current_raw_input_mode(input_mode);
+    let dismiss_prompt_ghost = state.pending_prompt_ghost_escape.take().is_some()
+        || state.pending_replaced_prompt_ghost_suffix.take().is_some()
+        || matches!(current_mode, RawInputMode::PromptGhost { .. });
+    state.pending_delay_escape.take();
+    if dismiss_prompt_ghost {
+        let _ = input_events.send(RawInputEvent::CandidateClearLine);
+        let _ = input_events.send(RawInputEvent::PromptGhostDismissed);
+        if matches!(current_mode, RawInputMode::PromptGhost { .. }) {
+            if let Ok(mut mode) = input_mode.lock() {
+                *mode = RawInputMode::Passthrough;
+            }
+        }
+    }
     if let RawInputMode::Submitted { generation, .. } = current_raw_input_mode(input_mode) {
         expire_capture_submission(input_mode, generation);
     }
@@ -469,21 +457,17 @@ pub(in super::super) fn finish_input_relay(
         };
         drain_abandoned_capture(capture_owned_input, &mut relay)?;
     }
-    // Bytes held as a possible split paste delimiter never got a routing
-    // verdict: forward them byte-identically before the trailing exit
-    // (#1721; keeps partial CSI passthrough guarantees at EOF).
-    let held_partial = state.line_buffer.take_pending_partial();
-    if !held_partial.is_empty() {
-        write_user_bytes_to_pty(
-            master,
-            &state.input_generation,
-            &mut state.line_submits,
-            input_events,
-            &state.main_prompt_gate,
-            &held_partial,
-        )?;
+    // Candidate bytes were never submitted to the Shell. EOF cancels them;
+    // flushing a lone `?`, slash prefix, or partial paste delimiter before
+    // `exit` would turn display state into executable input.
+    if state.line_buffer.is_active() {
+        state.line_buffer.clear();
+        let _ = input_events.send(RawInputEvent::CandidateClearLine);
     }
-    if !state.exit_tracker.saw_explicit_exit() {
+    if state.exit_tracker.saw_explicit_exit() {
+        return Ok(());
+    }
+    if state.native_line_state.is_empty() {
         write_user_bytes_to_pty(
             master,
             &state.input_generation,
@@ -492,6 +476,8 @@ pub(in super::super) fn finish_input_relay(
             &state.main_prompt_gate,
             b"exit\n",
         )?;
+    } else {
+        let _ = input_events.send(RawInputEvent::EofShutdownRequested);
     }
     Ok(())
 }

@@ -16,10 +16,10 @@ use crate::raw_input::{
 use crate::types::ShellEvent;
 
 use super::bootstrap::{start_bash_session, start_zsh_session, PtySession};
-use super::io_loop::{read_until_streaming, wait_child};
+use super::io_loop::{read_until_streaming, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
 use super::model::{ShellHostConfig, ShellHostOutput};
-use super::raw_relay::{read_raw_until_exit, RawActionWatchdog};
+use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
 
 pub fn run_raw_relay_bash<R, W>(
     config: &ShellHostConfig,
@@ -320,24 +320,24 @@ where
         main_prompt_gate,
         slash_route_enabled,
     );
-    let watchdog = action_watchdog.map(|grace| {
-        let driver_done = Arc::new(Mutex::new(None));
-        let done_slot = Arc::clone(&driver_done);
-        thread::spawn(move || {
-            let _ = driver_thread.join();
-            if let Ok(mut done) = done_slot.lock() {
-                *done = Some(Instant::now());
-            }
+    let (driver_completion_sender, driver_completion_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = driver_thread
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("raw input driver panicked")));
+        let _ = driver_completion_sender.send(DriverCompletion {
+            result,
+            completed_at: Instant::now(),
         });
-        RawActionWatchdog::new(driver_done, grace)
     });
+    let watchdog = action_watchdog.map(RawActionWatchdog::new);
     let mut last_winsize = config.winsize;
     let relay_prompt = if config.native_mode {
         ""
     } else {
         &config.prompt
     };
-    read_raw_until_exit(
+    let eof_shutdown = read_raw_until_exit(
         &mut session.master,
         &session.terminal,
         &mut session.child,
@@ -345,6 +345,7 @@ where
         &mut output,
         &mut event_observer,
         &input_event_receiver,
+        &driver_completion_receiver,
         &input_mode,
         &input_generation,
         &mut last_winsize,
@@ -358,7 +359,7 @@ where
     output.write_all(&session.parser.display[display_start..])?;
     output.flush()?;
 
-    let exit_status = wait_child(&mut session.child)?;
+    let exit_status = wait_child_preserving_signal(&mut session.child, eof_shutdown)?;
     push_shell_exited_event(&mut session.parser, config, exit_status)?;
     event_observer(&session.parser.events, &mut output)?;
     output.flush()?;

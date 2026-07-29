@@ -284,7 +284,8 @@ fn delay_escape_sequence_is_forwarded_without_cancel() {
         !events.contains(&RawInputEvent::Esc),
         "unexpected Esc event for arrow sequence"
     );
-    assert_eq!(output, b"\x1b[Aexit\n");
+    assert_eq!(output, b"\x1b[A");
+    assert!(events.contains(&RawInputEvent::EofShutdownRequested));
     assert!(matches!(mode, RawInputMode::Delay { .. }));
 }
 
@@ -300,7 +301,8 @@ fn delay_split_escape_sequence_is_forwarded_without_cancel() {
         !events.contains(&RawInputEvent::Esc),
         "unexpected Esc event for split arrow sequence"
     );
-    assert_eq!(output, b"\x1b[Aexit\n");
+    assert_eq!(output, b"\x1b[A");
+    assert!(events.contains(&RawInputEvent::EofShutdownRequested));
     assert!(matches!(mode, RawInputMode::Delay { .. }));
 }
 
@@ -316,7 +318,8 @@ fn delay_escape_is_forwarded_when_run_finishes_before_deadline() {
         !events.contains(&RawInputEvent::Esc),
         "unexpected Esc event after run finished"
     );
-    assert_eq!(output, b"\x1bxexit\n");
+    assert_eq!(output, b"\x1bx");
+    assert!(events.contains(&RawInputEvent::EofShutdownRequested));
     assert!(matches!(mode, RawInputMode::Passthrough));
 }
 
@@ -825,7 +828,8 @@ fn prompt_ghost_candidate_cycle_during_read_does_not_drop_input() {
         "{events:?}"
     );
     master.sync_all().expect("sync test output");
-    assert_eq!(fs::read(&path).expect("read test output"), b"xexit\n");
+    assert_eq!(fs::read(&path).expect("read test output"), b"x");
+    assert!(events.contains(&RawInputEvent::EofShutdownRequested));
     fs::remove_file(path).ok();
 }
 
@@ -1055,10 +1059,8 @@ fn tab_after_route_cutover_is_relayed_under_the_new_route() {
         "{events:?}"
     );
     master.sync_all().expect("sync test output");
-    assert_eq!(
-        fs::read(&path).expect("read test output"),
-        b"echo nativeexit\n"
-    );
+    assert_eq!(fs::read(&path).expect("read test output"), b"echo native");
+    assert!(events.contains(&RawInputEvent::EofShutdownRequested));
     fs::remove_file(path).ok();
 }
 
@@ -1213,7 +1215,7 @@ fn selection_bare_escape_times_out_without_waiting_for_another_key() {
     drop(input_tx);
     relay.join().expect("relay thread").expect("relay result");
     master.sync_all().expect("sync test output");
-    assert_eq!(fs::read(&path).expect("read test output"), b"\x1bexit\n");
+    assert_eq!(fs::read(&path).expect("read test output"), b"\x1b");
     fs::remove_file(path).ok();
 }
 
@@ -1255,7 +1257,7 @@ fn selection_action_wait_flushes_escape_at_the_deadline() {
 
     relay.join().expect("relay thread").expect("relay result");
     master.sync_all().expect("sync test output");
-    assert_eq!(fs::read(&path).expect("read test output"), b"\x1bexit\n");
+    assert_eq!(fs::read(&path).expect("read test output"), b"\x1b");
     fs::remove_file(path).ok();
 }
 
@@ -1270,10 +1272,8 @@ fn selection_shift_tab_cycles_when_arriving_in_one_chunk() {
     assert!(events.contains(&RawInputEvent::PromptGhostCycle {
         text: "continue deployment".to_string(),
     }));
-    assert!(matches!(
-        mode,
-        RawInputMode::PromptGhost { text, .. } if text == "continue deployment"
-    ));
+    assert!(events.contains(&RawInputEvent::PromptGhostDismissed));
+    assert!(matches!(mode, RawInputMode::Passthrough));
 }
 
 #[test]
@@ -1364,7 +1364,8 @@ fn selection_escape_with_nonmatching_follow_up_dismisses_and_forwards_all_bytes(
 
     let (events, output, mode) = relay.finish();
 
-    assert_eq!(output, b"\x1bxexit\n");
+    assert_eq!(output, b"\x1bx");
+    assert!(events.contains(&RawInputEvent::EofShutdownRequested));
     assert!(events.contains(&RawInputEvent::PromptGhostDismissed));
     assert!(!events
         .iter()
@@ -1378,25 +1379,27 @@ fn selection_partial_csi_times_out_and_forwards_all_bytes() {
     relay.send(b"\x1b[");
     expect_prompt_ghost_dismissal(&relay.event_rx);
 
-    let (_, output, mode) = relay.finish();
-    assert_eq!(output, b"\x1b[exit\n");
+    let (events, output, mode) = relay.finish();
+    assert_eq!(output, b"\x1b[");
+    assert!(events.contains(&RawInputEvent::EofShutdownRequested));
     assert!(matches!(mode, RawInputMode::Passthrough));
 }
 
 #[test]
-fn selection_pending_escape_at_eof_dismisses_and_forwards_escape() {
+fn selection_pending_escape_at_eof_is_cancelled_before_exit() {
     let relay = SelectionRelay::start("selection-escape-eof");
     relay.send(b"\x1b");
 
     let (events, output, mode) = relay.finish();
 
-    assert_eq!(output, b"\x1bexit\n");
+    assert_eq!(output, b"exit\n");
+    assert!(!events.contains(&RawInputEvent::EofShutdownRequested));
     assert!(events.contains(&RawInputEvent::PromptGhostDismissed));
     assert!(matches!(mode, RawInputMode::Passthrough));
 }
 
 #[test]
-fn selection_pending_escape_at_eof_after_route_change_is_not_dropped() {
+fn selection_pending_escape_at_eof_after_route_change_is_cancelled() {
     let (path, mut master) = output_file("selection-escape-route-eof");
     let (tx, rx) = mpsc::channel();
     let old_route = PromptGhostRoute::AgentSelection {
@@ -1435,10 +1438,10 @@ fn selection_pending_escape_at_eof_after_route_change_is_not_dropped() {
     finish_input_relay(&mut master, &tx, &classifier, &input_mode, &mut state)
         .expect("finish relay");
 
-    assert_eq!(fs::read(&path).expect("read test output"), b"\x1bexit\n");
-    assert!(rx
-        .try_iter()
-        .any(|event| event == RawInputEvent::PromptGhostDismissed));
+    assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events.contains(&RawInputEvent::PromptGhostDismissed));
+    assert!(!events.contains(&RawInputEvent::EofShutdownRequested));
     assert!(matches!(
         *input_mode.lock().expect("input mode"),
         RawInputMode::Passthrough
@@ -1877,7 +1880,7 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2309,10 +2312,8 @@ fn passthrough_relay_fixture<'a>(
     }
 }
 
-// Matrix #15 (#1721): a soft-newline draft submits as one multi-line agent
-// prompt; the commit echo shows markers and nothing reaches the shell.
 #[test]
-fn soft_newline_draft_routes_multiline_prompt_to_agent() {
+fn routing_c3_explicit_draft_upgrade_clears_the_shell_copy() {
     let (path, mut master) = output_file("soft-newline-agent");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -2338,43 +2339,35 @@ fn soft_newline_draft_routes_multiline_prompt_to_agent() {
     );
 
     relay_passthrough_input("请帮我分析系统负载".as_bytes(), &mut relay)
-        .expect("buffer natural-language draft");
+        .expect("relay Shell-owned Han input");
     relay_passthrough_input(b"\x1b[13;2u", &mut relay).expect("soft newline");
 
     let events = rx.try_iter().collect::<Vec<_>>();
-    let clear_at = events
-        .iter()
-        .position(|event| matches!(event, RawInputEvent::CandidateClearLine))
-        .expect("clear inline echo before the card opens");
-    let open_at = events
-        .iter()
-        .position(|event| {
+    assert!(
+        events.iter().any(|event| {
             matches!(
                 event,
                 RawInputEvent::PromptDraftOpen { text } if text == "请帮我分析系统负载\n"
             )
-        })
-        .expect("soft newline must upgrade the draft to the prompt card");
-    assert!(clear_at < open_at, "erase first, then open: {events:?}");
+        }),
+        "soft newline must upgrade the shell line: {events:?}"
+    );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, RawInputEvent::UserIntercept(..))),
         "upgrade must not submit early: {events:?}"
     );
-    assert!(!line_buffer.is_active(), "buffer hands off to the card");
-    assert_eq!(
-        fs::read(&path).expect("read test output"),
-        b"",
-        "nothing may reach the shell"
-    );
+    let mut expected = "请帮我分析系统负载".as_bytes().to_vec();
+    expected.extend_from_slice(&[super::super::CTRL_U, b'\r']);
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
     fs::remove_file(path).ok();
 }
 
 // Matrix #19 (#1721): a whitespace-only multi-line draft is consumed
 // without submitting an empty prompt.
 #[test]
-fn whitespace_only_soft_newline_draft_is_consumed() {
+fn routing_c3_explicit_whitespace_upgrade_uses_the_shell_mirror() {
     let (path, mut master) = output_file("soft-newline-empty");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -2412,7 +2405,6 @@ fn whitespace_only_soft_newline_draft_is_consumed() {
             .any(|event| matches!(event, RawInputEvent::UserIntercept(..))),
         "whitespace draft must not submit: {events:?}"
     );
-    assert!(events.contains(&RawInputEvent::CandidateClearLine));
     assert!(
         events.iter().any(|event| matches!(
             event,
@@ -2420,7 +2412,9 @@ fn whitespace_only_soft_newline_draft_is_consumed() {
         )),
         "whitespace draft still opens the card: {events:?}"
     );
-    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    let mut expected = "\u{3000}".as_bytes().to_vec();
+    expected.extend_from_slice(&[super::super::CTRL_U, b'\r']);
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
     assert!(!line_buffer.is_active());
     fs::remove_file(path).ok();
 }
@@ -2429,7 +2423,7 @@ fn whitespace_only_soft_newline_draft_is_consumed() {
 // contains a soft newline, and the redraw shows the marker instead of raw
 // sequence bytes.
 #[test]
-fn soft_newline_redraw_carries_marker_and_hint() {
+fn routing_c3_explicit_upgrade_does_not_require_candidate_redraw() {
     let (path, mut master) = output_file("soft-newline-hint");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -2473,7 +2467,9 @@ fn soft_newline_redraw_carries_marker_and_hint() {
             assert!(!display.contains(";2u"), "no literal leak: {display}");
         }
     }
-    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    let mut expected = "请帮我分析".as_bytes().to_vec();
+    expected.extend_from_slice(&[super::super::CTRL_U, b'\r']);
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
     fs::remove_file(path).ok();
 }
 
@@ -2530,7 +2526,7 @@ fn native_cjk_single_line_flushes_bytes_unchanged() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2572,14 +2568,14 @@ fn native_cjk_single_line_flushes_bytes_unchanged() {
 // Matrix #22 (#1721 G9): a native CJK draft with a soft newline submits one
 // multi-line NL prompt and never reaches bash.
 #[test]
-fn native_cjk_multiline_draft_intercepts_as_prompt() {
+fn routing_c3_typed_cjk_then_explicit_upgrade_uses_shell_mirror() {
     let (path, mut master) = output_file("native-cjk-multi");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2608,7 +2604,9 @@ fn native_cjk_multiline_draft_intercepts_as_prompt() {
         )),
         "native CJK soft newline must open the card: {events:?}"
     );
-    assert_eq!(fs::read(&path).expect("read test output"), b"");
+    let mut expected = "请帮我分析".as_bytes().to_vec();
+    expected.extend_from_slice(&[super::super::CTRL_U, b'\r']);
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
     fs::remove_file(path).ok();
 }
 
@@ -2622,7 +2620,7 @@ fn native_agent_marker_multiline_keeps_reason() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2664,7 +2662,7 @@ fn native_midline_cjk_stays_passthrough() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2711,7 +2709,7 @@ fn native_cjk_tab_returns_draft_to_shell() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2757,7 +2755,7 @@ fn cjk_line_start_stays_passthrough_when_gate_is_down() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2810,7 +2808,7 @@ fn submit_lowers_gate_until_next_prompt_ready() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2844,17 +2842,15 @@ fn submit_lowers_gate_until_next_prompt_ready() {
     drop(rx);
     fs::remove_file(path).ok();
 }
-// Matrix #6 under D13: a CJK bracketed paste opens the draft card even when
-// the terminal splits the paste into opener / payload / closer chunks.
 #[test]
-fn native_split_paste_chunks_open_the_draft_card() {
+fn routing_c3_wrapped_multiline_paste_stays_shell_owned_across_chunks() {
     let (path, mut master) = output_file("native-paste-split");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -2881,32 +2877,26 @@ fn native_split_paste_chunks_open_the_draft_card() {
     master.sync_all().expect("sync test output");
 
     let events = rx.try_iter().collect::<Vec<_>>();
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            RawInputEvent::PromptDraftOpen { text } if text == "分析负载\n给出建议"
-        )),
-        "split paste must open the card with both lines: {events:?}"
-    );
+    assert!(events.contains(&RawInputEvent::MultilinePasteObserved));
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, RawInputEvent::UserIntercept(..))),
-        "paste must not submit early: {events:?}"
+        "ordinary paste must not become Agent-owned: {events:?}"
     );
-    assert_eq!(
-        fs::read(&path).expect("read test output"),
-        b"",
-        "nothing may reach the shell"
-    );
+    let mut expected = b"\x1b[200~".to_vec();
+    expected.extend_from_slice("分析负载".as_bytes());
+    expected.extend_from_slice(b"\r\n");
+    expected.extend_from_slice("给出建议".as_bytes());
+    expected.extend_from_slice(b"\x1b[201~");
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
     fs::remove_file(path).ok();
 }
 
-// Regression (raw_cli_pasted_trust_confirm_sets_trust_mode): a pasted slash
-// command with a trailing newline submits like before the fix and never
-// upgrades into the draft card (matrix #17 scope: slash never composes).
+// A pasted slash command remains Shell-owned and never upgrades into the
+// draft card; native bracketed-paste semantics require Enter after the closer.
 #[test]
-fn escape_pasted_slash_command_submits_without_card() {
+fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
     let (path, mut master) = output_file("escape-slash-paste");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -2954,8 +2944,8 @@ fn escape_pasted_slash_command_submits_without_card() {
                     if input == "/mode approval trust confirm"
             ))
             .count(),
-        2,
-        "both pastes must submit as slash: {events:?}"
+        0,
+        "ordinary paste must not enter slash ownership: {events:?}"
     );
     assert!(
         !events
@@ -2966,19 +2956,17 @@ fn escape_pasted_slash_command_submits_without_card() {
     fs::remove_file(path).ok();
 }
 
-// ASCII paste routing (#1721): an ASCII paste whose opener arrives as its own chunk must not
-// leak the payload to the PTY bare — the candidate stays open across the
-// split and the flush replays the bracketed-paste wrapper so bash inserts
-// the bytes instead of executing embedded newlines.
+// ASCII paste routing (#1721): a split opener remains Shell-owned and the
+// wrapper reaches the PTY byte-for-byte, so bash buffers embedded newlines.
 #[test]
-fn native_split_ascii_paste_replays_wrapper_to_shell() {
+fn native_split_ascii_paste_passes_wrapper_to_shell() {
     let (path, mut master) = output_file("native-paste-ascii-split");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3003,13 +2991,7 @@ fn native_split_ascii_paste_replays_wrapper_to_shell() {
     master.sync_all().expect("sync test output");
 
     let written = fs::read(&path).expect("read test output");
-    if !written.is_empty() {
-        assert!(
-            written.starts_with(b"\x1b[200~"),
-            "flushed paste must replay the wrapper so bash defers execution: {:?}",
-            String::from_utf8_lossy(&written)
-        );
-    }
+    assert_eq!(written, b"\x1b[200~touch probe\r\n\x1b[201~");
     let events = rx.try_iter().collect::<Vec<_>>();
     assert!(
         !events
@@ -3020,18 +3002,15 @@ fn native_split_ascii_paste_replays_wrapper_to_shell() {
     fs::remove_file(path).ok();
 }
 
-// Split line-start opener (#1721): the line-start opener itself may split across
-// reads; the partial delimiter must be held at the relay entry instead of
-// leaking to bash, and the joined paste routes exactly like an unsplit one.
 #[test]
-fn native_split_line_start_opener_opens_the_draft_card() {
+fn routing_c3_split_paste_delimiter_is_byte_identical_and_shell_owned() {
     let (path, mut master) = output_file("native-split-opener");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3059,19 +3038,20 @@ fn native_split_line_start_opener_opens_the_draft_card() {
     let _ = relay;
     master.sync_all().expect("sync test output");
 
-    assert_eq!(
-        fs::read(&path).expect("read test output"),
-        b"",
-        "split opener must never leak payload to the shell"
-    );
+    let mut expected = b"\x1b[200~".to_vec();
+    expected.extend_from_slice("分析负载".as_bytes());
+    expected.extend_from_slice(b"\r\n");
+    expected.extend_from_slice("给出建议".as_bytes());
+    expected.extend_from_slice(b"\x1b[201~");
+    assert_eq!(fs::read(&path).expect("read test output"), expected);
     let events = rx.try_iter().collect::<Vec<_>>();
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            RawInputEvent::PromptDraftOpen { text } if text == "分析负载\n给出建议"
-        )),
-        "split opener paste must open the card with both lines: {events:?}"
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftOpen { .. })),
+        "ordinary split paste must stay Shell-owned: {events:?}"
     );
+    assert!(events.contains(&RawInputEvent::MultilinePasteObserved));
     fs::remove_file(path).ok();
 }
 
@@ -3086,7 +3066,7 @@ fn native_typed_qq_then_paste_composes_in_card() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3139,7 +3119,7 @@ fn native_lone_question_mark_flushes_back_to_shell() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3177,6 +3157,42 @@ fn native_lone_question_mark_flushes_back_to_shell() {
     fs::remove_file(path).ok();
 }
 
+#[test]
+fn routing_c3_eof_candidate_prefix_is_cancelled_before_clean_exit() {
+    for (label, bytes) in [
+        ("question", b"?".as_slice()),
+        ("slash", b"/mode".as_slice()),
+    ] {
+        let (path, mut master) = output_file(label);
+        let (tx, rx) = mpsc::channel();
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+        let classifier = InputClassifier::default();
+        let mut state = RawInputRelayState::default();
+
+        relay_input_bytes(
+            bytes,
+            Instant::now(),
+            &mut master,
+            &tx,
+            &classifier,
+            &input_mode,
+            &mut state,
+        )
+        .expect("buffer explicit prefix");
+        finish_input_relay(&mut master, &tx, &classifier, &input_mode, &mut state)
+            .expect("cancel prefix at EOF");
+
+        assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(events.contains(&RawInputEvent::CandidateClearLine));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserIntercept(..) | RawInputEvent::EofShutdownRequested
+        )));
+        fs::remove_file(path).ok();
+    }
+}
+
 // Lone `??` + Enter (#1932): the terminal-agnostic entry opens an empty
 // draft card instead of submitting an empty agent prompt.
 #[test]
@@ -3187,7 +3203,7 @@ fn native_lone_qq_enter_opens_empty_draft() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3238,7 +3254,7 @@ fn native_prompt_line_shortcut_upgrades_the_line() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3288,7 +3304,7 @@ fn native_dirty_line_shortcut_is_stripped() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3332,7 +3348,7 @@ fn native_multiline_paste_marks_mirror_dirty() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3386,7 +3402,7 @@ fn native_delete_at_line_end_keeps_the_mirror() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
@@ -3423,66 +3439,58 @@ fn native_delete_at_line_end_keeps_the_mirror() {
 
 #[test]
 fn native_exact_slash_routes_to_shell_when_at_prompt() {
-    // Covers both relay classifier flavors (issue #1718 G4): conservative is
-    // the production default, non-conservative the explicit opt-out.
-    for conservative in [true, false] {
-        let label = format!("slash-route-exact-{conservative}");
-        let (path, mut master) = output_file(&label);
-        let (tx, rx) = mpsc::channel();
-        let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
-        let main_prompt_gate = super::super::MainPromptGate::default();
-        main_prompt_gate.set_at_prompt(true);
-        let mut line_buffer = CandidateLineBuffer::default();
-        let mut native_line_state = NativeLineState::default();
-        let mut exit_tracker = ExplicitExitTracker::default();
-        let classifier = if conservative {
-            InputClassifier::conservative()
-        } else {
-            InputClassifier::default()
-        };
-        let input_generation = UserPtyInputGeneration::default();
-        let mut line_submits = LineSubmitCounter::default();
-        let mut relay = InputRelayContext {
-            master: &mut master,
-            input_classifier: &classifier,
-            input_events: &tx,
-            input_mode: &input_mode,
-            input_generation: &input_generation,
-            line_submits: &mut line_submits,
-            line_buffer: &mut line_buffer,
-            native_line_state: &mut native_line_state,
-            exit_tracker: &mut exit_tracker,
-            main_prompt_gate: &main_prompt_gate,
-            slash_route_enabled: true,
-        };
+    let label = "slash-route-exact";
+    let (path, mut master) = output_file(label);
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
+        slash_route_enabled: true,
+    };
 
-        relay_passthrough_input(b"/mode approval\n", &mut relay).expect("route exact slash");
-        master.sync_all().expect("sync test output");
+    relay_passthrough_input(b"/mode approval\n", &mut relay).expect("route exact slash");
+    master.sync_all().expect("sync test output");
 
-        let events = rx.try_iter().collect::<Vec<_>>();
-        // Routed submissions leave interception to the shell marker: no
-        // Rust-side intercept or commit events, bytes written to the PTY.
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, RawInputEvent::UserIntercept(..))));
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, RawInputEvent::CandidateCommit(..))));
-        assert!(events.contains(&RawInputEvent::CandidateClearLine));
-        assert_eq!(
-            fs::read(&path).expect("read test output"),
-            b"/mode approval\n"
-        );
-        // The submission lowers the prompt gate until the next prompt_ready
-        // marker (#1721 D16), so racing follow-up slash bytes fall back to
-        // the Rust intercept path.
-        assert!(!main_prompt_gate.is_at_prompt());
-        assert!(matches!(
-            *input_mode.lock().expect("input mode"),
-            RawInputMode::Passthrough
-        ));
-        fs::remove_file(path).ok();
-    }
+    let events = rx.try_iter().collect::<Vec<_>>();
+    // Routed submissions leave interception to the shell marker: no
+    // Rust-side intercept or commit events, bytes written to the PTY.
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, RawInputEvent::UserIntercept(..))));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, RawInputEvent::CandidateCommit(..))));
+    assert!(events.contains(&RawInputEvent::CandidateClearLine));
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"/mode approval\n"
+    );
+    // The submission lowers the prompt gate until the next prompt_ready
+    // marker (#1721 D16), so racing follow-up slash bytes fall back to
+    // the Rust intercept path.
+    assert!(!main_prompt_gate.is_at_prompt());
+    assert!(matches!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::Passthrough
+    ));
+    fs::remove_file(path).ok();
 }
 
 #[test]
@@ -3494,7 +3502,7 @@ fn native_exact_slash_falls_back_to_rust_intercept_when_not_at_prompt() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
@@ -3539,7 +3547,7 @@ fn native_shell_submission_lowers_gate_before_follow_up_slash() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
@@ -3584,7 +3592,7 @@ fn native_hint_prefix_slash_keeps_rust_intercept_when_routed() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::conservative();
+    let classifier = InputClassifier::default();
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {

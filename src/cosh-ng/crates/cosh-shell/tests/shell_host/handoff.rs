@@ -847,7 +847,7 @@ fn raw_relay_zsh_user_typed_pager_assignments_are_not_a_handoff() {
 }
 
 #[test]
-fn raw_relay_approved_handoff_wrapper_does_not_leak_to_output() {
+fn routing_c3_provider_no_regression_approved_handoff_does_not_leak() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }

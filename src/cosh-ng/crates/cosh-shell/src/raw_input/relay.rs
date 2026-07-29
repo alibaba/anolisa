@@ -6,18 +6,15 @@ use std::sync::{Arc, Mutex};
 use crate::input::{InputClassifier, InputDecision, InterceptReason};
 
 use super::event_parser::{
-    candidate_inline_hint, candidate_line_status, escape_candidate_allows_soft_newline,
-    native_candidate_allows_soft_newline, native_candidate_should_return_to_shell,
-    redact_extension_setting_value, starts_intercept_candidate, starts_native_cjk_candidate,
-    starts_native_intercept_candidate, starts_native_partial_paste_opener,
-    starts_native_paste_opener, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
+    candidate_inline_hint, candidate_line_status, native_candidate_allows_soft_newline,
+    native_candidate_should_return_to_shell, redact_extension_setting_value,
+    starts_native_intercept_candidate, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
     BRACKETED_PASTE_END, BRACKETED_PASTE_START,
 };
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
 use super::soft_newline::{
-    contains_soft_newline_sequence, draft_text_from_bytes, render_newline_markers,
-    render_soft_newline_markers,
+    contains_soft_newline_sequence, draft_text_from_bytes, render_soft_newline_markers,
 };
 use super::{write_all_pty, MainPromptGate, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
@@ -77,6 +74,17 @@ pub(super) fn send_shell_input_state(empty: bool, input_events: &Sender<RawInput
     let _ = input_events.send(RawInputEvent::ShellInputActivity { empty });
 }
 
+fn observe_native_line(
+    state: &mut NativeLineState,
+    bytes: &[u8],
+    input_events: &Sender<RawInputEvent>,
+) {
+    state.observe_shell_bytes(bytes);
+    if state.take_multiline_paste_observed() {
+        let _ = input_events.send(RawInputEvent::MultilinePasteObserved);
+    }
+}
+
 pub(super) fn relay_passthrough_input(
     bytes: &[u8],
     relay: &mut InputRelayContext<'_>,
@@ -112,53 +120,7 @@ fn relay_passthrough_input_with_activity(
         redraw_candidate_line(relay.input_events, relay.line_buffer);
         return relay_candidate_line(relay, emit_activity);
     }
-    if relay.input_classifier.is_conservative() {
-        return relay_native_passthrough(bytes, relay, emit_activity);
-    }
-    if relay.line_buffer.is_active() || starts_intercept_candidate(bytes) {
-        // Slash commands never compose: pasted newlines keep the pre-#1721
-        // submit semantics (matrix #17 scope, same rule as native D10). The
-        // held partial delimiter must join the classification input so a
-        // split opener cannot mask a slash prefix (#1721).
-        let combined: Vec<u8> = [
-            relay.line_buffer.bytes.as_slice(),
-            relay.line_buffer.pending_partial_bytes(),
-            bytes,
-        ]
-        .concat();
-        relay.line_buffer.soft_newline_enabled = escape_candidate_allows_soft_newline(&combined);
-        relay.line_buffer.push(bytes);
-        redraw_candidate_line(relay.input_events, relay.line_buffer);
-        return relay_candidate_line(relay, emit_activity);
-    }
-
-    // A gated soft-newline shortcut upgrades the bash-owned line into the
-    // draft card; fallback strips the sequence (#1932 F6). The tip only
-    // fires when no upgrade happened.
-    let handled = handle_prompt_line_soft_newline(bytes, relay)?;
-    if matches!(handled, PromptLineSoftNewline::Upgraded) {
-        return Ok(true);
-    }
-    observe_passthrough_soft_newline(bytes, relay.input_events);
-    let bytes = match &handled {
-        PromptLineSoftNewline::Stripped(stripped) => stripped.as_slice(),
-        _ => bytes,
-    };
-    send_raw_input_events(bytes, relay.input_events);
-    relay.native_line_state.observe_shell_bytes(bytes);
-    if emit_activity && !bytes.is_empty() {
-        send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
-    }
-    relay.exit_tracker.observe_shell_bytes(bytes);
-    write_user_bytes_to_pty(
-        relay.master,
-        relay.input_generation,
-        relay.line_submits,
-        relay.input_events,
-        relay.main_prompt_gate,
-        bytes,
-    )?;
-    Ok(false)
+    relay_native_passthrough(bytes, relay, emit_activity)
 }
 
 pub(super) fn relay_prompt_ghost_input(
@@ -233,9 +195,11 @@ pub(super) fn relay_prompt_ghost_input(
                 if let Ok(mut mode) = relay.input_mode.lock() {
                     *mode = RawInputMode::RawPassthrough;
                 }
-                relay
-                    .native_line_state
-                    .observe_shell_bytes(ghost_text.as_bytes());
+                observe_native_line(
+                    relay.native_line_state,
+                    ghost_text.as_bytes(),
+                    relay.input_events,
+                );
                 relay
                     .exit_tracker
                     .observe_shell_bytes(ghost_text.as_bytes());
@@ -249,7 +213,7 @@ pub(super) fn relay_prompt_ghost_input(
                 )?;
                 if !remainder.is_empty() {
                     send_raw_input_events(remainder, relay.input_events);
-                    relay.native_line_state.observe_shell_bytes(remainder);
+                    observe_native_line(relay.native_line_state, remainder, relay.input_events);
                     relay.exit_tracker.observe_shell_bytes(remainder);
                     write_user_bytes_to_pty(
                         relay.master,
@@ -345,12 +309,12 @@ fn relay_native_passthrough(
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
 ) -> io::Result<bool> {
+    let starts_paste = bytes.starts_with(BRACKETED_PASTE_START)
+        || (bytes.len() >= 2
+            && bytes.len() < BRACKETED_PASTE_START.len()
+            && BRACKETED_PASTE_START.starts_with(bytes));
     if relay.line_buffer.is_active()
-        || starts_native_intercept_candidate(bytes, relay.native_line_state)
-        || (relay.main_prompt_gate.is_at_prompt()
-            && (starts_native_cjk_candidate(bytes, relay.native_line_state)
-                || starts_native_paste_opener(bytes, relay.native_line_state)
-                || starts_native_partial_paste_opener(bytes, relay.native_line_state)))
+        || (!starts_paste && starts_native_intercept_candidate(bytes, relay.native_line_state))
     {
         // Route flags must consider the whole draft so far: a bracketed
         // paste opener may arrive as its own chunk (or split mid-delimiter,
@@ -384,7 +348,7 @@ fn relay_native_passthrough(
         _ => bytes,
     };
     send_raw_input_events(bytes, relay.input_events);
-    relay.native_line_state.observe_shell_bytes(bytes);
+    observe_native_line(relay.native_line_state, bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
@@ -449,28 +413,20 @@ fn relay_candidate_line(
                 return Ok(true);
             }
             if line.contains('\n') {
-                // Soft newlines only originate from prompt composition inside
-                // the candidate buffer, so multi-line text always routes to
-                // the agent before classification (#1721 D7). Whitespace-only
-                // drafts are consumed instead of submitting an empty prompt.
                 if line.trim().is_empty() {
                     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
                     send_shell_input_state(true, relay.input_events);
                 } else {
-                    let reason = if line.trim_start().starts_with("??") {
-                        InterceptReason::AgentMarker
-                    } else {
-                        InterceptReason::NaturalLanguage
-                    };
                     let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
-                        render_newline_markers(&redact_extension_setting_value(line.as_bytes())),
+                        redact_extension_setting_value(line.as_bytes()),
                     ));
                     if let Ok(mut mode) = relay.input_mode.lock() {
                         *mode = new_delay_input_mode();
                     }
-                    let _ = relay
-                        .input_events
-                        .send(RawInputEvent::UserIntercept(line, reason));
+                    let _ = relay.input_events.send(RawInputEvent::UserIntercept(
+                        line,
+                        InterceptReason::AgentMarker,
+                    ));
                     send_shell_input_state(true, relay.input_events);
                 }
                 if !remainder.is_empty() {
@@ -587,7 +543,7 @@ fn submit_line_bytes_to_shell(
 ) -> io::Result<bool> {
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
     send_raw_input_events(&bytes, relay.input_events);
-    relay.native_line_state.observe_shell_bytes(&bytes);
+    observe_native_line(relay.native_line_state, &bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
@@ -650,31 +606,6 @@ fn redraw_candidate_line(
 fn observe_passthrough_soft_newline(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
     if contains_soft_newline_sequence(bytes) {
         let _ = input_events.send(RawInputEvent::SoftNewlineShortcutObserved);
-    }
-    observe_passthrough_multiline_paste(bytes, input_events);
-}
-
-/// #1932 F5: a bracketed paste with embedded newlines relayed straight to
-/// bash line-executes on paste-unaware readline setups. Observe-only:
-/// best-effort single-chunk scan feeding the failure-insight hint; never
-/// touches the relayed bytes.
-fn observe_passthrough_multiline_paste(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
-    let Some(start) = bytes
-        .windows(BRACKETED_PASTE_START.len())
-        .position(|window| window == BRACKETED_PASTE_START)
-    else {
-        return;
-    };
-    let payload = &bytes[start + BRACKETED_PASTE_START.len()..];
-    let payload_end = payload
-        .windows(BRACKETED_PASTE_END.len())
-        .position(|window| window == BRACKETED_PASTE_END)
-        .unwrap_or(payload.len());
-    if payload[..payload_end]
-        .iter()
-        .any(|byte| matches!(byte, b'\r' | b'\n'))
-    {
-        let _ = input_events.send(RawInputEvent::MultilinePasteObserved);
     }
 }
 

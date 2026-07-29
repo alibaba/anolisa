@@ -62,8 +62,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
     prompt: &str,
     native_candidate_echoed_len: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let native_mode = prompt.is_empty();
+    let mut eof_shutdown_requested = false;
     while let Ok(event) = input_events.try_recv() {
         match event {
             RawInputEvent::ShellInputActivity { empty } => {
@@ -77,6 +78,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::SoftNewlineShortcutObserved => parser.push_soft_newline_shortcut_event(),
             RawInputEvent::MultilinePasteObserved => parser.push_multiline_paste_event(),
+            RawInputEvent::EofShutdownRequested => eof_shutdown_requested = true,
             RawInputEvent::SyntheticPromptRepaint => parser.arm_synthetic_prompt_repaint(),
             RawInputEvent::PromptDraftOpen { text } => {
                 let payload = serde_json::json!({ "text": text }).to_string();
@@ -286,5 +288,5 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::SessionCancel(id) => parser.push_card_event("session_cancel", &id),
         }
     }
-    Ok(())
+    Ok(eof_shutdown_requested)
 }

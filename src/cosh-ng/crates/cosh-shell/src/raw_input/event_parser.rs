@@ -61,13 +61,6 @@ impl CandidateLineBuffer {
         &self.pending_partial
     }
 
-    /// Drains held partial-delimiter bytes at end of input (#1721):
-    /// they never got a routing verdict, so the relay forwards them to the
-    /// PTY byte-identically instead of dropping them.
-    pub(super) fn take_pending_partial(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending_partial)
-    }
-
     pub(super) fn push(&mut self, bytes: &[u8]) {
         // Re-join any held partial paste delimiter from the previous chunk
         // (#1721): PTY reads may split `\x1b[200~` / `\x1b[201~` at any
@@ -249,21 +242,26 @@ pub(super) struct NativeLineState {
     /// newlines stay in readline's buffer without submitting, which the
     /// single-line mirror cannot express, so they poison it (#1932).
     in_paste: bool,
+    pending_paste_delimiter: Vec<u8>,
+    multiline_paste_observed: bool,
 }
 
 impl NativeLineState {
     fn is_at_line_start(&self) -> bool {
-        self.visible.is_empty()
+        self.is_empty()
     }
 
     pub(super) fn is_empty(&self) -> bool {
         self.visible.is_empty()
+            && !self.dirty
+            && !self.in_paste
+            && self.pending_paste_delimiter.is_empty()
     }
 
     /// The observed prompt-line bytes, only while the mirror is trusted
     /// (#1932 F6): `None` once an unobservable edit poisoned it.
     pub(super) fn clean_visible_line(&self) -> Option<&[u8]> {
-        if self.dirty {
+        if self.dirty || self.in_paste || !self.pending_paste_delimiter.is_empty() {
             None
         } else {
             Some(&self.visible)
@@ -271,6 +269,15 @@ impl NativeLineState {
     }
 
     pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {
+        let joined;
+        let bytes = if self.pending_paste_delimiter.is_empty() {
+            bytes
+        } else {
+            let mut value = std::mem::take(&mut self.pending_paste_delimiter);
+            value.extend_from_slice(bytes);
+            joined = value;
+            joined.as_slice()
+        };
         let mut idx = 0;
         while idx < bytes.len() {
             if bytes[idx..].starts_with(BRACKETED_PASTE_START) {
@@ -283,13 +290,20 @@ impl NativeLineState {
                 idx += BRACKETED_PASTE_END.len();
                 continue;
             }
+            if is_partial_paste_delimiter(&bytes[idx..]) {
+                self.pending_paste_delimiter = bytes[idx..].to_vec();
+                break;
+            }
             if self.in_paste {
                 // Paste payload is inserted verbatim by readline. A pasted
                 // newline keeps composing inside readline's buffer, which
                 // this single-line mirror cannot express: poison it instead
                 // of collapsing the buffer to its last line (#1932).
                 match bytes[idx] {
-                    b'\n' | b'\r' => self.dirty = true,
+                    b'\n' | b'\r' => {
+                        self.dirty = true;
+                        self.multiline_paste_observed = true;
+                    }
                     b'\t' => self.visible.push(b'\t'),
                     byte if byte < 0x20 || byte == 0x7f => self.dirty = true,
                     byte => self.visible.push(byte),
@@ -331,14 +345,21 @@ impl NativeLineState {
             }
         }
         if self.visible.len() > 4096 {
-            self.clear();
+            self.visible.clear();
+            self.dirty = true;
         }
+    }
+
+    pub(super) fn take_multiline_paste_observed(&mut self) -> bool {
+        std::mem::take(&mut self.multiline_paste_observed)
     }
 
     pub(super) fn clear(&mut self) {
         self.visible.clear();
         self.dirty = false;
         self.in_paste = false;
+        self.pending_paste_delimiter.clear();
+        self.multiline_paste_observed = false;
     }
 
     fn pop_visible_char(&mut self) {
@@ -408,24 +429,12 @@ pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
     redacted
 }
 
-pub(super) fn starts_intercept_candidate(bytes: &[u8]) -> bool {
-    let first = first_visible_input_byte(bytes);
-    matches!(first, Some(b'/' | b'?'))
-        || first.is_some_and(|byte| byte >= 0x80)
-        // A split paste opener (`\x1b[2`, #1721) must be held so the
-        // payload decides the route; joined non-openers re-scan normally.
-        || (bytes.len() >= 2
-            && bytes.len() < BRACKETED_PASTE_START.len()
-            && BRACKETED_PASTE_START.starts_with(bytes))
-}
-
 pub(super) fn starts_native_intercept_candidate(
     bytes: &[u8],
     native_line_state: &NativeLineState,
 ) -> bool {
-    // Line-start gate for the always-on native candidates: `/` (slash) and
-    // `??` (agent marker). CJK line starts are handled separately because
-    // they additionally require the main-prompt gate (#1721 D16).
+    // Only explicit slash and `??` routes are buffered. Ordinary text and
+    // paste bytes stay owned by the Shell.
     if !native_line_state.is_at_line_start() {
         return false;
     }
@@ -447,59 +456,13 @@ fn is_partial_paste_delimiter(suffix: &[u8]) -> bool {
         && (BRACKETED_PASTE_START.starts_with(suffix) || BRACKETED_PASTE_END.starts_with(suffix))
 }
 
-/// Whether bytes start a CJK natural-language candidate at the beginning of
-/// a shell line (#1721 G9). Callers must additionally hold the main-prompt
-/// gate so PS2/heredoc continuations stay bash-owned (D16).
-pub(super) fn starts_native_cjk_candidate(
-    bytes: &[u8],
-    native_line_state: &NativeLineState,
-) -> bool {
-    native_line_state.is_at_line_start()
-        && first_visible_input_byte(bytes).is_some_and(|byte| byte >= 0x80)
-}
-
-/// A bracketed-paste opener arriving as its own chunk at line start: hold it
-/// in the candidate buffer so the paste payload decides the route (#1721).
-/// Without this the opener leaks to bash and a CJK paste scatters (D13).
-pub(super) fn starts_native_paste_opener(
-    bytes: &[u8],
-    native_line_state: &NativeLineState,
-) -> bool {
-    native_line_state.is_at_line_start()
-        && bytes.starts_with(BRACKETED_PASTE_START)
-        && first_visible_input_bytes(bytes).is_empty()
-}
-
-/// PTY reads may split the opener itself at line start (#1721):
-/// `\x1b[2` alone must be held rather than leak to bash; the joined bytes
-/// re-scan as normal input if they turn out not to be an opener. A bare
-/// ESC is excluded: the spawn-level delay-escape path owns that case.
-pub(super) fn starts_native_partial_paste_opener(
-    bytes: &[u8],
-    native_line_state: &NativeLineState,
-) -> bool {
-    native_line_state.is_at_line_start()
-        && bytes.len() >= 2
-        && bytes.len() < BRACKETED_PASTE_START.len()
-        && BRACKETED_PASTE_START.starts_with(bytes)
-}
-
-/// Whether a native candidate may compose soft newlines: `??` agent drafts
-/// and CJK natural-language drafts may; slash commands may not (#1721 D10).
+/// Only an explicit `??` candidate may compose soft newlines.
 pub(super) fn native_candidate_allows_soft_newline(bytes: &[u8]) -> bool {
     match first_visible_input_byte(bytes) {
         Some(b'/') => false,
         Some(b'?') => first_visible_input_bytes(bytes).starts_with(b"??"),
-        Some(byte) => byte >= 0x80,
-        None => false,
+        _ => false,
     }
-}
-
-/// Escape-path variant: slash commands keep pre-#1721 byte semantics
-/// (pasted newlines submit, never compose); every other candidate
-/// (`?` agent prefix, CJK) may compose (#1721 D10 fail-closed).
-pub(super) fn escape_candidate_allows_soft_newline(bytes: &[u8]) -> bool {
-    !matches!(first_visible_input_byte(bytes), Some(b'/') | None)
 }
 
 fn first_visible_input_byte(bytes: &[u8]) -> Option<u8> {

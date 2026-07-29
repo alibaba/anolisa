@@ -95,7 +95,7 @@ fn raw_cli_zsh_native_pasted_mode_slash_does_not_reach_shell() {
 }
 
 #[test]
-fn raw_cli_pasted_trust_confirm_sets_trust_mode() {
+fn raw_cli_pasted_trust_confirm_sets_trust_mode_after_enter() {
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
@@ -104,7 +104,7 @@ fn raw_cli_pasted_trust_confirm_sets_trust_mode() {
         &[
             (
                 "cosh-osc$ ",
-                b"\x1b[200~/mode approval trust confirm\n\x1b[201~",
+                b"\x1b[200~/mode approval trust confirm\n\x1b[201~\n",
             ),
             ("Mode set to trust.", b""),
             ("cosh-osc$ ", b"/help\n"),

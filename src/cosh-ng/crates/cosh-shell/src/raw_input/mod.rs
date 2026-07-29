@@ -19,7 +19,8 @@ pub(crate) use generation::UserPtyInputGeneration;
 pub(crate) use mode::{update_input_mode, update_locked_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 pub(crate) use pty::{
-    set_pty_winsize, signal_foreground_process_group, signal_process_group, write_all_pty,
+    foreground_process_group_for_fds, process_group_exists, set_pty_winsize,
+    signal_foreground_process_group, signal_process_group, signal_process_group_id, write_all_pty,
 };
 pub use relay_action::RawRelayAction;
 pub(crate) use spawn::{spawn_raw_action_relay, spawn_raw_input_relay};
@@ -32,10 +33,9 @@ pub(super) const ESC: u8 = 0x1b;
 ///
 /// Set by the output side when the shell marker emits `prompt_ready` (PS1
 /// only); cleared whenever user bytes carrying a line submit reach the PTY
-/// or a command starts. CJK line-start candidates may only open while the
-/// gate is up, so PS2 continuations, heredocs, and running commands keep
-/// pre-#1721 byte passthrough (fail-closed: a lost signal disables capture,
-/// never the other way around).
+/// or a command starts. Explicit slash/`??` candidates may only open while
+/// the gate is up, so PS2 continuations, heredocs, and running commands keep
+/// byte passthrough (fail-closed: a lost signal disables capture).
 ///
 /// Ordering: `Relaxed` is sufficient because the gate is a standalone
 /// boolean latch — readers only branch on the flag and never rely on it to
@@ -96,6 +96,10 @@ pub(crate) enum RawInputEvent {
     /// A multi-line bracketed paste was relayed straight to bash (#1932):
     /// feeds the failure-insight multi-line entry hint, observe-only.
     MultilinePasteObserved,
+    /// Input ended while the Shell-owned line could not be proven empty.
+    /// The host must terminate the PTY session out-of-band; writing `exit`
+    /// here could append to and execute the user's partial line.
+    EofShutdownRequested,
     /// #1721 D13: the first soft newline in a candidate upgrades the draft
     /// into the multi-line prompt card; carries the buffered text.
     PromptDraftOpen {
@@ -466,7 +470,7 @@ mod tests {
 
     #[test]
     fn native_slash_candidate_returns_paths_and_tab_to_shell() {
-        let classifier = InputClassifier::conservative();
+        let classifier = InputClassifier::default();
         let mut line = CandidateLineBuffer::default();
 
         line.push(b"/m");

@@ -24,12 +24,19 @@ pub(crate) fn signal_foreground_process_group(
     fallback_child_pid: u32,
     signal: i32,
 ) -> io::Result<()> {
-    if let Some(process_group) =
-        foreground_process_group(master_fd).or_else(|| foreground_process_group(terminal_fd))
-    {
+    if let Some(process_group) = foreground_process_group_for_fds(master_fd, terminal_fd) {
         return signal_process_group_id(process_group, signal);
     }
     signal_process_group(fallback_child_pid, signal)
+}
+
+pub(crate) fn foreground_process_group_for_fds(master_fd: i32, terminal_fd: i32) -> Option<i32> {
+    foreground_process_group(master_fd).or_else(|| foreground_process_group(terminal_fd))
+}
+
+pub(crate) fn process_group_exists(process_group: i32) -> bool {
+    let result = unsafe { libc::kill(-process_group, 0) };
+    result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn foreground_process_group(fd: i32) -> Option<i32> {
@@ -42,7 +49,7 @@ fn foreground_process_group(fd: i32) -> Option<i32> {
     }
 }
 
-fn signal_process_group_id(process_group: i32, signal: i32) -> io::Result<()> {
+pub(crate) fn signal_process_group_id(process_group: i32, signal: i32) -> io::Result<()> {
     let result = unsafe { libc::kill(-process_group, signal) };
     if result < 0 {
         let err = io::Error::last_os_error();

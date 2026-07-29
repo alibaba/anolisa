@@ -2,16 +2,10 @@
 pub struct InputClassifier {
     slash_commands: Vec<String>,
     slash_hint_commands: Vec<String>,
-    conservative: bool,
     ai_enabled: bool,
 }
 
 impl InputClassifier {
-    pub fn with_conservative(mut self, conservative: bool) -> Self {
-        self.conservative = conservative;
-        self
-    }
-
     pub fn with_ai_enabled(mut self, ai_enabled: bool) -> Self {
         self.ai_enabled = ai_enabled;
         self
@@ -27,24 +21,12 @@ impl Default for InputClassifier {
             slash_hint_commands: crate::slash::registry::active_slash_hint_commands()
                 .map(str::to_string)
                 .collect(),
-            conservative: false,
             ai_enabled: true,
         }
     }
 }
 
 impl InputClassifier {
-    pub fn conservative() -> Self {
-        Self {
-            conservative: true,
-            ..Self::default()
-        }
-    }
-
-    pub fn is_conservative(&self) -> bool {
-        self.conservative
-    }
-
     pub(crate) fn ai_enabled(&self) -> bool {
         self.ai_enabled
     }
@@ -311,7 +293,6 @@ mod tests {
     fn ordinary_input_is_always_shell_first() {
         for classifier in [
             InputClassifier::default(),
-            InputClassifier::conservative(),
             InputClassifier::default().with_ai_enabled(false),
         ] {
             for input in [
@@ -360,8 +341,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_intercepts_agent_marker() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_intercepts_agent_marker() {
+        let c = InputClassifier::default();
         assert_eq!(
             c.classify("?? what happened"),
             InputDecision::Intercept {
@@ -372,8 +353,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_intercepts_slash_commands() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_intercepts_slash_commands() {
+        let c = InputClassifier::default();
         assert_eq!(
             c.classify("/explain last error"),
             InputDecision::Intercept {
@@ -391,8 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_sends_natural_language_to_shell() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_sends_natural_language_to_shell() {
+        let c = InputClassifier::default();
         for input in [
             "\u{5e2e}\u{6211}\u{5206}\u{6790}",
             "why is the build failing",
@@ -408,8 +389,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_sends_unknown_commands_to_shell() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_sends_unknown_commands_to_shell() {
+        let c = InputClassifier::default();
         assert_eq!(
             c.classify("git status"),
             InputDecision::SendToShell("git status".to_string())
@@ -429,8 +410,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_rejects_nl_with_flags() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_rejects_nl_with_flags() {
+        let c = InputClassifier::default();
         assert_eq!(
             c.classify("why -v"),
             InputDecision::SendToShell("why -v".to_string())
@@ -442,8 +423,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_rejects_nl_with_paths() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_rejects_nl_with_paths() {
+        let c = InputClassifier::default();
         assert_eq!(
             c.classify("explain /etc/passwd"),
             InputDecision::SendToShell("explain /etc/passwd".to_string())
@@ -459,8 +440,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_rejects_nl_with_shell_metacharacters() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_rejects_nl_with_shell_metacharacters() {
+        let c = InputClassifier::default();
         assert_eq!(
             c.classify("why echo | grep foo"),
             InputDecision::SendToShell("why echo | grep foo".to_string())
@@ -476,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_rejects_non_ascii_with_command_tokens() {
-        let c = InputClassifier::conservative();
+    fn routing_classifier_rejects_non_ascii_with_command_tokens() {
+        let c = InputClassifier::default();
         assert_eq!(
             c.classify("cat \u{8bbe}\u{8ba1}\u{6587}\u{6863}.md"),
             InputDecision::SendToShell("cat \u{8bbe}\u{8ba1}\u{6587}\u{6863}.md".to_string())
@@ -486,12 +467,6 @@ mod tests {
             c.classify("\u{67e5}\u{770b} --help"),
             InputDecision::SendToShell("\u{67e5}\u{770b} --help".to_string())
         );
-    }
-
-    #[test]
-    fn conservative_default_is_false() {
-        let d = InputClassifier::default();
-        assert!(!d.conservative);
     }
 
     #[test]

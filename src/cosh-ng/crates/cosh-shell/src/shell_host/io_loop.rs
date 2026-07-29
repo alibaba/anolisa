@@ -91,3 +91,19 @@ pub(super) fn wait_child(child: &mut Child) -> io::Result<Option<i32>> {
         None => Ok(child.wait()?.code()),
     }
 }
+
+#[cfg(unix)]
+pub(super) fn wait_child_preserving_signal(
+    child: &mut Child,
+    normalize_signal: bool,
+) -> io::Result<Option<i32>> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let status = match child.try_wait()? {
+        Some(status) => status,
+        None => child.wait()?,
+    };
+    Ok(status
+        .code()
+        .or_else(|| normalize_signal.then(|| status.signal().map(|signal| 128 + signal))?))
+}

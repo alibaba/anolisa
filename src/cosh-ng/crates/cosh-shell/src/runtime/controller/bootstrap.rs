@@ -98,10 +98,6 @@ pub(crate) fn run_raw(
             }
         }
     }
-    if config.native_mode {
-        config.input_classifier = config.input_classifier.with_conservative(true);
-    }
-
     let login = args.first().is_some_and(|a| a.starts_with('-'))
         || args.iter().any(|a| a == "--login" || a == "-l");
     config.login_shell = login;
