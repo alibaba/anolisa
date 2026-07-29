@@ -210,9 +210,16 @@ pub(crate) fn complete_capture_chain_if_pending(
     true
 }
 
-pub(crate) fn complete_capture_replay(input_mode: &Arc<Mutex<RawInputMode>>, generation: u64) {
+/// Completes a drained submission: chains to the pending next capture when
+/// one is installed, otherwise hands input back to the shell via `Terminal`.
+/// Returns `true` only for the `Terminal` hand-back (GH-1913: the caller may
+/// replay input quarantined during the settle window in that case).
+pub(crate) fn complete_capture_replay(
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    generation: u64,
+) -> bool {
     let Ok(mut mode) = input_mode.lock() else {
-        return;
+        return false;
     };
     let RawInputMode::Draining {
         previous_capture,
@@ -221,24 +228,26 @@ pub(crate) fn complete_capture_replay(input_mode: &Arc<Mutex<RawInputMode>>, gen
         ..
     } = &*mode
     else {
-        return;
+        return false;
     };
     if *active != generation {
-        return;
+        return false;
     }
     let previous_capture = previous_capture.clone();
-    *mode = if let Some(capture) = next_capture.clone() {
-        RawInputMode::Capture {
+    if let Some(capture) = next_capture.clone() {
+        *mode = RawInputMode::Capture {
             capture,
             generation: CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed),
             installed_at: std::time::Instant::now(),
-        }
+        };
+        false
     } else {
-        RawInputMode::Terminal {
+        *mode = RawInputMode::Terminal {
             previous_capture,
             generation,
-        }
-    };
+        };
+        true
+    }
 }
 
 pub(crate) fn expire_capture_submission(input_mode: &Arc<Mutex<RawInputMode>>, generation: u64) {

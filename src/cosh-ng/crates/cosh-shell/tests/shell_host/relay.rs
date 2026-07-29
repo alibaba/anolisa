@@ -1046,3 +1046,69 @@ fn raw_relay_capture_owned_input_overflow_is_visible_and_discarded() {
         .iter()
         .any(|event| event.message.as_deref() == Some("capture_overflow")));
 }
+
+#[test]
+fn raw_relay_capture_slow_ack_replays_processing_window_input() {
+    // GH-1913: input typed while a submitted card action is still being
+    // processed (e.g. the slow /config Save handler) must be replayed to the
+    // shell once the capture closes cleanly, never silently dropped.
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-capture-slow-ack-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("capture-slow-ack-test", &work_dir);
+    config.native_mode = false;
+    let capture = RawInputCapture::Question {
+        id: "question-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: false,
+    };
+    // DelayedInput yields one chunk per read(), so "yes\n" is delivered in a
+    // first read, and "echo ..." in a later read while the observer is still
+    // busy processing the card answer (the Save processing window).
+    let input = DelayedInput::new(vec![
+        (b"yes\n".to_vec(), Duration::from_millis(50)),
+        (
+            b"echo processing-window-ok\n".to_vec(),
+            Duration::from_millis(150),
+        ),
+        (b"exit\n".to_vec(), Duration::from_millis(500)),
+    ]);
+    let mut slept = false;
+    let output =
+        run_raw_relay_bash_with_output_control(&config, input, Vec::new(), move |events, _| {
+            if events.iter().any(|event| {
+                event.component.as_deref() == Some("card")
+                    && event.message.as_deref() == Some("answer")
+            }) {
+                if !slept {
+                    // Model the slow card action: the observer holds the
+                    // input mode lock while the config save settles.
+                    slept = true;
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                Ok(RawObserverAction::Continue)
+            } else {
+                Ok(RawObserverAction::CaptureInput(capture.clone()))
+            }
+        })
+        .expect("capture slow ack relay");
+
+    assert_eq!(
+        ledger_from_output(&output)
+            .blocks
+            .iter()
+            .filter(|block| block.command == "echo processing-window-ok")
+            .count(),
+        1,
+        "{:?}",
+        output.events
+    );
+    assert!(output
+        .events
+        .iter()
+        .any(|event| event.message.as_deref() == Some("capture_drained")));
+}

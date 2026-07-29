@@ -6,21 +6,77 @@ const CAPTURE_QUARANTINE_MAX_BYTES: usize = 64 * 1024;
 pub(super) struct CaptureOwnedInput {
     bytes: usize,
     overflowed: bool,
+    /// Input typed while a submitted card action is settling (GH-1913):
+    /// retained so a clean close can replay it instead of silently dropping
+    /// it. Same-read submit remainders are never buffered (observe-only) and
+    /// an overflow discards the whole buffer.
+    buffered: Vec<u8>,
+    /// Generation of the last capture that closed cleanly back to the shell
+    /// (GH-1913). Late reads still stamped with this generation were typed
+    /// while the card action settled and are delivered to the shell; without
+    /// the marker (expired, overflowed, or chained closes) they keep the
+    /// historical discard.
+    last_clean_close: Option<u64>,
 }
 
 impl CaptureOwnedInput {
+    /// Count-only observation for bytes that must never be replayed (e.g.
+    /// the same-read remainder behind a submit): they were composed before
+    /// the card released, so they stay quarantined.
     fn observe(&mut self, bytes: &[u8]) -> bool {
         self.bytes = self.bytes.saturating_add(bytes.len());
         if self.overflowed || self.bytes <= CAPTURE_QUARANTINE_MAX_BYTES {
             return false;
         }
         self.overflowed = true;
+        self.buffered = Vec::new();
         true
+    }
+
+    /// Buffers input typed while the submission is settling so a clean close
+    /// to Terminal can replay it (GH-1913); shares the overflow budget with
+    /// `observe`.
+    fn buffer(&mut self, bytes: &[u8]) -> bool {
+        let overflow = self.observe(bytes);
+        if !self.overflowed {
+            self.buffered.extend_from_slice(bytes);
+        }
+        overflow
+    }
+
+    fn take_buffered(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buffered)
     }
 
     fn clear(&mut self) {
         *self = Self::default();
     }
+}
+
+/// Replays input quarantined during a card submission once the capture chain
+/// closed cleanly (GH-1913): the mode is `Terminal` for the same generation,
+/// or already back to `Passthrough` (the observer acknowledges the terminal
+/// hand-back with a `Continue`, which can land before the replay runs). Any
+/// other live mode (a replacement capture, hold, delay) keeps the historical
+/// discard semantics: the bytes may have been aimed at an owner that no
+/// longer exists.
+fn replay_quarantined_input(
+    bytes: &[u8],
+    generation: u64,
+    relay: &mut InputRelayContext<'_>,
+) -> io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    match current_raw_input_mode(relay.input_mode) {
+        RawInputMode::Terminal {
+            generation: active, ..
+        } if active == generation => {}
+        RawInputMode::Passthrough => {}
+        _ => return Ok(()),
+    }
+    relay_passthrough_input(bytes, relay)?;
+    Ok(())
 }
 
 pub(super) fn capture_owns_input(mode: &RawInputMode) -> bool {
@@ -184,6 +240,9 @@ pub(super) fn drain_capture_submission(
     let Some(generation) = result.generation else {
         return Ok(());
     };
+    // A new submission owns the quarantine from here on; a clean-close
+    // marker from an earlier capture no longer applies.
+    capture_owned_input.last_clean_close = None;
     let mut overflow = capture_owned_input.observe(&result.remainder);
     if overflow {
         let _ = relay
@@ -193,10 +252,12 @@ pub(super) fn drain_capture_submission(
     }
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    let invalidated = loop {
         match current_raw_input_mode(relay.input_mode) {
             RawInputMode::Draining {
-                generation: active, ..
+                generation: active,
+                invalidated: drain_invalidated,
+                ..
             } if active == generation => {
                 if !overflow {
                     overflow = drain_capture_read_ahead(
@@ -207,7 +268,7 @@ pub(super) fn drain_capture_submission(
                         relay,
                     );
                 }
-                break;
+                break drain_invalidated;
             }
             RawInputMode::Submitted {
                 generation: active, ..
@@ -221,7 +282,7 @@ pub(super) fn drain_capture_submission(
                 };
                 match receiver.recv_timeout(wait) {
                     Ok(InputRead::Bytes { bytes, .. }) => {
-                        if !overflow && capture_owned_input.observe(&bytes) {
+                        if !overflow && capture_owned_input.buffer(&bytes) {
                             overflow = true;
                             let _ = relay
                                 .input_events
@@ -248,9 +309,12 @@ pub(super) fn drain_capture_submission(
                     .send(RawInputEvent::CaptureExpired { generation });
                 expire_capture_submission(relay.input_mode, generation);
             }
-            _ => return Ok(()),
+            _ => {
+                capture_owned_input.clear();
+                return Ok(());
+            }
         }
-    }
+    };
     if !overflow && complete_capture_chain_if_pending(relay.input_mode, generation) {
         capture_owned_input.clear();
         let _ = relay
@@ -259,11 +323,19 @@ pub(super) fn drain_capture_submission(
         return Ok(());
     }
 
+    let buffered = capture_owned_input.take_buffered();
     capture_owned_input.clear();
-    complete_capture_replay(relay.input_mode, generation);
+    let closed_to_terminal = complete_capture_replay(relay.input_mode, generation);
+    let clean_close = closed_to_terminal && !invalidated && !overflow;
+    if clean_close {
+        capture_owned_input.last_clean_close = Some(generation);
+    }
     let _ = relay
         .input_events
         .send(RawInputEvent::CaptureDrained { generation });
+    if clean_close {
+        replay_quarantined_input(&buffered, generation, relay)?;
+    }
     Ok(())
 }
 
@@ -309,7 +381,8 @@ fn relay_late_capture_bytes(
     capture_owned_input: &mut CaptureOwnedInput,
     relay: &mut InputRelayContext<'_>,
 ) -> io::Result<()> {
-    let active_generation = match current_raw_input_mode(relay.input_mode) {
+    let mode = current_raw_input_mode(relay.input_mode);
+    let active_generation = match &mode {
         RawInputMode::Capture {
             generation: active, ..
         }
@@ -318,15 +391,46 @@ fn relay_late_capture_bytes(
         }
         | RawInputMode::Draining {
             generation: active, ..
-        } => Some(active),
+        } => Some(*active),
         _ => None,
     };
     if active_generation != Some(generation) {
+        // GH-1913: when the quarantining capture already closed cleanly back
+        // to the shell (Terminal for this generation, or Passthrough once the
+        // observer acknowledged the hand-back), late reads still stamped with
+        // that generation were typed while the card action settled and belong
+        // to the shell — deliver them together with anything buffered during
+        // the settle window. Any other close (expired, overflowed, chained,
+        // replaced owner) keeps the historical discard.
+        let mut buffered = capture_owned_input.take_buffered();
+        let last_clean_close = capture_owned_input.last_clean_close;
         capture_owned_input.clear();
+        capture_owned_input.last_clean_close = last_clean_close;
+        let closed_cleanly = last_clean_close == Some(generation)
+            && match &mode {
+                RawInputMode::Terminal {
+                    generation: active, ..
+                } => *active == generation,
+                RawInputMode::Passthrough => true,
+                _ => false,
+            };
+        if closed_cleanly {
+            buffered.extend_from_slice(bytes);
+            if !buffered.is_empty() {
+                relay_passthrough_input(&buffered, relay)?;
+            }
+        }
         return Ok(());
     }
 
-    let overflow = capture_owned_input.observe(bytes);
+    // Bytes typed while the submission settles are buffered for the clean
+    // close replay (GH-1913); bytes aimed at a still-armed card stay
+    // observe-only so a later replay can never re-trigger card actions.
+    let overflow = if matches!(mode, RawInputMode::Capture { .. }) {
+        capture_owned_input.observe(bytes)
+    } else {
+        capture_owned_input.buffer(bytes)
+    };
     if overflow {
         let _ = relay
             .input_events
@@ -368,7 +472,7 @@ fn drain_capture_read_ahead(
     loop {
         match receiver.try_recv() {
             Ok(InputRead::Bytes { bytes, .. }) => {
-                if capture_owned_input.observe(&bytes) {
+                if capture_owned_input.buffer(&bytes) {
                     let _ = relay
                         .input_events
                         .send(RawInputEvent::CaptureOverflow { generation });
@@ -389,14 +493,27 @@ pub(super) fn drain_abandoned_capture(
     capture_owned_input: &mut CaptureOwnedInput,
     relay: &mut InputRelayContext<'_>,
 ) -> io::Result<()> {
-    let RawInputMode::Draining { generation, .. } = current_raw_input_mode(relay.input_mode) else {
+    let RawInputMode::Draining {
+        generation,
+        invalidated,
+        ..
+    } = current_raw_input_mode(relay.input_mode)
+    else {
         return Ok(());
     };
+    let buffered = capture_owned_input.take_buffered();
     capture_owned_input.clear();
-    complete_capture_replay(relay.input_mode, generation);
+    let closed_to_terminal = complete_capture_replay(relay.input_mode, generation);
+    let clean_close = closed_to_terminal && !invalidated;
+    if clean_close {
+        capture_owned_input.last_clean_close = Some(generation);
+    }
     let _ = relay
         .input_events
         .send(RawInputEvent::CaptureDrained { generation });
+    if clean_close {
+        replay_quarantined_input(&buffered, generation, relay)?;
+    }
     Ok(())
 }
 
@@ -636,6 +753,300 @@ mod tests {
         assert!(!input_rx
             .try_iter()
             .any(|event| matches!(event, RawInputEvent::CardInput(target, _) if target == "q-2")));
+        master.sync_all().expect("sync test output");
+        assert!(fs::read(&path).expect("read test output").is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    fn config_capture() -> RawInputCapture {
+        RawInputCapture::Config {
+            id: "config".to_string(),
+            option_count: 2,
+            selected: 0,
+        }
+    }
+
+    /// GH-1913: input typed as a separate read while a submitted card action
+    /// settles must be buffered and replayed once the capture closes cleanly
+    /// to Terminal, instead of being silently discarded.
+    #[test]
+    fn processing_window_read_is_replayed_after_clean_close() {
+        let path =
+            std::env::temp_dir().join(format!("cosh-shell-capture-replay-{}", std::process::id()));
+        let mut master = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("test output file");
+        let capture = config_capture();
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Draining {
+            previous_capture: capture.clone(),
+            generation: 7,
+            next_capture: None,
+            invalidated: false,
+        }));
+        let (read_tx, read_rx) = mpsc::channel();
+        read_tx
+            .send(InputRead::Bytes {
+                bytes: b"echo processing-window\r".to_vec(),
+                received_at: Instant::now(),
+                observed_mode: RawInputMode::Submitted {
+                    capture: capture.clone(),
+                    generation: 7,
+                },
+                ownership_changed_during_read: false,
+            })
+            .expect("queue read-ahead input");
+        drop(read_tx);
+        let (input_tx, input_rx) = mpsc::channel();
+        let classifier = InputClassifier::default();
+        let mut quarantine = CaptureOwnedInput::default();
+        let mut deferred_input = None;
+        let mut line_buffer = CandidateLineBuffer::default();
+        let mut native_line_state = NativeLineState::default();
+        let mut exit_tracker = ExplicitExitTracker::default();
+        let input_generation = UserPtyInputGeneration::default();
+        let mut line_submits = LineSubmitCounter::default();
+        let main_prompt_gate = super::super::super::MainPromptGate::default();
+        let mut relay = InputRelayContext {
+            master: &mut master,
+            input_classifier: &classifier,
+            input_events: &input_tx,
+            input_mode: &input_mode,
+            input_generation: &input_generation,
+            line_submits: &mut line_submits,
+            line_buffer: &mut line_buffer,
+            native_line_state: &mut native_line_state,
+            exit_tracker: &mut exit_tracker,
+            main_prompt_gate: &main_prompt_gate,
+            slash_route_enabled: false,
+        };
+
+        drain_capture_submission(
+            CaptureConsumeResult {
+                generation: Some(7),
+                remainder: Vec::new(),
+                retry: false,
+            },
+            &mut quarantine,
+            &mut deferred_input,
+            Some(&read_rx),
+            &mut relay,
+        )
+        .expect("drain submitted capture");
+
+        assert!(matches!(
+            current_raw_input_mode(&input_mode),
+            RawInputMode::Terminal { generation: 7, .. }
+        ));
+        assert!(input_rx
+            .try_iter()
+            .any(|event| matches!(event, RawInputEvent::CaptureDrained { generation: 7 })));
+        master.sync_all().expect("sync test output");
+        assert_eq!(
+            fs::read(&path).expect("read test output"),
+            b"echo processing-window\r"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    /// GH-1913: bytes stamped with the closed generation that arrive after
+    /// the chain reached Terminal are delivered, not dropped.
+    #[test]
+    fn late_bytes_after_terminal_close_are_delivered() {
+        let path = std::env::temp_dir().join(format!(
+            "cosh-shell-capture-late-terminal-{}",
+            std::process::id()
+        ));
+        let mut master = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("test output file");
+        let capture = config_capture();
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Terminal {
+            previous_capture: capture,
+            generation: 7,
+        }));
+        let (input_tx, _input_rx) = mpsc::channel();
+        let classifier = InputClassifier::default();
+        // The drain loop records the clean close before flipping to Terminal.
+        let mut quarantine = CaptureOwnedInput {
+            last_clean_close: Some(7),
+            ..CaptureOwnedInput::default()
+        };
+        let mut line_buffer = CandidateLineBuffer::default();
+        let mut native_line_state = NativeLineState::default();
+        let mut exit_tracker = ExplicitExitTracker::default();
+        let input_generation = UserPtyInputGeneration::default();
+        let mut line_submits = LineSubmitCounter::default();
+        let main_prompt_gate = super::super::super::MainPromptGate::default();
+        let mut relay = InputRelayContext {
+            master: &mut master,
+            input_classifier: &classifier,
+            input_events: &input_tx,
+            input_mode: &input_mode,
+            input_generation: &input_generation,
+            line_submits: &mut line_submits,
+            line_buffer: &mut line_buffer,
+            native_line_state: &mut native_line_state,
+            exit_tracker: &mut exit_tracker,
+            main_prompt_gate: &main_prompt_gate,
+            slash_route_enabled: false,
+        };
+
+        relay_late_capture_bytes(b"echo late-bytes\r", 7, &mut quarantine, &mut relay)
+            .expect("relay late bytes");
+
+        master.sync_all().expect("sync test output");
+        assert_eq!(
+            fs::read(&path).expect("read test output"),
+            b"echo late-bytes\r"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    /// Bytes stamped with a generation that no longer matches the closed
+    /// chain keep the historical discard: their owner is gone or replaced.
+    #[test]
+    fn late_bytes_for_a_different_generation_stay_discarded() {
+        let path = std::env::temp_dir().join(format!(
+            "cosh-shell-capture-late-mismatch-{}",
+            std::process::id()
+        ));
+        let mut master = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("test output file");
+        let capture = config_capture();
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Terminal {
+            previous_capture: capture,
+            generation: 8,
+        }));
+        let (input_tx, _input_rx) = mpsc::channel();
+        let classifier = InputClassifier::default();
+        let mut quarantine = CaptureOwnedInput::default();
+        let mut line_buffer = CandidateLineBuffer::default();
+        let mut native_line_state = NativeLineState::default();
+        let mut exit_tracker = ExplicitExitTracker::default();
+        let input_generation = UserPtyInputGeneration::default();
+        let mut line_submits = LineSubmitCounter::default();
+        let main_prompt_gate = super::super::super::MainPromptGate::default();
+        let mut relay = InputRelayContext {
+            master: &mut master,
+            input_classifier: &classifier,
+            input_events: &input_tx,
+            input_mode: &input_mode,
+            input_generation: &input_generation,
+            line_submits: &mut line_submits,
+            line_buffer: &mut line_buffer,
+            native_line_state: &mut native_line_state,
+            exit_tracker: &mut exit_tracker,
+            main_prompt_gate: &main_prompt_gate,
+            slash_route_enabled: false,
+        };
+
+        relay_late_capture_bytes(b"echo stale-bytes\r", 7, &mut quarantine, &mut relay)
+            .expect("relay stale bytes");
+
+        master.sync_all().expect("sync test output");
+        assert!(fs::read(&path).expect("read test output").is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    /// The chained-card close keeps discarding the settle-window bytes: they
+    /// may have been aimed at a card that was replaced mid-flight.
+    #[test]
+    fn processing_window_read_is_discarded_when_a_next_capture_chains() {
+        let path = std::env::temp_dir().join(format!(
+            "cosh-shell-capture-chain-discard-{}",
+            std::process::id()
+        ));
+        let mut master = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("test output file");
+        let capture = config_capture();
+        let next = RawInputCapture::Question {
+            id: "q-next".to_string(),
+            option_count: 0,
+            allow_free_text: true,
+            multiple: false,
+            secret: false,
+        };
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Draining {
+            previous_capture: capture.clone(),
+            generation: 7,
+            next_capture: Some(next),
+            invalidated: false,
+        }));
+        let (read_tx, read_rx) = mpsc::channel();
+        read_tx
+            .send(InputRead::Bytes {
+                bytes: b"echo chained-discard\r".to_vec(),
+                received_at: Instant::now(),
+                observed_mode: RawInputMode::Submitted {
+                    capture: capture.clone(),
+                    generation: 7,
+                },
+                ownership_changed_during_read: false,
+            })
+            .expect("queue read-ahead input");
+        drop(read_tx);
+        let (input_tx, _input_rx) = mpsc::channel();
+        let classifier = InputClassifier::default();
+        let mut quarantine = CaptureOwnedInput::default();
+        let mut deferred_input = None;
+        let mut line_buffer = CandidateLineBuffer::default();
+        let mut native_line_state = NativeLineState::default();
+        let mut exit_tracker = ExplicitExitTracker::default();
+        let input_generation = UserPtyInputGeneration::default();
+        let mut line_submits = LineSubmitCounter::default();
+        let main_prompt_gate = super::super::super::MainPromptGate::default();
+        let mut relay = InputRelayContext {
+            master: &mut master,
+            input_classifier: &classifier,
+            input_events: &input_tx,
+            input_mode: &input_mode,
+            input_generation: &input_generation,
+            line_submits: &mut line_submits,
+            line_buffer: &mut line_buffer,
+            native_line_state: &mut native_line_state,
+            exit_tracker: &mut exit_tracker,
+            main_prompt_gate: &main_prompt_gate,
+            slash_route_enabled: false,
+        };
+
+        drain_capture_submission(
+            CaptureConsumeResult {
+                generation: Some(7),
+                remainder: Vec::new(),
+                retry: false,
+            },
+            &mut quarantine,
+            &mut deferred_input,
+            Some(&read_rx),
+            &mut relay,
+        )
+        .expect("drain submitted capture");
+
+        assert!(matches!(
+            current_raw_input_mode(&input_mode),
+            RawInputMode::Capture {
+                capture: RawInputCapture::Question { ref id, .. },
+                ..
+            } if id == "q-next"
+        ));
         master.sync_all().expect("sync test output");
         assert!(fs::read(&path).expect("read test output").is_empty());
         fs::remove_file(path).ok();

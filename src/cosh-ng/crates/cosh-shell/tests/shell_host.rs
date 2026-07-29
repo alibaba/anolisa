@@ -199,6 +199,27 @@ where
     shell_run_raw_relay_bash_with_actions_output_control(&config, actions, output, event_observer)
 }
 
+fn run_raw_relay_bash_with_output_control<R, W, F>(
+    config: &ShellHostConfig,
+    input: R,
+    output: W,
+    event_observer: F,
+) -> io::Result<ShellHostOutput>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+{
+    let _guard = shell_host_run_guard();
+    let config = shell_host_test_config(config);
+    cosh_shell::shell_host::run_raw_relay_bash_with_output_control(
+        &config,
+        input,
+        output,
+        event_observer,
+    )
+}
+
 fn run_raw_relay_zsh_with_output_control<R, W, F>(
     config: &ShellHostConfig,
     input: R,
