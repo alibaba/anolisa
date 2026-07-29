@@ -3,7 +3,9 @@
 //! This module provides the `discover` subcommand which scans the system
 //! for running AI agent processes.
 
-use agentsight::{AgentScanner, CmdlineGlobMatcher};
+use std::collections::HashMap;
+
+use agentsight::AgentScanner;
 use structopt::StructOpt;
 
 /// Discover subcommand for finding AI agents running on the system
@@ -30,23 +32,34 @@ impl DiscoverCommand {
 
     /// List all known agents that can be detected
     fn list_known_agents(&self) {
+        // Group allow-rule patterns by agent name, preserving first-seen order.
+        // One agent may have several cmdline rules (variants), so grouping is
+        // required to avoid printing the same agent once per rule.
         let rules = agentsight::default_cmdline_rules();
-        let scanner = AgentScanner::from_rules(&rules, &[]);
-        let count = scanner.matcher_count();
+        let mut names: Vec<String> = Vec::new();
+        let mut rules_by_name: HashMap<String, Vec<String>> = HashMap::new();
+        for rule in rules.iter().filter(|r| r.allow && !r.patterns.is_empty()) {
+            let name = rule.agent_name.as_deref().unwrap_or("Custom Agent");
+            if !rules_by_name.contains_key(name) {
+                names.push(name.to_string());
+            }
+            rules_by_name
+                .entry(name.to_string())
+                .or_default()
+                .push(rule.patterns.join(" "));
+        }
 
-        println!("Known AI Agents ({count} total):");
+        println!("Known AI Agents ({} total):", names.len());
         println!("{}", "=".repeat(60));
         println!();
 
-        // Use CmdlineGlobMatcher to list agent info
-        for matcher in agentsight::default_cmdline_rules()
-            .iter()
-            .filter_map(CmdlineGlobMatcher::from_config)
-        {
-            let agent = matcher.info();
-            println!("  {} ({})", agent.name, agent.category);
-            println!("    Process names: {}", agent.process_names.join(", "));
-            println!("    {}", agent.description);
+        for name in &names {
+            println!("  {name}");
+            if let Some(patterns) = rules_by_name.get(name) {
+                for pattern in patterns {
+                    println!("    Match rule: {pattern}");
+                }
+            }
             println!();
         }
     }
