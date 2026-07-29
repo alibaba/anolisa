@@ -68,15 +68,8 @@ pub(crate) fn format_doctor_report_plain(report: &HealthScanReport, i18n: I18n) 
         doctor_status(report).token()
     ));
 
-    if !report.checks_done.is_empty() {
-        let mut checks = report.checks_done.clone();
-        checks.sort();
-        checks.dedup();
-        lines.push(format!(
-            "{}: {}",
-            i18n.t(MessageId::DoctorChecksLabel),
-            checks.join(", ")
-        ));
+    if let Some(line) = doctor_checks_line(report, i18n) {
+        lines.push(line);
     }
 
     let mut findings: Vec<_> = report.findings.iter().collect();
@@ -120,6 +113,24 @@ pub(crate) fn format_doctor_report_plain(report: &HealthScanReport, i18n: I18n) 
     }
 
     lines
+}
+
+/// Render the sorted, deduplicated `checks: <names>` line.
+///
+/// Shared by `cosh-shell doctor` and the `/health` slash command so both
+/// entry points surface the identical checks coverage.
+pub(crate) fn doctor_checks_line(report: &HealthScanReport, i18n: I18n) -> Option<String> {
+    if report.checks_done.is_empty() {
+        return None;
+    }
+    let mut checks = report.checks_done.clone();
+    checks.sort();
+    checks.dedup();
+    Some(format!(
+        "{}: {}",
+        i18n.t(MessageId::DoctorChecksLabel),
+        checks.join(", ")
+    ))
 }
 
 fn collector_token(collector: HealthCollector) -> &'static str {
@@ -197,6 +208,19 @@ mod tests {
         assert!(joined.contains("status: healthy"), "{joined}");
         assert!(joined.contains("all checks passed"), "{joined}");
         assert!(joined.contains("checks: provider"), "{joined}");
+    }
+
+    #[test]
+    fn checks_line_sorts_and_dedups_checks() {
+        let mut report = HealthScanReport::new("health-5", 0);
+        report
+            .checks_done
+            .extend(["provider", "config", "provider"].map(String::from));
+        let line = doctor_checks_line(&report, en()).expect("checks line");
+        assert_eq!(line, "checks: config, provider");
+
+        let empty = HealthScanReport::new("health-6", 0);
+        assert!(doctor_checks_line(&empty, en()).is_none());
     }
 
     #[test]

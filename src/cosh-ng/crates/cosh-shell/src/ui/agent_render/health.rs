@@ -31,11 +31,23 @@ const HEALTH_MAX_VISIBLE_PROMPTS: usize = 3;
 #[derive(Debug, Clone, Copy)]
 pub struct HealthBannerModel<'a> {
     pub report: &'a HealthScanReport,
+    /// Render the full panel even for healthy reports instead of collapsing
+    /// them into the compact one-line startup row. Used by the `/health`
+    /// slash command so its output stays aligned with `cosh-shell doctor`.
+    pub full_panel: bool,
 }
 
 impl<'a> HealthBannerModel<'a> {
     pub fn new(report: &'a HealthScanReport) -> Self {
-        Self { report }
+        Self {
+            report,
+            full_panel: false,
+        }
+    }
+
+    pub fn with_full_panel(mut self) -> Self {
+        self.full_panel = true;
+        self
     }
 }
 
@@ -53,7 +65,7 @@ impl RatatuiInlineRenderer {
     }
 
     pub fn health_banner_lines(&self, model: HealthBannerModel<'_>) -> Vec<String> {
-        if health_uses_startup_row(model.report) {
+        if !model.full_panel && health_uses_startup_row(model.report) {
             return self.health_startup_row_lines(model);
         }
         if self.plain {
@@ -71,7 +83,7 @@ impl RatatuiInlineRenderer {
     }
 
     fn health_banner_write_lines(&self, model: HealthBannerModel<'_>) -> Vec<String> {
-        if health_uses_startup_row(model.report) {
+        if !model.full_panel && health_uses_startup_row(model.report) {
             return self.health_startup_row_lines(model);
         }
         if self.plain {

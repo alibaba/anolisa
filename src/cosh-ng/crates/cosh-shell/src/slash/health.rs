@@ -2,7 +2,7 @@
 //! inline card. Uses the same [`run_doctor_report`] engine and status model as
 //! the `cosh-shell doctor` CLI, so both entry points report identical checks.
 
-use crate::diagnostics::doctor::run_doctor_report;
+use crate::diagnostics::doctor::{doctor_checks_line, run_doctor_report};
 use crate::diagnostics::health::finding_remediation;
 use crate::runtime::prelude::*;
 
@@ -22,12 +22,19 @@ pub(crate) fn render_health_command<W: Write>(
     let report = run_doctor_report(&config, &cwd);
 
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    renderer.write_health_banner(output, HealthBannerModel::new(&report))?;
+    // Force the full panel so a healthy report is not collapsed into the
+    // compact one-line startup row: TUI users must see the same checks
+    // coverage the `cosh-shell doctor` CLI prints.
+    renderer.write_health_banner(output, HealthBannerModel::new(&report).with_full_panel())?;
 
-    // Match the `cosh-shell doctor` CLI by surfacing the actionable remediation
-    // carried on each finding. Kept in this small slash module instead of the
-    // large agent_render/health.rs renderer to avoid growing that file.
+    // Match the `cosh-shell doctor` CLI by surfacing the checks list and the
+    // actionable remediation carried on each finding. Kept in this small slash
+    // module instead of the large agent_render/health.rs renderer to avoid
+    // growing that file.
     let i18n = I18n::new(state.language);
+    if let Some(line) = doctor_checks_line(&report, i18n) {
+        writeln!(output, "  {line}")?;
+    }
     let label = i18n.t(MessageId::DoctorRemediationLabel);
     for finding in &report.findings {
         if let Some(text) = finding_remediation(finding, i18n) {

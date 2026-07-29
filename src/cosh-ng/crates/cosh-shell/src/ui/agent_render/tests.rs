@@ -1744,6 +1744,30 @@ fn health_banner_compresses_healthy_report() {
 }
 
 #[test]
+fn health_banner_full_panel_expands_healthy_report() {
+    let mut report = HealthScanReport::new("health-ok-full", 0);
+    report.elapsed_ms = 24;
+    report.facts = vec![
+        health_float_fact("cpu.load_per_core_1m", 0.2),
+        health_float_fact("cpu.load_1m", 0.8),
+        health_float_fact("cpu.cores", 4.0),
+        health_float_fact("memory.used_ratio", 0.38),
+        health_float_fact("filesystem.root_used_ratio", 0.41),
+    ];
+    report.recompute_overall_severity();
+
+    let text = RatatuiInlineRenderer::with_width(80)
+        .health_banner_lines(HealthBannerModel::new(&report).with_full_panel())
+        .join("\n");
+
+    assert!(text.lines().count() > 2, "{text}");
+    assert!(text.contains("Health check"), "{text}");
+    assert!(text.contains("ok"), "{text}");
+    assert!(text.contains("Mem used 38%"), "{text}");
+    assert!(!text.contains("Health: ok"), "{text}");
+}
+
+#[test]
 fn health_banner_caps_try_lines_and_hides_suppressed_try_items() {
     let mut report = warning_health_report();
     report.findings.clear();
