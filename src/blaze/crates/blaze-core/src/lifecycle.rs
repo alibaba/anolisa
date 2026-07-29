@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Sandbox lifecycle state machine + JSON persistence.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -21,6 +22,7 @@ pub enum SandboxState {
     Running,
     Paused,
     Checkpointed,
+    RecoveryRequired,
     Reset,
     Warm,
     Destroyed,
@@ -34,11 +36,31 @@ impl SandboxState {
             SandboxState::Running => "running",
             SandboxState::Paused => "paused",
             SandboxState::Checkpointed => "checkpointed",
+            SandboxState::RecoveryRequired => "recovery-required",
             SandboxState::Reset => "reset",
             SandboxState::Warm => "warm",
             SandboxState::Destroyed => "destroyed",
         }
     }
+}
+
+/// Persisted multi-step operation used for crash diagnosis and recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OperationKind {
+    /// Sandbox creation is acquiring resources or starting a backend.
+    Create,
+    /// Runtime resources are being destroyed.
+    Destroy,
+}
+
+/// Durable journal entry for one active lifecycle operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationJournal {
+    /// Operation being performed.
+    pub kind: OperationKind,
+    /// UTC time at which the operation became externally visible.
+    pub started_at: DateTime<Utc>,
 }
 
 impl std::fmt::Display for SandboxState {
@@ -85,6 +107,9 @@ pub struct SandboxInstance {
     /// Last durably known backend ownership state.
     #[serde(default)]
     pub backend_ownership: BackendOwnership,
+    /// Active multi-step operation, if any.
+    #[serde(default)]
+    pub operation: Option<OperationJournal>,
 }
 
 impl SandboxInstance {
@@ -110,7 +135,23 @@ impl SandboxInstance {
             updated_at: now,
             policy_name,
             backend_ownership: BackendOwnership::NotStarted,
+            operation: None,
         }
+    }
+
+    /// Persist an operation before starting its first data-plane mutation.
+    pub fn begin_operation(&mut self, kind: OperationKind) {
+        self.operation = Some(OperationJournal {
+            kind,
+            started_at: Utc::now(),
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Clear the marker before atomically persisting the final state.
+    pub fn finish_operation(&mut self) {
+        self.operation = None;
+        self.updated_at = Utc::now();
     }
 
     /// Apply a state transition. Returns
@@ -154,8 +195,14 @@ impl SandboxInstance {
         let final_path = dir.join("state.json");
         let tmp_path = dir.join("state.json.tmp");
         let json = serde_json::to_vec_pretty(self)?;
-        fs::write(&tmp_path, &json)?;
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(&json)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+        }
         fs::rename(&tmp_path, &final_path)?;
+        File::open(&dir)?.sync_all()?;
         Ok(())
     }
 
@@ -169,10 +216,15 @@ impl SandboxInstance {
 }
 
 fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
-    use SandboxState::{Checkpointed, Creating, Destroyed, Paused, Pending, Reset, Running, Warm};
+    use SandboxState::{
+        Checkpointed, Creating, Destroyed, Paused, Pending, RecoveryRequired, Reset, Running, Warm,
+    };
     if to == Destroyed {
         // `* → destroyed` is always valid (terminal sink).
         return from != Destroyed;
+    }
+    if to == RecoveryRequired {
+        return !matches!(from, Destroyed | RecoveryRequired);
     }
     match (from, to) {
         (Pending, Creating) => true,
@@ -240,6 +292,29 @@ mod tests {
     }
 
     #[test]
+    fn recovery_required_can_finish_but_cannot_be_reentered() {
+        let mut inst = fresh();
+        inst.transition(SandboxState::Creating).expect("creating");
+        inst.transition(SandboxState::Running).expect("running");
+        inst.transition(SandboxState::RecoveryRequired)
+            .expect("recovery required");
+
+        let repeated = inst.transition(SandboxState::RecoveryRequired);
+        assert!(matches!(
+            repeated,
+            Err(BlazeError::InvalidStateTransition { .. })
+        ));
+
+        inst.transition(SandboxState::Destroyed)
+            .expect("destroyed from recovery");
+        let terminal = inst.transition(SandboxState::RecoveryRequired);
+        assert!(matches!(
+            terminal,
+            Err(BlazeError::InvalidStateTransition { .. })
+        ));
+    }
+
+    #[test]
     fn illegal_pending_to_running() {
         let mut inst = fresh();
         let err = inst.transition(SandboxState::Running).expect_err("illegal");
@@ -277,5 +352,40 @@ mod tests {
         assert_eq!(loaded.id, inst.id);
         assert_eq!(loaded.state, SandboxState::Creating);
         assert_eq!(loaded.policy_name, inst.policy_name);
+    }
+
+    #[test]
+    fn legacy_state_without_optional_fields_deserializes() {
+        let inst = fresh();
+        let value = serde_json::json!({
+            "id": inst.id,
+            "state": "running",
+            "backend": "mock",
+            "workload_class": "agent-rl",
+            "image_digest": "sha256:old",
+            "start_path": "cold",
+            "created_at": inst.created_at,
+            "updated_at": inst.updated_at,
+            "policy_name": "legacy"
+        });
+        let loaded: SandboxInstance = serde_json::from_value(value).expect("legacy state");
+        assert!(loaded.operation.is_none());
+        assert_eq!(loaded.backend_ownership, BackendOwnership::Unknown);
+    }
+
+    #[test]
+    fn create_journal_round_trips() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut instance = fresh();
+        instance.begin_operation(OperationKind::Create);
+        instance.persist(tmp.path()).expect("persist");
+
+        let mut loaded = SandboxInstance::load(tmp.path(), instance.id).expect("load");
+        assert_eq!(
+            loaded.operation.as_ref().map(|operation| operation.kind),
+            Some(OperationKind::Create)
+        );
+        loaded.finish_operation();
+        assert!(loaded.operation.is_none());
     }
 }
