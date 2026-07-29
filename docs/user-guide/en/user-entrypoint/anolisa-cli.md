@@ -11,7 +11,7 @@ transactions to the native package manager, and diagnoses or repairs drift.
 ### Option A: Install script (recommended)
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://get.agentic-os.sh | bash
 ```
 
 ### Option B: YUM (Alinux)
@@ -225,7 +225,7 @@ inspection.
 ## Example Workflow
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://get.agentic-os.sh | bash
 anolisa env
 anolisa install cosh
 anolisa install tokenless

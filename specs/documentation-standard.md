@@ -144,6 +144,35 @@ Design docs are **never** placed at:
 - `docs/` top level
 - `docs/user-guide/` or `docs/developer-guide/`
 
+### 3.3 Public Website and Agent Endpoints
+
+The Docusaurus source lives in `website/` on `main`. GitHub Pages is a
+deployment target, not a hand-maintained documentation source.
+
+The website MUST consume canonical repository content at build time:
+
+- Documentation routes render `docs/QUICKSTART*.md`, `docs/BUILDING*.md`,
+  and the paired files under `docs/user-guide/{en,zh}/` and
+  `docs/developer-guide/{en,zh}/`.
+- Changelog routes render the root and component `CHANGELOG*.md` files.
+- `/agents/`, `/agents/repo-index.*`, `/agents/cli-reference.txt`,
+  `/agents/changelog.txt`, `/llms.txt`, and `/llms-full.txt` are generated
+  from documentation, component manifests, CLI definitions, and changelogs.
+- Generated files live under `website/.generated/`; they MUST NOT be edited
+  or committed as independent sources.
+
+Homepage copy may summarize the project and direct readers to a capability,
+but installation commands, platform support, version numbers, and behavioral
+contracts MUST be derived from or link to their canonical repository source.
+
+English remains the default locale and Chinese uses the `/zh/` route prefix.
+Both locales MUST expose equivalent navigation for Docs, User Guide,
+Developer Guide, Changelog, and the Agent entry point.
+
+Pages builds run automatically for relevant changes merged to `main`.
+Pull requests build and validate the artifact without deploying it, and
+`workflow_dispatch` remains available for an explicit manual deployment.
+
 ## 4. Component-Level Files
 
 ### 4.1 Required Files (every component)
@@ -239,4 +268,4 @@ When a PR introduces any of the following changes, documentation MUST be updated
 
 ---
 
-*Last updated: 2026-07-04*
+*Last updated: 2026-07-29*

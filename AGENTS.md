@@ -9,6 +9,7 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | Component | Path | Tech | Platform |
 |-----------|------|------|----------|
 | **copilot-shell** (`cosh`) | `src/copilot-shell/` | TypeScript / Node.js | All |
+| **cosh-ng** | `src/cosh-ng/` | Rust | Linux only |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
 | **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux only |
 | **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm) |

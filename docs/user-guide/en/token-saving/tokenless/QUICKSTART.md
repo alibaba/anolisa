@@ -6,7 +6,7 @@ Tokenless is ANOLISA's Token optimization component. It automatically compresses
 
 ## Overview
 
-AI Agent interactions typically include large volumes of tool schema definitions and verbose CLI output. Tokenless intercepts these at the framework level and applies lossless/near-lossless compression, delivering 30–70% Token savings transparently.
+AI Agent interactions typically include large tool schemas and verbose CLI output. Tokenless compresses these at the framework layer and records payload-level statistics, so the effect can be measured in the current workload.
 
 **Core Capabilities:**
 
@@ -18,9 +18,9 @@ AI Agent interactions typically include large volumes of tool schema definitions
 
 ## Prerequisites
 
-- Linux (x86_64 or aarch64, glibc 2.17+) — full support: all install methods and framework adapter integration; source builds are also Linux-only
-- macOS (x86_64 or Apple Silicon) — via npm only; the npm package ships the CLI binaries (cross-compiled from Linux and verified for architecture) together with the framework adapters (adapter hooks are OS-independent bash/python scripts)
-- One of: cosh, OpenClaw, Hermes, claude-code, codex, qwencode (as the host Agent framework; the frameworks are cross-platform and run on macOS)
+- Linux (x86_64 or aarch64, glibc 2.17+) — npm supports both architectures; the ANOLISA CLI artifact is available for x86_64
+- macOS (x86_64 or Apple Silicon) — npm supports both architectures; the ANOLISA CLI artifact is available for Apple Silicon
+- One of: Cosh, OpenClaw, Hermes, Qoder, Claude Code, Codex, or Qwencode (as the host Agent framework; the frameworks are cross-platform and run on macOS)
 
 ---
 
@@ -31,6 +31,9 @@ AI Agent interactions typically include large volumes of tool schema definitions
 ```bash
 anolisa install tokenless
 ```
+
+Use this path on Linux x86_64 or Apple Silicon macOS. On Linux aarch64 or
+Intel macOS, use npm.
 
 ### Option 2: YUM (Alinux, requires ANOLISA YUM repo)
 
@@ -105,12 +108,12 @@ Tokenless also supports claude-code, codex, and qwencode adapters. See `anolisa 
 | `tokenless compress-toon` | Compress to TOON format |
 | `tokenless decompress-toon` | Decompress from TOON format |
 | `tokenless env-check` | Check environment and integration status |
-| `tokenless stats` | View compression statistics |
+| `tokenless stats summary` | View a compression statistics summary |
 
 ### View Compression Statistics
 
 ```bash
-tokenless stats
+tokenless stats summary
 ```
 
 Sample output:

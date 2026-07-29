@@ -110,7 +110,7 @@ ANOLISA CLI is the common installation entry point. Enable cosh-ng, Token-less,
 or other capabilities as needed.
 
 ```bash
-curl -fsSL https://agentic-os.sh/install.sh | bash
+curl -fsSL https://get.agentic-os.sh | bash
 
 anolisa install cosh-ng
 anolisa install tokenless

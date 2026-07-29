@@ -11,7 +11,7 @@
 ### 方式 A：安装脚本（推荐）
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://get.agentic-os.sh | bash
 ```
 
 ### 方式 B：YUM（Alinux）

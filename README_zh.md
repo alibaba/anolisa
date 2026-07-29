@@ -102,7 +102,7 @@ ANOLISA 正在完善面向 Agent 的执行环境：
 ANOLISA CLI 是统一的安装入口，cosh-ng、Token-less 和其他能力都可以按需启用。
 
 ```bash
-curl -fsSL https://agentic-os.sh/install.sh | bash
+curl -fsSL https://get.agentic-os.sh | bash
 
 anolisa install cosh-ng
 anolisa install tokenless

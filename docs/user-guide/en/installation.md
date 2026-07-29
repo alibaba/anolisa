@@ -11,7 +11,7 @@ The `anolisa` CLI is the unified entry point for managing all ANOLISA components
 ### Option A: Install script (recommended)
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://get.agentic-os.sh | bash
 ```
 
 ### Option B: YUM (Alinux)
