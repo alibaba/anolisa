@@ -1,5 +1,20 @@
 import { execFile } from "node:child_process";
 
+export function envFlagEnabled(name: string, defaultValue = true): boolean {
+  const value = process.env[name];
+  if (value === undefined) {
+    return defaultValue;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+  return defaultValue;
+}
+
 export type CliResult = {
   /** Raw stdout text (may be empty) */
   stdout: string;

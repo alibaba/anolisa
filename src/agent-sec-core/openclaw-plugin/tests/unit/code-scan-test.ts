@@ -50,6 +50,7 @@ function execEvent(command: string) {
 /** Captured CLI args from last mock call. */
 let lastCliArgs: string[] | undefined;
 let lastCliOpts: { timeout?: number } | undefined;
+let previousCodeScannerHookEnabled: string | undefined;
 
 function mockCli(result: CliResult) {
   _setCliMock(async (args, opts) => {
@@ -73,10 +74,17 @@ describe("scan-code", () => {
   beforeEach(() => {
     lastCliArgs = undefined;
     lastCliOpts = undefined;
+    previousCodeScannerHookEnabled = process.env.CODE_SCANNER_HOOK_ENABLED;
+    delete process.env.CODE_SCANNER_HOOK_ENABLED;
   });
 
   afterEach(() => {
     _resetCliMock();
+    if (previousCodeScannerHookEnabled === undefined) {
+      delete process.env.CODE_SCANNER_HOOK_ENABLED;
+    } else {
+      process.env.CODE_SCANNER_HOOK_ENABLED = previousCodeScannerHookEnabled;
+    }
   });
 
   // =========================================================================
@@ -103,6 +111,28 @@ describe("scan-code", () => {
   // Dimension 3a: Event-to-CLI Parameter Transformation
   // =========================================================================
   describe("event → CLI args transformation", () => {
+    it("CODE_SCANNER_HOOK_ENABLED=false → no CLI call", async () => {
+      process.env.CODE_SCANNER_HOOK_ENABLED = "false";
+      const { handler } = registerAndGetHandler();
+      mockCliNoCall();
+
+      const result = await handler(execEvent("rm -rf /"), {});
+
+      assert.equal(result, undefined);
+      assert.equal(lastCliArgs, undefined);
+    });
+
+    it("invalid CODE_SCANNER_HOOK_ENABLED value → defaults enabled silently", async () => {
+      process.env.CODE_SCANNER_HOOK_ENABLED = "maybe";
+      const { handler } = registerAndGetHandler();
+      mockCli({ exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" });
+
+      const result = await handler(execEvent("echo hello"), {});
+
+      assert.equal(result, undefined);
+      assert.deepEqual(lastCliArgs?.slice(2), ["scan-code", "--code", "echo hello", "--language", "bash"]);
+    });
+
     it("exec tool with command → correct CLI args", async () => {
       const { handler } = registerAndGetHandler();
       mockCli({ exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" });

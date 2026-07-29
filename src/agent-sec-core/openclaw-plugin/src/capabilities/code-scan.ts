@@ -1,5 +1,5 @@
 import type { SecurityCapability } from "../types.js";
-import { buildTraceContext, callAgentSecCli } from "../utils.js";
+import { buildTraceContext, callAgentSecCli, envFlagEnabled } from "../utils.js";
 
 export const codeScan: SecurityCapability = {
   id: "scan-code",
@@ -7,10 +7,14 @@ export const codeScan: SecurityCapability = {
   hooks: ["before_tool_call"],
   register(api) {
     const cfg = (api.pluginConfig as Record<string, any>) ?? {};
+    const hookEnabled = envFlagEnabled("CODE_SCANNER_HOOK_ENABLED", true);
     const requireApprovalEnabled = cfg.codeScanRequireApproval === true;
 
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
+        if (!hookEnabled) {
+          return undefined;
+        }
 
         // 只拦截 shell 类工具
         const command = extractCommand(event);
