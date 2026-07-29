@@ -89,6 +89,89 @@ _cosh_utf8_han_status() {
   return 1
 }
 
+_cosh_literal_first_word_matches() {
+  local input="$1"
+  local attempt_token="$2"
+  local command="$3"
+  local LC_ALL=C
+  local quote=""
+  local normalized=""
+  local started=0
+  local index=0
+  local length="${#input}"
+  local byte
+
+  [[ -n "$input" && "$length" -le 4096 ]] || return 1
+  [[ "$attempt_token" == "$command" ]] && return 0
+
+  while (( index < length )); do
+    byte="${input:$index:1}"
+    (( index += 1 ))
+    if [[ "$quote" == "'" ]]; then
+      case "$byte" in
+        "'") quote="" ;;
+        *[[:cntrl:]]*) return 1 ;;
+        *) normalized+="$byte"; started=1 ;;
+      esac
+      continue
+    fi
+    if [[ "$quote" == '"' ]]; then
+      case "$byte" in
+        '"') quote="" ;;
+        '\'|'$'|'`'|*[[:cntrl:]]*) return 1 ;;
+        *) normalized+="$byte"; started=1 ;;
+      esac
+      continue
+    fi
+    case "$byte" in
+      ' '|$'\t') (( started == 1 )) && break ;;
+      "'") quote="'"; started=1 ;;
+      '"') quote='"'; started=1 ;;
+      '\'|'$'|'`'|'|'|'&'|';'|'<'|'>'|'('|')'|'*'|'?'|'~'|'{'|'}'|'['|']'|*[[:cntrl:]]*)
+        return 1
+        ;;
+      *) normalized+="$byte"; started=1 ;;
+    esac
+  done
+  [[ -z "$quote" && -n "$normalized" && "$normalized" == "$command" ]]
+}
+
+_cosh_arguments_have_no_unquoted_expansion() {
+  local input="$1"
+  local LC_ALL=C
+  local quote=""
+  local escaped=0
+  local after_first_word=0
+  local index=0
+  local length="${#input}"
+  local byte
+
+  while (( index < length )); do
+    byte="${input:$index:1}"
+    (( index += 1 ))
+    if [[ "$quote" == "'" ]]; then
+      [[ "$byte" == "'" ]] && quote=""
+      continue
+    fi
+    if (( escaped == 1 )); then
+      escaped=0
+      continue
+    fi
+    case "$byte" in
+      '\') escaped=1 ;;
+      "'") quote="'" ;;
+      '"')
+        if [[ "$quote" == '"' ]]; then quote=""; elif [[ -z "$quote" ]]; then quote='"'; fi
+        ;;
+      ' '|$'\t') [[ -z "$quote" ]] && after_first_word=1 ;;
+      '*'|'?'|'~'|'{'|'}'|'['|']')
+        (( after_first_word == 1 )) && [[ -z "$quote" ]] && return 1
+        ;;
+    esac
+  done
+  (( escaped == 0 )) && [[ -z "$quote" ]]
+}
+
 _cosh_command_veto() {
   local input="$1"
   local top_token="$2"

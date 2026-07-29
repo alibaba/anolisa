@@ -72,6 +72,8 @@ _COSH_ATTEMPT_TOKEN=
 _COSH_ATTEMPT_TOKEN_FINGERPRINT=
 _COSH_ATTEMPT_SENSITIVE=0
 _COSH_ATTEMPT_UNSAFE=0
+_COSH_ATTEMPT_EXPANSION_DRIFT=0
+_COSH_ATTEMPT_SUBSHELL=
 _COSH_WRAPPER_ID="${COSH_SESSION_ID}:${COSH_MARKER_TOKEN}"
 _cosh_apply_internal_recovery() {
   if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
@@ -360,12 +362,15 @@ _cosh_add_handoff_history() {
 _cosh_begin_attempt() {
   local input="$1"
   local top_token="$2"
+  local expansion_drift="${3:-0}"
   local utf8_status
   _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
   _COSH_ATTEMPT_ACTIVE=1
   _COSH_ATTEMPT_WRAPPER_ID="$_COSH_WRAPPER_ID"
   _COSH_ATTEMPT_SENSITIVE=0
   _COSH_ATTEMPT_UNSAFE=0
+  _COSH_ATTEMPT_EXPANSION_DRIFT="$expansion_drift"
+  _COSH_ATTEMPT_SUBSHELL="${ZSH_SUBSHELL:-0}"
   _COSH_ATTEMPT_INPUT=
   _COSH_ATTEMPT_TOKEN=
   _COSH_ATTEMPT_TOKEN_FINGERPRINT=
@@ -426,6 +431,12 @@ command_not_found_handler() {
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
+  if (( ${ZSH_SUBSHELL:-0} != ${_COSH_ATTEMPT_SUBSHELL:-0} + 1 )) \
+     || (( ${#funcstack[@]} != 1 )) \
+     || [[ "${_COSH_ATTEMPT_EXPANSION_DRIFT:-0}" == 1 ]]; then
+    _cosh_delegate_zsh_command_not_found "$command" "$@"
+    return $?
+  fi
   if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
     local command_fingerprint
     command_fingerprint="$(_cosh_token_fingerprint "$command")"
@@ -443,7 +454,9 @@ command_not_found_handler() {
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
-  if [[ "${_COSH_ATTEMPT_TOKEN:-}" != "$command" || -z "$original" ]]; then
+  if [[ -z "$original" ]] \
+     || ! _cosh_literal_first_word_matches "$original" "${_COSH_ATTEMPT_TOKEN:-}" "$command" \
+     || ! _cosh_arguments_have_no_unquoted_expansion "$original"; then
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
@@ -474,6 +487,10 @@ command_not_found_handler() {
 }
 _cosh_preexec_marker() {
   local command="$1"
+  local expanded_command="${2:-$1}"
+  local canonical_command="${(j: :)${(z)command}}"
+  local expansion_drift=0
+  [[ "$canonical_command" != "$expanded_command" ]] && expansion_drift=1
   _COSH_ATTEMPT_ACTIVE=0
   _COSH_ATTEMPT_SENSITIVE=0
   _COSH_ATTEMPT_UNSAFE=0
@@ -497,10 +514,14 @@ _cosh_preexec_marker() {
     _cosh_clear_handoff_request
     unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
     unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
-    local first_word="$command"
+    local command_word_source="$command"
+    while [[ "$command_word_source" == ' '* || "$command_word_source" == $'\t'* ]]; do
+      command_word_source="${command_word_source#?}"
+    done
+    local first_word="$command_word_source"
     local argc=1
-    if [[ "$command" == *[[:space:]]* ]]; then
-      first_word="${command%%[[:space:]]*}"
+    if [[ "$command_word_source" == *[[:space:]]* ]]; then
+      first_word="${command_word_source%%[[:space:]]*}"
       argc=2
     fi
     local reason
@@ -508,7 +529,7 @@ _cosh_preexec_marker() {
       _cosh_emit_intercept_marker "$command" "$reason"
       return 1
     fi
-    _cosh_begin_attempt "$command" "$first_word"
+    _cosh_begin_attempt "$command" "$first_word" "$expansion_drift"
   fi
   if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1
      || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]] \

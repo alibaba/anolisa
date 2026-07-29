@@ -67,6 +67,66 @@ fn classify_with_context(
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn literal_first_word_matches(shell: &str, input: &str, attempt: &str, command: &str) -> bool {
+    let mut process = Process::new(shell);
+    if shell == "bash" {
+        process.args(["--noprofile", "--norc"]);
+    } else {
+        process.arg("-f");
+    }
+    let script = format!(
+        "{}\n_cosh_literal_first_word_matches \"$1\" \"$2\" \"$3\"",
+        shell_intent_helpers(),
+    );
+    process
+        .args(["-c", &script, "cosh-literal-test", input, attempt, command])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn routing_c2_matcher_table_covers_supported_quote_removal_subset() {
+    let accepted = [
+        (
+            "子曰\"三人行必有我师\"",
+            "子曰\"三人行必有我师\"",
+            "子曰三人行必有我师",
+        ),
+        ("子曰\" 三人行必有我师\"", "子曰\"", "子曰 三人行必有我师"),
+        ("'子曰 三人行'后续", "'子曰", "子曰 三人行后续"),
+        ("\"子 曰\"x", "\"子", "子 曰x"),
+        ("子曰'\"'后续", "子曰'\"'后续", "子曰\"后续"),
+        ("\"\"子曰", "\"\"子曰", "子曰"),
+        ("子曰?", "子曰?", "子曰?"),
+        ("   解释", "解释", "解释"),
+    ];
+    let rejected = [
+        ("\"\"", "\"\"", ""),
+        ("'子曰", "'子曰", "子曰"),
+        (r"子曰\ x", r"子曰\", "子曰 x"),
+        (r#"子曰"$HOME""#, r#"子曰"$HOME""#, "子曰/tmp"),
+        ("子曰$(id)", "子曰$(id)", "子曰uid"),
+        ("子曰*", "子曰*", "子曰a"),
+    ];
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for (input, attempt, command) in accepted {
+            assert!(
+                literal_first_word_matches(shell, input, attempt, command),
+                "{shell}: accepted {input:?}"
+            );
+        }
+        for (input, attempt, command) in rejected {
+            assert!(
+                !literal_first_word_matches(shell, input, attempt, command),
+                "{shell}: rejected {input:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn classification_is_locale_independent() {
     for shell in ["bash", "zsh"] {

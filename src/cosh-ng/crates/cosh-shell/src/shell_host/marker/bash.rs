@@ -58,6 +58,8 @@ _COSH_ATTEMPT_TOKEN=
 _COSH_ATTEMPT_TOKEN_FINGERPRINT=
 _COSH_ATTEMPT_SENSITIVE=0
 _COSH_ATTEMPT_UNSAFE=0
+_COSH_ATTEMPT_EXPANSION_DRIFT=0
+_COSH_ATTEMPT_SUBSHELL=
 _COSH_WRAPPER_ID="${COSH_SESSION_ID}:${COSH_MARKER_TOKEN}"
 _cosh_apply_internal_recovery() {
   if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
@@ -415,12 +417,15 @@ _cosh_replace_handoff_history() {
 _cosh_begin_attempt() {
   local input="$1"
   local top_token="$2"
+  local expansion_drift="${3:-0}"
   local utf8_status
   _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
   _COSH_ATTEMPT_ACTIVE=1
   _COSH_ATTEMPT_WRAPPER_ID="$_COSH_WRAPPER_ID"
   _COSH_ATTEMPT_SENSITIVE=0
   _COSH_ATTEMPT_UNSAFE=0
+  _COSH_ATTEMPT_EXPANSION_DRIFT="$expansion_drift"
+  _COSH_ATTEMPT_SUBSHELL="${BASH_SUBSHELL:-0}"
   _COSH_ATTEMPT_INPUT=
   _COSH_ATTEMPT_TOKEN=
   _COSH_ATTEMPT_TOKEN_FINGERPRINT=
@@ -481,6 +486,12 @@ command_not_found_handle() {
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
   fi
+  if [[ "${_COSH_ATTEMPT_SUBSHELL:-}" != "${BASH_SUBSHELL:-0}"
+     || "${#FUNCNAME[@]}" != 1
+     || "${_COSH_ATTEMPT_EXPANSION_DRIFT:-0}" == 1 ]]; then
+    _cosh_delegate_bash_command_not_found "$command" "$@"
+    return $?
+  fi
   if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
     local command_fingerprint
     command_fingerprint="$(_cosh_token_fingerprint "$command")"
@@ -498,7 +509,9 @@ command_not_found_handle() {
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
   fi
-  if [[ "${_COSH_ATTEMPT_TOKEN:-}" != "$command" || -z "$original" ]]; then
+  if [[ -z "$original" ]] \
+     || ! _cosh_literal_first_word_matches "$original" "${_COSH_ATTEMPT_TOKEN:-}" "$command" \
+     || ! _cosh_arguments_have_no_unquoted_expansion "$original"; then
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
   fi
@@ -542,6 +555,18 @@ _COSH_HAS_BASH_ALIASES=0
 if (( ${BASH_VERSINFO[0]:-0} >= 4 )); then
   _COSH_HAS_BASH_ALIASES=1
 fi
+
+_cosh_has_leading_alias() {
+  local command="$1"
+  local rest="$command"
+  local word
+  [[ "${_COSH_HAS_BASH_ALIASES:-0}" == 1 ]] || return 1
+  while [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+ ]]; do
+    rest="${rest:${#BASH_REMATCH[0]}}"
+  done
+  word="${rest%%[[:space:]]*}"
+  [[ -n "$word" && -n "${BASH_ALIASES[$word]:-}" ]]
+}
 
 _cosh_compact_alias_expanded() {
   local command="$1" expanded=0 guard=0 prefix rest word expansion done_prefix=""
@@ -653,6 +678,8 @@ _cosh_preexec_marker() {
     # (otherwise every aliased command, e.g. ls='ls --color=auto', loses its
     # preexec marker and an approved shell handoff can never close).
     _COSH_EXPANDED_COMPACT=""
+    local attempt_expansion_drift=0
+    _cosh_has_leading_alias "$command" && attempt_expansion_drift=1
     if [[ -n "$compact_command" && "$compact_bash_command" != *"$compact_command"* && "$compact_command" != *"$compact_bash_command"* ]]; then
       _cosh_compact_alias_expanded "$command"
     fi
@@ -723,7 +750,7 @@ _cosh_preexec_marker() {
           eval "$active_debug_trap" 2>/dev/null || true
           return 1
         fi
-        _cosh_begin_attempt "$command" "$first_word"
+        _cosh_begin_attempt "$command" "$first_word" "$attempt_expansion_drift"
       fi
       if [[ "$command" == trap*DEBUG* ]]; then
         _COSH_DEBUG_TRAP_MAY_CHANGE=1
