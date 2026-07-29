@@ -240,6 +240,12 @@ pub(super) fn build_shell_handoff_request(
     )?;
     request.request_id = input.request_id;
     request.tool_use_id = input.tool_use_id;
+    // Every handoff carries an agent-proposed command, so the pager decision is
+    // made here rather than at the transport: user-typed commands never build a
+    // handoff request and keep their own pager configuration untouched.
+    // A compound line receives one policy from its aggregated interaction
+    // profile; the marker applies it at preexec and restores it at precmd.
+    request.implicit_pager_policy = agent_implicit_pager_policy(input.command);
     request.validate()?;
     Ok(request)
 }

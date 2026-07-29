@@ -103,6 +103,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalReceiptSubjectBashSentToShell => "Bash tool: 已发送到 shell",
         MessageId::ApprovalReceiptSubjectBashProviderNative => "Bash tool: provider-native 执行",
         MessageId::ApprovalReceiptBashSentToShellMessage => "Bash tool 已发送到 shell",
+        MessageId::ApprovalReceiptForegroundInteractiveHint => {
+            "此命令将在前台交互运行，键盘输入会直接发送给它；若进入分页器，通常按 q 返回。"
+        }
         MessageId::ApprovalReceiptProviderNativeAllowedMessage => {
             "已允许 provider-native shell tool 执行"
         }

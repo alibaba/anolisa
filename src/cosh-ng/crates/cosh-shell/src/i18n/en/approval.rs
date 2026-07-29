@@ -119,6 +119,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Bash tool: provider-native execution"
         }
         MessageId::ApprovalReceiptBashSentToShellMessage => "Bash tool sent to shell",
+        MessageId::ApprovalReceiptForegroundInteractiveHint => {
+            "This command will run interactively in the foreground; keyboard input goes directly to it. Press q to leave a pager."
+        }
         MessageId::ApprovalReceiptProviderNativeAllowedMessage => {
             "Provider-native shell tool allowed"
         }

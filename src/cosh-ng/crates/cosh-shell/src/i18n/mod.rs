@@ -131,8 +131,17 @@ mod tests {
         // segment so pre-existing discriminants never shift.
         assert_eq!(MessageId::HelpSummaryMcp as usize, 834);
         assert_eq!(MessageId::SlashMcpTitle as usize, 835);
-        assert_eq!(MessageId::SlashMcpTitle as usize, MessageId::ALL.len() - 1);
-        assert_eq!(MessageId::HelpSummaryMcp as usize, MessageId::ALL.len() - 2);
+        // The #1988 trailing segment is the current tail.
+        assert_eq!(
+            MessageId::ApprovalReceiptForegroundInteractiveHint as usize,
+            836
+        );
+        assert_eq!(
+            MessageId::ApprovalReceiptForegroundInteractiveHint as usize,
+            MessageId::ALL.len() - 1
+        );
+        assert_eq!(MessageId::SlashMcpTitle as usize, MessageId::ALL.len() - 2);
+        assert_eq!(MessageId::HelpSummaryMcp as usize, MessageId::ALL.len() - 3);
     }
 
     #[test]

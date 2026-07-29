@@ -1,3 +1,5 @@
+use crate::types::ImplicitPagerPolicy;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderToolClass {
     Shell,
@@ -118,6 +120,21 @@ pub fn classify_command_interaction(command: &str) -> CommandInteractionProfile 
             }
         },
         reason: assessment.primary_reason(),
+    }
+}
+
+/// Picks the implicit-pager policy for an agent-originated shell handoff.
+///
+/// Commands the agent runs to *read* something (`git log`, `systemctl status`)
+/// must not stop at a pager waiting for `q`, so their implicit pagers are
+/// disabled. Commands that only make sense with a terminal (`less`, `man`,
+/// `top`, `ssh`) keep the user's configuration. Unknown ordinary commands get
+/// `Disable`: the pager environment variables are inert for programs that do
+/// not consult them.
+pub(crate) fn agent_implicit_pager_policy(command: &str) -> ImplicitPagerPolicy {
+    match classify_command_interaction(command).pty_requirement {
+        PtyRequirement::Required => ImplicitPagerPolicy::Inherit,
+        PtyRequirement::NotRequired => ImplicitPagerPolicy::Disable,
     }
 }
 
@@ -275,6 +292,67 @@ mod tests {
                 "{command}"
             );
             assert_eq!(profile.approval_risk, ApprovalRisk::Medium, "{command}");
+        }
+
+        assert_agent_forensics_commands_disable_implicit_pagers();
+        assert_agent_explicit_interactive_commands_inherit_the_user_pager();
+        assert_unknown_ordinary_commands_are_not_treated_as_explicit_interactive();
+    }
+
+    fn assert_agent_forensics_commands_disable_implicit_pagers() {
+        for command in [
+            "git log",
+            "git log --since=\"1 day ago\" --oneline",
+            "git show HEAD",
+            "git diff HEAD~1",
+            "cd repo && git log",
+            "systemctl status nginx",
+            "journalctl -u nginx",
+            "df -h",
+            "top -b -n1",
+        ] {
+            assert_eq!(
+                agent_implicit_pager_policy(command),
+                ImplicitPagerPolicy::Disable,
+                "{command}"
+            );
+        }
+    }
+
+    fn assert_agent_explicit_interactive_commands_inherit_the_user_pager() {
+        for command in [
+            "less README.md",
+            "cd repo && less README.md",
+            "more output.log",
+            "man ls",
+            "top",
+            "htop",
+            "ssh host",
+        ] {
+            assert_eq!(
+                agent_implicit_pager_policy(command),
+                ImplicitPagerPolicy::Inherit,
+                "{command}"
+            );
+        }
+    }
+
+    fn assert_unknown_ordinary_commands_are_not_treated_as_explicit_interactive() {
+        for command in [
+            "fake-forensics-tool --json",
+            "./scripts/collect-evidence.sh",
+            "mystery-binary",
+        ] {
+            assert_eq!(
+                classify_command_interaction(command).pty_requirement,
+                PtyRequirement::NotRequired,
+                "{command}"
+            );
+            assert_eq!(
+                agent_implicit_pager_policy(command),
+                ImplicitPagerPolicy::Disable,
+                "{command}"
+            );
         }
     }
 }
