@@ -165,6 +165,22 @@ def test_hooks_json_uses_qoder_plugin_wrapper() -> None:
     assert hook["args"] == ["${QODER_PLUGIN_ROOT}/hooks/skill_ledger_hook.py"]
 
 
+def test_env_flag_enabled_accepts_only_true_false(monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_SEC_TEST_FLAG", raising=False)
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", True) is True
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", False) is False
+
+    monkeypatch.setenv("AGENT_SEC_TEST_FLAG", "true")
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", False) is True
+
+    monkeypatch.setenv("AGENT_SEC_TEST_FLAG", "false")
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", True) is False
+
+    monkeypatch.setenv("AGENT_SEC_TEST_FLAG", "maybe")
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", True) is True
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", False) is False
+
+
 def test_common_outputs_qoder_hook_shapes() -> None:
     deny = json.loads(qoder_hook_common.deny_output("blocked"))
     pre_tool = json.loads(qoder_hook_common.pre_tool_decision_output("deny", "nope"))

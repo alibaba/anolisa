@@ -158,6 +158,35 @@ def test_empty_or_non_string_command_fails_open(mock_cli) -> None:
     assert not capture.exists()
 
 
+def test_hook_enabled_false_skips_input_and_scan(mock_cli) -> None:
+    env, capture = mock_cli(
+        output=_DENY_RESULT,
+        extra={"CODE_SCANNER_HOOK_ENABLED": "false", "CODE_SCANNER_MODE": "deny"},
+    )
+
+    proc = _run_hook(_pre_tool_input("rm -rf /secret/path"), env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    assert not capture.exists()
+
+
+def test_invalid_hook_enabled_value_defaults_to_enabled_silently(mock_cli) -> None:
+    env, capture = mock_cli(
+        output=_DENY_RESULT,
+        extra={"CODE_SCANNER_HOOK_ENABLED": "maybe"},
+    )
+
+    proc = _run_hook(_pre_tool_input("rm -rf /secret/path"), env)
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    captured = _captured_call(capture)
+    assert "scan-code" in captured["argv"]
+
+
 def test_observe_mode_scans_and_allows_silently(mock_cli) -> None:
     env, capture = mock_cli(output=_DENY_RESULT)
 

@@ -8,12 +8,14 @@ from typing import Any
 
 from qoder_hook_common import (
     dumps_hook_output,
+    env_flag_enabled,
     jsonish_value,
     load_hook_input,
     pre_tool_decision_output,
     with_trace_context,
 )
 
+_HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 _MODE = os.environ.get("CODE_SCANNER_MODE", "observe").strip().lower()
 _VALID_MODES = {"observe", "ask", "deny"}
 try:
@@ -155,6 +157,9 @@ def _format_decision(verdict: str, findings: list[Any]) -> str | None:
 
 def main() -> None:
     """Run the Qoder code scanner hook."""
+    if not _HOOK_ENABLED:
+        return
+
     input_data = load_hook_input()
     if input_data is None:
         return
