@@ -662,6 +662,157 @@ fn run_command_stats_show_existing_record() {
 }
 
 #[test]
+fn run_command_stats_diff_existing_record() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    let recorder = match open_recorder() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let record = StatsRecord::new(
+        OperationType::CompressResponse,
+        "test-agent".to_string(),
+        500,
+        125,
+        100,
+        25,
+    )
+    .with_session_id("diff-session")
+    .with_tool_use_id("diff-tool")
+    .with_text(
+        "line one\nline removed\n".to_string(),
+        "line one\n".to_string(),
+    );
+    let id = recorder.record(&record).unwrap();
+
+    let result = run_command(Commands::Stats(StatsCommands::Diff {
+        id: Some(id),
+        session: None,
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_diff_session_and_tool() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    let recorder = match open_recorder() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "test-agent".to_string(),
+                500,
+                125,
+                100,
+                25,
+            )
+            .with_session_id("diff-session")
+            .with_tool_use_id("diff-tool")
+            .with_text("before".to_string(), "after".to_string()),
+        )
+        .unwrap();
+
+    let session = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("diff-session".to_string()),
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: Some(DiffSortArg::Saved),
+        context: 3,
+        no_color: true,
+        json: true,
+    }));
+    assert!(session.is_ok());
+
+    let tool = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("diff-session".to_string()),
+        tool_use_id: Some("diff-tool".to_string()),
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }));
+    assert!(tool.is_ok());
+}
+
+#[test]
+fn stats_diff_cli_validates_scope_and_limit() {
+    let record = Cli::try_parse_from(["tokenless", "stats", "diff", "42"]).unwrap();
+    match record.command {
+        Commands::Stats(StatsCommands::Diff {
+            id,
+            session,
+            limit,
+            context,
+            ..
+        }) => {
+            assert_eq!(id, Some(42));
+            assert_eq!(session, None);
+            assert_eq!(limit, DEFAULT_DIFF_LIMIT);
+            assert_eq!(context, 3);
+        }
+        _ => panic!("expected stats diff"),
+    }
+
+    assert!(
+        Cli::try_parse_from([
+            "tokenless",
+            "stats",
+            "diff",
+            "42",
+            "--session",
+            "session-1"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tokenless", "stats", "diff", "--session", "session-1", "-l", "0"])
+            .is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tokenless", "stats", "diff", "42", "--limit", "1"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tokenless", "stats", "diff", "--tool-use-id", "tool-1"]).is_err()
+    );
+    let help = match Cli::try_parse_from(["tokenless", "stats", "diff", "--help"]) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("expected help output"),
+    };
+    assert!(help.contains("[default: 20]"));
+    assert!(
+        Cli::try_parse_from([
+            "tokenless",
+            "stats",
+            "diff",
+            "--session",
+            "session-1",
+            "--tool-use-id",
+            "tool-1",
+            "--sort",
+            "time"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn run_command_compress_response_large_with_truncation() {
     let _guard = TempDbGuard::new();
 
@@ -745,6 +896,56 @@ fn run_command_stats_show_nonexistent() {
     let result = run_command(Commands::Stats(StatsCommands::Show { id: 999999 }));
     assert!(result.is_err());
     assert!(result.unwrap_err().0.contains("not found"));
+}
+
+#[test]
+fn run_command_stats_diff_nonexistent_scopes() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    let record = run_command(Commands::Stats(StatsCommands::Diff {
+        id: Some(999999),
+        session: None,
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }))
+    .unwrap_err();
+    assert!(record.0.contains("not found"));
+    assert_eq!(record.1, 1);
+
+    let session = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("missing-session".to_string()),
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }))
+    .unwrap_err();
+    assert!(session.0.contains("No records found"));
+    assert_eq!(session.1, 1);
+
+    let injected = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("missing\u{1b}]0;INJECTED\u{7}".to_string()),
+        tool_use_id: Some("tool\u{1b}]52;c;INJECTED\u{7}".to_string()),
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }))
+    .unwrap_err();
+    assert!(!injected.0.contains('\u{1b}'));
+    assert!(!injected.0.contains('\u{7}'));
+    assert!(injected.0.contains("INJECTED"));
 }
 
 #[test]

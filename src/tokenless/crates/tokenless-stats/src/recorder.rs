@@ -2,9 +2,11 @@
 //!
 //! Provides SQLite-based storage for compression and rewriting metrics.
 
+use crate::diff::DiffRecords;
 use crate::record::{CompressionMode, OperationType, StatsRecord};
 use chrono::DateTime;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -86,6 +88,10 @@ impl StatsRecorder {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_id ON stats(session_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_tool ON stats(session_id, tool_use_id)",
             [],
         )?;
 
@@ -258,6 +264,149 @@ impl StatsRecorder {
         ))?;
         let rows = stmt.query_map(rusqlite::params![session_id, n as i64], Self::row_to_record)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Queries the newest records used to build a session or tool-use diff.
+    ///
+    /// Results are returned oldest first. Session overviews load only metrics
+    /// and metadata; SQLite compares adjacent payloads to preserve exact chain
+    /// linking without materializing every payload in the Rust process.
+    /// Explicit tool-use queries retain content for their detailed diff.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot prepare or execute the query, or a
+    /// stored row cannot be converted into a statistics record.
+    pub fn records_for_diff(
+        &self,
+        session_id: &str,
+        tool_use_id: Option<&str>,
+    ) -> StatsResult<DiffRecords> {
+        match tool_use_id {
+            Some(tool_use_id) => self.records_for_tool_diff(session_id, tool_use_id),
+            None => self.records_for_session_diff(session_id),
+        }
+    }
+
+    fn records_for_tool_diff(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+    ) -> StatsResult<DiffRecords> {
+        let conn = self.lock_conn();
+        let newest_first = format!(
+            "SELECT {} FROM stats
+             WHERE session_id = ? AND tool_use_id = ?
+             ORDER BY id DESC LIMIT ?",
+            Self::SELECT_COLS
+        );
+        let mut stmt = conn.prepare(&newest_first)?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, tool_use_id, Self::DEFAULT_LIMIT as i64],
+            Self::row_to_record,
+        )?;
+        let mut records = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StatsError::from)?;
+        Self::sort_diff_records(&mut records);
+        Ok(DiffRecords::from_records(records))
+    }
+
+    fn records_for_session_diff(&self, session_id: &str) -> StatsResult<DiffRecords> {
+        let conn = self.lock_conn();
+        let query = "
+            WITH newest AS (
+                SELECT id
+                FROM stats
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            ),
+            ordered AS (
+                SELECT
+                    stats.id, stats.timestamp, stats.operation, stats.agent_id,
+                    stats.source_pid, stats.session_id, stats.tool_use_id,
+                    stats.before_chars, stats.before_tokens, stats.after_chars,
+                    stats.after_tokens, stats.mode, stats.stash_writes,
+                    stats.stash_errors, stats.stash_size,
+                    LAG(stats.id) OVER (
+                        PARTITION BY stats.tool_use_id
+                        ORDER BY stats.timestamp, stats.id
+                    ) AS previous_id
+                FROM stats
+                INNER JOIN newest ON newest.id = stats.id
+            )
+            SELECT
+                ordered.id, ordered.timestamp, ordered.operation, ordered.agent_id,
+                ordered.source_pid, ordered.session_id, ordered.tool_use_id,
+                ordered.before_chars, ordered.before_tokens, ordered.after_chars,
+                ordered.after_tokens,
+                NULL AS before_text, NULL AS after_text,
+                NULL AS before_output, NULL AS after_output,
+                ordered.mode, ordered.stash_writes, ordered.stash_errors,
+                ordered.stash_size,
+                CASE
+                    WHEN ordered.tool_use_id IS NOT NULL
+                        AND COALESCE(previous.mode, 'active')
+                            NOT IN ('dry-run', 'dryrun')
+                        AND COALESCE(current.mode, 'active')
+                            NOT IN ('dry-run', 'dryrun')
+                        AND (
+                            CASE
+                                WHEN previous.operation = 'rewrite-command'
+                                    AND previous.before_output IS NOT NULL
+                                    AND previous.after_output IS NOT NULL
+                                THEN previous.after_output
+                                WHEN previous.before_text IS NOT NULL
+                                    AND previous.after_text IS NOT NULL
+                                THEN previous.after_text
+                            END
+                        ) = (
+                            CASE
+                                WHEN current.operation = 'rewrite-command'
+                                    AND current.before_output IS NOT NULL
+                                    AND current.after_output IS NOT NULL
+                                THEN current.before_output
+                                WHEN current.before_text IS NOT NULL
+                                    AND current.after_text IS NOT NULL
+                                THEN current.before_text
+                            END
+                        )
+                    THEN 1
+                    ELSE 0
+                END AS linked_to_previous
+            FROM ordered
+            INNER JOIN stats AS current ON current.id = ordered.id
+            LEFT JOIN stats AS previous ON previous.id = ordered.previous_id
+            ORDER BY ordered.timestamp, ordered.id
+        ";
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, Self::DEFAULT_LIMIT as i64],
+            |row| {
+                let record = Self::row_to_record(row)?;
+                let linked_to_previous = row.get::<_, i64>(19)? != 0;
+                Ok((record, linked_to_previous))
+            },
+        )?;
+        let mut records = Vec::new();
+        let mut linked_to_previous = HashSet::new();
+        for row in rows {
+            let (record, is_linked) = row?;
+            if is_linked {
+                linked_to_previous.insert(record.id);
+            }
+            records.push(record);
+        }
+        Ok(DiffRecords::from_prelinked(records, linked_to_previous))
+    }
+
+    fn sort_diff_records(records: &mut [StatsRecord]) {
+        records.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.id.cmp(&right.id))
+        });
     }
 
     /// Get record count

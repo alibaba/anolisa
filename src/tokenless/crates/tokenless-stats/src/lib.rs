@@ -5,6 +5,7 @@
 //! schema compression, response compression, and command rewriting.
 
 pub mod config;
+pub mod diff;
 pub mod home;
 pub mod query;
 pub mod record;
@@ -24,6 +25,11 @@ pub use query::{
 pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_bytes};
 
 pub use config::TokenlessConfig;
+
+pub use diff::{
+    DiffRecords, DiffReport, DiffSort, format_diff_report, record_report, session_report,
+    tool_use_report,
+};
 
 pub use home::get_home_dir;
 
