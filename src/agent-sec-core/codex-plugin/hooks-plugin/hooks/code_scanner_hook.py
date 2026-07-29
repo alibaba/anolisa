@@ -29,10 +29,12 @@ import os
 import subprocess
 import sys
 
+from hook_config import env_flag_enabled
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
+HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 MODE = os.environ.get("CODE_SCANNER_MODE", "observe").lower()
 try:
     TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
@@ -73,6 +75,9 @@ def _block_self_protect(command: str) -> None:
 
 
 def main() -> None:
+    if not HOOK_ENABLED:
+        return
+
     # 1. Read stdin JSON (fail-open: empty stdout = allow in Codex)
     try:
         input_data = json.load(sys.stdin)
