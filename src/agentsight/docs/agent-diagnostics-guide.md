@@ -41,7 +41,8 @@ AgentSight 支持两种 Agent 发现机制：
       {"rule": ["hermes*"], "agent_name": "Hermes"},
       {"rule": ["node*", "*openclaw*"], "agent_name": "OpenClaw"},
       {"rule": ["*node*", "*cosh*"], "agent_name": "Cosh"},
-      {"rule": ["claude*"], "agent_name": "Claude"}
+      {"rule": ["*claude*"], "agent_name": "Claude"},
+      {"rule": ["*node*", "*claude*"], "agent_name": "Claude"}
     ]
   }
 }
@@ -74,7 +75,7 @@ AgentSight 支持两种 Agent 发现机制：
 | Hermes | 进程命令行包含 `hermes` |
 | Cosh (Copilot Shell) | Node.js 进程，命令行包含 `cosh` / `copilot-shell` |
 | OpenClaw | 进程名包含 `openclaw-gatewa` |
-| Claude Code | 进程名以 `claude` 开头 |
+| Claude Code | 进程命令行包含 `claude`（含 `node` 启动方式） |
 | 自定义 Agent | 通过 `cmdline.allow` 配置自定义规则 |
 
 ---
@@ -389,7 +390,8 @@ sudo agentsight trace --daemon
       {"rule": ["hermes*"], "agent_name": "Hermes"},
       {"rule": ["node*", "*openclaw*"], "agent_name": "OpenClaw"},
       {"rule": ["*node*", "*cosh*"], "agent_name": "Cosh"},
-      {"rule": ["claude*"], "agent_name": "Claude"},
+      {"rule": ["*claude*"], "agent_name": "Claude"},
+      {"rule": ["*node*", "*claude*"], "agent_name": "Claude"},
       {"rule": ["*python3*", "*my-agent*"], "agent_name": "MyAgent"}
     ]
   },

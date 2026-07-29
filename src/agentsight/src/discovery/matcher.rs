@@ -368,6 +368,15 @@ mod tests {
     }
 
     #[test]
+    fn test_default_rules_no_false_positive_for_unrelated_node_process() {
+        // An unrelated node process must not match as Claude
+        assert_eq!(
+            match_default_rules(&["node", "/srv/app/server.js"], ""),
+            None
+        );
+    }
+
+    #[test]
     fn test_default_rules_match_with_exe_path_set() {
         // Verify matching works when exe_path carries a real path,
         // as it does in production eBPF-captured ProcessContext.

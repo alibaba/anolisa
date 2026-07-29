@@ -85,6 +85,7 @@
       {"rule": ["openclaw"], "agent_name": "OpenClaw"},
       {"rule": ["claude*"], "agent_name": "Claude"},
       {"rule": ["*/claude*"], "agent_name": "Claude"},
+      {"rule": ["*claude*"], "agent_name": "Claude"},
       {"rule": ["*node*", "*claude*"], "agent_name": "Claude"}
     ]
   },

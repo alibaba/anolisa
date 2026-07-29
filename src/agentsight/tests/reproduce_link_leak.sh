@@ -72,8 +72,8 @@ INITIAL_FDS=$(count_fds "$AGENTSIGHT_PID")
 echo -e "${GREEN}[step 2]${NC} baseline fd count: $INITIAL_FDS"
 
 # --- Step 3-6: Cycle claude processes and watch fd growth ---
-# Config has: {"rule": ["claude*"], "agent_name": "Claude"}
-# We create a script whose argv[0] matches "claude*" by using exec -a
+# Config has: {"rule": ["*claude*"], "agent_name": "Claude"}
+# We create a script whose argv[0] matches "*claude*" by using exec -a
 NUM_CYCLES=5
 
 echo ""
@@ -84,7 +84,7 @@ echo "  agentsight attaches uprobe, process exits, repeat."
 FD_COUNTS=("$INITIAL_FDS")
 
 for i in $(seq 1 $NUM_CYCLES); do
-    # Use exec -a to set argv[0] to "claude-fake" (matches "claude*" rule)
+    # Use exec -a to set argv[0] to "claude-fake" (matches "*claude*" rule)
     # Then run python3 which loads libssl.so
     bash -c 'exec -a claude-fake python3 -c "import ssl; import time; time.sleep(3)"' &
     AGENT_PID=$!
