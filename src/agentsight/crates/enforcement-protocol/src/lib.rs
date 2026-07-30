@@ -258,6 +258,91 @@ pub enum ProtocolError {
     },
 }
 
+/// Stateful bounded NDJSON decoder for streams that may time out mid-frame.
+pub struct FrameReader<R> {
+    reader: R,
+    bytes: Vec<u8>,
+}
+
+impl<R> FrameReader<R> {
+    /// Wraps a stream while retaining partial frame bytes between reads.
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            bytes: Vec::new(),
+        }
+    }
+
+    /// Returns the wrapped stream and discards any incomplete frame.
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+}
+
+impl<R: Read> FrameReader<R> {
+    /// Reads and validates one bounded NDJSON frame.
+    ///
+    /// An I/O timeout leaves already-read bytes buffered so the next call can
+    /// finish the same frame instead of interpreting its suffix as new JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for I/O, malformed JSON, missing termination, an
+    /// oversized frame, or a protocol-version mismatch.
+    pub fn read_frame<T>(&mut self) -> Result<Option<T>, ProtocolError>
+    where
+        T: DeserializeOwned + VersionedFrame,
+    {
+        loop {
+            if let Some(newline) = self.bytes.iter().position(|byte| *byte == b'\n') {
+                if newline > MAX_FRAME_BYTES {
+                    return Err(ProtocolError::FrameTooLarge {
+                        max: MAX_FRAME_BYTES,
+                        actual: newline,
+                    });
+                }
+                let mut encoded = self.bytes.drain(..=newline).collect::<Vec<_>>();
+                encoded.pop();
+                return decode_frame(&encoded).map(Some);
+            }
+            if self.bytes.len() > MAX_FRAME_BYTES {
+                return Err(ProtocolError::FrameTooLarge {
+                    max: MAX_FRAME_BYTES,
+                    actual: self.bytes.len(),
+                });
+            }
+
+            let remaining = MAX_FRAME_BYTES + 1 - self.bytes.len();
+            let mut chunk = [0_u8; 8 * 1024];
+            let read_limit = remaining.min(chunk.len());
+            let read = self.reader.read(&mut chunk[..read_limit])?;
+            if read == 0 {
+                return if self.bytes.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(ProtocolError::MissingNewline)
+                };
+            }
+            self.bytes.extend_from_slice(&chunk[..read]);
+        }
+    }
+}
+
+fn decode_frame<T>(bytes: &[u8]) -> Result<T, ProtocolError>
+where
+    T: DeserializeOwned + VersionedFrame,
+{
+    let frame: T = serde_json::from_slice(bytes)?;
+    let actual = frame.protocol_version();
+    if actual != PROTOCOL_VERSION {
+        return Err(ProtocolError::UnsupportedVersion {
+            expected: PROTOCOL_VERSION,
+            actual,
+        });
+    }
+    Ok(frame)
+}
+
 /// Reads and validates one bounded NDJSON frame.
 ///
 /// # Errors
@@ -284,17 +369,8 @@ where
         }
         return Err(ProtocolError::MissingNewline);
     }
-
     bytes.pop();
-    let frame: T = serde_json::from_slice(&bytes)?;
-    let actual = frame.protocol_version();
-    if actual != PROTOCOL_VERSION {
-        return Err(ProtocolError::UnsupportedVersion {
-            expected: PROTOCOL_VERSION,
-            actual,
-        });
-    }
-    Ok(Some(frame))
+    decode_frame(&bytes).map(Some)
 }
 
 /// Serializes and flushes one bounded NDJSON frame.
@@ -323,9 +399,70 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufReader, Cursor};
+    use std::collections::VecDeque;
+    use std::io::{BufReader, Cursor, Read};
 
     use super::*;
+
+    struct InterruptingReader {
+        steps: VecDeque<io::Result<Vec<u8>>>,
+    }
+
+    impl Read for InterruptingReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            match self.steps.pop_front() {
+                Some(Ok(bytes)) => {
+                    assert!(bytes.len() <= output.len());
+                    output[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Some(Err(error)) => Err(error),
+                None => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn stateful_reader_preserves_a_partial_frame_across_timeout() {
+        let request = Request::new(Command::Health);
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &request).expect("fixture should encode");
+        let split = encoded.len() / 2;
+        let reader = InterruptingReader {
+            steps: VecDeque::from([
+                Ok(encoded[..split].to_vec()),
+                Err(io::Error::new(io::ErrorKind::TimedOut, "fixture timeout")),
+                Ok(encoded[split..].to_vec()),
+            ]),
+        };
+        let mut reader = FrameReader::new(reader);
+
+        let first = reader
+            .read_frame::<Request>()
+            .expect_err("timeout should remain observable");
+        assert!(
+            matches!(first, ProtocolError::Io(error) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        assert_eq!(
+            reader
+                .read_frame::<Request>()
+                .expect("the suffix should complete the retained prefix"),
+            Some(request)
+        );
+    }
+
+    #[test]
+    fn one_shot_reader_leaves_the_next_buffered_frame_intact() {
+        let first = Request::new(Command::Health);
+        let second = Request::new(Command::ListBindings);
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &first).expect("first fixture should encode");
+        write_frame(&mut encoded, &second).expect("second fixture should encode");
+        let mut reader = BufReader::new(Cursor::new(encoded));
+
+        assert_eq!(read_frame::<_, Request>(&mut reader).unwrap(), Some(first));
+        assert_eq!(read_frame::<_, Request>(&mut reader).unwrap(), Some(second));
+    }
 
     #[test]
     fn request_round_trips_as_one_frame() {

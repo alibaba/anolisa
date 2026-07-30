@@ -1,0 +1,24 @@
+[Unit]
+Description=AgentSight ActPlane Enforcement Engine
+Before=agentsight.service
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/agentsight-enforcer
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=agentsight
+RuntimeDirectoryMode=0750
+UMask=0077
+Environment=AGENTSIGHT_ENFORCER_SOCKET=/run/agentsight/enforcer.sock
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/agentsight /sys/fs/bpf
+LimitMEMLOCK=infinity
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target
