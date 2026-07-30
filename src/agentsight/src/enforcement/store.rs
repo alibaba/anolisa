@@ -7,10 +7,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use std::cell::RefCell;
 
-use agentsight_enforcement_protocol::{Binding, BindingState, ViolationEvent};
+use agentsight_enforcement_protocol::{
+    Binding, BindingState, CredentialExfiltrationPolicy, CredentialPolicySnapshot, ViolationEvent,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
+
+mod credential;
+mod transition;
+
+pub(crate) use credential::credential_binding_matches_request;
 
 const MIN_REASONABLE_UNIX_EPOCH_NS: u64 = 946_684_800_000_000_000;
 const MAX_STORED_VIOLATIONS: usize = 100_000;
@@ -63,6 +70,39 @@ pub enum EnforcementStoreError {
     /// A stable idempotency key names a different desired request.
     #[error("binding conflict for {0}")]
     BindingConflict(Uuid),
+    /// A credential binding ID names a different structured product policy.
+    #[error("credential intent conflict for {0}")]
+    CredentialIntentConflict(Uuid),
+    /// A stable transition key names a different replacement request.
+    #[error("transition conflict for action {0}")]
+    TransitionConflict(Uuid),
+    /// A requested transition is not persisted.
+    #[error("transition for action {0} is not persisted")]
+    MissingTransition(Uuid),
+    /// A persisted transition contains an unknown enum value.
+    #[error("invalid transition {field} value: {value}")]
+    InvalidTransitionState {
+        /// Column containing the invalid value.
+        field: &'static str,
+        /// Value rejected by the exhaustive parser.
+        value: String,
+    },
+    /// A durable handoff request failed protocol validation before runtime mutation.
+    #[error("invalid transition request for action {action_id}: {reason}")]
+    InvalidTransitionRequest {
+        /// Action owning the rejected transition.
+        action_id: Uuid,
+        /// Stable protocol validation detail.
+        reason: String,
+    },
+    /// Persisted structured policy provenance is malformed, unsupported, or mismatched.
+    #[error("invalid credential policy snapshot for binding {binding_id}: {reason}")]
+    InvalidCredentialPolicySnapshot {
+        /// Binding whose immutable provenance could not be trusted.
+        binding_id: Uuid,
+        /// Decode, version, validation, or identity failure.
+        reason: String,
+    },
 }
 
 /// Thread-safe local enforcement state.
@@ -79,7 +119,7 @@ impl EnforcementStore {
     /// Returns a SQLite or JSON error when initialization or legacy migration fails.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EnforcementStoreError> {
         let path = path.as_ref();
-        let mut connection = if path == Path::new(":memory:") {
+        let connection = if path == Path::new(":memory:") {
             Connection::open_in_memory()?
         } else {
             crate::storage::sqlite::create_connection(path)
@@ -117,9 +157,33 @@ impl EnforcementStore {
                 event_json TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_enforcement_violations_time
-                ON enforcement_violations(occurred_at_ns DESC);",
+                ON enforcement_violations(occurred_at_ns DESC);
+             CREATE TABLE IF NOT EXISTS enforcement_transitions (
+                action_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                acknowledgement_json TEXT,
+                failure_code TEXT,
+                updated_at_ns INTEGER NOT NULL,
+                PRIMARY KEY(action_id, direction)
+             );
+             CREATE INDEX IF NOT EXISTS idx_enforcement_transitions_phase
+                ON enforcement_transitions(phase, updated_at_ns ASC);
+             CREATE TABLE IF NOT EXISTS enforcement_credential_policy_snapshots (
+                binding_id TEXT PRIMARY KEY,
+                snapshot_json TEXT NOT NULL,
+                updated_at_ns INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS enforcement_credential_policy_intents (
+                binding_id TEXT PRIMARY KEY,
+                request_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                updated_at_ns INTEGER NOT NULL
+             );",
         )?;
         migrate_legacy_violation_timestamps(&mut connection)?;
+        credential::migrate_credential_policy_intents(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -131,43 +195,43 @@ impl EnforcementStore {
     ///
     /// Returns a mutex, serialization, SQLite, or immutable-request conflict error.
     pub fn upsert_binding(&self, binding: &Binding) -> Result<(), EnforcementStoreError> {
-        let json = serde_json::to_string(binding)?;
         let connection = self.connection()?;
-        let existing_json: Option<String> = connection
-            .query_row(
-                "SELECT desired_json FROM enforcement_bindings WHERE binding_id = ?1",
-                params![binding.request.binding_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(existing_json) = existing_json {
-            let existing: Binding = serde_json::from_str(&existing_json)?;
-            if existing.request != binding.request {
-                return Err(EnforcementStoreError::BindingConflict(
-                    binding.request.binding_id,
-                ));
-            }
-        }
-        connection.execute(
-            "INSERT INTO enforcement_bindings
-               (binding_id, desired_json, state, message, domain_id, updated_at_ns)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(binding_id) DO UPDATE SET
-               desired_json=excluded.desired_json,
-               state=excluded.state,
-               message=excluded.message,
-               domain_id=excluded.domain_id,
-               updated_at_ns=excluded.updated_at_ns",
-            params![
-                binding.request.binding_id.to_string(),
-                json,
-                state_name(binding.state),
-                binding.message.as_deref(),
-                binding.domain_id.map(i64::from),
-                sqlite_i64(now_ns()),
-            ],
-        )?;
+        upsert_binding_on(&connection, binding, now_ns())
+    }
+
+    /// Persists a compiled acknowledgement and its exact structured policy atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, identity, serialization, mutex, or SQLite error.
+    pub fn upsert_credential_binding(
+        &self,
+        binding: &Binding,
+        policy: &CredentialExfiltrationPolicy,
+    ) -> Result<(), EnforcementStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let updated_at_ns = now_ns();
+        upsert_binding_on(&transaction, binding, updated_at_ns)?;
+        upsert_credential_policy_snapshot_on(&transaction, binding, policy, updated_at_ns)?;
+        transaction.commit()?;
         Ok(())
+    }
+
+    /// Reads the immutable structured policy captured for one credential binding.
+    ///
+    /// Legacy bindings without a snapshot return `None`; malformed, unknown-version,
+    /// and identity-mismatched snapshots fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a mutex, SQLite, decode, version, validation, or identity error.
+    pub fn credential_policy_snapshot(
+        &self,
+        binding_id: Uuid,
+    ) -> Result<Option<CredentialPolicySnapshot>, EnforcementStoreError> {
+        let connection = self.connection()?;
+        credential_policy_snapshot_on(&connection, binding_id)
     }
 
     /// Reads one binding by ID.
@@ -291,6 +355,15 @@ impl EnforcementStore {
              WHERE state IN ('pending', 'enforced', 'degraded')",
             params![message, sqlite_i64(updated_at_ns)],
         )?;
+        transaction.execute(
+            "UPDATE enforcement_credential_policy_intents
+             SET state = 'degraded', updated_at_ns = ?1
+             WHERE binding_id IN (
+                 SELECT binding_id FROM enforcement_bindings
+                 WHERE state = 'degraded' AND updated_at_ns = ?1
+             )",
+            params![sqlite_i64(updated_at_ns)],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -299,6 +372,170 @@ impl EnforcementStore {
         self.connection
             .lock()
             .map_err(|_| EnforcementStoreError::Poisoned)
+    }
+}
+
+fn upsert_binding_on(
+    connection: &Connection,
+    binding: &Binding,
+    updated_at_ns: u64,
+) -> Result<(), EnforcementStoreError> {
+    let existing_json: Option<String> = connection
+        .query_row(
+            "SELECT desired_json FROM enforcement_bindings WHERE binding_id = ?1",
+            params![binding.request.binding_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing_json) = existing_json {
+        let existing: Binding = serde_json::from_str(&existing_json)?;
+        if existing.request != binding.request {
+            return Err(EnforcementStoreError::BindingConflict(
+                binding.request.binding_id,
+            ));
+        }
+    }
+    connection.execute(
+        "INSERT INTO enforcement_bindings
+           (binding_id, desired_json, state, message, domain_id, updated_at_ns)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(binding_id) DO UPDATE SET
+           desired_json=excluded.desired_json,
+           state=excluded.state,
+           message=excluded.message,
+           domain_id=excluded.domain_id,
+           updated_at_ns=excluded.updated_at_ns",
+        params![
+            binding.request.binding_id.to_string(),
+            serde_json::to_string(binding)?,
+            state_name(binding.state),
+            binding.message.as_deref(),
+            binding.domain_id.map(i64::from),
+            sqlite_i64(updated_at_ns),
+        ],
+    )?;
+    credential::sync_credential_intent_state_on(
+        connection,
+        binding.request.binding_id,
+        binding.state,
+        updated_at_ns,
+    )?;
+    Ok(())
+}
+
+pub(super) fn upsert_credential_policy_snapshot_on(
+    connection: &Connection,
+    binding: &Binding,
+    policy: &CredentialExfiltrationPolicy,
+    updated_at_ns: u64,
+) -> Result<(), EnforcementStoreError> {
+    let binding_id = binding.request.binding_id;
+    let snapshot = CredentialPolicySnapshot::capture(policy.clone())
+        .map_err(|error| invalid_credential_snapshot(binding_id, error))?;
+    validate_snapshot_binding(binding_id, binding, &snapshot)?;
+    let existing_json: Option<String> = connection
+        .query_row(
+            "SELECT snapshot_json FROM enforcement_credential_policy_snapshots
+             WHERE binding_id = ?1",
+            params![binding_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing_json) = existing_json {
+        let existing: CredentialPolicySnapshot = serde_json::from_str(&existing_json)
+            .map_err(|error| invalid_credential_snapshot(binding_id, error))?;
+        existing
+            .policy()
+            .map_err(|error| invalid_credential_snapshot(binding_id, error))?;
+        if existing != snapshot {
+            return Err(invalid_credential_snapshot(
+                binding_id,
+                "immutable snapshot conflicts with the original policy",
+            ));
+        }
+        credential::upsert_credential_intent_from_binding_on(
+            connection,
+            binding,
+            policy,
+            updated_at_ns,
+        )?;
+        return Ok(());
+    }
+    connection.execute(
+        "INSERT INTO enforcement_credential_policy_snapshots
+           (binding_id, snapshot_json, updated_at_ns)
+         VALUES (?1, ?2, ?3)",
+        params![
+            binding_id.to_string(),
+            serde_json::to_string(&snapshot)?,
+            sqlite_i64(updated_at_ns),
+        ],
+    )?;
+    credential::upsert_credential_intent_from_binding_on(
+        connection,
+        binding,
+        policy,
+        updated_at_ns,
+    )?;
+    Ok(())
+}
+
+pub(super) fn credential_policy_snapshot_on(
+    connection: &Connection,
+    binding_id: Uuid,
+) -> Result<Option<CredentialPolicySnapshot>, EnforcementStoreError> {
+    let row: Option<(String, String)> = connection
+        .query_row(
+            "SELECT snapshots.snapshot_json, bindings.desired_json
+             FROM enforcement_credential_policy_snapshots AS snapshots
+             JOIN enforcement_bindings AS bindings
+               ON bindings.binding_id = snapshots.binding_id
+             WHERE snapshots.binding_id = ?1",
+            params![binding_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((snapshot_json, binding_json)) = row else {
+        return Ok(None);
+    };
+    let snapshot: CredentialPolicySnapshot = serde_json::from_str(&snapshot_json)
+        .map_err(|error| invalid_credential_snapshot(binding_id, error))?;
+    snapshot
+        .policy()
+        .map_err(|error| invalid_credential_snapshot(binding_id, error))?;
+    let binding: Binding = serde_json::from_str(&binding_json)
+        .map_err(|error| invalid_credential_snapshot(binding_id, error))?;
+    validate_snapshot_binding(binding_id, &binding, &snapshot)?;
+    Ok(Some(snapshot))
+}
+
+fn validate_snapshot_binding(
+    binding_id: Uuid,
+    binding: &Binding,
+    snapshot: &CredentialPolicySnapshot,
+) -> Result<(), EnforcementStoreError> {
+    let policy = snapshot
+        .policy()
+        .map_err(|error| invalid_credential_snapshot(binding_id, error))?;
+    if binding.request.binding_id != binding_id
+        || binding.request.policy_id != policy.policy_id
+        || binding.request.policy_revision != policy.revision.to_string()
+    {
+        return Err(invalid_credential_snapshot(
+            binding_id,
+            "snapshot identity does not match compiled binding",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_credential_snapshot(
+    binding_id: Uuid,
+    error: impl std::fmt::Display,
+) -> EnforcementStoreError {
+    EnforcementStoreError::InvalidCredentialPolicySnapshot {
+        binding_id,
+        reason: error.to_string(),
     }
 }
 
@@ -350,7 +587,8 @@ fn is_reasonable_unix_epoch_ns(value: u64) -> bool {
     (MIN_REASONABLE_UNIX_EPOCH_NS..=i64::MAX as u64).contains(&value)
 }
 
-fn state_name(state: BindingState) -> &'static str {
+/// Returns the stable SQLite representation for a binding lifecycle state.
+pub(super) fn state_name(state: BindingState) -> &'static str {
     match state {
         BindingState::Pending => "pending",
         BindingState::Enforced => "enforced",
@@ -361,7 +599,8 @@ fn state_name(state: BindingState) -> &'static str {
     }
 }
 
-fn now_ns() -> u64 {
+/// Returns a saturating Unix-epoch nanosecond timestamp for persistence metadata.
+pub(super) fn now_ns() -> u64 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -369,7 +608,8 @@ fn now_ns() -> u64 {
     nanos.min(u64::MAX as u128) as u64
 }
 
-fn sqlite_i64(value: u64) -> i64 {
+/// Clamps an unsigned timestamp or count into SQLite's signed integer range.
+pub(super) fn sqlite_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 
@@ -377,10 +617,18 @@ fn sqlite_i64(value: u64) -> i64 {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use agentsight_enforcement_protocol::Effect;
+    use agentsight_enforcement_protocol::{
+        ApplyCredentialPolicy, ApplyPolicy, CredentialExfiltrationPolicy, DestinationScope, Effect,
+        PolicyMode, ReplaceFailureCode, ReplacePolicy, ReplacementPolicy, ReplacementSource,
+    };
 
     use super::*;
+    use crate::enforcement::{
+        PolicyTransition, TransitionDirection, TransitionKey, TransitionPhase,
+    };
 
     const LEGACY_OCCURRED_AT_NS: u64 = 270_000_000_000_000;
     const LEGACY_OBSERVED_AT_NS: u64 = 1_784_000_000_000_000_000;
@@ -431,6 +679,543 @@ mod tests {
             observed_at_ns,
             actplane_revision: "test-revision".into(),
         }
+    }
+
+    fn transition_binding(state: BindingState) -> Binding {
+        Binding {
+            request: ApplyPolicy {
+                binding_id: Uuid::new_v4(),
+                agent_id: "transition-agent".into(),
+                session_id: Some("transition-session".into()),
+                root_pid: 42,
+                process_start_time: 99,
+                policy_id: "transition-policy".into(),
+                policy_revision: "1".into(),
+                policy_dsl: "source AGENT = exec \"**\"".into(),
+            },
+            state,
+            message: None,
+            domain_id: Some(7),
+        }
+    }
+
+    fn credential_policy(ttl_secs: u64) -> CredentialExfiltrationPolicy {
+        CredentialExfiltrationPolicy {
+            policy_id: "transition-policy".into(),
+            revision: 1,
+            source_patterns: vec!["/tmp/credential".into()],
+            trusted_endpoints: vec!["trusted.example:443".into()],
+            taint_label: "CREDENTIAL".into(),
+            taint_ttl_secs: ttl_secs,
+            destination_scope: DestinationScope::PublicIpv4,
+            mode: PolicyMode::Audit,
+        }
+    }
+
+    fn credential_request(binding_id: Uuid, ttl_secs: u64) -> ApplyCredentialPolicy {
+        ApplyCredentialPolicy {
+            binding_id,
+            agent_id: "transition-agent".into(),
+            session_id: Some("transition-session".into()),
+            root_pid: 42,
+            process_start_time: 99,
+            policy: credential_policy(ttl_secs),
+        }
+    }
+
+    #[test]
+    fn credential_intent_is_durable_before_backend_ack_and_immutable() {
+        let database = TestDatabase::new();
+        let binding_id = Uuid::new_v4();
+        let request = credential_request(binding_id, 300);
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+
+        let intent = store
+            .begin_credential_policy_intent(&request)
+            .expect("typed intent should persist before backend mutation");
+        assert_eq!(intent.request, request);
+        assert_eq!(intent.state, BindingState::Pending);
+        assert_eq!(
+            store
+                .binding(binding_id)
+                .expect("binding lookup should work"),
+            None
+        );
+        let snapshot_json: String = store
+            .connection()
+            .expect("test connection should lock")
+            .query_row(
+                "SELECT snapshot_json
+                 FROM enforcement_credential_policy_snapshots
+                 WHERE binding_id = ?1",
+                params![binding_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("canonical snapshot must predate backend mutation");
+        let snapshot: CredentialPolicySnapshot =
+            serde_json::from_str(&snapshot_json).expect("snapshot should decode");
+        assert_eq!(
+            snapshot.policy().expect("snapshot should validate"),
+            &request.policy
+        );
+        drop(store);
+
+        let reopened =
+            EnforcementStore::open(&database.path).expect("test store should reopen cleanly");
+        assert_eq!(
+            reopened
+                .credential_policy_intents()
+                .expect("typed intent should survive reopen"),
+            vec![intent]
+        );
+        assert!(matches!(
+            reopened.begin_credential_policy_intent(&credential_request(binding_id, 900)),
+            Err(EnforcementStoreError::CredentialIntentConflict(conflict))
+                if conflict == binding_id
+        ));
+    }
+
+    #[test]
+    fn credential_acknowledgement_must_match_pre_mutation_identity() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let request = credential_request(Uuid::new_v4(), 300);
+        store
+            .begin_credential_policy_intent(&request)
+            .expect("typed intent should seed");
+        let mut acknowledgement = transition_binding(BindingState::Enforced);
+        acknowledgement.request.binding_id = request.binding_id;
+        acknowledgement.request.policy_id = request.policy.policy_id.clone();
+        acknowledgement.request.policy_revision = request.policy.revision.to_string();
+        acknowledgement.request.agent_id = "wrong-agent".into();
+
+        assert!(matches!(
+            store.upsert_credential_binding(&acknowledgement, &request.policy),
+            Err(EnforcementStoreError::CredentialIntentConflict(binding_id))
+                if binding_id == request.binding_id
+        ));
+        assert_eq!(
+            store
+                .binding(request.binding_id)
+                .expect("failed acknowledgement must roll back"),
+            None
+        );
+        assert_eq!(
+            store
+                .credential_policy_intents()
+                .expect("intent should remain retryable")[0]
+                .state,
+            BindingState::Pending
+        );
+    }
+
+    #[test]
+    fn detached_binding_cannot_be_resurrected_by_degradation() {
+        let database = TestDatabase::new();
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        let active = transition_binding(BindingState::Enforced);
+        store
+            .upsert_binding(&active)
+            .expect("active binding should seed");
+
+        let writer =
+            EnforcementStore::open(&database.path).expect("independent writer should open");
+        let mut detached = active.clone();
+        detached.state = BindingState::Detached;
+        detached.domain_id = None;
+        let detached_for_hook = detached.clone();
+        set_degradation_hook(move || {
+            writer
+                .upsert_binding(&detached_for_hook)
+                .expect("concurrent detach should commit");
+        });
+
+        store
+            .mark_active_degraded("subscription disconnected")
+            .expect("conditional degradation should complete");
+
+        assert_eq!(
+            store
+                .binding(active.request.binding_id)
+                .expect("binding should load"),
+            Some(detached)
+        );
+    }
+
+    #[test]
+    fn violation_insert_transactionally_caps_oldest_rows() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let events: Vec<_> = (1..=4)
+            .map(|second| {
+                violation(
+                    1_783_000_000_000_000_000 + second,
+                    1_783_000_000_000_000_100 + second,
+                )
+            })
+            .collect();
+
+        for event in &events {
+            store
+                .insert_violation_with_limit(event, 3)
+                .expect("bounded violation insert should succeed");
+        }
+
+        let retained = store
+            .violations(10)
+            .expect("bounded violations should load");
+        assert_eq!(retained.len(), 3);
+        assert_eq!(retained[0].event_id, events[3].event_id);
+        assert_eq!(retained[2].event_id, events[1].event_id);
+        assert!(
+            !retained
+                .iter()
+                .any(|event| event.event_id == events[0].event_id)
+        );
+    }
+
+    #[test]
+    fn credential_binding_snapshot_preserves_exact_normalized_policy() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        let policy = credential_policy(300);
+
+        store
+            .upsert_credential_binding(&source, &policy)
+            .expect("credential binding should persist atomically");
+
+        let snapshot = store
+            .credential_policy_snapshot(source.request.binding_id)
+            .expect("snapshot should decode")
+            .expect("snapshot should exist");
+        assert_eq!(
+            snapshot.policy().expect("snapshot should validate"),
+            &policy
+        );
+        assert_eq!(
+            snapshot
+                .policy()
+                .expect("snapshot should remain valid")
+                .taint_ttl_secs,
+            300
+        );
+    }
+
+    #[test]
+    fn malformed_or_missing_credential_snapshot_never_synthesizes_defaults() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        store
+            .upsert_binding(&source)
+            .expect("legacy binding should seed without a snapshot");
+        assert_eq!(
+            store
+                .credential_policy_snapshot(source.request.binding_id)
+                .expect("missing snapshot should be represented explicitly"),
+            None
+        );
+
+        store
+            .upsert_credential_binding(&source, &credential_policy(300))
+            .expect("valid snapshot should seed");
+        store
+            .connection()
+            .expect("test connection should lock")
+            .execute(
+                "UPDATE enforcement_credential_policy_snapshots
+                 SET snapshot_json = '{\"version\":99,\"policy\":{}}'
+                 WHERE binding_id = ?1",
+                rusqlite::params![source.request.binding_id.to_string()],
+            )
+            .expect("test corruption should persist");
+
+        assert!(matches!(
+            store.credential_policy_snapshot(source.request.binding_id),
+            Err(EnforcementStoreError::InvalidCredentialPolicySnapshot { binding_id, .. })
+                if binding_id == source.request.binding_id
+        ));
+    }
+
+    #[test]
+    fn credential_snapshot_is_immutable_for_one_binding_identity() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        store
+            .upsert_credential_binding(&source, &credential_policy(300))
+            .expect("original snapshot should seed");
+
+        assert!(matches!(
+            store.upsert_credential_binding(&source, &credential_policy(900)),
+            Err(EnforcementStoreError::InvalidCredentialPolicySnapshot { binding_id, .. })
+                if binding_id == source.request.binding_id
+        ));
+        assert_eq!(
+            store
+                .credential_policy_snapshot(source.request.binding_id)
+                .expect("original snapshot should decode")
+                .expect("original snapshot should remain")
+                .policy()
+                .expect("original snapshot should validate")
+                .taint_ttl_secs,
+            300
+        );
+    }
+
+    #[test]
+    fn transition_rejects_noncanonical_source_snapshot_atomically() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        store
+            .upsert_credential_binding(&source, &credential_policy(300))
+            .expect("canonical source should seed");
+        let target = transition_binding(BindingState::Enforced);
+        let key = TransitionKey {
+            action_id: Uuid::new_v4(),
+            direction: TransitionDirection::Forward,
+        };
+        let request = ReplacePolicy {
+            expected: source.clone(),
+            source: ReplacementSource::Credential(
+                agentsight_enforcement_protocol::CredentialPolicySnapshot::capture(
+                    credential_policy(900),
+                )
+                .expect("mismatched policy is otherwise valid"),
+            ),
+            replacement: ReplacementPolicy::Generic(target.request),
+        };
+
+        assert!(matches!(
+            store.begin_transition(&PolicyTransition::pending(key.clone(), request)),
+            Err(EnforcementStoreError::InvalidTransitionRequest { action_id, .. })
+                if action_id == key.action_id
+        ));
+        assert_eq!(
+            store
+                .transition(&key)
+                .expect("transition lookup should work"),
+            None
+        );
+        assert_eq!(
+            store
+                .credential_policy_snapshot(source.request.binding_id)
+                .expect("canonical snapshot should decode")
+                .expect("canonical snapshot should remain")
+                .policy()
+                .expect("canonical snapshot should validate")
+                .taint_ttl_secs,
+            300
+        );
+    }
+
+    #[test]
+    fn verified_transition_reads_share_one_explicit_sqlite_snapshot() {
+        for read_pending in [false, true] {
+            let database = TestDatabase::new();
+            let store = EnforcementStore::open(&database.path).expect("test store should open");
+            let source = transition_binding(BindingState::Enforced);
+            store
+                .upsert_binding(&source)
+                .expect("legacy generic source should seed");
+            let target = transition_binding(BindingState::Enforced);
+            let transition = PolicyTransition::pending(
+                TransitionKey {
+                    action_id: Uuid::new_v4(),
+                    direction: TransitionDirection::Forward,
+                },
+                ReplacePolicy {
+                    expected: source.clone(),
+                    source: ReplacementSource::Generic,
+                    replacement: ReplacementPolicy::Generic(target.request),
+                },
+            );
+            store
+                .begin_transition(&transition)
+                .expect("transition should seed");
+
+            let writer = EnforcementStore::open(&database.path)
+                .expect("independent fixture writer should open");
+            let source_for_writer = source.clone();
+            let observed_explicit_transaction = Arc::new(AtomicBool::new(false));
+            let writer_committed = Arc::new(AtomicBool::new(false));
+            let observed_for_hook = Arc::clone(&observed_explicit_transaction);
+            let committed_for_hook = Arc::clone(&writer_committed);
+            transition::set_transition_read_hook(move |reader| {
+                observed_for_hook.store(!reader.is_autocommit(), Ordering::SeqCst);
+                writer
+                    .upsert_credential_binding(&source_for_writer, &credential_policy(300))
+                    .expect("fixture canonical snapshot should commit");
+                committed_for_hook.store(true, Ordering::SeqCst);
+            });
+
+            let recovered = if read_pending {
+                let pending = store
+                    .pending_transitions()
+                    .expect("pending recovery should keep its original snapshot");
+                assert_eq!(pending.len(), 1);
+                pending.into_iter().next()
+            } else {
+                store
+                    .transition(&transition.key)
+                    .expect("single lookup should keep its original snapshot")
+            }
+            .expect("seeded transition should exist");
+
+            assert!(writer_committed.load(Ordering::SeqCst));
+            assert!(observed_explicit_transaction.load(Ordering::SeqCst));
+            assert_eq!(recovered.key, transition.key);
+            assert_eq!(recovered.request.source, ReplacementSource::Generic);
+            assert_eq!(
+                store
+                    .credential_policy_snapshot(source.request.binding_id)
+                    .expect("concurrent snapshot should decode")
+                    .expect("concurrent snapshot should exist")
+                    .policy()
+                    .expect("concurrent snapshot should validate")
+                    .taint_ttl_secs,
+                300
+            );
+        }
+    }
+
+    fn transition(source: Binding, target: &Binding) -> PolicyTransition {
+        PolicyTransition::pending(
+            TransitionKey {
+                action_id: Uuid::new_v4(),
+                direction: TransitionDirection::Forward,
+            },
+            ReplacePolicy {
+                expected: source,
+                source: ReplacementSource::Generic,
+                replacement: ReplacementPolicy::Generic(target.request.clone()),
+            },
+        )
+    }
+
+    #[test]
+    fn completing_transition_updates_ownership_atomically() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        let target = transition_binding(BindingState::Enforced);
+        let transition = transition(source.clone(), &target);
+        store.upsert_binding(&source).expect("source should seed");
+        store
+            .begin_transition(&transition)
+            .expect("transition should begin");
+
+        store
+            .complete_transition(&transition.key, &target)
+            .expect("transition should complete");
+
+        assert_eq!(
+            store
+                .binding(source.request.binding_id)
+                .expect("source should load")
+                .expect("source should exist")
+                .state,
+            BindingState::Detached
+        );
+        assert_eq!(
+            store
+                .binding(target.request.binding_id)
+                .expect("target should load"),
+            Some(target)
+        );
+        assert_eq!(
+            store
+                .transition(&transition.key)
+                .expect("transition should load")
+                .expect("transition should exist")
+                .phase,
+            TransitionPhase::Completed
+        );
+    }
+
+    #[test]
+    fn failed_completion_rolls_back_all_transition_writes() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        let target = transition_binding(BindingState::Enforced);
+        let transition = transition(source.clone(), &target);
+        store.upsert_binding(&source).expect("source should seed");
+        store
+            .begin_transition(&transition)
+            .expect("transition should begin");
+        let wrong_target = transition_binding(BindingState::Enforced);
+
+        assert!(matches!(
+            store.complete_transition(&transition.key, &wrong_target),
+            Err(EnforcementStoreError::TransitionConflict(_))
+        ));
+
+        assert_eq!(
+            store
+                .binding(source.request.binding_id)
+                .expect("source should load"),
+            Some(source)
+        );
+        assert_eq!(
+            store
+                .transition(&transition.key)
+                .expect("transition should load")
+                .expect("transition should exist")
+                .phase,
+            TransitionPhase::Pending
+        );
+        store
+            .mark_transition_indeterminate(&transition.key, ReplaceFailureCode::BindingConflict)
+            .expect("transition should remain retryable");
+    }
+
+    #[test]
+    fn source_retained_outcome_remains_retryable_with_typed_acknowledgement() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        let target = transition_binding(BindingState::Enforced);
+        let transition = transition(source.clone(), &target);
+        store.upsert_binding(&source).expect("source should seed");
+        store
+            .begin_transition(&transition)
+            .expect("transition should begin");
+
+        store
+            .retain_transition(&transition.key, &source, ReplaceFailureCode::KernelFailure)
+            .expect("source-retained outcome should persist");
+
+        let retained = store
+            .transition(&transition.key)
+            .expect("transition should load")
+            .expect("transition should exist");
+        assert_eq!(retained.phase, TransitionPhase::Pending);
+        assert_eq!(retained.acknowledgement, Some(source));
+        assert_eq!(
+            retained.failure_code,
+            Some(ReplaceFailureCode::KernelFailure)
+        );
+        assert_eq!(store.pending_transitions().unwrap(), [retained]);
+    }
+
+    #[test]
+    fn completion_rejects_target_on_a_different_runtime_domain() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let source = transition_binding(BindingState::Enforced);
+        let mut target = transition_binding(BindingState::Enforced);
+        let transition = transition(source.clone(), &target);
+        target.domain_id = Some(source.domain_id.expect("source domain should exist") + 1);
+        store.upsert_binding(&source).expect("source should seed");
+        store
+            .begin_transition(&transition)
+            .expect("transition should begin");
+
+        assert!(matches!(
+            store.complete_transition(&transition.key, &target),
+            Err(EnforcementStoreError::TransitionConflict(_))
+        ));
+        assert_eq!(
+            store.transition(&transition.key).unwrap().unwrap().phase,
+            TransitionPhase::Pending
+        );
+        assert_eq!(
+            store.binding(source.request.binding_id).unwrap(),
+            Some(source)
+        );
     }
 
     fn raw_violation(path: &Path, event_id: Uuid) -> (i64, String) {

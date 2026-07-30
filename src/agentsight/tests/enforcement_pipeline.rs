@@ -13,8 +13,9 @@ use agentsight::enforcement::{
     EnforcementStore, EnforcementStoreError,
 };
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, Command, Effect, HealthStatus, RemoteError, Request,
-    Response, ResponseBody, ViolationEvent, read_frame, write_frame,
+    ApplyPolicy, Binding, BindingState, Command, Effect, HealthStatus, RemoteError,
+    ReplaceFailureCode, ReplaceOutcome, ReplacementPolicy, Request, Response, ResponseBody,
+    ViolationEvent, read_frame, write_frame,
 };
 use agentsight_enforcer::{EnforcementBackend, EnforcerService, MockBackend};
 use uuid::Uuid;
@@ -467,10 +468,12 @@ fn handle_controlled_connection(
                 message: state.health_message.clone(),
             }))
         }
-        Command::ApplyPolicy(_) | Command::ApplyCredentialPolicy(_) => Err(RemoteError {
-            code: "required_subscription_unavailable".into(),
-            message: "fixture requires a subscription lease".into(),
-        }),
+        Command::ApplyPolicy(_) | Command::ApplyCredentialPolicy(_) | Command::ReplacePolicy(_) => {
+            Err(RemoteError {
+                code: "required_subscription_unavailable".into(),
+                message: "fixture requires a subscription lease".into(),
+            })
+        }
         Command::ApplyPolicyLeased { request, .. } => {
             let binding = Binding {
                 request,
@@ -558,6 +561,42 @@ fn handle_controlled_connection(
             }
             state.bindings.push(binding.clone());
             Ok(ResponseBody::Applied(binding))
+        }
+        Command::ReplacePolicyLeased { request, .. } => {
+            let target_request = match request.replacement {
+                ReplacementPolicy::Generic(request) => request,
+                ReplacementPolicy::Credential(request) => ApplyPolicy {
+                    binding_id: request.binding_id,
+                    agent_id: request.agent_id,
+                    session_id: request.session_id,
+                    root_pid: request.root_pid,
+                    process_start_time: request.process_start_time,
+                    policy_id: request.policy.policy_id,
+                    policy_revision: request.policy.revision.to_string(),
+                    policy_dsl: String::new(),
+                },
+            };
+            let target = Binding {
+                request: target_request,
+                state: BindingState::Enforced,
+                message: None,
+                domain_id: request.expected.domain_id.or(Some(1)),
+            };
+            let mut state = state
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.bindings.contains(&target) {
+                Ok(ResponseBody::Replaced(ReplaceOutcome::Applied(target)))
+            } else if state.bindings.contains(&request.expected) {
+                state.bindings.clear();
+                state.bindings.push(target.clone());
+                Ok(ResponseBody::Replaced(ReplaceOutcome::Applied(target)))
+            } else {
+                Ok(ResponseBody::Replaced(ReplaceOutcome::Conflict {
+                    code: ReplaceFailureCode::BindingConflict,
+                }))
+            }
         }
         Command::ListBindings => {
             let (shared, changed) = &*state;
@@ -1571,5 +1610,38 @@ fn first_detach_succeeds_when_persisted_binding_is_already_absent_from_backend()
     assert_eq!(fixture.detach_attempts(), 1);
     assert_eq!(persisted[0].state, BindingState::Detached);
     assert!(persisted[0].message.is_none());
+    assert!(persisted[0].domain_id.is_none());
+}
+
+#[test]
+fn successful_detach_clears_persisted_runtime_domain() {
+    let fixture = ControlledEnforcer::start();
+    let store = EnforcementStore::open(&fixture.database_path)
+        .expect("temporary enforcement store should open");
+    let coordinator =
+        EnforcementCoordinator::new(EnforcementClient::new(&fixture.socket_path), store);
+    let ingestion = coordinator
+        .start_ingestion()
+        .expect("ingestion should start");
+    assert!(fixture.wait_for_subscribe_attempt());
+    fixture.acknowledge_subscription();
+    assert!(poll_until(|| coordinator
+        .health()
+        .is_ok_and(|health| health.ready)));
+    let binding = coordinator
+        .apply(fixture.apply_request())
+        .expect("binding should apply");
+    assert!(binding.domain_id.is_some());
+
+    coordinator
+        .detach(binding.request.binding_id)
+        .expect("active binding should detach");
+
+    let persisted = coordinator
+        .bindings()
+        .expect("detached binding should load");
+    coordinator.stop_ingestion();
+    ingestion.join().expect("ingestion should stop");
+    assert_eq!(persisted[0].state, BindingState::Detached);
     assert!(persisted[0].domain_id.is_none());
 }

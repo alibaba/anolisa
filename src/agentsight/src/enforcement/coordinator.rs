@@ -6,16 +6,17 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
+    CredentialPolicySnapshot, HealthStatus, ViolationEvent,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::store::credential_binding_matches_request;
 use super::{EnforcementClient, EnforcementError, EnforcementStore, EnforcementStoreError};
 
 mod reconciliation;
-
-use reconciliation::reconcile_desired_state;
+mod transition;
 
 const INGESTION_UNAVAILABLE_MESSAGE: &str = "violation ingestion is not subscribed";
 const DEGRADED_BINDING_MESSAGE: &str = "enforcement binding is degraded";
@@ -46,6 +47,13 @@ struct IngestionReadiness {
 /// Opaque snapshot of one acknowledged required-subscription generation.
 #[derive(Clone)]
 pub(crate) struct IngestionLease {
+    worker: Arc<WorkerToken>,
+    subscription_id: Uuid,
+    generation: u64,
+}
+
+#[derive(Clone)]
+struct ReconciliationLease {
     worker: Arc<WorkerToken>,
     subscription_id: Uuid,
     generation: u64,
@@ -198,6 +206,43 @@ impl IngestionReadiness {
         Ok(true)
     }
 
+    fn reconciliation_lease(
+        &self,
+        worker: &Arc<WorkerToken>,
+        subscription_id: Uuid,
+    ) -> Option<ReconciliationLease> {
+        let state = self.state();
+        (state.subscription_id == Some(subscription_id)
+            && state
+                .current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, worker)))
+        .then(|| ReconciliationLease {
+            worker: Arc::clone(worker),
+            subscription_id,
+            generation: state.generation,
+        })
+    }
+
+    fn commit_reconciliation_if_current<E>(
+        &self,
+        lease: &ReconciliationLease,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let state = self.state();
+        if state.generation != lease.generation
+            || state.subscription_id != Some(lease.subscription_id)
+            || !state
+                .current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &lease.worker))
+        {
+            return Ok(false);
+        }
+        commit()?;
+        Ok(true)
+    }
+
     fn lease_current(&self, lease: &IngestionLease) -> Option<IngestionGenerationLease<'_>> {
         let state = self.state();
         lease
@@ -283,6 +328,9 @@ pub enum EnforcementCoordinatorError {
     /// Combined backend or ingestion health cannot guarantee violation evidence.
     #[error("enforcement unavailable: {0}")]
     EnforcementUnavailable(String),
+    /// Runtime policy ownership could not be proved and requires reconciliation.
+    #[error("policy replacement ownership is indeterminate; reconciliation is required")]
+    TransitionUnavailable,
     /// The privileged service call failed.
     #[error(transparent)]
     Client(#[from] EnforcementError),
@@ -432,8 +480,8 @@ impl EnforcementCoordinator {
 
     /// Applies a product-level credential policy and persists the adapter acknowledgement.
     ///
-    /// Product policy compilation remains inside the privileged adapter, so AgentSight only
-    /// persists the compiled binding returned by the enforcer.
+    /// Product policy compilation remains inside the privileged adapter. AgentSight persists
+    /// the structured request first, then atomically records its compiled acknowledgement.
     ///
     /// # Errors
     ///
@@ -452,26 +500,55 @@ impl EnforcementCoordinator {
         if !health.ready {
             return Err(unavailable_from_health(health));
         }
+        let intent = match self.store.begin_credential_policy_intent(&request) {
+            Ok(intent) => intent,
+            Err(EnforcementStoreError::CredentialIntentConflict(binding_id)) => {
+                return Err(EnforcementError::Remote {
+                    code: "binding_conflict".into(),
+                    message: format!(
+                        "binding {binding_id} conflicts with persisted credential intent"
+                    ),
+                }
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if matches!(
+            intent.state,
+            BindingState::Detaching | BindingState::Detached
+        ) {
+            return self
+                .store
+                .binding(request.binding_id)?
+                .ok_or(EnforcementStoreError::MissingBinding(request.binding_id).into());
+        }
+        let policy = request.policy.clone();
         match self
             .client
-            .apply_credential_policy(request, lease.subscription_id)
+            .apply_credential_policy(request.clone(), lease.subscription_id)
         {
             Ok(binding) => {
+                if !credential_binding_matches_request(&request, &binding) {
+                    return Err(EnforcementStoreError::InvalidCredentialPolicySnapshot {
+                        binding_id: request.binding_id,
+                        reason: "compiled acknowledgement does not match structured intent".into(),
+                    }
+                    .into());
+                }
                 let post_apply_health = self
                     .client
                     .health()
                     .map(|health| combine_health(health, &self.ingestion_readiness));
                 match post_apply_health {
                     Ok(health) if health.ready => {
-                        if self
-                            .ingestion_readiness
-                            .commit_if_current(&lease, || self.store.upsert_binding(&binding))?
-                        {
+                        if self.ingestion_readiness.commit_if_current(&lease, || {
+                            self.store.upsert_credential_binding(&binding, &policy)
+                        })? {
                             Ok(binding)
                         } else {
                             let message =
                                 "violation ingestion readiness changed during credential apply";
-                            self.persist_degraded_binding(binding, message)?;
+                            self.persist_degraded_credential_binding(binding, message, &policy)?;
                             Err(EnforcementCoordinatorError::EnforcementUnavailable(
                                 message.into(),
                             ))
@@ -482,7 +559,11 @@ impl EnforcementCoordinator {
                         log::error!(
                             "enforcement became unavailable after credential apply: {detail}"
                         );
-                        self.persist_degraded_binding(binding, DEGRADED_BINDING_MESSAGE)?;
+                        self.persist_degraded_credential_binding(
+                            binding,
+                            DEGRADED_BINDING_MESSAGE,
+                            &policy,
+                        )?;
                         Err(EnforcementCoordinatorError::EnforcementUnavailable(
                             "enforcement service became unavailable after credential apply".into(),
                         ))
@@ -491,7 +572,11 @@ impl EnforcementCoordinator {
                         log::error!(
                             "enforcement health check failed after credential apply: {error}"
                         );
-                        self.persist_degraded_binding(binding, DEGRADED_BINDING_MESSAGE)?;
+                        self.persist_degraded_credential_binding(
+                            binding,
+                            DEGRADED_BINDING_MESSAGE,
+                            &policy,
+                        )?;
                         Err(error.into())
                     }
                 }
@@ -505,6 +590,15 @@ impl EnforcementCoordinator {
                 Err(EnforcementCoordinatorError::EnforcementUnavailable(
                     INGESTION_UNAVAILABLE_MESSAGE.into(),
                 ))
+            }
+            Err(EnforcementError::Remote { code, message })
+                if reconciliation::is_binding_rejection(&code) =>
+            {
+                self.store.mark_credential_policy_intent_failed(
+                    request.binding_id,
+                    &reconciliation::remote_rejection_message(&code, &message),
+                )?;
+                Err(EnforcementError::Remote { code, message }.into())
             }
             Err(error) => Err(error.into()),
         }
@@ -530,6 +624,7 @@ impl EnforcementCoordinator {
             Ok(()) => {
                 binding.state = BindingState::Detached;
                 binding.message = None;
+                binding.domain_id = None;
                 self.store.upsert_binding(&binding)?;
                 Ok(())
             }
@@ -556,6 +651,14 @@ impl EnforcementCoordinator {
     /// Returns a persistence error.
     pub fn bindings(&self) -> Result<Vec<Binding>, EnforcementCoordinatorError> {
         Ok(self.store.bindings()?)
+    }
+
+    /// Reads immutable structured provenance for one credential binding.
+    pub(crate) fn credential_policy_snapshot(
+        &self,
+        binding_id: Uuid,
+    ) -> Result<Option<CredentialPolicySnapshot>, EnforcementCoordinatorError> {
+        Ok(self.store.credential_policy_snapshot(binding_id)?)
     }
 
     /// Snapshots the current acknowledged required-subscription generation.
@@ -649,10 +752,19 @@ impl EnforcementCoordinator {
     pub fn health(
         &self,
     ) -> Result<agentsight_enforcement_protocol::HealthStatus, EnforcementCoordinatorError> {
-        Ok(combine_health(
-            self.client.health()?,
-            &self.ingestion_readiness,
-        ))
+        let mut health = combine_health(self.client.health()?, &self.ingestion_readiness);
+        if self
+            .store
+            .pending_transitions()?
+            .iter()
+            .any(|transition| transition.phase == super::TransitionPhase::Indeterminate)
+        {
+            health.ready = false;
+            health.message = Some(
+                "policy replacement ownership is indeterminate; reconciliation is required".into(),
+            );
+        }
+        Ok(health)
     }
 
     fn lifecycle(&self) -> MutexGuard<'_, ()> {
@@ -669,6 +781,17 @@ impl EnforcementCoordinator {
         binding.state = BindingState::Degraded;
         binding.message = Some(message.into());
         self.store.upsert_binding(&binding)
+    }
+
+    fn persist_degraded_credential_binding(
+        &self,
+        mut binding: Binding,
+        message: &str,
+        policy: &CredentialExfiltrationPolicy,
+    ) -> Result<(), EnforcementStoreError> {
+        binding.state = BindingState::Degraded;
+        binding.message = Some(message.into());
+        self.store.upsert_credential_binding(&binding, policy)
     }
 }
 
@@ -731,7 +854,22 @@ fn ingest_loop(
                     if !ingestion_readiness.adopt_subscription(&worker, subscription_id) {
                         break;
                     }
-                    match reconcile_desired_state(&client, &store, subscription_id) {
+                    let Some(reconciliation_lease) =
+                        ingestion_readiness.reconciliation_lease(&worker, subscription_id)
+                    else {
+                        break;
+                    };
+                    match reconciliation::reconcile_desired_state_fenced(
+                        &client,
+                        &store,
+                        subscription_id,
+                        |store, key, outcome| {
+                            ingestion_readiness
+                                .commit_reconciliation_if_current(&reconciliation_lease, || {
+                                    transition::persist_outcome(store, key, outcome)
+                                })
+                        },
+                    ) {
                         Ok(()) if ingestion_readiness.mark_ready(&worker, subscription_id) => {
                             Ok(())
                         }
