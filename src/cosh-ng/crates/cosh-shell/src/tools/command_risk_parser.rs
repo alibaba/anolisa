@@ -16,6 +16,17 @@ use super::command_risk::CommandShape;
 /// `command_risk_tests.rs`.
 const SAFE_OUTPUT_SINKS: &[&str] = &["/dev/null"];
 
+/// Segment separator kind recorded at each `&&`/`||`/`;`/newline break.
+/// A single `&` also records a mark (background list separator) but the
+/// shape escalates to Complex, so its connector is never consumed by the
+/// compound path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentConnector {
+    Seq,
+    And,
+    Or,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct ParsedCommand {
     pub(super) shape: CommandShape,
@@ -26,6 +37,12 @@ pub(super) struct ParsedCommand {
     /// command contains segment separators (used by the stripped-compound
     /// aggregation path).
     pub(super) segments: Vec<Vec<Vec<String>>>,
+    /// Connector kind for every recorded segment mark, in source order.
+    /// When no empty segment was swallowed, entry `i` is the connector
+    /// between `segments[i]` and `segments[i + 1]`; consumers must verify
+    /// `segment_connectors.len() == segments.len() - 1` before relying on
+    /// that pairing (a trailing separator leaves a dangling mark).
+    pub(super) segment_connectors: Vec<SegmentConnector>,
 }
 
 pub(super) fn parse_command(command: &str) -> ParsedCommand {
@@ -35,6 +52,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             stages: Vec::new(),
             null_redirections: 0,
             segments: Vec::new(),
+            segment_connectors: Vec::new(),
         };
     }
     if command.contains('\0') {
@@ -43,6 +61,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             stages: Vec::new(),
             null_redirections: 0,
             segments: Vec::new(),
+            segment_connectors: Vec::new(),
         };
     }
 
@@ -53,9 +72,10 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     let mut quote: Option<char> = None;
     let mut null_redirections = 0usize;
     let mut amp_redirect_guard = false;
-    // Segment breaks recorded as (stage index, token offset) at each
-    // `&&`/`||`/`;`/newline, resolved into `segments` after parsing.
-    let mut segment_marks: Vec<(usize, usize)> = Vec::new();
+    // Segment breaks recorded as (stage index, token offset, connector)
+    // at each `&&`/`||`/`;`/newline, resolved into `segments` after
+    // parsing.
+    let mut segment_marks: Vec<(usize, usize, SegmentConnector)> = Vec::new();
     // Tracks whether the current token buffer contains quoted or escaped
     // content; such tokens are ordinary arguments and never fd prefixes.
     let mut token_quoted = false;
@@ -78,14 +98,14 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             ' ' | '\t' => push_token(&mut tokens, &mut token, &mut token_quoted),
             '\n' | ';' => {
                 push_token(&mut tokens, &mut token, &mut token_quoted);
-                segment_marks.push((stages.len(), tokens.len()));
+                segment_marks.push((stages.len(), tokens.len(), SegmentConnector::Seq));
                 shape = max_shape(shape, CommandShape::Sequence);
             }
             '|' => {
                 push_token(&mut tokens, &mut token, &mut token_quoted);
                 if chars.peek().is_some_and(|next| *next == '|') {
                     chars.next();
-                    segment_marks.push((stages.len(), tokens.len()));
+                    segment_marks.push((stages.len(), tokens.len(), SegmentConnector::Or));
                     shape = max_shape(shape, CommandShape::AndOrList);
                 } else {
                     stages.push(std::mem::take(&mut tokens));
@@ -96,7 +116,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                 push_token(&mut tokens, &mut token, &mut token_quoted);
                 if chars.peek().is_some_and(|next| *next == '&') {
                     chars.next();
-                    segment_marks.push((stages.len(), tokens.len()));
+                    segment_marks.push((stages.len(), tokens.len(), SegmentConnector::And));
                     shape = max_shape(shape, CommandShape::AndOrList);
                 } else {
                     shape = max_shape(shape, CommandShape::Complex);
@@ -109,7 +129,10 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     // empty tail that the segment builder drops, so
                     // `ls &` still yields a single segment.
                     if !amp_redirect_guard {
-                        segment_marks.push((stages.len(), tokens.len()));
+                        // Shape already escalated to Complex, so this
+                        // connector is never consumed by the compound
+                        // path; the kind is irrelevant, pick Seq.
+                        segment_marks.push((stages.len(), tokens.len(), SegmentConnector::Seq));
                     }
                 }
             }
@@ -305,6 +328,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             stages: Vec::new(),
             null_redirections: 0,
             segments: Vec::new(),
+            segment_connectors: Vec::new(),
         };
     }
     push_token(&mut tokens, &mut token, &mut token_quoted);
@@ -326,6 +350,10 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     ParsedCommand {
         shape,
         segments: split_segments(&stages, &segment_marks),
+        segment_connectors: segment_marks
+            .iter()
+            .map(|&(_, _, connector)| connector)
+            .collect(),
         stages,
         null_redirections,
     }
@@ -334,7 +362,10 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
 /// Resolves the recorded segment marks into per-segment pipeline stages.
 /// Consecutive stages between two marks belong to the same segment; a mark
 /// splits the stage it points into at the recorded token offset.
-fn split_segments(stages: &[Vec<String>], marks: &[(usize, usize)]) -> Vec<Vec<Vec<String>>> {
+fn split_segments(
+    stages: &[Vec<String>],
+    marks: &[(usize, usize, SegmentConnector)],
+) -> Vec<Vec<Vec<String>>> {
     if marks.is_empty() {
         return Vec::new();
     }
@@ -343,7 +374,7 @@ fn split_segments(stages: &[Vec<String>], marks: &[(usize, usize)]) -> Vec<Vec<V
     let mut mark_iter = marks.iter().peekable();
     for (stage_index, stage) in stages.iter().enumerate() {
         let mut start = 0usize;
-        while let Some(&&(mark_stage, mark_offset)) = mark_iter.peek() {
+        while let Some(&&(mark_stage, mark_offset, _)) = mark_iter.peek() {
             if mark_stage != stage_index {
                 break;
             }
@@ -380,7 +411,10 @@ pub(super) fn is_env_assignment(token: &str) -> bool {
 }
 
 fn push_token(tokens: &mut Vec<String>, token: &mut String, token_quoted: &mut bool) {
-    if !token.is_empty() {
+    // An explicitly quoted empty string (`''` / `""`) is a real argv entry
+    // in every shell (`ls ''` passes an empty argument and fails); dropping
+    // it would break the assessed-argv == executed-argv invariant.
+    if !token.is_empty() || *token_quoted {
         tokens.push(std::mem::take(token));
     }
     *token_quoted = false;
