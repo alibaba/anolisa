@@ -83,4 +83,8 @@ jobs:
             CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
             RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
             PATH="$PATH" \
-            "$cargo_bin" test --test bpf_load -- --ignored
+            CARGO_BIN="$cargo_bin" \
+            bash -c '
+              ulimit -l unlimited
+              exec "$CARGO_BIN" test --test bpf_load -- --ignored --test-threads=1
+            '
