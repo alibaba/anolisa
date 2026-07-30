@@ -279,3 +279,201 @@ fn raw_relay_zsh_history_records_original_handoff_command() {
         "{terminal}"
     );
 }
+
+fn pager_guard_handoff_request(command: &str, source: &str) -> ShellHandoffRequest {
+    ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        source,
+        "user",
+        "approval-pg",
+        "run-pg",
+        1,
+    )
+    .expect("handoff request")
+}
+
+// Issue #1988: agent-approved handoff commands run with the pager family
+// forced to cat so pager-capable tools cannot stall the turn on the
+// foreground TTY; the guard must restore the user's environment exactly
+// afterwards and must not touch user-initiated executions.
+#[test]
+fn raw_relay_bash_pager_guard_exports_cat_for_agent_handoff_and_restores() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-pager-guard-restore-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("pager-guard-restore-test", &work_dir);
+    config
+        .env_overrides
+        .push(("GIT_PAGER".to_string(), "less".to_string()));
+    let mut emitted = false;
+    let command =
+        "printf 'during=%s,%s,%s,%s\\n' \"${GIT_PAGER-unset}\" \"${PAGER-unset}\" \"${SYSTEMD_PAGER-unset}\" \"${MANPAGER-unset}\"";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line(
+                "printf 'after=%s,%s\\n' \"${GIT_PAGER-unset}\" \"${PAGER-unset}\"",
+            ),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        move |_, _| {
+            if emitted {
+                return Ok(RawObserverAction::Continue);
+            }
+            emitted = true;
+            Ok(RawObserverAction::EmitToPty(pager_guard_handoff_request(
+                command,
+                "approved_provider_shell_tool",
+            )))
+        },
+    )
+    .expect("raw relay pager guard restore");
+
+    let ledger = ledger_from_output(&output);
+    let command_output = ledger_output_refs_text(&ledger);
+    assert!(
+        command_output.contains("during=cat,cat,cat,cat"),
+        "{command_output}"
+    );
+    assert!(
+        command_output.contains("after=less,unset"),
+        "{command_output}"
+    );
+}
+
+#[test]
+fn raw_relay_bash_pager_guard_covers_compound_handoff_command() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-pager-guard-compound-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("pager-guard-compound-test", &work_dir);
+    let mut emitted = false;
+    let command = "true && printf 'compound=%s\\n' \"${GIT_PAGER-unset}\"";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        move |_, _| {
+            if emitted {
+                return Ok(RawObserverAction::Continue);
+            }
+            emitted = true;
+            Ok(RawObserverAction::EmitToPty(pager_guard_handoff_request(
+                command,
+                "approved_provider_shell_tool",
+            )))
+        },
+    )
+    .expect("raw relay pager guard compound");
+
+    let ledger = ledger_from_output(&output);
+    let command_output = ledger_output_refs_text(&ledger);
+    assert!(command_output.contains("compound=cat"), "{command_output}");
+}
+
+#[test]
+fn raw_relay_bash_pager_guard_skips_user_send_to_shell_handoff() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-pager-guard-send-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("pager-guard-send-test", &work_dir);
+    let mut emitted = false;
+    let command = "printf 'send=%s\\n' \"${GIT_PAGER-unset}\"";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        move |_, _| {
+            if emitted {
+                return Ok(RawObserverAction::Continue);
+            }
+            emitted = true;
+            Ok(RawObserverAction::EmitToPty(pager_guard_handoff_request(
+                command,
+                "send_to_shell",
+            )))
+        },
+    )
+    .expect("raw relay pager guard send_to_shell");
+
+    let ledger = ledger_from_output(&output);
+    let command_output = ledger_output_refs_text(&ledger);
+    assert!(command_output.contains("send=unset"), "{command_output}");
+}
+
+#[test]
+fn raw_relay_zsh_pager_guard_exports_cat_for_agent_handoff_and_restores() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-pager-guard-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-pager-guard-test", &work_dir);
+    config.native_mode = false;
+    config
+        .env_overrides
+        .push(("GIT_PAGER".to_string(), "less".to_string()));
+    let input = DelayedInput::new(vec![
+        (
+            b"printf 'after=%s,%s\\n' \"${GIT_PAGER-unset}\" \"${PAGER-unset}\"\n".to_vec(),
+            Duration::from_millis(900),
+        ),
+        (b"exit\n".to_vec(), Duration::from_millis(300)),
+    ]);
+    let mut emitted = false;
+    let command = "printf 'during=%s,%s\\n' \"${GIT_PAGER-unset}\" \"${PAGER-unset}\"";
+    let output = run_raw_relay_zsh_with_output_control(&config, input, Vec::new(), move |_, _| {
+        if emitted {
+            return Ok(RawObserverAction::Continue);
+        }
+        emitted = true;
+        Ok(RawObserverAction::EmitToPty(pager_guard_handoff_request(
+            command,
+            "approved_provider_shell_tool",
+        )))
+    })
+    .expect("raw zsh relay pager guard");
+
+    let ledger = ledger_from_output(&output);
+    let command_output = ledger_output_refs_text(&ledger);
+    assert!(
+        command_output.contains("during=cat,cat"),
+        "{command_output}"
+    );
+    assert!(
+        command_output.contains("after=less,unset"),
+        "{command_output}"
+    );
+}

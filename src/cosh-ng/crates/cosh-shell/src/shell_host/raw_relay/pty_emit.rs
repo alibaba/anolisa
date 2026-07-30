@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nix::libc;
@@ -18,6 +18,28 @@ use super::{mark_pending_prompt_replayed, write_pending_display, write_prompt_gh
 
 fn write_handoff_request(path: &Path, command: &str) -> io::Result<()> {
     std::fs::write(path, command.as_bytes())
+}
+
+/// Sidecar marker consumed by `_cosh_arm_handoff_pager_guard` in the bash
+/// marker script: present only for agent-approved handoffs, so pagers are
+/// forced to `cat` there while user-driven `send_to_shell` handoffs (the
+/// user explicitly chose interactive foreground execution) keep native
+/// pager behavior (issue #1988).
+pub(crate) fn pager_guard_marker_path(handoff_request_file: &Path) -> PathBuf {
+    let mut path = handoff_request_file.as_os_str().to_os_string();
+    path.push(".pager-guard");
+    PathBuf::from(path)
+}
+
+fn sync_pager_guard_marker(handoff_request_file: &Path, request: &ShellHandoffRequest) {
+    let guard = pager_guard_marker_path(handoff_request_file);
+    // Fail-quiet on both sides: a missing marker only means the pager
+    // guard stays disarmed and pagers behave as before the fix.
+    if request.source == "send_to_shell" {
+        let _ = std::fs::remove_file(&guard);
+    } else {
+        let _ = std::fs::write(&guard, b"");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -147,8 +169,10 @@ fn emit_to_pty<W: Write>(
     pending_terminal_restore.record_intervention_start(terminal_fd);
     parser.register_pending_handoff_origin(&request);
     write_handoff_request(handoff_request_file, &request.command)?;
+    sync_pager_guard_marker(handoff_request_file, &request);
     if let Err(err) = write_all_pty(master, &bytes) {
         let _ = std::fs::remove_file(handoff_request_file);
+        let _ = std::fs::remove_file(pager_guard_marker_path(handoff_request_file));
         return Err(err);
     }
     Ok(())

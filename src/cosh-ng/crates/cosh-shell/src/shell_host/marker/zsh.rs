@@ -245,6 +245,67 @@ _cosh_add_handoff_history() {
   print -sr -- "$_COSH_HANDOFF_HISTORY_COMMAND" 2>/dev/null || true
   unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
 }
+# Pager guard for agent-approved handoff commands (issue #1988); see the
+# bash marker for the full rationale. Armed only when the Rust side left
+# the sidecar marker file, restored exactly at the next prompt. Fail-safe:
+# any failure leaves pagers behaving as before the fix. Note: changes a
+# handoff command itself makes to these variables do not persist; the
+# guard restores the pre-handoff environment exactly at the next prompt.
+_COSH_PAGER_GUARD_VARS='GIT_PAGER PAGER SYSTEMD_PAGER MANPAGER'
+_COSH_PAGER_GUARD_ARMED=0
+_cosh_handoff_pager_guard_requested() {
+  [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "${COSH_HANDOFF_REQUEST_FILE}.pager-guard" ]]
+}
+_cosh_clear_handoff_pager_guard_marker() {
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "${COSH_HANDOFF_REQUEST_FILE}.pager-guard" ]]; then
+    rm -f -- "${COSH_HANDOFF_REQUEST_FILE}.pager-guard" 2>/dev/null || true
+  fi
+}
+_cosh_arm_handoff_pager_guard() {
+  if [[ "${_COSH_PAGER_GUARD_ARMED:-0}" == 1 ]]; then
+    return 0
+  fi
+  _cosh_handoff_pager_guard_requested || return 0
+  local var
+  for var in ${=_COSH_PAGER_GUARD_VARS}; do
+    if [[ -n "${parameters[$var]-}" ]]; then
+      if [[ "${parameters[$var]-}" == *export* ]]; then
+        typeset -g "_COSH_PG_STATE_$var=exported"
+      else
+        typeset -g "_COSH_PG_STATE_$var=set"
+      fi
+      typeset -g "_COSH_PG_VALUE_$var=${(P)var}"
+    else
+      typeset -g "_COSH_PG_STATE_$var=unset"
+    fi
+    export "$var=cat" 2>/dev/null || true
+  done
+  _COSH_PAGER_GUARD_ARMED=1
+}
+_cosh_restore_handoff_pager_guard() {
+  if [[ "${_COSH_PAGER_GUARD_ARMED:-0}" != 1 ]]; then
+    return 0
+  fi
+  local var state_var value_var
+  for var in ${=_COSH_PAGER_GUARD_VARS}; do
+    state_var="_COSH_PG_STATE_$var"
+    value_var="_COSH_PG_VALUE_$var"
+    case "${(P)state_var:-unset}" in
+      exported)
+        export "$var=${(P)value_var}" 2>/dev/null || true
+        ;;
+      set)
+        typeset -g "$var=${(P)value_var}"
+        typeset +x "$var" 2>/dev/null || true
+        ;;
+      *)
+        unset "$var" 2>/dev/null || true
+        ;;
+    esac
+    unset "$state_var" "$value_var" 2>/dev/null || true
+  done
+  _COSH_PAGER_GUARD_ARMED=0
+}
 _cosh_begin_attempt() {
   local input="$1"
   local top_token="$2"
@@ -373,12 +434,14 @@ _cosh_preexec_marker() {
   if _cosh_is_handoff_wrapper "$command"; then
     display_command="$(_cosh_unwrap_handoff_command "$command")"
     _COSH_HANDOFF_ACTIVE=1
+    _cosh_arm_handoff_pager_guard
     if _cosh_command_has_secret "$display_command"; then
       display_command="<redacted sensitive command>"
     fi
     _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
   elif _cosh_is_pending_handoff_command "$command"; then
     _COSH_HANDOFF_ACTIVE=1
+    _cosh_arm_handoff_pager_guard
   else
     _cosh_clear_handoff_request
     unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
@@ -410,6 +473,8 @@ _cosh_precmd_marker() {
   _cosh_apply_internal_recovery
   _cosh_add_handoff_history
   _cosh_clear_handoff_request
+  _cosh_clear_handoff_pager_guard_marker
+  _cosh_restore_handoff_pager_guard
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _COSH_ATTEMPT_ACTIVE=0
   _cosh_emit_marker "precmd" "" "$exit_status" false

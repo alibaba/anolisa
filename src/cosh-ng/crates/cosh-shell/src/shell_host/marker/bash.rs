@@ -292,6 +292,76 @@ _cosh_replace_handoff_history() {
   builtin history -s "$_COSH_HANDOFF_HISTORY_COMMAND" 2>/dev/null || true
   unset _COSH_HANDOFF_HISTORY_NO _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
 }
+# Agent handoff commands run on the foreground TTY, so pager-capable tools
+# (git log, systemctl, man) would drop into interactive less and the precmd
+# marker — and with it the agent turn — could not close until a human
+# pressed q (issue #1988). While an agent-approved handoff command is
+# running, force the pager family to cat via exported env. Rust side drops
+# a sidecar marker file next to the handoff request file for agent-approved
+# handoffs only; user `send_to_shell` handoffs (explicitly interactive) and
+# user-typed commands never arm the guard. Restore is exact: original
+# value, export attribute, and unset state all round-trip. Every step is
+# fail-safe (guard failure means pagers behave as before the fix).
+# GIT_PAGER outranks core.pager which outranks PAGER, so PAGER alone is
+# not enough for git; SYSTEMD_PAGER/MANPAGER shadow PAGER the same way.
+# Note: changes a handoff command itself makes to these variables do not
+# persist; the guard restores the pre-handoff environment exactly at the
+# next prompt.
+_COSH_PAGER_GUARD_VARS='GIT_PAGER PAGER SYSTEMD_PAGER MANPAGER'
+_COSH_PAGER_GUARD_ARMED=0
+_cosh_handoff_pager_guard_requested() {
+  [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "${COSH_HANDOFF_REQUEST_FILE}.pager-guard" ]]
+}
+_cosh_clear_handoff_pager_guard_marker() {
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "${COSH_HANDOFF_REQUEST_FILE}.pager-guard" ]]; then
+    rm -f -- "${COSH_HANDOFF_REQUEST_FILE}.pager-guard" 2>/dev/null || true
+  fi
+}
+_cosh_arm_handoff_pager_guard() {
+  if [[ "${_COSH_PAGER_GUARD_ARMED:-0}" == 1 ]]; then
+    return 0
+  fi
+  _cosh_handoff_pager_guard_requested || return 0
+  local var decl
+  for var in $_COSH_PAGER_GUARD_VARS; do
+    if decl="$(declare -p "$var" 2>/dev/null)"; then
+      if [[ "$decl" == "declare -x"* ]]; then
+        printf -v "_COSH_PG_STATE_$var" '%s' exported
+      else
+        printf -v "_COSH_PG_STATE_$var" '%s' set
+      fi
+      printf -v "_COSH_PG_VALUE_$var" '%s' "${!var}"
+    else
+      printf -v "_COSH_PG_STATE_$var" '%s' unset
+    fi
+    export "$var=cat" 2>/dev/null || true
+  done
+  _COSH_PAGER_GUARD_ARMED=1
+}
+_cosh_restore_handoff_pager_guard() {
+  if [[ "${_COSH_PAGER_GUARD_ARMED:-0}" != 1 ]]; then
+    return 0
+  fi
+  local var state_var value_var
+  for var in $_COSH_PAGER_GUARD_VARS; do
+    state_var="_COSH_PG_STATE_$var"
+    value_var="_COSH_PG_VALUE_$var"
+    case "${!state_var:-unset}" in
+      exported)
+        export "$var=${!value_var}" 2>/dev/null || true
+        ;;
+      set)
+        printf -v "$var" '%s' "${!value_var}"
+        export -n "$var" 2>/dev/null || true
+        ;;
+      *)
+        unset "$var" 2>/dev/null || true
+        ;;
+    esac
+    unset "$state_var" "$value_var" 2>/dev/null || true
+  done
+  _COSH_PAGER_GUARD_ARMED=0
+}
 _cosh_begin_attempt() {
   local input="$1"
   local top_token="$2"
@@ -569,8 +639,10 @@ _cosh_preexec_marker() {
         display_command="$(_cosh_unwrap_handoff_command "$command")"
         _COSH_HANDOFF_ACTIVE=1
         _COSH_HANDOFF_HISTORY_NO="$history_no"
+        _cosh_arm_handoff_pager_guard
       elif _cosh_is_pending_handoff_command "$command"; then
         _COSH_HANDOFF_ACTIVE=1
+        _cosh_arm_handoff_pager_guard
       else
         _cosh_clear_handoff_request
         unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
@@ -630,6 +702,8 @@ _cosh_precmd_marker() {
   _cosh_apply_internal_recovery
   _cosh_replace_handoff_history
   _cosh_clear_handoff_request
+  _cosh_clear_handoff_pager_guard_marker
+  _cosh_restore_handoff_pager_guard
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _COSH_ATTEMPT_ACTIVE=0
   _cosh_emit_marker "precmd" "" "$status" false
