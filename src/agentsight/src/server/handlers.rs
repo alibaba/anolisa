@@ -82,6 +82,7 @@ pub async fn auth_status(data: web::Data<AppState>) -> impl Responder {
             "optimization",
             "skills",
             "security",
+            "enforcement",
             "atif",
             "settings",
             "agent_health"

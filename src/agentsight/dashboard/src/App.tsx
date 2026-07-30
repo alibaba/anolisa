@@ -11,6 +11,7 @@ import { SecurityObservabilityPage } from './pages/SecurityObservabilityPage';
 import { OptimizationPage } from './pages/OptimizationPage';
 import { AgentSessionsPage } from './pages/AgentSessionsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { RiskEnforcementPage } from './pages/RiskEnforcementPage';
 import { LoginPage } from './pages/LoginPage';
 import { fetchAuthStatus, fetchAuthVerify, login } from './utils/apiClient';
 import type { AppCapability, AuthStatusResponse } from './utils/apiClient';
@@ -22,6 +23,7 @@ const DEFAULT_CAPABILITIES: AppCapability[] = [
   'optimization',
   'skills',
   'security',
+  'enforcement',
   'atif',
   'settings',
   'agent_health',
@@ -40,6 +42,7 @@ function pathAllowed(pathname: string, capabilities: AppCapability[]): boolean {
   if (pathname.startsWith('/optimization')) return capabilities.includes('optimization');
   if (pathname.startsWith('/skills')) return capabilities.includes('skills');
   if (pathname.startsWith('/security')) return capabilities.includes('security');
+  if (pathname.startsWith('/enforcement')) return capabilities.includes('enforcement');
   if (pathname.startsWith('/atif')) return capabilities.includes('atif');
   if (pathname.startsWith('/settings')) return capabilities.includes('settings');
   if (pathname.startsWith('/health')) return capabilities.includes('agent_health');
@@ -162,6 +165,7 @@ const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) =
             <Route path="/optimization/:sessionId" element={<OptimizationPage />} />
             <Route path="/skills" element={<SkillMetricsPage />} />
             <Route path="/security" element={<SecurityObservabilityPage />} />
+            <Route path="/enforcement" element={<RiskEnforcementPage />} />
             <Route path="/atif" element={<AtifViewerPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/health" element={<AgentHealthPage />} />
