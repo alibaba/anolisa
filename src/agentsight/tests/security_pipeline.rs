@@ -75,15 +75,20 @@ fn insert_containment_action(store: &SecurityStore, case_id: Uuid, binding_id: U
         .expect("containment action should persist");
 }
 
+#[derive(Clone, Copy)]
+struct DecisionOutcome {
+    mode: PolicyMode,
+    blocked: bool,
+    risk_score: u8,
+}
+
 fn containment_decision(
     store: &SecurityStore,
     template_id: Uuid,
     binding_id: Uuid,
     event_id: Uuid,
     occurred_at_ns: u64,
-    mode: PolicyMode,
-    blocked: bool,
-    risk_score: u8,
+    outcome: DecisionOutcome,
 ) -> SecurityEvent {
     let mut event = store
         .event(template_id)
@@ -96,9 +101,9 @@ fn containment_decision(
     let SecurityEventKind::PolicyDecision(decision) = &mut event.kind else {
         panic!("template must be a policy decision");
     };
-    decision.mode = mode;
-    decision.blocked = blocked;
-    decision.risk_score = risk_score;
+    decision.mode = outcome.mode;
+    decision.blocked = outcome.blocked;
+    decision.risk_score = outcome.risk_score;
     event
 }
 
@@ -234,9 +239,11 @@ fn allowed_containment_decision_appends_without_claiming_a_block() {
         binding_id,
         Uuid::new_v4(),
         700,
-        PolicyMode::Audit,
-        false,
-        91,
+        DecisionOutcome {
+            mode: PolicyMode::Audit,
+            blocked: false,
+            risk_score: 91,
+        },
     );
     let coordinator = SecurityCoordinator::new(
         EnforcementClient::new("/unused/agentsight-enforcer.sock"),
@@ -303,9 +310,11 @@ fn reordered_duplicate_block_decisions_mark_original_case_at_earliest_time() {
         binding_id,
         later_id,
         800,
-        PolicyMode::Enforce,
-        true,
-        94,
+        DecisionOutcome {
+            mode: PolicyMode::Enforce,
+            blocked: true,
+            risk_score: 94,
+        },
     );
     let earlier = containment_decision(
         &store,
@@ -313,9 +322,11 @@ fn reordered_duplicate_block_decisions_mark_original_case_at_earliest_time() {
         binding_id,
         Uuid::new_v4(),
         700,
-        PolicyMode::Enforce,
-        true,
-        96,
+        DecisionOutcome {
+            mode: PolicyMode::Enforce,
+            blocked: true,
+            risk_score: 96,
+        },
     );
     let coordinator = SecurityCoordinator::new(
         EnforcementClient::new("/unused/agentsight-enforcer.sock"),
