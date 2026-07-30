@@ -4,7 +4,8 @@
 //! troubleshooting. Independent from the existing audit JSONL
 //! ([`super::audit`]) and security event stream ([`super::event_stream`]).
 //!
-//! Schema follows `SKILL_LEDGER_SKILLFS_ACTIVATION_CN.md` §SkillFS 事件日志需求:
+//! The Ledger boundary follows §6 of `SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md`;
+//! N3 remains a SkillFS-local diagnostic protocol, not a Ledger identity source:
 //!
 //! ```json
 //! {

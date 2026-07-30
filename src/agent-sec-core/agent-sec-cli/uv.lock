@@ -8,13 +8,14 @@ resolution-markers = [
 
 [[package]]
 name = "agent-sec-cli"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "modelscope" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "regex" },
     { name = "sqlalchemy" },
     { name = "textual" },
     { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
@@ -45,6 +46,7 @@ requires-dist = [
     { name = "pgpy", marker = "extra == 'pgpy'", specifier = ">=0.5" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "regex", specifier = ">=2026.4.4" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "textual", specifier = ">=0.80" },
     { name = "torch", specifier = ">=2.0", index = "https://download.pytorch.org/whl/cpu" },

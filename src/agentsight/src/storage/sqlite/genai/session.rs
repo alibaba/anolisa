@@ -17,6 +17,10 @@ pub struct SessionSummary {
     pub total_output_tokens: i64,
     pub model: Option<String>,
     pub agent_name: Option<String>,
+    /// Earliest user query in the window (≤ 200 chars, best-effort)
+    pub first_user_query: Option<String>,
+    /// Latest user query in the window (≤ 200 chars, best-effort)
+    pub last_user_query: Option<String>,
 }
 
 /// Session summary for the Token Savings page
@@ -61,22 +65,40 @@ impl GenAISqliteStore {
         end_ns: i64,
         include_auxiliary: bool,
     ) -> Result<Vec<SessionSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let call_kind_filter = if include_auxiliary {
             ""
         } else {
             " AND (call_kind = 'main' OR call_kind IS NULL)"
+        };
+        // Same filter for the correlated user-query subqueries (g2-qualified).
+        let sub_call_kind_filter = if include_auxiliary {
+            ""
+        } else {
+            " AND (g2.call_kind = 'main' OR g2.call_kind IS NULL)"
         };
         let sql = format!(
             "SELECT session_id,
                     COUNT(DISTINCT conversation_id) AS conversation_count,
                     MIN(start_timestamp_ns)  AS first_seen_ns,
                     MAX(start_timestamp_ns)  AS last_seen_ns,
-                    COALESCE(SUM(input_tokens), 0)  AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
                     MAX(model)               AS model,
-                    MAX(agent_name)          AS agent_name
-             FROM genai_events
+                    MAX(agent_name)          AS agent_name,
+                    (SELECT substr(g2.user_query, 1, 200) FROM genai_events g2
+                      WHERE g2.session_id = g1.session_id
+                        AND g2.event_type = 'llm_call'
+                        AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                        AND g2.start_timestamp_ns BETWEEN ?1 AND ?2{sub_call_kind_filter}
+                      ORDER BY g2.start_timestamp_ns ASC LIMIT 1) AS first_user_query,
+                    (SELECT substr(g2.user_query, 1, 200) FROM genai_events g2
+                      WHERE g2.session_id = g1.session_id
+                        AND g2.event_type = 'llm_call'
+                        AND g2.user_query IS NOT NULL AND g2.user_query != ''
+                        AND g2.start_timestamp_ns BETWEEN ?1 AND ?2{sub_call_kind_filter}
+                      ORDER BY g2.start_timestamp_ns DESC LIMIT 1) AS last_user_query
+             FROM genai_events g1
              WHERE event_type = 'llm_call'
                AND session_id IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2{call_kind_filter}
@@ -94,6 +116,8 @@ impl GenAISqliteStore {
                 total_output_tokens: row.get(5)?,
                 model: row.get(6)?,
                 agent_name: row.get(7)?,
+                first_user_query: row.get(8)?,
+                last_user_query: row.get(9)?,
             })
         })?;
         let mut result = Vec::new();
@@ -113,12 +137,12 @@ impl GenAISqliteStore {
         end_ns: i64,
         agent_name: Option<&str>,
     ) -> Result<Vec<SavingsSessionSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql = if agent_name.is_some() {
             "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -131,7 +155,7 @@ impl GenAISqliteStore {
         } else {
             "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -175,11 +199,11 @@ impl GenAISqliteStore {
         &self,
         session_id: &str,
     ) -> Result<Option<SavingsSessionSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql = "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -213,7 +237,7 @@ impl GenAISqliteStore {
         &self,
         session_ids: &[&str],
     ) -> Result<std::collections::HashMap<String, usize>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = std::collections::HashMap::new();
 
         for sid in session_ids {
@@ -247,7 +271,7 @@ impl GenAISqliteStore {
         session_ids: &[&str],
     ) -> Result<std::collections::HashMap<String, ToolCallTurnInfo>, Box<dyn std::error::Error>>
     {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = std::collections::HashMap::new();
 
         for sid in session_ids {
@@ -307,7 +331,7 @@ impl GenAISqliteStore {
         end_ns: Option<i64>,
         include_auxiliary: bool,
     ) -> Result<Vec<TraceSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let call_kind_filter = if include_auxiliary {
             ""
@@ -320,7 +344,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -338,7 +362,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -356,7 +380,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -374,7 +398,7 @@ impl GenAISqliteStore {
             format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -431,7 +455,7 @@ impl GenAISqliteStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT DISTINCT agent_name
              FROM genai_events
@@ -456,7 +480,7 @@ impl GenAISqliteStore {
         &self,
         pid: i32,
     ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result = conn.query_row(
             "SELECT session_id FROM genai_events
              WHERE pid = ?1 AND status = 'complete' AND session_id IS NOT NULL
@@ -477,7 +501,7 @@ impl GenAISqliteStore {
         call_id: &str,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE genai_events SET session_id = ?2 WHERE call_id = ?1",
             params![call_id, session_id],

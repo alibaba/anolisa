@@ -10,6 +10,12 @@ from agent_sec_cli.skill_ledger.activation_policy import (
     allowed_scan_statuses_for_policy,
 )
 from agent_sec_cli.skill_ledger.core.checker import manifest_only_status
+from agent_sec_cli.skill_ledger.core.live_root import (
+    ResolvedSkillRoot,
+    SkillRootInput,
+    resolve_skill_root,
+    validate_resolved_skill_root,
+)
 from agent_sec_cli.skill_ledger.core.manifest_helpers import (
     safe_load_latest_manifest,
     snapshot_matches_manifest,
@@ -30,7 +36,6 @@ from agent_sec_cli.skill_ledger.models.manifest import (
     UserDecision,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
-from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
 _ALLOWING_USER_DECISIONS = {"allow", "always_allow", "rollback"}
 _USER_DECISION_STATUSES = frozenset({"pass", "warn", "deny", "none"})
@@ -41,7 +46,7 @@ PENDING_DECISION_TARGET = f"{SKILL_META_DIR}/{VERSIONS_DIR}/{PENDING_DECISION_SN
 
 
 def build_exposure_summary(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     *,
     status_result: dict[str, Any] | None = None,
@@ -52,82 +57,102 @@ def build_exposure_summary(
     resolution can consume the same decision without learning separate policy
     branches.
     """
-    validate_skill_dir(skill_dir)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
     if status_result is None:
-        status_result = manifest_only_status(skill_dir, backend)
+        status_result = manifest_only_status(root, backend)
     latest_status = str(status_result.get("status", "unknown"))
-    latest_manifest = safe_load_latest_manifest(skill_dir)
+    latest_manifest = safe_load_latest_manifest(io_skill_dir)
     latest_version = _latest_version_id(status_result, latest_manifest)
 
-    decision_candidate = _find_user_decision_candidate(skill_dir, backend)
+    decision_candidate = _find_user_decision_candidate(io_skill_dir, backend)
     if decision_candidate is _BLOCKED_BY_USER:
-        return _summary(
-            latest_status=latest_status,
-            latest_version=latest_version,
-            active_version=None,
-            user_decision=_newest_block_decision(skill_dir, backend),
-            reason_code="user_block",
-            message=None,
+        return _with_identity(
+            root,
+            _summary(
+                latest_status=latest_status,
+                latest_version=latest_version,
+                active_version=None,
+                user_decision=_newest_block_decision(io_skill_dir, backend),
+                reason_code="user_block",
+                message=None,
+            ),
         )
     if isinstance(decision_candidate, tuple):
         version_id, decision = decision_candidate
-        return _summary(
-            latest_status=latest_status,
-            latest_version=latest_version,
-            active_version=version_id,
-            user_decision=decision,
-            reason_code=f"user_{decision.action}",
-            message=None,
+        return _with_identity(
+            root,
+            _summary(
+                latest_status=latest_status,
+                latest_version=latest_version,
+                active_version=version_id,
+                user_decision=decision,
+                reason_code=f"user_{decision.action}",
+                message=None,
+            ),
         )
 
-    candidate = _find_policy_candidate(skill_dir, backend)
+    candidate = _find_policy_candidate(io_skill_dir, backend)
     active_version = candidate[0] if candidate is not None else None
 
     if latest_status in {"pass", "warn"}:
         if active_version == latest_version and active_version is not None:
-            return _summary(
+            return _with_identity(
+                root,
+                _summary(
+                    latest_status=latest_status,
+                    latest_version=latest_version,
+                    active_version=active_version,
+                    user_decision=None,
+                    reason_code="normal",
+                    message=None,
+                ),
+            )
+        return _with_identity(
+            root,
+            _summary(
                 latest_status=latest_status,
                 latest_version=latest_version,
                 active_version=active_version,
                 user_decision=None,
-                reason_code="normal",
-                message=None,
-            )
-        return _summary(
-            latest_status=latest_status,
-            latest_version=latest_version,
-            active_version=active_version,
-            user_decision=None,
-            reason_code="tampered",
-            message=_activation_message(
-                f"Latest {latest_status} snapshot is not a trusted activation target",
-                active_version,
+                reason_code="tampered",
+                message=_activation_message(
+                    f"Latest {latest_status} snapshot is not a trusted activation target",
+                    active_version,
+                ),
             ),
         )
 
     if latest_status == "drifted":
-        return _summary(
-            latest_status=latest_status,
-            latest_version=latest_version,
-            active_version=active_version,
-            user_decision=None,
-            reason_code="root_drift",
-            message=_activation_message(
-                f"Current skill root drifted from latest signed version {latest_version or 'none'}",
-                active_version,
+        return _with_identity(
+            root,
+            _summary(
+                latest_status=latest_status,
+                latest_version=latest_version,
+                active_version=active_version,
+                user_decision=None,
+                reason_code="root_drift",
+                message=_activation_message(
+                    f"Current skill root drifted from latest signed version {latest_version or 'none'}",
+                    active_version,
+                ),
             ),
         )
 
     if latest_status == "tampered":
-        return _summary(
-            latest_status=latest_status,
-            latest_version=latest_version,
-            active_version=active_version,
-            user_decision=None,
-            reason_code="tampered",
-            message=_activation_message(
-                f"Latest skill metadata is tampered for version {latest_version or 'none'}",
-                active_version,
+        return _with_identity(
+            root,
+            _summary(
+                latest_status=latest_status,
+                latest_version=latest_version,
+                active_version=active_version,
+                user_decision=None,
+                reason_code="tampered",
+                message=_activation_message(
+                    f"Latest skill metadata is tampered for version {latest_version or 'none'}",
+                    active_version,
+                ),
             ),
         )
 
@@ -136,15 +161,18 @@ def build_exposure_summary(
         if active_version is not None
         else "latest_risk_pending_decision"
     )
-    return _summary(
-        latest_status=latest_status,
-        latest_version=latest_version,
-        active_version=active_version,
-        user_decision=None,
-        reason_code=reason_code,
-        message=_activation_message(
-            f"Latest skill status is {latest_status} for version {latest_version or 'none'}",
-            active_version,
+    return _with_identity(
+        root,
+        _summary(
+            latest_status=latest_status,
+            latest_version=latest_version,
+            active_version=active_version,
+            user_decision=None,
+            reason_code=reason_code,
+            message=_activation_message(
+                f"Latest skill status is {latest_status} for version {latest_version or 'none'}",
+                active_version,
+            ),
         ),
     )
 
@@ -184,6 +212,17 @@ def _summary(
         "userDecision": user_decision_to_dict(user_decision),
         "reasonCode": reason_code,
         "message": message,
+    }
+
+
+def _with_identity(
+    root: ResolvedSkillRoot,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
+        **summary,
     }
 
 

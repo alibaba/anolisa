@@ -1,6 +1,6 @@
 # Node.js
 node_modules/
-dist/
+/dist/
 npm-debug.log
 
 # Python
@@ -17,6 +17,9 @@ venv/
 
 # Build artifacts
 rpmbuild/
+website/.docusaurus/
+website/.generated/
+website/build/
 # target/ is already covered by **/target/ (Rust rule above)
 *.o
 *.a
@@ -43,7 +46,6 @@ rpmbuild/
 .qoder/
 .claude/
 .agents/
-.worktrees/
 
 !src/agent-sec-core/codex-plugin/.agents/
 !src/agent-sec-core/codex-plugin/.agents/**

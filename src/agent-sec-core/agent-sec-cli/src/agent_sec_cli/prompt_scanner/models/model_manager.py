@@ -13,6 +13,8 @@ import contextlib
 import logging
 import os
 import threading
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,6 +26,19 @@ if TYPE_CHECKING:
     import torch
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _ModelHandle:
+    """Model, tokenizer and inference lock for one loaded model.
+
+    Bundling them binds the lock to the tokenizer it protects —
+    structurally, not by convention.
+    """
+
+    model: object
+    tokenizer: object
+    inference_lock: threading.Lock
 
 
 class ClassifierResult(BaseModel):
@@ -47,12 +62,9 @@ class ModelManager:
 
     Responsibilities:
     - Lazy-load models on first use.
-    - Cache loaded (model, tokenizer) pairs in memory.
+    - Cache loaded models in memory as ``_ModelHandle`` instances.
     - Auto-detect best available device (CPU / CUDA / MPS).
     - Provide ``clear_cache()`` for memory reclamation.
-
-    Each cache entry is a ``(model, tokenizer)`` tuple so callers
-    never need to manage the tokenizer separately.
     """
 
     _DEFAULT_CACHE_DIR = "~/.cache/prompt_scanner/models"
@@ -62,9 +74,10 @@ class ModelManager:
         # Defer device detection until first inference to avoid importing torch
         # at module load time (which would slow down non-ML subcommands like code-scan).
         self._device_cached: str | None = device
-        # cache: model_name -> (model, tokenizer)
-        self._loaded_models: dict[str, tuple[object, object]] = {}
-        self._load_lock = threading.Lock()
+        # ``_lock`` guards the registry (insert / lookup / clear); each
+        # handle's ``inference_lock`` serialises use of its tokenizer.
+        self._handles: dict[str, _ModelHandle] = {}
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -103,7 +116,7 @@ class ModelManager:
         """Return a cached ``(model, tokenizer)`` pair, loading on demand.
 
         Thread-safe: concurrent calls for the same model will block on the
-        lock and reuse the result of the first successful load.
+        registry lock and reuse the result of the first successful load.
 
         The model **must** have been downloaded beforehand (e.g. via
         ``scan-prompt warmup``).  If it is not present locally, a
@@ -119,25 +132,50 @@ class ModelManager:
             agent_sec_cli.prompt_scanner.exceptions.ModelLoadError: if the
                 model cannot be loaded (missing deps, not downloaded, etc.).
         """
-        # Fast path: model already loaded (no lock needed for dict reads under GIL).
-        if model_name in self._loaded_models:
-            return self._loaded_models[model_name]
-
-        with self._load_lock:
-            # Double-check after acquiring the lock.
-            if model_name in self._loaded_models:
-                return self._loaded_models[model_name]
-            pair = self._do_load(model_name)
-            self._loaded_models[model_name] = pair
-            return pair
+        h = self._get_handle(model_name)
+        return h.model, h.tokenizer
 
     def get_model(self, model_name: str) -> tuple[object, object] | None:
-        """Return the cached ``(model, tokenizer)`` pair if already loaded."""
-        return self._loaded_models.get(model_name)
+        """Return ``(model, tokenizer)`` if already loaded, else ``None``.
+
+        Peek-only — does not trigger a load.
+        """
+        h = self._handles.get(model_name)
+        if h is None:
+            return None
+        return h.model, h.tokenizer
 
     def clear_cache(self) -> None:
-        """Release all loaded models from memory."""
-        self._loaded_models.clear()
+        """Drop all handles from the registry.
+
+        In-flight callers keep their handle alive via their own reference;
+        new callers will reload on next access.
+        """
+        with self._lock:
+            self._handles.clear()
+
+    @contextlib.contextmanager
+    def inference_context(self, model_name: str) -> Iterator[tuple[object, object]]:
+        """Acquire the per-tokenizer lock and yield ``(model, tokenizer)``.
+
+        Fetching the handle and taking its lock in one step guarantees the
+        lock is the one bound to the yielded tokenizer — even if
+        ``clear_cache()`` races, the handle stays alive via this caller's
+        reference.  The HuggingFace tokenizer (Rust-backed, RefCell) is not
+        re-entrant, so inference must be serialised by this lock.
+
+        Args:
+            model_name: ModelScope model identifier.
+
+        Yields:
+            ``(model, tokenizer)``.  The lock is held for the ``with`` block.
+
+        Raises:
+            ModelLoadError: if the model cannot be loaded.
+        """
+        handle = self._get_handle(model_name)
+        with handle.inference_lock:
+            yield handle.model, handle.tokenizer
 
     @property
     def device(self) -> str:
@@ -153,6 +191,32 @@ class ModelManager:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _get_handle(self, model_name: str) -> _ModelHandle:
+        """Return the handle for *model_name*, loading on first use.
+
+        Single registration point for ``load_model`` and ``inference_context``:
+        model, tokenizer and lock are always created and discovered together.
+        Double-checked locking — fast path reads ``_handles`` unlocked
+        (``dict.get`` is atomic under the GIL), slow path re-checks under
+        ``_lock`` before ``_do_load``.
+        """
+        handle = self._handles.get(model_name)
+        if handle is not None:
+            return handle
+
+        with self._lock:
+            # Double-check after acquiring the registry lock.
+            handle = self._handles.get(model_name)
+            if handle is None:
+                model, tokenizer = self._do_load(model_name)
+                handle = _ModelHandle(
+                    model=model,
+                    tokenizer=tokenizer,
+                    inference_lock=threading.Lock(),
+                )
+                self._handles[model_name] = handle
+            return handle
 
     @staticmethod
     def detect_device() -> str:

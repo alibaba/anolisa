@@ -71,6 +71,9 @@ describe('ShellProcessor', () => {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getChildProcessEnv: vi
+        .fn()
+        .mockReturnValue({ COSH_SESSION_ID: 'test-session-id' }),
       getShellExecutionConfig: vi.fn().mockReturnValue({}),
       getAllowedTools: vi.fn().mockReturnValue([]),
     };
@@ -150,6 +153,7 @@ describe('ShellProcessor', () => {
       expect.any(Object),
       false,
       expect.any(Object),
+      { COSH_SESSION_ID: 'test-session-id' },
     );
     expect(result).toEqual([{ text: 'The current status is: On branch main' }]);
   });
@@ -222,6 +226,7 @@ describe('ShellProcessor', () => {
       expect.any(Object),
       false,
       expect.any(Object),
+      { COSH_SESSION_ID: 'test-session-id' },
     );
     expect(result).toEqual([{ text: 'Do something dangerous: deleted' }]);
   });
@@ -251,6 +256,7 @@ describe('ShellProcessor', () => {
       expect.any(Object),
       false,
       expect.any(Object),
+      { COSH_SESSION_ID: 'test-session-id' },
     );
     expect(result).toEqual([{ text: 'Do something dangerous: deleted' }]);
   });
@@ -444,6 +450,7 @@ describe('ShellProcessor', () => {
       expect.any(Object),
       false,
       expect.any(Object),
+      { COSH_SESSION_ID: 'test-session-id' },
     );
   });
 
@@ -609,6 +616,7 @@ describe('ShellProcessor', () => {
         expect.any(Object),
         false,
         expect.any(Object),
+        { COSH_SESSION_ID: 'test-session-id' },
       );
 
       expect(result).toEqual([{ text: 'Command: match found' }]);
@@ -634,6 +642,7 @@ describe('ShellProcessor', () => {
         expect.any(Object),
         false,
         expect.any(Object),
+        { COSH_SESSION_ID: 'test-session-id' },
       );
 
       expect(result).toEqual([
@@ -705,6 +714,7 @@ describe('ShellProcessor', () => {
         expect.any(Object),
         false,
         expect.any(Object),
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
 
@@ -735,6 +745,7 @@ describe('ShellProcessor', () => {
         expect.any(Object),
         false,
         expect.any(Object),
+        { COSH_SESSION_ID: 'test-session-id' },
       );
     });
   });

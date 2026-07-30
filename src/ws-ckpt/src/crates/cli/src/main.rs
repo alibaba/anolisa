@@ -338,6 +338,9 @@ async fn main() {
             }
             if !is_daemon {
                 eprintln!("\x1b[31mError: {:#}\x1b[0m", e);
+            } else {
+                // Surface failure reason in daemon mode (captured by journald).
+                eprintln!("ws-ckpt daemon failed to start: {:#}", e);
             }
             process::exit(1);
         }

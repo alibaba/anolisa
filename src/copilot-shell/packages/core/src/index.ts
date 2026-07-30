@@ -201,6 +201,8 @@ export * from './utils/browser.js';
 // OpenAI Logging Utilities
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
 export { Storage } from './config/storage.js';
+// cosh-ng (config.toml) compatibility - read-only
+export { loadCoshNgAuth, type CoshNgAuth } from './config/coshNgAuth.js';
 
 // Export test utils
 export * from './test-utils/index.js';

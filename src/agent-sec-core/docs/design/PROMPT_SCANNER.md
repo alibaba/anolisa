@@ -621,5 +621,5 @@ uv run python -c "from modelscope import snapshot_download; snapshot_download('L
 | 自定义规则加载 | `ScanConfig.custom_rules_path` 字段已定义；内置规则自动加载，自定义规则加载集成待完成（可直接调用 `load_rules_from_yaml()` 后传给 `RuleEngine`）|
 | L2 模型冷启动 | 首次加载约 2–5 s；**建议安装后执行 `scan-prompt warmup` 预热** |
 | L2 为二分类器 | Llama-Prompt-Guard-2 只区分 BENIGN 和 JAILBREAK，injection 类型最终通过 L1 规则的 category 字段推断 |
-| 批量扫描并发策略 | `scan_batch` 在 STANDARD/STRICT 模式下强制串行执行（HuggingFace tokenizer Rust 后端非线程安全，`_inference_lock` 序列化推理，多线程只会增加开销）；仅 FAST 模式（纯 L1）使用 `ThreadPoolExecutor` |
+| 批量扫描并发策略 | `scan_batch` 在 STANDARD/STRICT 模式下强制串行执行（HuggingFace tokenizer Rust 后端非线程安全，`ModelManager.inference_context` 序列化推理，多线程只会增加开销）；仅 FAST 模式（纯 L1）使用 `ThreadPoolExecutor` |
 | 语言检测 | 当前为启发式规则（Unicode 脚本块比例 ≥ 15%），非 ML 模型；支持 `zh`/`ar`/`ru`/`hi`/`en`；日文汉字及韩文归为 `zh` |

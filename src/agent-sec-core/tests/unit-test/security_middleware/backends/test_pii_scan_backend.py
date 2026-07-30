@@ -1,10 +1,23 @@
 """Unit tests for security_middleware.backends.pii_scan."""
 
 import json
+from pathlib import Path
 
+import pytest
 from agent_sec_cli.pii_checker.scanner import DEFAULT_MAX_BYTES
 from agent_sec_cli.security_middleware.backends.pii_scan import PiiScanBackend
 from agent_sec_cli.security_middleware.context import RequestContext
+
+
+@pytest.fixture(autouse=True)
+def _isolate_custom_rules_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
+def _write_custom_rules(home: Path, content: str) -> None:
+    path = home / ".config" / "agent-sec" / "pii-checker" / "rules.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def test_backend_returns_json_result():
@@ -68,6 +81,7 @@ def test_backend_rejects_invalid_max_bytes():
     assert result.exit_code == 1
     assert result.data["verdict"] == "error"
     assert result.data["summary"]["error_type"] == "ValueError"
+    assert result.error_type == "ValueError"
 
 
 def test_backend_rejects_non_integer_max_bytes():
@@ -81,6 +95,7 @@ def test_backend_rejects_non_integer_max_bytes():
     assert result.success is False
     assert result.exit_code == 1
     assert result.data["summary"]["error_type"] == "ValueError"
+    assert result.error_type == "ValueError"
 
 
 def test_backend_error_preserves_error_type_without_traceback(monkeypatch):
@@ -98,6 +113,7 @@ def test_backend_error_preserves_error_type_without_traceback(monkeypatch):
     assert result.success is False
     assert result.exit_code == 1
     assert result.data["summary"]["error_type"] == "RuntimeError"
+    assert result.error_type == "RuntimeError"
     assert result.error == "pii_scan error: scanner failed"
     assert "Traceback" not in result.stdout
 
@@ -155,3 +171,69 @@ def test_backend_audit_details_allow_null_max_bytes_without_input_text():
 
     assert details["request"]["max_bytes"] is None
     assert sensitive not in details_text
+
+
+def test_backend_custom_rules_flow_into_sanitized_audit_details(tmp_path: Path):
+    pattern = "DFT-[A-Z0-9]{8}"
+    sensitive = "DFT-ABC12345"
+    _write_custom_rules(
+        tmp_path,
+        f"- type: dogfood_token\n  regex: '{pattern}'\n  severity: deny\n",
+    )
+    backend = PiiScanBackend()
+
+    result = backend.execute(
+        RequestContext(action="pii_scan"),
+        text=sensitive,
+        source="tool_output",
+        redact_output=True,
+    )
+    details = backend.build_event_details(
+        result,
+        {"text": sensitive, "source": "tool_output", "redact_output": True},
+    )
+    details_text = json.dumps(details, ensure_ascii=False)
+
+    custom_summary = details["result"]["summary"]["custom_rules"]
+    assert result.success is True
+    assert result.data["verdict"] == "deny"
+    assert details["result"]["findings"][0]["type"] == "dogfood_token"
+    assert custom_summary["status"] == "loaded"
+    assert custom_summary["rule_count"] == 1
+    assert len(custom_summary["ruleset_sha256"]) == 64
+    assert pattern not in details_text
+    assert sensitive not in details_text
+    assert ".config" not in details_text
+
+
+def test_backend_invalid_custom_rules_fail_open_with_builtins(tmp_path: Path, caplog):
+    sensitive_pattern = "[private-business-pattern"
+    _write_custom_rules(
+        tmp_path,
+        f"- type: dogfood_token\n  regex: '{sensitive_pattern}'\n",
+    )
+    backend = PiiScanBackend()
+
+    result = backend.execute(
+        RequestContext(action="pii_scan"),
+        text="alice@company.cn",
+    )
+    details = backend.build_event_details(
+        result,
+        {"text": "alice@company.cn", "source": "user_input"},
+    )
+    details_text = json.dumps(details, ensure_ascii=False)
+    custom_summary = details["result"]["summary"]["custom_rules"]
+
+    assert result.success is True
+    assert result.exit_code == 0
+    assert result.data["verdict"] == "warn"
+    assert result.data["findings"][0]["type"] == "email"
+    assert result.data["summary"]["custom_rules"]["status"] == "invalid"
+    assert custom_summary["status"] == "invalid"
+    assert custom_summary["error_code"] == "invalid_regex"
+    assert len(custom_summary["ruleset_sha256"]) == 64
+    assert sensitive_pattern not in caplog.text
+    assert sensitive_pattern not in details_text
+    assert "alice@company.cn" not in details_text
+    assert ".config" not in details_text

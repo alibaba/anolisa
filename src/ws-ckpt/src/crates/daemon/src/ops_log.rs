@@ -6,6 +6,7 @@ use serde::Serialize;
 use ws_ckpt_common::{Request, Response};
 
 const OPS_LOG_PATH: &str = "/var/log/anolisa/sls/ops/ws-ckpt.jsonl";
+const TELEMETRY_GATE: &str = "/etc/anolisa/.telemetry_disabled";
 const KNOWN_AGENTS: &[&str] = &["user", "hermes", "openclaw"];
 static OPS_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -65,6 +66,11 @@ pub fn detect_agent_name(pid: u32) -> String {
 }
 
 pub fn log_operation(ops_name: &'static str, agent_name: &str, response: &Response) {
+    if std::path::Path::new(TELEMETRY_GATE).exists() || !std::path::Path::new(OPS_LOG_PATH).exists()
+    {
+        return;
+    }
+
     let err_reason = match response {
         Response::Error { message, .. } => message.as_str(),
         _ => "none",

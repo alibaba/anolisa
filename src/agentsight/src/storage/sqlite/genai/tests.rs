@@ -446,8 +446,13 @@ fn test_list_sessions() {
     assert_eq!(r[0].session_id, "sess-1");
     assert_eq!(r[0].conversation_count, 2);
     assert_eq!(r[0].total_input_tokens, 500);
+    // Only call-3 in sess-1 carries a user_query, so it is both preview ends.
+    assert_eq!(r[0].first_user_query.as_deref(), Some("what is rust"));
+    assert_eq!(r[0].last_user_query.as_deref(), Some("what is rust"));
     assert_eq!(r[1].session_id, "sess-2");
     assert_eq!(r[1].total_input_tokens, 550);
+    assert_eq!(r[1].first_user_query, None);
+    assert_eq!(r[1].last_user_query, None);
     cleanup_db(&path);
 }
 
@@ -1084,6 +1089,44 @@ fn test_list_sessions_only_auxiliary_hidden() {
 }
 
 #[test]
+fn test_list_sessions_preview_honors_call_kind_filter() {
+    let store = make_store_with_pending(&[
+        ("c1", "sess-a", "conv-1", "recap", 1000),
+        ("c2", "sess-a", "conv-2", "main", 2000),
+    ]);
+    // Give both calls a user_query: the auxiliary one must not become the
+    // preview when auxiliary calls are excluded.
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE genai_events SET user_query = 'recap query' WHERE call_id = 'c1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE genai_events SET user_query = 'main query' WHERE call_id = 'c2'",
+            [],
+        )
+        .unwrap();
+    }
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].first_user_query.as_deref(), Some("main query"));
+    assert_eq!(sessions[0].last_user_query.as_deref(), Some("main query"));
+
+    // With auxiliary included, the earlier recap query becomes the first.
+    let sessions_all = store.list_sessions(0, 10000, true).unwrap();
+    assert_eq!(
+        sessions_all[0].first_user_query.as_deref(),
+        Some("recap query")
+    );
+    assert_eq!(
+        sessions_all[0].last_user_query.as_deref(),
+        Some("main query")
+    );
+}
+
+#[test]
 fn test_list_traces_by_session_excludes_auxiliary() {
     let store = make_store_with_pending(&[
         ("c1", "sess-x", "conv-main", "main", 1000),
@@ -1118,4 +1161,108 @@ fn test_list_traces_call_kind_filter_with_time_range() {
         .list_traces_by_session("sess-t", Some(0), Some(3000), true)
         .unwrap();
     assert_eq!(traces_all.len(), 2);
+}
+
+// ─── poison-recovery tests ─────────────────────────────────────────────────
+
+/// After intentionally poisoning the conn mutex, methods that use
+/// `unwrap_or_else(|e| e.into_inner())` should still operate correctly.
+#[test]
+fn poison_recovery_conn_still_operational() {
+    let (store, path) = create_populated_store("poison_conn");
+
+    // Intentionally poison the conn mutex by panicking while holding the lock
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = store.conn.lock().unwrap();
+        panic!("intentional poison");
+    }));
+    assert!(result.is_err(), "Mutex should be poisoned");
+
+    // Exercise the poison-recovery path: get_events_by_session locks conn
+    // and should recover via unwrap_or_else(|e| e.into_inner())
+    let events = store.get_events_by_session("sess-1").unwrap();
+    assert!(
+        !events.is_empty(),
+        "Should still read after conn poison recovery"
+    );
+
+    // Also exercise a write path (schema.rs: wal_checkpoint via VACUUM)
+    store.wal_checkpoint().unwrap();
+
+    cleanup_db(&path);
+}
+
+/// After intentionally poisoning the pending and last_flush mutexes,
+/// flush() should still operate correctly via poison recovery.
+#[test]
+fn poison_recovery_flush_still_operational() {
+    let (store, path) = create_populated_store("poison_flush");
+
+    // Insert a pending event (normal path) to populate the pending buffer
+    let info = PendingCallInfo {
+        call_id: "poison-flush-1".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-pf".to_string()),
+        session_id: Some("s-pf".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 99,
+        process_name: "test-proc".to_string(),
+        agent_name: Some("test-agent".to_string()),
+        http_method: None,
+        http_path: None,
+        input_messages: None,
+        system_instructions: None,
+        user_query: Some("hello".to_string()),
+        is_sse: false,
+        model: Some("gpt-4".to_string()),
+        provider: Some("openai".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::RequestCapture,
+        pending_match_key: None,
+    };
+    store.insert_pending(&info).unwrap();
+
+    // Also add to the pending event buffer (for flush)
+    {
+        let mut pending = store.pending.lock().unwrap();
+        use crate::genai::semantic::{GenAISemanticEvent, LLMCall, LLMRequest};
+        let call = LLMCall::new(
+            "poison-flush-2".to_string(),
+            BASE_NS as u64,
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            LLMRequest {
+                messages: vec![],
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            99,
+            "test-agent".to_string(),
+        );
+        pending.push(GenAISemanticEvent::LLMCall(call));
+    }
+
+    // Poison both the pending and last_flush mutexes
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _g1 = store.pending.lock().unwrap();
+        let _g2 = store.last_flush.lock().unwrap();
+        panic!("intentional poison");
+    }));
+    assert!(result.is_err(), "Mutexes should be poisoned");
+
+    // flush() exercises:
+    //   - pending.lock().unwrap_or_else(|e| e.into_inner())  (mod.rs)
+    //   - last_flush.lock().unwrap_or_else(|e| e.into_inner())  (mod.rs)
+    store.flush();
+
+    cleanup_db(&path);
 }

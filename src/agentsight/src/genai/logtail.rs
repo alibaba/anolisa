@@ -27,6 +27,64 @@ pub const LOGTAIL_ENV_VAR: &str = "SLS_LOGTAIL_FILE";
 /// AgentSight 使用此路径作为本地默认 SLS 输出文件。
 pub const DEFAULT_SLS_LOGTAIL_PATH: &str = "/var/log/anolisa/sls/ops/agentsight.jsonl";
 
+/// 写入默认 SLS 路径（[`DEFAULT_SLS_LOGTAIL_PATH`]）时保留的字段白名单。
+///
+/// 默认路径面向概览级采集，仅保留模型、Token、Agent、Skill 等关键指标，
+/// 删除对话内容、请求参数、时间戳明细等字段以降低数据量。
+/// sysom 路径与环境变量路径不受影响，保持完整字段。
+///
+/// 注意：`__time__`/`__source__`/`__topic__` 等 iLogtail 保留字段也不保留，
+/// 仅按本白名单输出。
+const DEFAULT_PATH_KEEP_FIELDS: &[&str] = &[
+    // LLMCall 记录保留字段
+    "gen_ai.operation.name",
+    "gen_ai.provider.name",
+    "gen_ai.request.model",
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+    "agentsight.agent.name",
+    "agentsight.http.domain",
+    "agent.skill.name",
+    "agent.skill.load_count",
+    // 中断事件记录保留字段
+    "agentsight.interruption.type",
+    "agentsight.interruption.severity",
+];
+
+/// 按 [`DEFAULT_PATH_KEEP_FIELDS`] 白名单原地精简记录。
+///
+/// 仅保留 [`DEFAULT_PATH_KEEP_FIELDS`] 白名单字段，删除其余字段。
+/// 仅用于默认 SLS 路径的写入；其他路径应写入完整记录。
+fn slim_records_for_default_path(records: &mut [BTreeMap<String, String>]) {
+    for m in records.iter_mut() {
+        m.retain(|k, _| DEFAULT_PATH_KEEP_FIELDS.contains(&k.as_str()));
+    }
+}
+
+/// 遥测禁用哨兵文件路径（默认路径写前门控的第二级）。
+///
+/// 默认路径写入采用两级门控：第一级是目标文件必须存在
+/// （`require_path_exists`，标识 iLogtail 已部署）；第二级即本哨兵文件 ——
+/// 运维创建此文件即可显式关闭默认路径遥测。sysom / 环境变量路径不受影响。
+const TELEMETRY_DISABLED_SENTINEL: &str = "/etc/anolisa/.telemetry_disabled";
+
+/// 检查默认路径遥测是否被哨兵文件禁用。
+///
+/// 每次调用都执行一次 `stat`（经由 [`std::path::Path::exists`]），不做缓存，
+/// 以便运维通过创建 / 删除哨兵文件即时开关默认路径遥测。
+fn default_path_telemetry_disabled() -> bool {
+    telemetry_disabled_at(std::path::Path::new(TELEMETRY_DISABLED_SENTINEL))
+}
+
+/// 判定给定哨兵路径是否存在（存在即视为遥测被禁用）。
+///
+/// 抽出路径参数以便单元测试用临时文件覆盖存在 / 不存在两种分支，
+/// 生产逻辑通过 [`default_path_telemetry_disabled`] 传入固定的
+/// [`TELEMETRY_DISABLED_SENTINEL`]。
+fn telemetry_disabled_at(sentinel: &std::path::Path) -> bool {
+    sentinel.exists()
+}
+
 /// 动态 Logtail 路径（由 config watcher 运行时设置）
 static DYNAMIC_LOGTAIL_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
@@ -265,13 +323,28 @@ impl LogtailExporter {
             self.path.clone()
         };
 
+        // 默认路径写前门控（总开关，优先短路）：每次写前 stat 遥测禁用哨兵文件，
+        // 存在则视为运维已关闭默认路径遥测，直接跳过，不再检查目标文件。
+        // sysom / 环境变量路径不受此门控影响。
+        if target_path == std::path::Path::new(DEFAULT_SLS_LOGTAIL_PATH)
+            && default_path_telemetry_disabled()
+        {
+            return;
+        }
+
+        // 部署检查：目标文件不存在（iLogtail 未部署）则跳过，不自动创建。
         if self.require_path_exists && !target_path.exists() {
             return;
         }
 
-        let records = events_to_flat_records(events, self.encryptor.as_ref(), self.trace_enabled);
+        let mut records =
+            events_to_flat_records(events, self.encryptor.as_ref(), self.trace_enabled);
         if records.is_empty() {
             return;
+        }
+        // 默认 SLS 路径仅保留概览级字段；sysom / 环境变量路径写入完整记录。
+        if target_path == std::path::Path::new(DEFAULT_SLS_LOGTAIL_PATH) {
+            slim_records_for_default_path(&mut records);
         }
 
         let file = match OpenOptions::new()
@@ -746,8 +819,17 @@ pub fn export_interruption_events(events: &[InterruptionEvent]) {
         return;
     }
 
+    // 默认路径仅保留概览级字段（interruption.type / severity）；
+    // sysom / 环境变量路径写入完整记录。
+    let mut slim_records = records.clone();
+    slim_records_for_default_path(&mut slim_records);
+
     let default_path = std::path::PathBuf::from(DEFAULT_SLS_LOGTAIL_PATH);
     for path in &paths {
+        // 默认路径写前门控（总开关，优先短路）：哨兵文件存在则跳过默认路径写入。
+        if path == &default_path && default_path_telemetry_disabled() {
+            continue;
+        }
         // Skip the default path when it does not exist, matching the behavior
         // of the default LogtailExporter for LLMCall records.
         if path == &default_path && !path.exists() {
@@ -756,7 +838,12 @@ pub fn export_interruption_events(events: &[InterruptionEvent]) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        write_interruption_records_to_path(path, &records);
+        let records_to_write = if path == &default_path {
+            &slim_records
+        } else {
+            &records
+        };
+        write_interruption_records_to_path(path, records_to_write);
     }
 }
 
@@ -793,7 +880,7 @@ fn write_interruption_records_to_path(
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::genai::semantic::{
         InputMessage, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage, TokenUsage,
@@ -979,7 +1066,11 @@ mod tests {
 
     // Serialize tests that mutate the process-wide SLS_LOGTAIL_FILE env var
     // or the global dynamic logtail path.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    //
+    // Background tests also acquire this lock because `logtail_path()` checks
+    // the environment variable before the dynamic path, so any concurrent
+    // env-var mutation would otherwise make their path assertions flaky.
+    pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn reset_logtail_state() {
         // SAFETY: tests acquire ENV_LOCK before mutating this variable,
@@ -1263,5 +1354,126 @@ mod tests {
 
         assert!(!default.exists());
         reset_logtail_state();
+    }
+
+    #[test]
+    fn test_slim_records_keeps_only_whitelisted_llm_fields() {
+        // 完整 LLMCall 记录经精简后，仅保留白名单业务字段与 iLogtail 保留字段。
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        let mut records = events_to_flat_records(&[event], None, true);
+        assert_eq!(records.len(), 1);
+
+        // 精简前应包含将被删除的字段
+        assert!(records[0].contains_key("gen_ai.input.messages"));
+        assert!(records[0].contains_key("gen_ai.request.temperature"));
+        assert!(records[0].contains_key("agentsight.pid"));
+
+        slim_records_for_default_path(&mut records);
+        let r = &records[0];
+
+        // 保留：白名单业务字段
+        assert_eq!(
+            r.get("gen_ai.provider.name").map(String::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            r.get("gen_ai.request.model").map(String::as_str),
+            Some("gpt-4")
+        );
+        assert_eq!(
+            r.get("gen_ai.usage.input_tokens").map(String::as_str),
+            Some("100")
+        );
+        assert_eq!(
+            r.get("gen_ai.usage.output_tokens").map(String::as_str),
+            Some("50")
+        );
+        assert!(r.contains_key("gen_ai.operation.name"));
+        assert!(r.contains_key("agent.skill.name"));
+        assert!(r.contains_key("agent.skill.load_count"));
+
+        // 删除：iLogtail 系统字段
+        assert!(!r.contains_key("__time__"));
+        assert!(!r.contains_key("__source__"));
+        assert!(!r.contains_key("__topic__"));
+
+        // 删除：对话内容、请求参数、时间戳明细、instance/uid 等
+        assert!(!r.contains_key("gen_ai.input.messages"));
+        assert!(!r.contains_key("gen_ai.output.messages"));
+        assert!(!r.contains_key("gen_ai.system_instructions"));
+        assert!(!r.contains_key("gen_ai.request.temperature"));
+        assert!(!r.contains_key("agentsight.pid"));
+        assert!(!r.contains_key("agentsight.duration_ns"));
+        assert!(!r.contains_key("gen_ai.response.id"));
+        assert!(!r.contains_key("instance"));
+    }
+
+    #[test]
+    fn test_slim_records_keeps_only_whitelisted_interruption_fields() {
+        // 中断记录经精简后，仅保留 interruption.type / severity。
+        let event = InterruptionEvent::new(
+            crate::interruption::InterruptionType::AgentCrash,
+            Some("session-1".to_string()),
+            None,
+            Some("conv-1".to_string()),
+            None,
+            Some(42),
+            Some("test-agent".to_string()),
+            1_000_000,
+            Some(serde_json::json!({"pid": 42})),
+        );
+        let mut records = interruption_events_to_flat_records(&[event]);
+        assert_eq!(records.len(), 1);
+
+        slim_records_for_default_path(&mut records);
+        let r = &records[0];
+
+        // 保留：白名单中断字段
+        assert!(r.contains_key("agentsight.interruption.type"));
+        assert!(r.contains_key("agentsight.interruption.severity"));
+
+        // 删除：系统字段与会话关联、明细字段
+        assert!(!r.contains_key("__time__"));
+        assert!(!r.contains_key("__source__"));
+        assert!(!r.contains_key("__topic__"));
+        assert!(!r.contains_key("gen_ai.session.id"));
+        assert!(!r.contains_key("gen_ai.conversation.id"));
+        assert!(!r.contains_key("agentsight.interruption.id"));
+        assert!(!r.contains_key("agentsight.interruption.detail"));
+        assert!(!r.contains_key("agentsight.pid"));
+    }
+
+    #[test]
+    fn test_telemetry_sentinel_absent_means_enabled() {
+        // 正常环境下哨兵文件不存在，默认路径遥测不应被禁用。
+        // 测试不创建 /etc 下文件，避免污染系统与依赖 root 权限；
+        // 仅在哨兵文件确实不存在时断言，保证 CI 稳定。
+        if !std::path::Path::new(TELEMETRY_DISABLED_SENTINEL).exists() {
+            assert!(!default_path_telemetry_disabled());
+        }
+    }
+
+    #[test]
+    fn test_telemetry_disabled_at_reflects_sentinel_presence() {
+        // 用临时文件覆盖门控核心判断的存在 / 不存在两条分支，
+        // 不依赖硬编码的 /etc 哨兵路径，也无需 root。
+        let tmp =
+            std::env::temp_dir().join(format!("agentsight_telemetry_gate_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let sentinel = tmp.join(".telemetry_disabled");
+
+        // 不存在 → 未禁用
+        assert!(!sentinel.exists());
+        assert!(!telemetry_disabled_at(&sentinel));
+
+        // 创建后存在 → 禁用
+        std::fs::write(&sentinel, "").unwrap();
+        assert!(telemetry_disabled_at(&sentinel));
+
+        // 删除后恢复 → 再次未禁用（验证实时 stat、不缓存）
+        std::fs::remove_file(&sentinel).unwrap();
+        assert!(!telemetry_disabled_at(&sentinel));
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

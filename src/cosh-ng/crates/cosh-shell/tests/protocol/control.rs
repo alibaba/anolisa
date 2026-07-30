@@ -30,6 +30,21 @@ fn wait_for_session_id(
     false
 }
 
+fn wait_for_cosh_core_session(
+    session_state: &Arc<Mutex<cosh_shell::adapter::SessionRuntimeState>>,
+    expected: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if session_state.lock().unwrap().active_session_id() == Some(expected) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
 #[path = "control/approval_round_trip.rs"]
 mod approval_round_trip;
 #[path = "control/host_executed.rs"]

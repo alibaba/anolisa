@@ -25,19 +25,21 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     );
     let home_str = home.to_string_lossy().to_string();
     let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
-    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "cosh-core",
         &[],
         &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
-        vec![
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
             (
-                b"?? cosh-core-malformed-provider-event\n".to_vec(),
-                Duration::ZERO,
+                "cosh-osc$",
+                b"?? cosh-core-malformed-provider-event\n".as_slice(),
             ),
             (
-                b"echo after-malformed-provider\nexit\n".to_vec(),
-                Duration::from_millis(1_500),
+                "cosh-core malformed provider fixture stderr",
+                b"echo after-malformed-provider\n".as_slice(),
             ),
+            ("after-malformed-provider", b"exit\n".as_slice()),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -46,6 +48,8 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         output.contains("cosh-core malformed provider fixture stderr"),
         "{output}"
     );
+    assert!(!output.contains("Agent question unavailable"), "{output}");
+    assert!(!output.contains(r#"{"type":"assistant""#), "{output}");
     assert!(output.contains("after-malformed-provider"), "{output}");
     assert!(
         !output.contains("bash: cosh-core-malformed-provider-event: command not found"),
@@ -153,12 +157,18 @@ sleep 60
         .expect("spawn cosh-shell raw");
     let raw_pid = child.id();
     let mut stdin = child.stdin.take().expect("child stdin");
+    let writer_pid_file = pid_file.clone();
     let writer = thread::spawn(move || {
         stdin
             .write_all(b"?? cosh-core-process-cleanup\n")
             .expect("write prompt");
         stdin.flush().expect("flush prompt");
-        thread::sleep(Duration::from_millis(1_200));
+        for _ in 0..100 {
+            if writer_pid_file.is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
         stdin.write_all(b"/cancel\n").expect("write cancel");
         stdin.flush().expect("flush cancel");
         thread::sleep(Duration::from_millis(1_000));

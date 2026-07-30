@@ -444,6 +444,11 @@ mod tests {
     }
 
     #[test]
+    fn test_sls_writer_default_trait() {
+        let _writer = SlsWriter::default();
+    }
+
+    #[test]
     fn test_sls_writer_writes_to_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");

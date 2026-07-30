@@ -1,4 +1,4 @@
-%define anolis_release 2
+%define anolis_release 3
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -130,9 +130,9 @@ fi
 ln -sf %{_libexecdir}/anolisa/tokenless/rtk %{buildroot}%{_bindir}/rtk
 ln -sf %{_libexecdir}/anolisa/tokenless/toon %{buildroot}%{_bindir}/toon
 
-# Install documentation
-install -m 0644 docs/tokenless-user-manual-en.md %{buildroot}%{_docdir}/tokenless/
-install -m 0644 docs/tokenless-user-manual-zh.md %{buildroot}%{_docdir}/tokenless/
+# Install documentation. The bilingual user manual moved to the
+# repository-level docs/user-guide tree and is published with the ANOLISA
+# documentation, not packaged per-component.
 install -m 0644 docs/response-compression.md %{buildroot}%{_docdir}/tokenless/
 install -m 0644 LICENSE %{buildroot}%{_docdir}/tokenless/
 
@@ -228,8 +228,6 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_libexecdir}/anolisa/tokenless/toon
 %doc %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
-%doc %{_docdir}/tokenless/tokenless-user-manual-en.md
-%doc %{_docdir}/tokenless/tokenless-user-manual-zh.md
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/components
 %dir %{_datadir}/anolisa/components/tokenless
@@ -448,6 +446,18 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Jul 16 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.7.0-3
+- fix(tokenless): declare all shipped adapters (claude-code, codex, cosh, qoder) in RPM component contract template; exclude generated component.toml from source tarball to prevent stale contracts (GH-1470)
+
+* Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.7.0-1
+- feat(tokenless): add MCP `tokenless_retrieve` stdio server (`tokenless mcp serve`); closes the stash MCP gap vs Headroom CCR's `headroom_retrieve`
+- feat(tokenless): complete reversible-compression (stash) coverage across string, depth, and SchemaCompressor description truncation paths; add `--no-stash`/`--stash-db` to `compress-schema`; SqliteStore lazy TTL purge
+- feat(tokenless): add actual-savings-rate display and JSON fields (session_total_tokens / actual_savings_tokens / actual_savings_percent); record stash writes/size in compression stats
+- feat(anolisa): built-in qoder framework driver (qodercli install + settings.json merge/prune, symlink-safe atomic write_file); gate qoder to adapter_type=plugin; fail closed on forged receipts
+- test(tokenless): raise coverage from 59% to 75% via 100+ unit and 18 CLI integration tests
+- docs(tokenless): add `docs/stash-reversible-compression.md`, README architecture-tree/retrieve subsections, rename `*_CN.md` to `*_zh.md`, add missing `README.md` + `README_zh.md`
+- fix(anolisa): address adapter review — trust packaged datadir roots for Codex symlinks; scope Claude Code marketplaces per component; reject framework/adapter type mismatches before enable
+
 * Sat Jul 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.6.1-2
 - fix(tokenless): sync stale version stamps to 0.6.1 (component.toml, cosh-extension.json, user-manual footers); bump anolis_release to 2
 

@@ -134,6 +134,29 @@ pub fn disable_unit(unit: &str) -> Result<(), SystemdError> {
     Err(classify_error(unit, &out))
 }
 
+/// Disable a unit without blocking on its stop sequence.
+///
+/// Unlike [`disable_unit`] (`disable --now`), this never waits for the unit to
+/// drain its shutdown: `stop --no-block` enqueues termination and returns
+/// immediately, then plain `disable` removes the `WantedBy` boot symlink. An
+/// explicit stop also suppresses `Restart=`, so the unit will not churn after
+/// it goes down. Use this when the caller has already flipped an authoritative
+/// off-switch (e.g. a persistent opt-out marker) and only needs systemd to
+/// stop relaunching the unit — without paying the unit's `TimeoutStopSec`.
+pub fn disable_unit_deferred(unit: &str) -> Result<(), SystemdError> {
+    if unit.trim().is_empty() {
+        return Err(SystemdError::NotFound("<empty>".to_string()));
+    }
+    // Best-effort, non-blocking stop; the subsequent `disable` reports the
+    // authoritative outcome, so a not-loaded/inactive unit here is ignored.
+    let _ = run_systemctl(&["stop", "--no-block", unit]);
+    let out = run_systemctl(&["disable", unit])?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(classify_error(unit, &out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +166,6 @@ mod tests {
         assert!(unit_status("agentsight.service").is_err());
         assert!(enable_unit("agentsight.service").is_err());
         assert!(disable_unit("agentsight.service").is_err());
+        assert!(disable_unit_deferred("agentsight.service").is_err());
     }
 }

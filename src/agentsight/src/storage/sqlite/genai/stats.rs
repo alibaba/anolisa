@@ -46,16 +46,16 @@ impl GenAISqliteStore {
         let range_ns = (end_ns - start_ns).max(1);
         let bucket_ns = range_ns / bucket_count as i64;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // Build query with optional agent_name filter
         let sql = if agent_name.is_some() {
             "SELECT
                 (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
                 ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
-                COALESCE(SUM(input_tokens), 0)            AS input_tokens,
+                COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0)           AS output_tokens,
-                COALESCE(SUM(total_tokens), 0)            AS total_tokens
+                COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
@@ -66,9 +66,9 @@ impl GenAISqliteStore {
             "SELECT
                 (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
                 ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
-                COALESCE(SUM(input_tokens), 0)            AS input_tokens,
+                COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS input_tokens,
                 COALESCE(SUM(output_tokens), 0)           AS output_tokens,
-                COALESCE(SUM(total_tokens), 0)            AS total_tokens
+                COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
@@ -115,14 +115,14 @@ impl GenAISqliteStore {
         let range_ns = (end_ns - start_ns).max(1);
         let bucket_ns = range_ns / bucket_count as i64;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql = if agent_name.is_some() {
             "SELECT
                 (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
                 ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
-                COALESCE(SUM(total_tokens), 0)            AS total_tokens
+                COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
@@ -134,7 +134,7 @@ impl GenAISqliteStore {
                 (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
                 ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
-                COALESCE(SUM(total_tokens), 0)            AS total_tokens
+                COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS total_tokens
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
@@ -174,12 +174,12 @@ impl GenAISqliteStore {
     pub fn get_agent_token_summary(
         &self,
     ) -> Result<Vec<AgentTokenSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT COALESCE(agent_name, process_name, 'unknown') AS agent,
-                    COALESCE(SUM(input_tokens),  0) AS input_tokens,
+                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS input_tokens,
                     COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                    COALESCE(SUM(total_tokens),  0) AS total_tokens,
+                    COALESCE(SUM(input_tokens + output_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0) AS total_tokens,
                     COUNT(*)                        AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'

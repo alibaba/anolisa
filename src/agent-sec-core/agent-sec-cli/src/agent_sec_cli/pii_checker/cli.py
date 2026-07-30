@@ -168,6 +168,23 @@ def _format_text_output(data: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _emit_custom_rules_warning(data: dict[str, Any]) -> None:
+    """Write a sanitized warning when the custom rules file is invalid."""
+    summary = data.get("summary", {})
+    if not isinstance(summary, dict):
+        return
+    custom_rules = summary.get("custom_rules", {})
+    if not isinstance(custom_rules, dict) or custom_rules.get("status") != "invalid":
+        return
+    error_code = custom_rules.get("error_code", "invalid_configuration")
+    if not isinstance(error_code, str):
+        error_code = "invalid_configuration"
+    typer.echo(
+        f"Warning: custom PII rules disabled ({error_code}).",
+        err=True,
+    )
+
+
 @scanner_app.callback(invoke_without_command=True)
 def scan_pii(
     ctx: typer.Context,
@@ -242,6 +259,8 @@ def scan_pii(
         input_truncated=input_truncated,
         input_bytes_scanned=input_bytes_scanned,
     )
+
+    _emit_custom_rules_warning(result.data)
 
     if output_format == "json":
         typer.echo(result.stdout)

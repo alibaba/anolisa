@@ -11,6 +11,38 @@ pub(super) fn emit_fake_tool_approval_stream(
     sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
 ) -> Result<bool, AdapterError> {
     let run_id = format!("fake-run-{}", request.command_block.id);
+    if input.contains("stream batch tool approval") {
+        // Multi-request turn for turn-scope batch consent (issue #1773):
+        // three distinct diagnostic commands queued in one run.
+        sink(AgentEvent::StatusChanged {
+            run_id: run_id.clone(),
+            phase: "streaming".to_string(),
+            message: "streaming fake batch approval requests".to_string(),
+        })?;
+        sink(AgentEvent::TextDelta {
+            run_id: run_id.clone(),
+            text: "Preparing a batch of streamed tool requests before finishing.".to_string(),
+        })?;
+        // Emit the three requests back-to-back so they land in the same
+        // governed-event batch: the first card already sees a multi-request
+        // turn and offers "Allow all this turn". Portable medium-risk
+        // commands keep the scripted-PTY case green on macOS and Linux.
+        thread::sleep(Duration::from_millis(100));
+        for command in ["ps aux | head", "ps aux | head -20", "df -h | head"] {
+            sink(AgentEvent::ToolCall {
+                run_id: run_id.clone(),
+                tool_id: None,
+                name: "Bash".to_string(),
+                input: command.to_string(),
+            })?;
+        }
+        sink(AgentEvent::AgentCompleted {
+            run_id,
+            summary: "batch stream approval fake analysis completed".to_string(),
+        })?;
+        return Ok(true);
+    }
+
     if input.contains("stream pwd tool approval") {
         sink(AgentEvent::StatusChanged {
             run_id: run_id.clone(),

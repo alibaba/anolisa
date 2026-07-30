@@ -80,6 +80,7 @@ class TestPostAction(unittest.TestCase):
             data={"ok": False, "verdict": "error"},
             error="scan error",
             exit_code=1,
+            error_type="ErrUnsupportedLang",
         )
 
         post_action(ctx, result, {"code": "bad"}, DummyBackend())
@@ -90,7 +91,8 @@ class TestPostAction(unittest.TestCase):
         self.assertEqual(event.result, "failed")
         self.assertEqual(event.details["result"], {"ok": False, "verdict": "error"})
         self.assertEqual(event.details["error"], "scan error")
-        self.assertNotIn("error_type", event.details)
+        self.assertEqual(event.details["error_type"], "ErrUnsupportedLang")
+        self.assertEqual(event.details["exit_code"], 1)
 
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_post_action_maps_failed_result_to_event_result(self, mock_log):

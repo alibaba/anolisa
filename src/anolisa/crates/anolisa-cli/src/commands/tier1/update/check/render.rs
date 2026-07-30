@@ -4,8 +4,8 @@
 
 use super::super::UpdateArgs;
 use super::{
-    ACTION_ERROR, ACTION_INSTALL, ACTION_NOOP, ACTION_UNSUPPORTED_RPM, ACTION_UPDATE,
-    CHECK_COMMAND, CliCheck, ComponentCheck, UpdateCheckReport,
+    ACTION_ERROR, ACTION_INSTALL, ACTION_NOOP, ACTION_RECONCILE, ACTION_UNSUPPORTED_RPM,
+    ACTION_UPDATE, CHECK_COMMAND, CliCheck, ComponentCheck, UpdateCheckReport,
 };
 use crate::color::Palette;
 use crate::context::CliContext;
@@ -38,10 +38,10 @@ pub(super) fn render_motd(ctx: &CliContext, report: &UpdateCheckReport) {
     }
 }
 
-/// Build the MOTD text, or `None` when nothing can be upgraded or installed.
+/// Build the MOTD text, or `None` when no upgrade action is required.
 pub(super) fn build_motd(report: &UpdateCheckReport) -> Option<String> {
     let summary = &report.summary;
-    if summary.updates == 0 && summary.missing_defaults == 0 {
+    if summary.updates == 0 && summary.reconciliations == 0 && summary.missing_defaults == 0 {
         return None;
     }
     let mut parts = Vec::new();
@@ -59,8 +59,20 @@ pub(super) fn build_motd(report: &UpdateCheckReport) -> Option<String> {
             plural(summary.missing_defaults)
         ));
     }
+    if summary.reconciliations > 0 {
+        parts.push(format!(
+            "{} component{} requires state reconciliation",
+            summary.reconciliations,
+            plural(summary.reconciliations)
+        ));
+    }
+    let headline = if summary.updates == 0 && summary.missing_defaults == 0 {
+        "ANOLISA state reconciliation is required."
+    } else {
+        "ANOLISA toolchain update is available."
+    };
     Some(format!(
-        "ANOLISA toolchain update is available.\n{}.\nRun: sudo anolisa upgrade to apply, or anolisa update --check for details",
+        "{headline}\n{}.\nRun: sudo anolisa upgrade to apply, or anolisa update --check for details",
         parts.join("; ")
     ))
 }
@@ -85,9 +97,10 @@ fn render_human(ctx: &CliContext, report: &UpdateCheckReport) {
 
     let summary = &report.summary;
     println!(
-        "{} {} update(s), {} new default(s), {} unsupported, {} error(s)",
+        "{} {} update(s), {} reconciliation(s), {} new default(s), {} unsupported, {} error(s)",
         color.label("summary:"),
         summary.updates,
+        summary.reconciliations,
         summary.missing_defaults,
         summary.unsupported,
         summary.errors,
@@ -148,6 +161,12 @@ fn render_component_line(component: &ComponentCheck, color: &Palette) {
             "  {} {}",
             component.component,
             color.warn("(new default — can be installed)"),
+        ),
+        ACTION_RECONCILE => println!(
+            "  {}{} {}",
+            component.component,
+            meta,
+            color.warn("(state reconciliation required)"),
         ),
         ACTION_UNSUPPORTED_RPM => println!(
             "  {}{} {}",

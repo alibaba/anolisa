@@ -15,7 +15,7 @@
 set -euo pipefail
 
 SUDO_PREFIX=""
-[ "$(id -u)" -ne 0 ] && SUDO_PREFIX="sudo"
+[ "$(id -u)" -ne 0 ] && SUDO_PREFIX="sudo -n"
 
 FIX_LOG_DIR="${HOME}/.tokenless"
 FIX_LOG="${FIX_LOG_DIR}/env-fix.log"
@@ -65,6 +65,24 @@ was_recently_fixed() {
   # dep names may contain '.' (e.g. "python3.11") which is a regex wildcard.
   awk -v c="$cutoff" '$0 >= c {print}' "$FIX_LOG" 2>/dev/null \
     | grep -Fq "fix=${dep} status=success"
+}
+
+classify_recent_failure() {
+  if [ ! -f "$FIX_LOG" ]; then
+    echo "unknown failure"
+    return
+  fi
+  local recent
+  recent=$(tail -n 80 "$FIX_LOG" 2>/dev/null || true)
+  if echo "$recent" | grep -Eiq 'sudo:.*(password|required|try again|authentication|not in the sudoers)|a password is required|no tty present'; then
+    echo "auth failed: non-interactive sudo unavailable"
+  elif echo "$recent" | grep -Eiq '(Could not resolve|Temporary failure resolving|Name or service not known|Network is unreachable|Connection timed out|Connection refused|TLS|SSL|certificate|curl: \([0-9]+\)|wget: unable|Failed to connect)'; then
+    echo "network failed"
+  elif echo "$recent" | grep -Eiq '(Permission denied|Operation not permitted)'; then
+    echo "permission denied"
+  else
+    echo "unknown failure"
+  fi
 }
 
 # --- Normalize a dep spec to object format ---
@@ -541,7 +559,8 @@ fix_dep() {
       local fb_method fb_package fb_binary fb_source fb_manifest fb_features fb_url fb_args
       fb_method=$(echo "$fallbacks" | jq -r ".[$i].method // empty")
       fb_package=$(echo "$fallbacks" | jq -r ".[$i].package // empty")
-      fb_binary=$(echo "$fallbacks" | jq -r --arg def "$binary" ".[$i].binary // \$def")
+      fb_binary=$(echo "$fallbacks" | jq -r \
+        --arg default_binary "$binary" ".[$i].binary // \$default_binary")
       fb_source=$(echo "$fallbacks" | jq -r ".[$i].source // empty")
       fb_manifest=$(echo "$fallbacks" | jq -r ".[$i].manifest // empty")
       fb_features=$(echo "$fallbacks" | jq -r ".[$i].features // empty")
@@ -576,8 +595,9 @@ fix_dep() {
   fi
 
   # All strategies failed
-  log_fix "$binary" "failed" "all strategies failed (primary: ${manager}, fallbacks: ${fallback_count})"
-  echo "[tokenless-env-fix] ${binary}: install failed (primary: ${manager}, ${fallback_count} fallbacks exhausted)"
+  failure_detail=$(classify_recent_failure)
+  log_fix "$binary" "failed" "${failure_detail} (primary: ${manager}, fallbacks: ${fallback_count})"
+  echo "[tokenless-env-fix] ${binary}: install failed — ${failure_detail} (primary: ${manager}, ${fallback_count} fallbacks exhausted)"
   return 1
 }
 

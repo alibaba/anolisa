@@ -1,5 +1,27 @@
 use crate::approval::handoff::raw_bash_command;
+use crate::journal::audit::ShellApprovalAuditInput;
 use crate::runtime::prelude::*;
+
+pub(crate) fn approval_audit_input(
+    request: &RuntimeApprovalRequest,
+) -> ShellApprovalAuditInput<'_> {
+    ShellApprovalAuditInput {
+        id: &request.id,
+        audit_ref: request.audit_ref.as_deref(),
+        session_id: &request.session_id,
+        run_id: &request.run_id,
+        request_id: request.request_id.as_deref(),
+        tool_use_id: request.tool_use_id.as_deref(),
+        subject: &request.subject,
+        risk: request.risk,
+        assessment: request
+            .assessment
+            .as_ref()
+            .map(|assessment| assessment.primary_reason),
+        preview: &request.preview,
+        status: request.status.label(),
+    }
+}
 
 pub(super) fn approval_journal_entry(
     request: &RuntimeApprovalRequest,
@@ -7,6 +29,7 @@ pub(super) fn approval_journal_entry(
 ) -> RuntimeApprovalJournalEntry {
     RuntimeApprovalJournalEntry {
         id: request.id.clone(),
+        audit_ref: request.audit_ref.clone(),
         run_id: request.run_id.clone(),
         source: request.source,
         kind: request.kind,

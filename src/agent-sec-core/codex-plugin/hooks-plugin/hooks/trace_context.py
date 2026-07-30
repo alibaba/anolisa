@@ -3,22 +3,24 @@
 import json
 from typing import Any
 
-_FIELD_MAP = {
-    "trace_id": "trace_id",
-    "session_id": "session_id",
-    "run_id": "run_id",
-    "call_id": "call_id",
-    "tool_call_id": "tool_use_id",
+_FIELD_ALIASES = {
+    "trace_id": ("trace_id",),
+    "session_id": ("session_id",),
+    "run_id": ("turn_id", "run_id"),
+    "call_id": ("call_id",),
+    "tool_call_id": ("tool_use_id", "tool_call_id"),
 }
 
 
 def trace_context(input_data: dict[str, Any]) -> dict[str, str] | None:
     """Build canonical trace context from fields directly present on hook input."""
     context: dict[str, str] = {"agent_name": "codex"}
-    for output_key, input_key in _FIELD_MAP.items():
-        value = input_data.get(input_key)
-        if isinstance(value, str) and value.strip():
-            context[output_key] = value.strip()
+    for output_key, input_keys in _FIELD_ALIASES.items():
+        for input_key in input_keys:
+            value = input_data.get(input_key)
+            if isinstance(value, str) and value.strip():
+                context[output_key] = value.strip()
+                break
     return context or None
 
 

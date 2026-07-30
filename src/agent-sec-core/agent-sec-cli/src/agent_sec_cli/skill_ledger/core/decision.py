@@ -20,9 +20,12 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     diff_file_hashes,
 )
 from agent_sec_cli.skill_ledger.core.live_root import (
-    live_skill_dir_manageability,
-    require_live_skill_dir,
-    resolve_live_skill_dir,
+    ResolvedSkillRoot,
+    SkillRootInput,
+    canonical_skill_operation,
+    resolve_skill_root,
+    skill_root_manageability,
+    validate_resolved_skill_root,
 )
 from agent_sec_cli.skill_ledger.core.manifest_helpers import (
     safe_load_latest_manifest,
@@ -50,7 +53,7 @@ from agent_sec_cli.skill_ledger.models.manifest import (
     UserDecision,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
-from agent_sec_cli.skill_ledger.utils import utc_now_iso, validate_skill_dir
+from agent_sec_cli.skill_ledger.utils import utc_now_iso
 
 _TRUSTED_CURRENT_STATUSES = {"pass", "warn", "deny"}
 _ALLOWING_DECISIONS = {"allow", "always_allow", "rollback"}
@@ -73,8 +76,9 @@ _FINDING_LEVEL_RANK = {
 logger = logging.getLogger(__name__)
 
 
+@canonical_skill_operation
 def decide_skill(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     *,
     action: str,
@@ -82,13 +86,14 @@ def decide_skill(
     reason: str | None = None,
 ) -> dict[str, Any]:
     """Apply a user decision to a skill and refresh activation."""
-    live_skill_dir = str(require_live_skill_dir(skill_dir, backend))
-    validate_skill_dir(live_skill_dir)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
     if action == "rollback":
         if not target_version_id:
-            target_version_id = _default_rollback_target(live_skill_dir, backend)
+            target_version_id = _default_rollback_target(root, backend)
         return rollback_skill(
-            live_skill_dir,
+            root,
             backend,
             target_version_id=target_version_id,
             reason=reason,
@@ -98,28 +103,33 @@ def decide_skill(
             "decision action must be one of: allow, always_allow, block, rollback"
         )
 
-    with _skill_decision_lock(live_skill_dir):
+    with _skill_decision_lock(io_skill_dir):
         manifest, status_result = _load_latest_decidable_manifest(
-            live_skill_dir,
+            root,
             backend,
         )
         manifest.userDecision = UserDecision(action=action, reason=reason)
-        _sign_and_save(live_skill_dir, manifest, backend)
-        activation = _refresh_activation(live_skill_dir, backend)
+        _sign_and_save(io_skill_dir, manifest, backend)
+        activation = _refresh_activation(root, backend)
     return _decision_payload(
-        live_skill_dir,
+        root,
         manifest,
         status=status_result.get("status"),
         activation=activation,
     )
 
 
-def clear_decision(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
+@canonical_skill_operation
+def clear_decision(
+    skill_dir: SkillRootInput,
+    backend: SigningBackend,
+) -> dict[str, Any]:
     """Remove the latest version's user decision and refresh activation."""
-    live_skill_dir = str(require_live_skill_dir(skill_dir, backend))
-    validate_skill_dir(live_skill_dir)
-    with _skill_decision_lock(live_skill_dir):
-        manifest = load_latest_manifest(live_skill_dir)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
+    with _skill_decision_lock(io_skill_dir):
+        manifest = load_latest_manifest(io_skill_dir)
         if manifest is None:
             raise SkillLedgerError(
                 "cannot clear decision: skill has no signed manifest"
@@ -130,33 +140,35 @@ def clear_decision(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
                 f"cannot clear decision on untrusted manifest: {error}"
             )
         manifest.userDecision = None
-        _sign_and_save(live_skill_dir, manifest, backend)
-        activation = _refresh_activation(live_skill_dir, backend)
+        _sign_and_save(io_skill_dir, manifest, backend)
+        activation = _refresh_activation(root, backend)
     return _decision_payload(
-        live_skill_dir,
+        root,
         manifest,
         status=None,
         activation=activation,
     )
 
 
+@canonical_skill_operation
 def rollback_skill(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     *,
     target_version_id: str,
     reason: str | None = None,
 ) -> dict[str, Any]:
     """Restore a trusted snapshot to the root and record rollback as a new version."""
-    live_skill_dir = str(require_live_skill_dir(skill_dir, backend))
-    validate_skill_dir(live_skill_dir)
-    with _skill_decision_lock(live_skill_dir):
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
+    with _skill_decision_lock(io_skill_dir):
         target_manifest = _load_trusted_version(
-            live_skill_dir,
+            io_skill_dir,
             target_version_id,
             backend,
         )
-        target_snapshot = snapshot_dir_path(live_skill_dir, target_version_id)
+        target_snapshot = snapshot_dir_path(io_skill_dir, target_version_id)
         if not target_snapshot.is_dir():
             raise SkillLedgerError(f"rollback snapshot not found: {target_version_id}")
         if not snapshot_matches_manifest(target_snapshot, target_manifest):
@@ -164,11 +176,11 @@ def rollback_skill(
                 f"rollback snapshot does not match manifest: {target_version_id}"
             )
 
-        backup_dir = _backup_root(live_skill_dir)
+        backup_dir = _backup_root(io_skill_dir)
         try:
-            _replace_root_from_snapshot(live_skill_dir, target_snapshot)
-            scan_skill(live_skill_dir, backend, force=True)
-            manifest = load_latest_manifest(live_skill_dir)
+            _replace_root_from_snapshot(io_skill_dir, target_snapshot)
+            scan_skill(root, backend, force=True)
+            manifest = load_latest_manifest(io_skill_dir)
             if manifest is None:
                 raise SkillLedgerError("rollback scan did not create a manifest")
             manifest.userDecision = UserDecision(
@@ -176,72 +188,59 @@ def rollback_skill(
                 targetVersionId=target_version_id,
                 reason=reason,
             )
-            _sign_and_save(live_skill_dir, manifest, backend)
+            _sign_and_save(io_skill_dir, manifest, backend)
         except BaseException:
-            _replace_root_from_snapshot(live_skill_dir, backup_dir)
+            _replace_root_from_snapshot(io_skill_dir, backup_dir)
             raise
 
-        activation = _refresh_activation(live_skill_dir, backend)
+        activation = _refresh_activation(root, backend)
         return _decision_payload(
-            live_skill_dir,
+            root,
             manifest,
             status=manifest.scanStatus,
             activation=activation,
-            extra={"rollbackBackup": str(backup_dir)},
+            extra={"rollbackBackup": str(root.canonical_path(backup_dir))},
         )
 
 
+@canonical_skill_operation
 def show_skill(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     *,
     policy: str | None = None,
 ) -> dict[str, Any]:
     """Return latest, active, decision, and consistency information."""
-    validate_skill_dir(skill_dir)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
     resolved_policy = resolve_activation_policy(
         {"activationPolicy": policy} if policy is not None else None
     )
-    live_resolution = resolve_live_skill_dir(skill_dir, backend)
-    managed, manageability_reason = live_skill_dir_manageability(live_resolution)
+    managed, manageability_reason = skill_root_manageability(root)
     if not managed:
         logger.info(
             "skill-ledger show skipped unmanaged skill root: skill_dir=%s reason=%s",
-            skill_dir,
+            root.canonical_dir,
             manageability_reason,
         )
         return _unmanaged_show_payload(
-            skill_dir,
+            root,
             policy=resolved_policy,
             reason=manageability_reason,
         )
-    effective_skill_dir = (
-        str(live_resolution.skill_dir)
-        if live_resolution.skill_dir is not None
-        else skill_dir
-    )
-    status_result = (
-        check(effective_skill_dir, backend)
-        if live_resolution.skill_dir is not None
-        else manifest_only_status(skill_dir, backend)
-    )
+    status_result = check(root, backend)
     summary = build_exposure_summary(
-        effective_skill_dir,
+        root,
         backend,
         status_result=status_result,
     )
-    latest_manifest = safe_load_latest_manifest(effective_skill_dir)
+    latest_manifest = safe_load_latest_manifest(io_skill_dir)
     active_version = summary.get("activeVersionId")
     active_manifest = (
-        load_version_manifest(effective_skill_dir, active_version)
-        if active_version
-        else None
+        load_version_manifest(io_skill_dir, active_version) if active_version else None
     )
-    root_matches_active = (
-        _root_matches_manifest(effective_skill_dir, active_manifest)
-        if live_resolution.skill_dir is not None
-        else None
-    )
+    root_matches_active = _root_matches_manifest(io_skill_dir, active_manifest)
     consistency_reason = _show_consistency_reason(
         summary=summary,
         latest_manifest=latest_manifest,
@@ -256,7 +255,8 @@ def show_skill(
     return {
         **summary,
         "message": display_message,
-        "skillName": Path(skill_dir).name,
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "activationPolicy": resolved_policy,
         "latest": _manifest_summary(latest_manifest, status_result),
         "active": _manifest_summary(active_manifest, None),
@@ -268,7 +268,7 @@ def show_skill(
 
 
 def _unmanaged_show_payload(
-    skill_dir: str,
+    root: ResolvedSkillRoot,
     *,
     policy: str,
     reason: str,
@@ -283,7 +283,8 @@ def _unmanaged_show_payload(
         "message": None,
         "managed": False,
         "manageabilityReason": reason,
-        "skillName": Path(skill_dir).name,
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "activationPolicy": policy,
         "latest": None,
         "active": None,
@@ -296,8 +297,9 @@ def _unmanaged_show_payload(
     }
 
 
+@canonical_skill_operation
 def export_skill(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     *,
     version: str,
@@ -306,14 +308,15 @@ def export_skill(
 ) -> dict[str, Any]:
     """Export a signed snapshot plus manifest and findings for user review.
 
-    This is a read-only ledger snapshot review path.  It intentionally does not
-    require a manageable live root for ``latest`` or explicit version exports,
-    so users can inspect hidden risky snapshots from SkillFS runtime views.
+    This read-only review path resolves the current I/O root but does not require
+    the canonical path to be explicitly listed in ``managedSkillDirs``.
     """
-    validate_skill_dir(skill_dir)
-    version_id = _resolve_export_version(skill_dir, backend, version, policy=policy)
-    manifest = _load_trusted_version(skill_dir, version_id, backend)
-    snapshot = snapshot_dir_path(skill_dir, version_id)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
+    version_id = _resolve_export_version(root, backend, version, policy=policy)
+    manifest = _load_trusted_version(io_skill_dir, version_id, backend)
+    snapshot = snapshot_dir_path(io_skill_dir, version_id)
     if not snapshot.is_dir():
         raise SkillLedgerError(f"snapshot not found for version {version_id}")
     if not snapshot_matches_manifest(snapshot, manifest):
@@ -335,7 +338,8 @@ def export_skill(
         encoding="utf-8",
     )
     return {
-        "skillName": Path(skill_dir).name,
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "versionId": version_id,
         "output": str(out_dir),
         "snapshot": str(snapshot_out),
@@ -345,23 +349,24 @@ def export_skill(
 
 
 def _load_latest_decidable_manifest(
-    skill_dir: str,
+    root: ResolvedSkillRoot,
     backend: SigningBackend,
 ) -> tuple[SignedManifest, dict[str, Any]]:
-    manifest = load_latest_manifest(skill_dir)
+    io_skill_dir = str(root.io_dir)
+    manifest = load_latest_manifest(io_skill_dir)
     if manifest is None:
         raise SkillLedgerError("cannot decide: skill has no signed manifest")
     valid, error = verify_manifest_integrity(manifest, backend)
     if not valid:
         raise SkillLedgerError(f"cannot decide on untrusted manifest: {error}")
     if not snapshot_matches_manifest(
-        snapshot_dir_path(skill_dir, manifest.versionId),
+        snapshot_dir_path(io_skill_dir, manifest.versionId),
         manifest,
     ):
         raise SkillLedgerError(
             f"cannot decide: snapshot does not match manifest: {manifest.versionId}"
         )
-    status_result = manifest_only_status(skill_dir, backend)
+    status_result = manifest_only_status(root, backend)
     if status_result.get("status") not in _TRUSTED_CURRENT_STATUSES:
         raise SkillLedgerError(
             "cannot decide on untrusted latest skill version: "
@@ -370,7 +375,10 @@ def _load_latest_decidable_manifest(
     return manifest, status_result
 
 
-def _default_rollback_target(skill_dir: str, backend: SigningBackend) -> str:
+def _default_rollback_target(
+    skill_dir: SkillRootInput,
+    backend: SigningBackend,
+) -> str:
     activation = resolve_activation(
         skill_dir,
         backend,
@@ -412,7 +420,10 @@ def _sign_and_save(
     save_manifest(skill_dir, manifest, write_version=True)
 
 
-def _refresh_activation(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
+def _refresh_activation(
+    skill_dir: SkillRootInput,
+    backend: SigningBackend,
+) -> dict[str, Any]:
     return resolve_activation(
         skill_dir,
         backend,
@@ -422,7 +433,7 @@ def _refresh_activation(skill_dir: str, backend: SigningBackend) -> dict[str, An
 
 
 def _decision_payload(
-    skill_dir: str,
+    root: ResolvedSkillRoot,
     manifest: SignedManifest,
     *,
     status: str | None,
@@ -431,7 +442,8 @@ def _decision_payload(
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "status": "decided",
-        "skillName": Path(skill_dir).name,
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "versionId": manifest.versionId,
         "scanStatus": manifest.scanStatus,
         "manifestHash": manifest.manifestHash,
@@ -698,20 +710,21 @@ def _root_matches_manifest(
 
 
 def _resolve_export_version(
-    skill_dir: str,
+    root: ResolvedSkillRoot,
     backend: SigningBackend,
     version: str,
     *,
     policy: str | None,
 ) -> str:
+    io_skill_dir = str(root.io_dir)
     if version == "latest":
-        manifest = load_latest_manifest(skill_dir)
+        manifest = load_latest_manifest(io_skill_dir)
         if manifest is None:
             raise SkillLedgerError("skill has no latest version to export")
         return manifest.versionId
     if version == "active":
         activation = resolve_activation(
-            skill_dir,
+            root,
             backend,
             policy=policy or resolve_activation_policy(),
             write_activation=False,
@@ -720,7 +733,7 @@ def _resolve_export_version(
         if not active_version:
             raise SkillLedgerError("skill has no active version to export")
         return str(active_version)
-    if version in list_version_ids(skill_dir):
+    if version in list_version_ids(io_skill_dir):
         return version
     raise SkillLedgerError(f"unknown export version: {version}")
 

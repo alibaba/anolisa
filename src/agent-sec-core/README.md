@@ -1,6 +1,6 @@
 # Agent Sec Core
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 **OS-level security kernel for AI Agents.** Provides a full defense chain of system hardening, asset integrity verification, and security decision-making. Runs as a security supervision layer above all business skills, applicable to Agent OS platforms such as [ANOLISA](../../README.md) and OpenClaw.
 
@@ -123,6 +123,7 @@ agent-sec-core/
 │   │   └── security_middleware/ # Middleware layer + backends
 │   ├── dev-tools/             # Developer guides for extending backends
 │   └── pyproject.toml         # Build configuration
+├── qwen-code-extension/       # Qwen Code PII policy + Observability hooks
 ├── skills/                    # Security-related skills (skill-ledger, code-scanner, prompt-scanner, ...)
 ├── tools/                     # sign-skill.sh — PGP skill signing utility
 ├── tests/                     # Unit, integration, and e2e tests
@@ -130,7 +131,7 @@ agent-sec-core/
 ├── Makefile
 ├── agent-sec-core.spec        # RPM packaging spec
 ├── README.md
-└── README_CN.md
+└── README_zh.md
 ```
 
 ## Quick Start
@@ -185,6 +186,21 @@ The binary is output to `linux-sandbox/target/release/linux-sandbox`.
 ```bash
 sudo yum install agent-sec-core
 ```
+
+### Protect Qwen Code from PII leakage
+
+The Qwen Code extension observes user input, tool input/output, and final model output
+by default. Set `PII_CHECKER_MODE=block` to enforce high-risk scanner `deny` verdicts
+at supported decision points; failed tool outputs are audit-only in Qwen Code 0.19.9,
+and scanner failures remain fail-open.
+
+```bash
+export PII_CHECKER_MODE=block
+./qwen-code-extension/scripts/deploy.sh
+```
+
+See [the Qwen Code extension guide](qwen-code-extension/README.md) for configuration and
+the post-tool/model-output enforcement boundaries.
 
 ### Generate Sandbox Policy
 
@@ -281,7 +297,13 @@ agent-sec-cli skill-ledger scan /path/to/skill
 agent-sec-cli skill-ledger status
 ```
 
-Design doc: [`docs/design/SKILL_LEDGER_CN.md`](docs/design/SKILL_LEDGER_CN.md) · User guide: [`docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md`](docs/guide/SKILL_LEDGER_USER_GUIDE_CN.md)
+The bundled Qoder CLI plugin registers a `PreToolUse` hook for the `Skill`
+tool. It resolves user Skills from `~/.qoder/skills/` before project Skills
+from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and applies the
+`SKILL_LEDGER_HOOK_POLICY=ask|debug|warn|block` policy (default: `ask`). Each
+check carries Qoder trace identifiers into the security audit log.
+
+Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md)
 
 ## Audit Log
 

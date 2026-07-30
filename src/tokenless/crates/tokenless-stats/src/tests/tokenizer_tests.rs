@@ -53,7 +53,7 @@ fn tokenizer_struct_methods() {
 
 #[test]
 fn tokenizer_default() {
-    let tokenizer = Tokenizer::default();
+    let tokenizer = Tokenizer;
     assert_eq!(tokenizer.estimate_tokens(""), 0);
     assert_eq!(tokenizer.count_chars(""), 0);
 }

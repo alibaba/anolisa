@@ -74,8 +74,10 @@ impl SkillStore {
 
             let path = entry.path();
 
-            // Skip non-directories
-            if !path.is_dir() {
+            // Skip non-directories. No-follow entry type so a symlink to a
+            // directory is skipped: a symlinked Skill/category is not managed
+            // (the resolver rejects symlinked components with O_NOFOLLOW).
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
 
@@ -113,10 +115,10 @@ impl SkillStore {
                 errors.extend(cat_errors);
             } else {
                 // ---- Flat layout ----
-                let skill_md = path.join("SKILL.md");
-                if !skill_md.exists() {
+                if !has_regular_skill_md(&path) {
                     continue;
                 }
+                let skill_md = path.join("SKILL.md");
 
                 match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
                     Ok(mut entry) => {
@@ -176,7 +178,9 @@ impl SkillStore {
             };
 
             let path = entry.path();
-            if !path.is_dir() {
+            // No-follow entry type: a symlinked child is never a managed
+            // nested Skill (resolver rejects symlinked components).
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
 
@@ -194,10 +198,10 @@ impl SkillStore {
                 continue;
             }
 
-            let skill_md = path.join("SKILL.md");
-            if !skill_md.exists() {
+            if !has_regular_skill_md(&path) {
                 continue;
             }
+            let skill_md = path.join("SKILL.md");
 
             match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
                 Ok(mut entry) => {
@@ -303,17 +307,55 @@ impl Default for SkillStore {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// Return `true` when `dir` is itself a **real directory** (not a symlink)
+/// and contains a `SKILL.md` that is a **regular file**, both classified
+/// **without following symlinks**.
+///
+/// This is the single, shared definition of "this directory is a Skill"
+/// used by store discovery, the FUSE readdir/read gating, Hermes activation
+/// enumeration, and the control-socket resolver. Keeping one predicate
+/// prevents the layers from disagreeing about what a Skill is:
+///
+/// * `dir` must be a real directory. A symlinked Skill directory
+///   (`<root>/linked-skill -> /outside`) is **not** a managed Skill: the
+///   resolver descends with `openat(O_NOFOLLOW)` and rejects any symlinked
+///   component, so store/FUSE discovery must reject it too rather than load,
+///   expose, and read a Skill the resolver refuses to resolve.
+/// * A `SKILL.md` that is a symlink, directory, FIFO, or any other
+///   non-regular object is **not** a valid marker — it is treated as absent
+///   (the directory is not a Skill), never followed.
+/// * A regular-file `SKILL.md` is a marker even when it is unreadable
+///   (mode `000`): discovery must not depend on read permission.
+///
+/// This matches the resolver's `openat(O_NOFOLLOW)` + `fstatat`
+/// classification (real directory with a regular-file marker → Skill;
+/// anything else → not a Skill).
+pub fn has_regular_skill_md(dir: &Path) -> bool {
+    // The directory itself must be a real directory, checked no-follow so a
+    // symlink is rejected even when its target is a directory.
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        _ => return false,
+    }
+    match std::fs::symlink_metadata(dir.join("SKILL.md")) {
+        Ok(meta) => meta.file_type().is_file(),
+        Err(_) => false,
+    }
+}
+
 /// Returns `true` when `dir` looks like a category container:
-/// it has no `SKILL.md` of its own but contains at least one sub-directory
-/// that does have a `SKILL.md`.
+/// it has no `SKILL.md` of its own but contains at least one **real
+/// sub-directory** (not a symlink) that does have a `SKILL.md`.
 fn is_category_dir(dir: &Path) -> bool {
-    if dir.join("SKILL.md").exists() {
+    if has_regular_skill_md(dir) {
         return false;
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() && p.join("SKILL.md").exists() {
+            // No-follow entry type: a symlinked child is never a Skill
+            // directory, so it never makes `dir` a category.
+            let is_real_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_real_dir && has_regular_skill_md(&entry.path()) {
                 return true;
             }
         }
@@ -539,5 +581,201 @@ mod tests {
 
         assert!(errors.is_empty());
         assert!(store.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // has_regular_skill_md predicate boundaries (shared Skill-marker rule)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn has_regular_skill_md_true_for_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        assert!(has_regular_skill_md(dir.path()));
+    }
+
+    #[test]
+    fn has_regular_skill_md_true_for_unreadable_mode_000_regular_file() {
+        // Discovery must not depend on read permission: a mode-000 regular
+        // SKILL.md is still a marker (stat succeeds without read access).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let md = dir.path().join("SKILL.md");
+        std::fs::write(&md, "---\nname: x\n---\n").unwrap();
+        std::fs::set_permissions(&md, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let present = has_regular_skill_md(dir.path());
+        // Restore perms so the tempdir cleans up.
+        std::fs::set_permissions(&md, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(present, "mode-000 regular SKILL.md must be seen as present");
+    }
+
+    #[test]
+    fn has_regular_skill_md_false_for_symlink() {
+        // A symlink named SKILL.md is not a marker and is never followed.
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("real.md");
+        std::fs::write(&target, "---\nname: x\n---\n").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("SKILL.md")).unwrap();
+        assert!(!has_regular_skill_md(dir.path()));
+    }
+
+    #[test]
+    fn has_regular_skill_md_false_for_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("SKILL.md")).unwrap();
+        assert!(!has_regular_skill_md(dir.path()));
+    }
+
+    #[test]
+    fn has_regular_skill_md_false_when_absent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(!has_regular_skill_md(dir.path()));
+    }
+
+    #[test]
+    fn store_hermes_symlinked_top_level_skill_md_is_category_not_skill() {
+        // A top-level dir whose only SKILL.md is a symlink is a category:
+        // store must NOT load it as a flat skill, and its real nested child
+        // (regular SKILL.md) IS loaded as `category/child`. This is the same
+        // classification the resolver and FUSE layer now apply.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let top = temp_dir.path().join("top");
+        std::fs::create_dir(&top).unwrap();
+        let real = temp_dir.path().join("real.md");
+        std::fs::write(&real, "---\nname: r\n---\n").unwrap();
+        std::os::unix::fs::symlink(&real, top.join("SKILL.md")).unwrap();
+        let child = top.join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(child.join("SKILL.md"), "---\nname: child\n---\n").unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+        assert!(errors.is_empty(), "unexpected load errors: {errors:?}");
+
+        // `top` is a category, not a flat skill; `child` is the nested skill.
+        assert!(
+            store.get("top").is_none(),
+            "symlink-marker top must not load"
+        );
+        assert!(store.get("child").is_some(), "nested child must load");
+    }
+
+    #[test]
+    fn has_regular_skill_md_false_for_symlinked_directory() {
+        // `dir` itself is a symlink pointing at a real Skill directory. It is
+        // NOT a managed Skill: the resolver's O_NOFOLLOW descent rejects a
+        // symlinked component, so the predicate must reject it too.
+        let root = tempfile::TempDir::new().unwrap();
+        let real = root.path().join("real-skill");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        let link = root.path().join("linked-skill");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(has_regular_skill_md(&real), "the real dir is a Skill");
+        assert!(
+            !has_regular_skill_md(&link),
+            "a symlinked Skill directory must not be classified as a Skill"
+        );
+    }
+
+    #[test]
+    fn store_flat_symlinked_skill_dir_not_loaded() {
+        // Flat layout: `<root>/linked-skill -> <outside>/real-skill`. The
+        // store must NOT load the symlinked directory as a Skill (the
+        // resolver rejects it), while a sibling real Skill loads normally.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let real = outside.path().join("real-skill");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: real\n---\n").unwrap();
+        std::os::unix::fs::symlink(&real, temp_dir.path().join("linked-skill")).unwrap();
+        // A genuine in-root Skill to prove loading still works.
+        let inroot = temp_dir.path().join("inroot");
+        std::fs::create_dir(&inroot).unwrap();
+        std::fs::write(inroot.join("SKILL.md"), "---\nname: inroot\n---\n").unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+        assert!(errors.is_empty(), "unexpected load errors: {errors:?}");
+        assert!(
+            store.get("linked-skill").is_none(),
+            "symlinked Skill directory must not be loaded"
+        );
+        assert!(store.get("inroot").is_some(), "real Skill must load");
+    }
+
+    #[test]
+    fn store_hermes_symlink_category_not_descended() {
+        // A symlinked category (`<root>/linkcat -> <outside>/cat`) must not be
+        // descended: its nested skills live outside the managed root and the
+        // resolver rejects the symlinked component. Skills under it must NOT
+        // load.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let cat = outside.path().join("cat");
+        let nested = cat.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), "---\nname: nested\n---\n").unwrap();
+        std::os::unix::fs::symlink(&cat, temp_dir.path().join("linkcat")).unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+        assert!(errors.is_empty(), "unexpected load errors: {errors:?}");
+        assert!(
+            store.get("nested").is_none(),
+            "skill under a symlinked category must not load"
+        );
+    }
+
+    #[test]
+    fn store_hermes_symlink_nested_skill_not_loaded() {
+        // Real category, but the nested skill entry is a symlink to a real
+        // Skill directory. The symlinked nested skill must NOT load.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let real = outside.path().join("real-nested");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: linked\n---\n").unwrap();
+
+        let cat = temp_dir.path().join("cat");
+        std::fs::create_dir(&cat).unwrap();
+        // A genuine nested skill so `cat` is recognized as a category.
+        let realnested = cat.join("realnested");
+        std::fs::create_dir(&realnested).unwrap();
+        std::fs::write(realnested.join("SKILL.md"), "---\nname: realnested\n---\n").unwrap();
+        // The symlinked nested skill.
+        std::os::unix::fs::symlink(&real, cat.join("linknested")).unwrap();
+
+        let mut store = SkillStore::new();
+        let config = ParseConfig {
+            strict: false,
+            max_skill_size: 1_048_576,
+            max_skills: 1000,
+        };
+        let errors = store.load_from_directory(temp_dir.path(), &config);
+        assert!(errors.is_empty(), "unexpected load errors: {errors:?}");
+        assert!(
+            store.get("realnested").is_some(),
+            "real nested skill must load"
+        );
+        assert!(
+            store.get("linknested").is_none(),
+            "symlinked nested skill must not load"
+        );
     }
 }

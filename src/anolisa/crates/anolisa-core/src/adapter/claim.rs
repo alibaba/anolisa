@@ -5,9 +5,11 @@
 //! over on behalf of one component, so [`status`](super::manager) and
 //! [`disable`](super::manager) can run later without re-reading the
 //! resource directory and without trusting any executable instruction
-//! from disk. Receipts never carry argv, shell strings, script paths, or
-//! reverse commands — the framework CLI invocation is constructed by the
-//! built-in driver, not read back from the receipt.
+//! from disk. Receipts never carry executable argv, script paths, or reverse
+//! commands. [`AdapterNotice::command`](crate::manifest::AdapterNotice::command)
+//! is the sole command-like string: an inert display hint that must never be
+//! parsed into argv or executed. Framework CLI invocations are constructed by
+//! built-in drivers, not read back from receipts.
 //!
 //! Every value that `status`/`disable` would interpret as a path, a
 //! symlink, or a framework-registry entry must live in [`ClaimResource`],
@@ -83,6 +85,14 @@ pub struct AdapterClaim {
     pub driver_schema: u32,
     /// Lifecycle status of the receipt itself.
     pub status: ClaimStatus,
+    /// Static, display-only notices declared in the component manifest at
+    /// enable time. Persisted so `disable` can show `post_disable` notices
+    /// from the receipt alone, without depending on the manifest still
+    /// being present (same rationale as `adapter_type`). Inert text: never
+    /// shell-expanded, template-substituted, or executed. Declared after
+    /// the scalar fields so TOML emits it among the sub-tables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<crate::manifest::AdapterNotice>,
     /// Manager-validatable resource declarations — the receipt's security
     /// boundary. Re-validated before every `status`/`disable`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -301,6 +311,28 @@ impl ClaimResource {
     }
 }
 
+/// Confirmation state for a framework configuration mutation.
+///
+/// `Pending` is durable write-ahead intent: the command has not yet produced
+/// a confirmed success, so the host may or may not contain the requested
+/// value. Existing receipts omit this field and therefore deserialize as
+/// `Applied`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigApplyState {
+    /// The framework command completed successfully.
+    #[default]
+    Applied,
+    /// The mutation is about to run or its outcome is uncertain.
+    Pending,
+}
+
+impl ConfigApplyState {
+    fn is_applied(&self) -> bool {
+        *self == Self::Applied
+    }
+}
+
 /// The closed set of resource kinds a receipt may declare.
 ///
 /// Additional kinds (`Tree`, `JsonKeys`) are introduced when their first
@@ -354,14 +386,16 @@ pub enum ClaimResourceKind {
         /// Marketplace name ANOLISA registered.
         marketplace: String,
     },
-    /// A framework configuration key/value pair that ANOLISA applied.
-    /// The key path is framework-specific; the value is the TOML
-    /// representation of what was set.
+    /// A framework configuration key ANOLISA attempted to apply.
     FrameworkConfig {
         /// Framework that owns the config (e.g. `openclaw`).
         framework: String,
         /// Config key path.
         key: String,
+        /// Whether the framework confirmed the mutation. Applied is omitted
+        /// on the wire to preserve compatibility with existing receipts.
+        #[serde(default, skip_serializing_if = "ConfigApplyState::is_applied")]
+        state: ConfigApplyState,
     },
 }
 
@@ -389,6 +423,9 @@ pub enum DriverPayload {
     /// Qoder (qodercli) driver payload.
     #[serde(rename = "qoder")]
     Qoder(QoderClaim),
+    /// Qwen Code driver payload.
+    #[serde(rename = "qwencode")]
+    QwenCode(QwenCodeClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -506,6 +543,19 @@ pub struct QoderClaim {
     /// Full hook entries ANOLISA owns in `settings.json`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_hook_specs: Vec<QoderManagedHook>,
+}
+
+/// Qwen Code driver payload. Qwen owns extension artifacts and activation
+/// state through its CLI; the receipt references the exact native extension
+/// entry and plugin identity ANOLISA verifies before enabling or uninstalling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QwenCodeClaim {
+    /// Resource id of the Qwen-managed extension entry
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub extension_dir_resource: String,
+    /// Resource id of the installed extension
+    /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub plugin_resource: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +893,7 @@ mod tests {
             bundle_digest: Some("sha256:abc".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "openclaw_state_dir".to_string(),
@@ -968,6 +1019,7 @@ mod tests {
             bundle_digest: Some("sha256:def".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "hermes_home".to_string(),
@@ -1024,11 +1076,48 @@ mod tests {
             kind: ClaimResourceKind::FrameworkConfig {
                 framework: "openclaw".to_string(),
                 key: "plugins.entries.sec.enabled".to_string(),
+                state: ConfigApplyState::Applied,
             },
         };
         resource
             .validate(&layout, &allowed)
             .expect("config resource should pass");
+    }
+
+    #[test]
+    fn framework_config_state_is_backward_compatible_and_round_trips_pending() {
+        let applied = ClaimResource {
+            id: "config_applied".to_string(),
+            purpose: "openclaw_config".to_string(),
+            kind: ClaimResourceKind::FrameworkConfig {
+                framework: "openclaw".to_string(),
+                key: "applied.key".to_string(),
+                state: ConfigApplyState::Applied,
+            },
+        };
+        let applied_json = serde_json::to_string(&applied).expect("serialize applied");
+        assert!(
+            !applied_json.contains("\"state\""),
+            "default applied state must keep the existing wire shape"
+        );
+        let parsed: ClaimResource =
+            serde_json::from_str(&applied_json).expect("parse implicit applied");
+        assert_eq!(parsed, applied);
+
+        let pending = ClaimResource {
+            id: "config_pending".to_string(),
+            purpose: "openclaw_config".to_string(),
+            kind: ClaimResourceKind::FrameworkConfig {
+                framework: "openclaw".to_string(),
+                key: "pending.key".to_string(),
+                state: ConfigApplyState::Pending,
+            },
+        };
+        let pending_json = serde_json::to_string(&pending).expect("serialize pending");
+        assert!(pending_json.contains("\"state\":\"pending\""));
+        let parsed: ClaimResource =
+            serde_json::from_str(&pending_json).expect("parse explicit pending");
+        assert_eq!(parsed, pending);
     }
 
     #[test]
@@ -1044,6 +1133,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "state_dir".to_string(),
@@ -1073,6 +1163,7 @@ mod tests {
                     kind: ClaimResourceKind::FrameworkConfig {
                         framework: "openclaw".to_string(),
                         key: "plugins.entries.sec-core.enabled".to_string(),
+                        state: ConfigApplyState::Applied,
                     },
                 },
             ],
@@ -1135,6 +1226,7 @@ mod tests {
             bundle_digest: Some("sha256:c0de".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "codex_marketplace_dir".to_string(),
@@ -1223,6 +1315,7 @@ mod tests {
             bundle_digest: Some("sha256:c05h".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![ClaimResource {
                 id: "cosh_extension_dir".to_string(),
                 purpose: "cosh_extension_dir".to_string(),
@@ -1258,6 +1351,7 @@ mod tests {
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "cc_marketplace".to_string(),
@@ -1298,6 +1392,7 @@ mod tests {
             bundle_digest: Some("sha256:90de".to_string()),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
+            notices: Vec::new(),
             resources: vec![
                 ClaimResource {
                     id: "qoder_plugin".to_string(),
@@ -1359,6 +1454,69 @@ mod tests {
         sample_qoder_claim()
             .validate(&layout, &allowed)
             .expect("qoder claim under allowed roots must pass");
+    }
+
+    #[test]
+    fn qwencode_claim_round_trips_and_validates() {
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "qwencode".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("extension".to_string()),
+            enabled_at: "2026-07-16T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qwencode"),
+            bundle_digest: Some("sha256:0wen".to_string()),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            notices: Vec::new(),
+            resources: vec![
+                ClaimResource {
+                    id: "qwencode_extension_dir".to_string(),
+                    purpose: "qwencode_extension_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.qwen/extensions/tokenless"),
+                    },
+                },
+                ClaimResource {
+                    id: "qwencode_plugin".to_string(),
+                    purpose: "qwencode_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "qwencode".to_string(),
+                        plugin_id: "tokenless".to_string(),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::QwenCode(QwenCodeClaim {
+                extension_dir_resource: "qwencode_extension_dir".to_string(),
+                plugin_resource: "qwencode_plugin".to_string(),
+            }),
+        };
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+        let wrapper = Wrapper {
+            adapter_claims: vec![claim.clone()],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize Qwen Code to TOML");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse Qwen Code from TOML");
+        assert_eq!(
+            wrapper, parsed,
+            "Qwen Code round-trip mismatch; TOML:\n{text}"
+        );
+
+        let json = serde_json::to_string(&claim).expect("serialize Qwen Code JSON");
+        let back: AdapterClaim = serde_json::from_str(&json).expect("parse Qwen Code JSON");
+        assert_eq!(claim, back);
+
+        claim
+            .validate(
+                &FsLayout::system(None),
+                &[PathBuf::from("/home/alice/.qwen")],
+            )
+            .expect("Qwen Code claim under allowed root must pass");
     }
 
     /// A forged qoder receipt pointing its settings resource at `~/.ssh` or

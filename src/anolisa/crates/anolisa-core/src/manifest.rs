@@ -78,9 +78,6 @@ pub struct ComponentManifest {
     /// synthesized `binary_version` over the first executable layout file —
     /// see [`ComponentManifest::health_spec`].
     pub health_check: Option<CheckSpec>,
-    /// Legacy `[[health_checks]]` entries in source order, retained for the
-    /// existing `status` probe path during the additive-compat window.
-    pub health_checks: Vec<HealthSpec>,
 }
 
 /// Structured distribution selector, surfaced for downstream consumers
@@ -370,6 +367,33 @@ impl ServiceSpec {
             instance: None,
         }
     }
+
+    /// Whether this declaration covers `unit`: an exact name match, or a
+    /// template declaration (`foo@.service`) covering its instantiated
+    /// units (`foo@alice.service`).
+    pub fn covers_unit(&self, unit: &str) -> bool {
+        if self.unit == unit {
+            return true;
+        }
+        if let Some(prefix) = self.unit.strip_suffix("@.service") {
+            return unit
+                .strip_prefix(&format!("{prefix}@"))
+                .map(|rest| rest.ends_with(".service") && rest.len() > ".service".len())
+                .unwrap_or(false);
+        }
+        false
+    }
+}
+
+/// Scope declared for `unit` by the `[[component.services]]` declarations;
+/// a unit with no covering declaration probes as system scope, matching the
+/// serde default on [`ServiceSpec::scope`].
+pub fn declared_unit_scope(services: &[ServiceSpec], unit: &str) -> ServiceScope {
+    services
+        .iter()
+        .find(|decl| decl.covers_unit(unit))
+        .map(|decl| decl.scope)
+        .unwrap_or_default()
 }
 
 /// Serde default for boolean fields whose absent value is `true`.
@@ -625,6 +649,11 @@ pub struct AdapterSpec {
     /// Post-install config key/value pairs the driver should apply.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<AdapterConfigSetSpec>,
+    /// Static, display-only operator notices shown after `adapter enable`
+    /// or `adapter disable` succeeds. Inert text: never expanded,
+    /// substituted, or executed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<AdapterNotice>,
     /// Semver constraint on the target framework version, e.g. `">=1.2"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framework_version_req: Option<String>,
@@ -686,6 +715,65 @@ pub struct AdapterConfigSetSpec {
     pub key: String,
     /// Value to set.
     pub value: toml::Value,
+    /// Optional semver-style constraint on the target framework version,
+    /// e.g. `">=2026.4.24"`. When present, the driver applies this config
+    /// entry only if the detected framework version satisfies the
+    /// constraint; otherwise the entry is skipped and left out of the
+    /// receipt. Absent means "always apply", preserving backward
+    /// compatibility with older manifests. Skipped on serialize when absent
+    /// so those manifests round-trip byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_version: Option<String>,
+}
+
+/// A static, display-only operator notice attached to an adapter. The
+/// adapter manager surfaces matching notices after `adapter enable`
+/// ([`NoticeWhen::PostEnable`]) or `adapter disable`
+/// ([`NoticeWhen::PostDisable`]) succeeds.
+///
+/// Notices are inert text: `text` and `command` are never shell-expanded,
+/// template-substituted, or executed. Structured output preserves their
+/// values, while human output escapes control characters. Required framework
+/// configuration is NOT a notice — it stays a structured
+/// [`AdapterConfigSetSpec`] entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterNotice {
+    /// When the notice is displayed.
+    pub when: NoticeWhen,
+    /// Notice severity. Defaults to [`NoticeLevel::Info`] when absent.
+    #[serde(default, skip_serializing_if = "is_default_level")]
+    pub level: NoticeLevel,
+    /// The notice body. Required; human output escapes control characters.
+    pub text: String,
+    /// Optional display-only command hint (e.g. a follow-up the operator
+    /// may run). Never parsed or executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// Lifecycle point at which an [`AdapterNotice`] is displayed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeWhen {
+    /// Show after `adapter enable` succeeds.
+    PostEnable,
+    /// Show after `adapter disable` succeeds.
+    PostDisable,
+}
+
+/// Severity of an [`AdapterNotice`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeLevel {
+    /// Informational notice.
+    #[default]
+    Info,
+    /// Warning the operator should pay attention to.
+    Warning,
+}
+
+fn is_default_level(level: &NoticeLevel) -> bool {
+    matches!(level, NoticeLevel::Info)
 }
 
 /// One skill entry in an `[[adapters]]` or framework-specific section.
@@ -766,12 +854,18 @@ pub struct OpenClawAdapterSpec {
     /// Post-install config key/value pairs for OpenClaw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<AdapterConfigSetSpec>,
+    /// Static, display-only operator notices for the OpenClaw adapter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<AdapterNotice>,
 }
 
 impl OpenClawAdapterSpec {
     /// Whether no framework-specific data is present.
     pub fn is_empty(&self) -> bool {
-        self.bundle.is_empty() && self.skills.is_empty() && self.config.is_empty()
+        self.bundle.is_empty()
+            && self.skills.is_empty()
+            && self.config.is_empty()
+            && self.notices.is_empty()
     }
 }
 
@@ -791,38 +885,16 @@ pub struct HermesAdapterSpec {
         serialize_with = "serialize_skills"
     )]
     pub skills: Vec<AdapterSkillSpec>,
+    /// Static, display-only operator notices for the Hermes adapter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<AdapterNotice>,
 }
 
 impl HermesAdapterSpec {
     /// Whether no framework-specific data is present.
     pub fn is_empty(&self) -> bool {
-        self.bundle.is_empty() && self.skills.is_empty()
+        self.bundle.is_empty() && self.skills.is_empty() && self.notices.is_empty()
     }
-}
-
-/// One `[[health_checks]]` entry. Multiple checks per component are
-/// expected (binary probe + systemd unit + http endpoint, etc.) so we
-/// keep the entire list rather than only the first.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct HealthSpec {
-    /// Optional stable health-check name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Health-check kind (`file`, `command`, `systemd`, ...).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub kind: String,
-    /// Command line for command-style checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// Probe path for binary/file checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe: Option<String>,
-    /// Service unit for service-manager checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-    /// Optional checks degrade instead of failing when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub optional: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -851,8 +923,6 @@ struct ComponentManifestRaw {
     features: Vec<FeatureRaw>,
     #[serde(default)]
     adapters: Vec<AdapterRaw>,
-    #[serde(default, alias = "health")]
-    health_checks: Vec<HealthCheckRaw>,
 }
 
 #[derive(Deserialize)]
@@ -1105,6 +1175,8 @@ struct AdapterRaw {
     #[serde(default)]
     config: Vec<AdapterConfigSetSpec>,
     #[serde(default)]
+    notices: Vec<AdapterNotice>,
+    #[serde(default)]
     framework_version_req: Option<String>,
     #[serde(default)]
     openclaw: Option<OpenClawAdapterSpec>,
@@ -1126,22 +1198,6 @@ struct AdapterCompatRaw {
     driver_schema: Option<u32>,
     #[serde(default)]
     framework_version: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct HealthCheckRaw {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    probe: Option<String>,
-    #[serde(default)]
-    unit: Option<String>,
-    #[serde(default)]
-    optional: Option<bool>,
 }
 
 impl From<ComponentManifestRaw> for ComponentManifest {
@@ -1337,22 +1393,10 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                 detect: a.detect,
                 skills: a.skills,
                 config: a.config,
+                notices: a.notices,
                 framework_version_req: a.framework_version_req,
                 openclaw: a.openclaw,
                 hermes: a.hermes,
-            })
-            .collect();
-
-        let health_checks: Vec<HealthSpec> = raw
-            .health_checks
-            .into_iter()
-            .map(|h| HealthSpec {
-                name: h.name,
-                kind: h.kind.unwrap_or_default(),
-                command: h.command,
-                probe: h.probe,
-                unit: h.unit,
-                optional: h.optional,
             })
             .collect();
 
@@ -1378,7 +1422,6 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             features,
             adapters,
             health_check,
-            health_checks,
         }
     }
 }
@@ -2056,6 +2099,48 @@ mod tests {
     }
 
     #[test]
+    fn service_declarations_cover_exact_and_template_units() {
+        let plain = ServiceSpec::from_legacy_unit("agentsight.service".to_string());
+        assert!(plain.covers_unit("agentsight.service"));
+        assert!(!plain.covers_unit("agentsight-user.service"));
+
+        let template = ServiceSpec {
+            unit: "anolisa-memory@.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+            instance: Some("%u".to_string()),
+        };
+        assert!(template.covers_unit("anolisa-memory@alice.service"));
+        // Exact match on the template's own literal name still counts.
+        assert!(template.covers_unit("anolisa-memory@.service"));
+        assert!(!template.covers_unit("anolisa-memory@.service.d"));
+    }
+
+    #[test]
+    fn declared_unit_scope_defaults_to_system_without_a_covering_decl() {
+        let declared = vec![ServiceSpec {
+            unit: "anolisa-memory@.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+            instance: Some("%u".to_string()),
+        }];
+        assert_eq!(
+            declared_unit_scope(&declared, "anolisa-memory@alice.service"),
+            ServiceScope::User
+        );
+        assert_eq!(
+            declared_unit_scope(&declared, "agentsight.service"),
+            ServiceScope::System
+        );
+        assert_eq!(
+            declared_unit_scope(&[], "anything.service"),
+            ServiceScope::System
+        );
+    }
+
+    #[test]
     fn legacy_install_services_map_to_specs_with_defaults() {
         // Legacy `[install] services = [...]` is a bare unit-name list; each
         // name becomes a system-scoped ServiceSpec with enable/start true.
@@ -2453,8 +2538,12 @@ mod tests {
         assert!(m.health_spec().is_none());
     }
 
+    /// The retired `[[health_checks]]` vocabulary must not break parsing:
+    /// manifests written against the legacy schema still load, the legacy
+    /// entries are simply ignored (structured health comes only from
+    /// `[component.health_check]`).
     #[test]
-    fn multiple_health_checks_are_preserved_in_order() {
+    fn legacy_health_checks_sections_are_ignored() {
         let toml_text = r#"
             [component]
             name = "agentsight"
@@ -2471,21 +2560,12 @@ mod tests {
             unit = "agentsight.service"
             optional = true
         "#;
-        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
-        assert_eq!(m.health_checks.len(), 2);
-        assert_eq!(m.health_checks[0].name.as_deref(), Some("binary"));
-        assert_eq!(m.health_checks[0].kind, "command");
-        assert_eq!(
-            m.health_checks[0].command.as_deref(),
-            Some("{bindir}/agentsight --help")
+        let m = ComponentManifest::from_toml_str(toml_text).expect("legacy manifest still parses");
+        assert_eq!(m.component.name, "agentsight");
+        assert!(
+            m.health_spec().is_none(),
+            "legacy checks must not synthesize a structured spec"
         );
-        assert_eq!(m.health_checks[1].name.as_deref(), Some("service"));
-        assert_eq!(m.health_checks[1].kind, "systemd");
-        assert_eq!(
-            m.health_checks[1].unit.as_deref(),
-            Some("agentsight.service")
-        );
-        assert_eq!(m.health_checks[1].optional, Some(true));
     }
 
     #[test]
@@ -2800,6 +2880,72 @@ mod tests {
     }
 
     #[test]
+    fn adapter_config_framework_version_parses_and_round_trips() {
+        // The issue's suggested component shape: a per-config framework
+        // version condition alongside the adapter-level compat requirement.
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            plugin_id = "agent-sec"
+
+            [adapters.compat]
+            framework_version = ">=2026.4.14"
+
+            [[adapters.openclaw.config]]
+            key = "plugins.entries.agent-sec.hooks.allowConversationAccess"
+            value = true
+            framework_version = ">=2026.4.24"
+
+            [[adapters.openclaw.config]]
+            key = "plugins.entries.agent-sec.enabled"
+            value = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert_eq!(a.compat.framework_version.as_deref(), Some(">=2026.4.14"));
+        let oc = a.openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.config.len(), 2);
+        assert_eq!(
+            oc.config[0].framework_version.as_deref(),
+            Some(">=2026.4.24")
+        );
+        // A config entry with no condition means "always apply".
+        assert!(oc.config[1].framework_version.is_none());
+
+        // The condition must survive a serialize→parse round-trip, and an
+        // absent condition must not be emitted (old manifests stay stable).
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(m.adapters, m2.adapters);
+    }
+
+    #[test]
+    fn adapter_config_without_framework_version_skips_serializing_field() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.config]]
+            key = "some.key"
+            value = "hello"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("framework_version"),
+            "absent per-config framework_version must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
     fn adapter_empty_skills_config_skip_serializing() {
         let toml_text = r#"
             [component]
@@ -2826,6 +2972,242 @@ mod tests {
         assert!(
             !serialized.contains("[hermes]"),
             "absent hermes section must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
+    fn adapter_notices_parse_generic() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            plugin_id = "sec-core"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            level = "info"
+            text = "Restart the framework to load the plugin."
+            command = "openclaw restart"
+
+            [[adapters.notices]]
+            when = "post_disable"
+            level = "warning"
+            text = "Cached tokens remain until the framework restarts."
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert_eq!(a.notices.len(), 2);
+        assert_eq!(a.notices[0].when, NoticeWhen::PostEnable);
+        assert_eq!(a.notices[0].level, NoticeLevel::Info);
+        assert_eq!(
+            a.notices[0].text,
+            "Restart the framework to load the plugin."
+        );
+        assert_eq!(a.notices[0].command.as_deref(), Some("openclaw restart"));
+        assert_eq!(a.notices[1].when, NoticeWhen::PostDisable);
+        assert_eq!(a.notices[1].level, NoticeLevel::Warning);
+        assert!(a.notices[1].command.is_none());
+    }
+
+    #[test]
+    fn adapter_notice_level_defaults_to_info() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            text = "No level declared."
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.adapters[0].notices[0].level, NoticeLevel::Info);
+    }
+
+    #[test]
+    fn adapter_notices_parse_framework_specific_sections() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.openclaw.notices]]
+            when = "post_enable"
+            text = "OpenClaw-specific notice."
+
+            [[adapters]]
+            framework = "hermes"
+
+            [[adapters.hermes.notices]]
+            when = "post_disable"
+            level = "warning"
+            text = "Hermes-specific notice."
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let oc = m.adapters[0].openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.notices.len(), 1);
+        assert_eq!(oc.notices[0].when, NoticeWhen::PostEnable);
+        assert_eq!(oc.notices[0].text, "OpenClaw-specific notice.");
+        let h = m.adapters[1].hermes.as_ref().expect("hermes section");
+        assert_eq!(h.notices.len(), 1);
+        assert_eq!(h.notices[0].when, NoticeWhen::PostDisable);
+        assert_eq!(h.notices[0].level, NoticeLevel::Warning);
+    }
+
+    #[test]
+    fn adapter_notices_round_trip() {
+        let toml_text = r#"
+            [component]
+            name = "roundtrip"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            level = "warning"
+            text = "Keep this verbatim: {datadir} $HOME `id`"
+            command = "echo {datadir}/$HOME"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(
+            m.adapters, m2.adapters,
+            "round-trip must preserve notices verbatim"
+        );
+    }
+
+    #[test]
+    fn adapter_notices_text_is_verbatim_and_inert() {
+        // Placeholders and shell metacharacters must survive parsing
+        // unchanged: notices are display-only and never expanded/executed.
+        let toml_text = r#"
+            [component]
+            name = "inert"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            text = "run {datadir}/bin/tool; rm -rf $(whoami)"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(
+            m.adapters[0].notices[0].text,
+            "run {datadir}/bin/tool; rm -rf $(whoami)"
+        );
+    }
+
+    #[test]
+    fn adapter_notices_skip_serializing_when_empty() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("notices"),
+            "absent notices must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_default_level_skips_serializing_field() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            text = "info-level notice"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("level ="),
+            "default info level must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_unknown_when_rejected() {
+        let toml_text = r#"
+            [component]
+            name = "bad"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_install"
+            text = "unsupported trigger"
+        "#;
+        assert!(
+            ComponentManifest::from_toml_str(toml_text).is_err(),
+            "unknown `when` must fail closed"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_unknown_level_rejected() {
+        let toml_text = r#"
+            [component]
+            name = "bad"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+            level = "critical"
+            text = "unsupported level"
+        "#;
+        assert!(
+            ComponentManifest::from_toml_str(toml_text).is_err(),
+            "unknown `level` must fail closed"
+        );
+    }
+
+    #[test]
+    fn adapter_notice_missing_text_rejected() {
+        let toml_text = r#"
+            [component]
+            name = "bad"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.notices]]
+            when = "post_enable"
+        "#;
+        assert!(
+            ComponentManifest::from_toml_str(toml_text).is_err(),
+            "missing required `text` must fail"
         );
     }
 

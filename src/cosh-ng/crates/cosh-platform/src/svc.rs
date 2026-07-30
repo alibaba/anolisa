@@ -99,19 +99,19 @@ pub fn svc_action(name: &str, action: &str, dry_run: bool) -> Result<SvcActionRe
         ));
     }
 
-    // Get current state before action
-    let before = svc_status(name)?;
-    let previous_state = before.state.clone();
-
     if dry_run {
+        let dry_run_state = SvcState::Unknown("(dry-run)".to_string());
         return Ok(SvcActionResult {
             name: name.to_string(),
             action: action.to_string(),
             success: true,
-            previous_state,
-            new_state: SvcState::Unknown("(dry-run)".to_string()),
+            previous_state: dry_run_state.clone(),
+            new_state: dry_run_state,
         });
     }
+
+    let before = svc_status(name)?;
+    let previous_state = before.state.clone();
 
     let output = run_command(
         Command::new("systemctl").args([action, name]),
@@ -497,6 +497,25 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidInput);
         assert!(err.message.contains("destroy"));
+    }
+
+    #[test]
+    fn test_svc_action_dry_run_skips_status_query_for_all_actions() {
+        let name = "cosh-nonexistent-test-svc-1361";
+
+        for action in ["start", "stop", "restart", "enable", "disable"] {
+            let result = svc_action(name, action, true)
+                .unwrap_or_else(|err| panic!("dry-run {action} failed: {err:?}"));
+
+            assert_eq!(result.name, name);
+            assert_eq!(result.action, action);
+            assert!(result.success);
+            assert_eq!(
+                result.previous_state,
+                SvcState::Unknown("(dry-run)".to_string())
+            );
+            assert_eq!(result.new_state, SvcState::Unknown("(dry-run)".to_string()));
+        }
     }
 
     // --- PID parsing edge cases ---

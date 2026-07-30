@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn bundled_distribution_index_contains_only_reviewed_entries() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../manifests/distribution-index/index.toml");
+            .join("../../manifests/components/index.toml");
         let index = DistributionIndex::load(&fixture).expect("load fixture");
         assert!(
             index

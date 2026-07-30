@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::question::runtime::pending_question_capture;
 use crate::runtime::prelude::*;
+use crate::runtime::question_terminal::redraw_active_question_if_width_changed;
 use crate::runtime::state::{ApprovalRequestStatus, CoshApprovalMode, InlineState};
 
 use super::dispatcher::RuntimeDispatcher;
@@ -22,7 +23,15 @@ fn render_raw_inline_events<W: Write>(
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    if let Some(audit) = inline_state.audit.as_mut() {
+        audit.observe_shell_events(events);
+    }
     let mut terminal_output = CrLfWriter::new(output);
+    redraw_active_question_if_width_changed(
+        inline_state,
+        &mut terminal_output,
+        RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
+    )?;
     let snapshot = ShellEventSnapshot::new(events);
     let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,
@@ -35,11 +44,12 @@ fn render_raw_inline_events<W: Write>(
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
-        .emit_next_approved()
+        .emit_next_approved(snapshot.events().len())
     {
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
             inline_state.pending_input_ghost = None;
+            inline_state.pending_input_ghost_route = Default::default();
             inline_state.pending_input_ghost_binding = None;
             return Ok(RawObserverAction::EmitToPtyWithPromptRestore(request));
         }
@@ -52,6 +62,7 @@ fn render_raw_inline_events<W: Write>(
         inline_state.trigger_pty_prompt = false;
         return Ok(RawObserverAction::RestorePrompt {
             ghost_text: inline_state.pending_input_ghost.take(),
+            ghost_route: std::mem::take(&mut inline_state.pending_input_ghost_route),
         });
     }
     let shell_busy = shell_has_active_foreground_command(snapshot.events());
@@ -183,6 +194,24 @@ fn approval_mode_from_config(value: &str) -> CoshApprovalMode {
 }
 
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
+    // #1721 D13: an open draft card owns every keystroke until submit/cancel.
+    if let Some(draft) = state.prompt_draft.as_ref() {
+        return Some(RawInputCapture::PromptDraft {
+            id: draft.id.clone(),
+            initial_text: draft.text.clone(),
+        });
+    }
+    if let Some(session_panel) = state.control.session().pending_panel() {
+        return Some(RawInputCapture::Session {
+            id: session_panel.id.clone(),
+            option_count: session_panel.sessions.len(),
+            selected: session_panel.selected_option,
+            confirming_clear: matches!(
+                session_panel.phase,
+                crate::slash::session::RuntimeSessionPanelPhase::ConfirmClear
+            ),
+        });
+    }
     if let Some(mode_panel) = state.control.pending_mode_panel() {
         return Some(RawInputCapture::Mode {
             id: mode_panel.id.clone(),
@@ -232,7 +261,10 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
         .find(|request| request.status == ApprovalRequestStatus::Pending)
         .map(|request| RawInputCapture::Approval {
             id: request.id.clone(),
-            is_hook: request.subject.contains("HOOK:"),
+            action_set: crate::approval::panel::approval_action_set_for(
+                request,
+                &state.approvals.requests,
+            ),
         })
 }
 
@@ -247,7 +279,9 @@ pub(crate) fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool
             ShellEventKind::CommandStarted => {
                 active.insert(command_id.as_str());
             }
-            ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed => {
+            ShellEventKind::CommandCompleted
+            | ShellEventKind::CommandFailed
+            | ShellEventKind::UserInputIntercepted => {
                 active.remove(command_id.as_str());
             }
             _ => {}
@@ -387,7 +421,7 @@ mod tests {
         state
             .control
             .shell_handoff_mut()
-            .emit_next_approved()
+            .emit_next_approved(0)
             .expect("emit handoff");
         state
             .control
@@ -427,7 +461,7 @@ mod tests {
         state
             .control
             .shell_handoff_mut()
-            .emit_next_approved()
+            .emit_next_approved(0)
             .expect("emit handoff");
         state
             .control
@@ -483,6 +517,7 @@ mod tests {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "fake",
             language: Language::EnUs,
@@ -529,6 +564,8 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

@@ -1,5 +1,10 @@
 pub mod context_window;
+mod model;
+mod output_text;
 mod redaction;
+
+pub(crate) use model::{evidence_capture_status_for_block, EvidenceCaptureStatus};
+pub(crate) use output_text::redact_sensitive_output;
 
 pub use context_window::{
     build_context_window, build_related_history_index, context_blocks_from_entries,
@@ -8,3 +13,4 @@ pub use context_window::{
     terminal_output_id, ContextEntry, ContextWindowConfig, ProviderCommandFacts,
     RelatedHistoryConfig, ShellEvidenceAccess,
 };
+pub(crate) use redaction::redact_sensitive_text;

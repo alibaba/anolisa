@@ -39,9 +39,10 @@ use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus};
 use anolisa_core::adapter::driver::{AdapterStatusReport, DriverPlan};
 use anolisa_core::adapter::manager::{
-    AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOutcome, ScanEntry, ScanReport,
-    StatusReport,
+    AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOptions, EnableOutcome, ScanEntry,
+    ScanReport, StatusReport,
 };
+use anolisa_core::manifest::{AdapterNotice, NoticeLevel, NoticeWhen};
 
 use crate::commands::common;
 use crate::context::CliContext;
@@ -67,6 +68,19 @@ pub enum AdapterCommands {
         /// Target framework (e.g. `openclaw`). Omit when the component
         /// ships adapters for exactly one framework.
         framework: Option<String>,
+        /// Explicit safety bypass: authorize an unsafe plugin install.
+        ///
+        /// This is an explicit security-bypass authorization. When set,
+        /// ANOLISA is permitted to pass the OpenClaw framework's own
+        /// unsafe-install flag if the installed OpenClaw advertises it as
+        /// effective. Releases where that flag is a deprecated no-op are
+        /// rejected and require operator-owned `security.installPolicy`
+        /// configuration instead.
+        /// Only valid for an OpenClaw plugin adapter; using it with any
+        /// other framework or a skill-only adapter is rejected. Off by
+        /// default; a normal install never bypasses OpenClaw's checks.
+        #[arg(long)]
+        allow_unsafe_plugin_install: bool,
     },
     /// Disable a previously enabled adapter.
     Disable {
@@ -123,6 +137,29 @@ struct ScanPayload {
     warnings: Vec<String>,
 }
 
+/// One notice in `--json` output. A stable shape: `when` and `level` are
+/// always present (never elided for defaults) so consumers can rely on the
+/// field layout; `command` is optional display-only text.
+#[derive(Serialize)]
+struct NoticeRow {
+    when: NoticeWhen,
+    level: NoticeLevel,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+}
+
+impl From<&AdapterNotice> for NoticeRow {
+    fn from(notice: &AdapterNotice) -> Self {
+        NoticeRow {
+            when: notice.when,
+            level: notice.level,
+            text: notice.text.clone(),
+            command: notice.command.clone(),
+        }
+    }
+}
+
 /// `adapter enable` JSON output.
 #[derive(Serialize)]
 struct EnablePayload {
@@ -133,6 +170,9 @@ struct EnablePayload {
     plan: Option<DriverPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     claim: Option<AdapterClaim>,
+    /// Notices displayed (real enable) or that would be displayed
+    /// (dry-run). Always present; empty when the adapter declares none.
+    notices: Vec<NoticeRow>,
 }
 
 /// `adapter disable` JSON output.
@@ -145,6 +185,9 @@ struct DisablePayload {
     claim_removed: bool,
     cleanup_complete: bool,
     messages: Vec<String>,
+    /// Notices displayed (real disable) or that would be displayed
+    /// (dry-run). Always present; empty when none apply.
+    notices: Vec<NoticeRow>,
 }
 
 /// One row of `adapter status` JSON output.
@@ -173,7 +216,13 @@ pub fn handle(args: AdapterArgs, ctx: &CliContext) -> Result<(), CliError> {
         AdapterCommands::Enable {
             component,
             framework,
-        } => handle_enable(ctx, &component, framework.as_deref()),
+            allow_unsafe_plugin_install,
+        } => handle_enable(
+            ctx,
+            &component,
+            framework.as_deref(),
+            allow_unsafe_plugin_install,
+        ),
         AdapterCommands::Disable {
             component,
             framework,
@@ -287,17 +336,24 @@ fn handle_enable(
     ctx: &CliContext,
     component: &str,
     framework: Option<&str>,
+    allow_unsafe_plugin_install: bool,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
-    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
-    let manager = build_manager(ctx);
+    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
+    let manager = common::build_adapter_manager_from_view(ctx, &view);
     let outcome = manager
-        .enable(&component, framework, ctx.dry_run)
+        .enable_with_options(
+            &component,
+            framework,
+            ctx.dry_run,
+            EnableOptions {
+                allow_unsafe_plugin_install,
+            },
+        )
         .map_err(|e| map_err(COMMAND, e))?;
 
     match outcome {
-        EnableOutcome::Planned(plan) => {
+        EnableOutcome::Planned { plan, notices } => {
             if ctx.json {
                 let payload = EnablePayload {
                     component: plan.component.clone(),
@@ -305,6 +361,7 @@ fn handle_enable(
                     dry_run: true,
                     plan: Some(plan),
                     claim: None,
+                    notices: notices.iter().map(NoticeRow::from).collect(),
                 };
                 return render_json(COMMAND, payload);
             }
@@ -318,9 +375,11 @@ fn handle_enable(
             if let Some(cmd) = &plan.register_command {
                 println!("  command: {cmd}");
             }
+            print_notices(&notices, true, ctx.quiet);
             Ok(())
         }
         EnableOutcome::Enabled(claim) => {
+            let notices = post_enable_notices(&claim);
             if ctx.json {
                 let payload = EnablePayload {
                     component: claim.component.clone(),
@@ -328,6 +387,7 @@ fn handle_enable(
                     dry_run: false,
                     plan: None,
                     claim: Some(*claim),
+                    notices: notices.iter().map(NoticeRow::from).collect(),
                 };
                 return render_json(COMMAND, payload);
             }
@@ -335,6 +395,7 @@ fn handle_enable(
             if let Some(pid) = &claim.plugin_id {
                 println!("  plugin: {pid}");
             }
+            print_notices(&notices, false, ctx.quiet);
             Ok(())
         }
     }
@@ -350,9 +411,8 @@ fn handle_disable(
     framework: Option<&str>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter disable";
-    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
-    let manager = build_manager(ctx);
+    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
+    let manager = common::build_adapter_manager_from_view(ctx, &view);
     let outcome: DisableOutcome = manager
         .disable(&component, framework, ctx.dry_run)
         .map_err(|e| map_err(COMMAND, e))?;
@@ -366,6 +426,7 @@ fn handle_disable(
                 claim_removed: false,
                 cleanup_complete: outcome.report.cleanup_complete,
                 messages: outcome.report.messages.clone(),
+                notices: outcome.notices.iter().map(NoticeRow::from).collect(),
             };
             return render_json(COMMAND, payload);
         }
@@ -374,6 +435,7 @@ fn handle_disable(
         for msg in &outcome.report.messages {
             println!("  - {msg}");
         }
+        print_notices(&outcome.notices, true, ctx.quiet);
         return Ok(());
     }
 
@@ -399,6 +461,7 @@ fn handle_disable(
             claim_removed: outcome.claim_removed,
             cleanup_complete: outcome.report.cleanup_complete,
             messages: outcome.report.messages.clone(),
+            notices: outcome.notices.iter().map(NoticeRow::from).collect(),
         };
         return render_json(COMMAND, payload);
     }
@@ -414,7 +477,56 @@ fn handle_disable(
     for msg in &outcome.report.messages {
         println!("  - {msg}");
     }
+    print_notices(&outcome.notices, false, ctx.quiet);
     degraded.map_or(Ok(()), Err)
+}
+
+/// The `post_enable` notices persisted in a receipt.
+fn post_enable_notices(claim: &AdapterClaim) -> Vec<AdapterNotice> {
+    claim
+        .notices
+        .iter()
+        .filter(|notice| notice.when == NoticeWhen::PostEnable)
+        .cloned()
+        .collect()
+}
+
+/// Print notices for human output. Suppressed entirely under `--quiet`.
+/// Under `dry_run` the notices are only a preview of what a real operation
+/// would display, so the heading says so. Control characters are escaped to
+/// keep untrusted contract or receipt text from altering terminal state.
+fn print_notices(notices: &[AdapterNotice], dry_run: bool, quiet: bool) {
+    if quiet || notices.is_empty() {
+        return;
+    }
+    if dry_run {
+        println!("  would show notices:");
+    } else {
+        println!("  notices:");
+    }
+    for notice in notices {
+        let level = match notice.level {
+            NoticeLevel::Info => "info",
+            NoticeLevel::Warning => "warning",
+        };
+        println!("    [{level}] {}", escape_notice_for_terminal(&notice.text));
+        if let Some(command) = &notice.command {
+            println!("      command: {}", escape_notice_for_terminal(command));
+        }
+    }
+}
+
+/// Escape control characters while preserving printable Unicode text.
+fn escape_notice_for_terminal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 /// Human-facing `component/framework` label for a disable outcome, falling
@@ -432,16 +544,16 @@ fn disable_target(outcome: &DisableOutcome) -> String {
 
 fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliError> {
     const COMMAND: &str = "adapter status";
-    let component = match component {
+    let (component, manager) = match component {
         Some(name) => {
-            let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-            Some(common::lookup_component_name(
-                name, &installed, ctx, COMMAND,
-            ))
+            let (component, view) = common::resolve_adapter_target(name, ctx, COMMAND)?;
+            (
+                Some(component),
+                common::build_adapter_manager_from_view(ctx, &view),
+            )
         }
-        None => None,
+        None => (None, build_manager(ctx)),
     };
-    let manager = build_manager(ctx);
     let report: StatusReport = manager
         .status(component.as_deref())
         .map_err(|e| map_err(COMMAND, e))?;
@@ -487,8 +599,9 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
 // ---------------------------------------------------------------------------
 
 /// Map an [`AdapterError`] to the CLI error model. Input/environment
-/// problems are `INVALID_ARGUMENT` (exit 2); machine-side failures (CLI
-/// spawn, lock, state/log IO) are `EXECUTION_FAILED` (exit 1).
+/// problems are `INVALID_ARGUMENT` (exit 2), an absent component is
+/// `NOT_INSTALLED` (also exit 2); machine-side failures (CLI spawn, lock,
+/// state/log IO) are `EXECUTION_FAILED` (exit 1).
 fn map_err(command: &str, err: AdapterError) -> CliError {
     match err {
         AdapterError::UnknownPlaceholder { .. }
@@ -496,13 +609,21 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         | AdapterError::AmbiguousFramework { .. }
         | AdapterError::UnsupportedAdapterType { .. }
         | AdapterError::InvalidAdapterInput { .. }
-        | AdapterError::ComponentNotInstalled { .. }
         | AdapterError::AdapterNotDeclared { .. }
         | AdapterError::ResourceRootNotFound { .. }
         | AdapterError::ContractResourceRootNotFound { .. }
         | AdapterError::FrameworkNotDetected { .. }
+        | AdapterError::FrameworkVersionMismatch { .. }
         | AdapterError::BundleInvalid { .. }
+        | AdapterError::UnsafeInstallNotApplicable { .. }
         | AdapterError::ClaimValidation(_) => CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: err.to_string(),
+        },
+        // Same condition the lifecycle commands report as NOT_INSTALLED:
+        // the target is absent from state. Routing it anywhere else would
+        // make the code depend on which command the caller happened to run.
+        AdapterError::ComponentNotInstalled { .. } => CliError::NotInstalled {
             command: command.to_string(),
             reason: err.to_string(),
         },
@@ -554,9 +675,14 @@ mod tests {
             AdapterCommands::Enable {
                 component,
                 framework,
+                allow_unsafe_plugin_install,
             } => {
                 assert_eq!(component, "tokenless");
                 assert!(framework.is_none());
+                assert!(
+                    !allow_unsafe_plugin_install,
+                    "unsafe install must default to false"
+                );
             }
             _ => panic!("expected enable"),
         }
@@ -568,6 +694,61 @@ mod tests {
             }
             _ => panic!("expected enable"),
         }
+    }
+
+    #[test]
+    fn enable_parses_allow_unsafe_plugin_install_flag() {
+        let cli = TestCli::try_parse_from([
+            "x",
+            "enable",
+            "tokenless",
+            "openclaw",
+            "--allow-unsafe-plugin-install",
+        ])
+        .expect("parse");
+        match cli.command {
+            AdapterCommands::Enable {
+                component,
+                framework,
+                allow_unsafe_plugin_install,
+            } => {
+                assert_eq!(component, "tokenless");
+                assert_eq!(framework.as_deref(), Some("openclaw"));
+                assert!(
+                    allow_unsafe_plugin_install,
+                    "flag must be captured when passed"
+                );
+            }
+            _ => panic!("expected enable"),
+        }
+    }
+
+    /// An absent component reports the same code here as it does from
+    /// `uninstall`/`update`/`repair`, so a caller never has to know which
+    /// command surfaced the condition.
+    #[test]
+    fn component_not_installed_maps_to_not_installed() {
+        let err = map_err(
+            "adapter enable",
+            AdapterError::ComponentNotInstalled {
+                component: "cosh".to_string(),
+            },
+        );
+        assert_eq!(err.code(), "NOT_INSTALLED");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn unsafe_install_not_applicable_maps_to_invalid_argument() {
+        let err = map_err(
+            "adapter enable",
+            AdapterError::UnsafeInstallNotApplicable {
+                component: "agent-sec".to_string(),
+                framework: "hermes".to_string(),
+                adapter_type: None,
+            },
+        );
+        assert!(matches!(err, CliError::InvalidArgument { .. }));
     }
 
     #[test]

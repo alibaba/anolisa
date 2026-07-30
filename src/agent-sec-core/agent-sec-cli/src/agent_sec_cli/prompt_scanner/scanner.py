@@ -205,10 +205,12 @@ class PromptScanner:
             # Why sequential?  The HuggingFace tokenizer (Rust-backed,
             # uses RefCell internally) is NOT thread-safe.  To prevent
             # "Already borrowed" panics, PromptGuardClassifier serialises
-            # all inference behind _inference_lock.  With that lock in
-            # place a ThreadPoolExecutor only adds thread-creation and
-            # context-switch overhead while every worker queues on the
-            # same lock — net effect is *slower* than a plain loop.
+            # all inference behind the shared ModelManager.inference_context
+            # (keyed by model_name, shared across all classifier instances
+            # using the same tokenizer).  With that lock in place a
+            # ThreadPoolExecutor only adds thread-creation and context-switch
+            # overhead while every worker queues on the same lock — net
+            # effect is *slower* than a plain loop.
             return [self.scan(t) for t in texts]
 
         # FAST mode (L1 only): pure-regex detectors are thread-safe.

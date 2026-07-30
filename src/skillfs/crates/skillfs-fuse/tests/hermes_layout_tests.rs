@@ -604,13 +604,13 @@ fn hermes_nested_write_triggers_notify() {
 
     let event = &events[0];
     assert_eq!(
-        event.skill_name, "apple/apple-notes",
-        "skillName must be category/skill"
+        event.skill_id, "apple/apple-notes",
+        "skillId must be category/skill"
     );
     assert!(
-        event.skill_dir.ends_with("/apple/apple-notes"),
-        "skillDir must end with /apple/apple-notes, got: {}",
-        event.skill_dir
+        event.canonical_skill_dir.ends_with("/apple/apple-notes"),
+        "canonicalSkillDir must end with /apple/apple-notes, got: {}",
+        event.canonical_skill_dir
     );
     assert!(
         event.paths.contains(&"SKILL.md".to_string()),
@@ -682,13 +682,15 @@ fn hermes_nested_file_rename_triggers_notify() {
     let events = notify_client.events();
     let rename_events: Vec<_> = events
         .iter()
-        .filter(|e| e.skill_name == "apple/apple-notes" && e.event_kind == "rename")
+        .filter(|e| e.skill_id == "apple/apple-notes" && e.event_kind == "rename")
         .collect();
-    assert!(
-        !rename_events.is_empty(),
-        "nested file rename must trigger notify for apple/apple-notes, got: {:?}",
-        events
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "nested file rename must trigger one notify for apple/apple-notes: {events:?}"
     );
+    assert_eq!(rename_events[0].schema_version, 2);
+    assert_eq!(rename_events[0].paths, vec!["new.txt", "old.txt"]);
 }
 
 // -----------------------------------------------------------------------

@@ -3,8 +3,8 @@ use std::time::Duration;
 use crate::agent::run::ActiveAgentRun;
 use crate::runtime::prelude::*;
 
-const SHELL_HANDOFF_CONTINUATION_HINT: &str =
-    "analysis-only continuation after foreground shell handoff";
+#[cfg(test)]
+const SHELL_HANDOFF_CONTINUATION_HINT: &str = crate::types::SHELL_HANDOFF_CONTINUATION_HINT;
 const SHELL_HANDOFF_RECOVERY_OWNER_HINT: &str = "shell handoff recovery owner:";
 const DISABLE_PROVIDER_RESUME_HINT: &str = "disable provider resume for shell handoff fallback";
 const SHELL_HANDOFF_FIRST_TEXT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -12,13 +12,7 @@ const SHELL_HANDOFF_FIRST_TEXT_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) fn run_request_is_analysis_only_continuation(
     run_request: Option<&AgentRequest>,
 ) -> bool {
-    run_request.is_some_and(|request| {
-        request.mode == AgentMode::RecommendOnly
-            && request
-                .context_hints
-                .iter()
-                .any(|hint| hint.contains(SHELL_HANDOFF_CONTINUATION_HINT))
-    })
+    run_request.is_some_and(crate::types::request_is_analysis_only_continuation)
 }
 
 pub(crate) fn provider_mode_for_agent_run(
@@ -30,6 +24,27 @@ pub(crate) fn provider_mode_for_agent_run(
     } else {
         shell_mode
     }
+}
+
+pub(crate) fn annotate_continuation_user_approval_mode(
+    request: &mut AgentRequest,
+    shell_mode: CoshApprovalMode,
+) {
+    if !run_request_is_analysis_only_continuation(Some(request)) {
+        return;
+    }
+    let mode_name = match shell_mode {
+        CoshApprovalMode::Recommend => "recommend",
+        CoshApprovalMode::Auto => "auto",
+        CoshApprovalMode::Trust => "trust",
+    };
+    request
+        .context_hints
+        .retain(|hint| !hint.starts_with(crate::types::USER_APPROVAL_MODE_HINT_PREFIX));
+    request.context_hints.push(format!(
+        "{}{mode_name}",
+        crate::types::USER_APPROVAL_MODE_HINT_PREFIX
+    ));
 }
 
 fn run_request_is_shell_handoff_recovery_continuation(request: &AgentRequest) -> bool {
@@ -67,7 +82,7 @@ pub(crate) fn render_fresh_turn_recovery_notice<W: Write>(
 
 pub(crate) fn shell_handoff_resume_fallback_request(
     active_run: &ActiveAgentRun,
-) -> Option<AgentRequest> {
+) -> Option<(AgentRequest, AgentRunOrigin)> {
     let failed = active_run.governed_events.iter().any(|event| {
         matches!(
             &event.event,
@@ -83,7 +98,7 @@ pub(crate) fn shell_handoff_resume_fallback_request(
 
 fn shell_handoff_resume_fallback_request_without_failure(
     active_run: &ActiveAgentRun,
-) -> Option<AgentRequest> {
+) -> Option<(AgentRequest, AgentRunOrigin)> {
     if !run_request_is_shell_handoff_recovery_continuation(&active_run.request) {
         return None;
     }
@@ -105,12 +120,12 @@ fn shell_handoff_resume_fallback_request_without_failure(
     request
         .context_hints
         .push("fresh-turn fallback after shell handoff continuation resume failure".to_string());
-    Some(request)
+    Some((request, active_run.origin))
 }
 
 pub(crate) fn shell_handoff_first_text_fallback_request(
     active_run: &ActiveAgentRun,
-) -> Option<AgentRequest> {
+) -> Option<(AgentRequest, AgentRunOrigin)> {
     if active_run.has_visible_text_delta {
         return None;
     }
@@ -150,6 +165,7 @@ mod tests {
             format!("{SHELL_HANDOFF_RECOVERY_OWNER_HINT} req-1/toolu-1"),
         ];
         let mut active_run = test_active_run(request);
+        active_run.origin = AgentRunOrigin::InsightPrompt;
         active_run.governed_events.push(GovernedEvent {
             decision: GovernanceDecision::Display,
             policy_decision: GovernancePolicyDecision::AuditOnly,
@@ -162,8 +178,9 @@ mod tests {
             auto_execute: false,
         });
 
-        let fallback =
+        let (fallback, origin) =
             shell_handoff_resume_fallback_request(&active_run).expect("fallback request");
+        assert_eq!(origin, AgentRunOrigin::InsightPrompt);
         assert_eq!(fallback.id, "request-1-fresh");
         assert_eq!(fallback.command_block.id, "block-1-fresh");
         assert!(fallback
@@ -205,10 +222,12 @@ mod tests {
             format!("{SHELL_HANDOFF_RECOVERY_OWNER_HINT} req-1/toolu-1"),
         ];
         let mut active_run = test_active_run(request);
+        active_run.origin = AgentRunOrigin::AutoFailure;
         active_run.started_at = Instant::now() - SHELL_HANDOFF_FIRST_TEXT_TIMEOUT;
 
-        let fallback =
+        let (fallback, origin) =
             shell_handoff_first_text_fallback_request(&active_run).expect("fallback request");
+        assert_eq!(origin, AgentRunOrigin::AutoFailure);
         assert_eq!(fallback.id, "request-1-fresh");
         assert!(fallback
             .context_hints
@@ -263,6 +282,7 @@ mod tests {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "fake",
             language: Language::EnUs,
@@ -309,6 +329,8 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

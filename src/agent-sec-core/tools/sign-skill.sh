@@ -27,7 +27,7 @@
 #                      environments where the keyring is not pre-configured.
 #   GPG_PASSPHRASE   - Passphrase for the GPG key (optional).
 #
-# Full guide: tools/SIGNING_GUIDE.md | tools/SIGNING_GUIDE_CN.md
+# Full guide: tools/SIGNING_GUIDE.md | tools/SIGNING_GUIDE_zh.md
 #
 
 set -e

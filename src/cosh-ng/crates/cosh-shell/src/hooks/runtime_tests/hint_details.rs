@@ -233,19 +233,17 @@ fn recorded_hook_finding_uses_zh_notice_labels() {
     let rendered = String::from_utf8(output).expect("utf8");
     assert!(rendered.contains("Hook 发现"), "{rendered}");
     assert!(rendered.contains("命令 Hook 发现"), "{rendered}");
-    assert!(rendered.contains("输出 ID"), "{rendered}");
-    assert!(
-        rendered.contains("terminal-output://session/cmd-1"),
-        "{rendered}"
-    );
+    assert!(!rendered.contains("输出 ID"), "{rendered}");
+    assert!(!rendered.contains("terminal-output://"), "{rendered}");
     assert!(
         rendered.contains("Agent 后续分析必须先使用 cosh-shell 的有界证据"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("使用 /hooks analyze|ignore|details hook-cmd-1-memory-pressure。"),
+        !rendered.contains("hook-cmd-1-memory-pressure"),
         "{rendered}"
     );
+    assert!(!rendered.contains("details"), "{rendered}");
     assert!(!rendered.contains("Command hook finding"), "{rendered}");
     assert!(!rendered.contains("Output ref:"), "{rendered}");
     assert!(!rendered.contains("/tmp/out"), "{rendered}");

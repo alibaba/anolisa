@@ -17,48 +17,50 @@ pub(crate) fn render_hooks_command<W: Write>(
         (None, _, _) => {
             let i18n = state.i18n();
             let hooks = state.hooks.engine.registered_hook_infos();
-            let shell_body = hooks_status_body(state, &hooks, &i18n);
+            let shell_lines = hooks_status_body(state, &hooks, &i18n);
 
             // Agent Hooks section (only available with CoshCore backend)
-            let (agent_body, agent_hook_count) =
+            let (agent_view, agent_hook_count) =
                 if let AdapterInstance::CoshCore(cosh_core) = adapter {
                     match cosh_core.registry_query("hooks", "list", Value::Null) {
                         Ok(data) => {
-                            let list = format_agent_hooks_list(&data);
                             let count = data.as_array().map(|a| a.len()).unwrap_or(0);
-                            (list, count)
+                            let groups = group_agent_hooks(&data);
+                            let view = if groups.is_empty() {
+                                AgentHooksView::Message("(none)".to_string())
+                            } else {
+                                AgentHooksView::Groups(groups)
+                            };
+                            (view, count)
                         }
-                        Err(e) => (vec![format!("  Error: {e}")], 0),
+                        Err(e) => (AgentHooksView::Message(format!("Error: {e}")), 0),
                     }
                 } else {
                     (
-                        vec![format!(
-                            "  {}",
-                            i18n.t(MessageId::SlashHooksAgentUnavailable)
-                        )],
+                        AgentHooksView::Message(
+                            i18n.t(MessageId::SlashHooksAgentUnavailable).to_string(),
+                        ),
                         0,
                     )
                 };
 
-            let mut body = Vec::new();
-            body.push(format!(
-                "── {} ──",
-                i18n.t(MessageId::SlashHooksShellSection)
-            ));
-            body.extend(shell_body);
-            body.push(String::new());
-            body.push(format!(
-                "── {} ──",
-                i18n.t(MessageId::SlashHooksAgentSection)
-            ));
-            body.extend(agent_body);
-
             let total_hook_count = hooks.len() + agent_hook_count;
-            render_notice_panel(
+            let omitted_template = if i18n.language() == crate::config::Language::ZhCn {
+                "… 另有 {count} 个 hook 未显示（完整列表见 plain 输出）".to_string()
+            } else {
+                "… {count} more hook(s) not shown (full list in plain output)".to_string()
+            };
+            RatatuiInlineRenderer::for_terminal().write_hook_status_panel(
                 output,
-                i18n.t(MessageId::SlashHooksRegisteredTitle),
-                body,
-                Some(&hooks_footer(state, total_hook_count, &i18n)),
+                HookStatusPanelModel {
+                    title: i18n.t(MessageId::SlashHooksRegisteredTitle),
+                    shell_label: i18n.t(MessageId::SlashHooksShellSection),
+                    shell_lines,
+                    agent_label: i18n.t(MessageId::SlashHooksAgentSection),
+                    agent: agent_view,
+                    omitted_template,
+                    footer: hooks_footer(state, total_hook_count, &i18n),
+                },
             )
         }
         (Some("history"), None, None) => render_hooks_history(state, output),
@@ -681,30 +683,76 @@ fn hook_severity_label(severity: FindingSeverity) -> &'static str {
     }
 }
 
-fn format_agent_hooks_list(data: &Value) -> Vec<String> {
+/// Fixed display order for agent hook events; unknown events keep their
+/// first-seen order after the known ones.
+///
+/// Currently consumed only by `group_agent_hooks`. If another surface ever
+/// needs the same event ordering (e.g. another panel or CLI output),
+/// extract this constant and `agent_hook_event_rank` into a shared hooks
+/// domain module instead of duplicating the order.
+const AGENT_HOOK_EVENT_ORDER: [&str; 12] = [
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "UserPromptSubmit",
+    "BeforeModel",
+    "AfterModel",
+    "Stop",
+    "SessionStart",
+    "SessionEnd",
+    "PreCompact",
+    "Notification",
+    "BeforeToolSelection",
+];
+
+fn agent_hook_event_rank(event: &str) -> usize {
+    AGENT_HOOK_EVENT_ORDER
+        .iter()
+        .position(|known| *known == event)
+        .unwrap_or(AGENT_HOOK_EVENT_ORDER.len())
+}
+
+/// Groups the flat `(name, event)` records returned by cosh-core by event
+/// type so a hook registered for several events no longer scatters across
+/// the panel (#1713). Events follow a fixed lifecycle order; hooks keep the
+/// registry order inside each group.
+pub(super) fn group_agent_hooks(data: &Value) -> Vec<HookEventGroup> {
     let Some(arr) = data.as_array() else {
-        return vec!["  (none)".to_string()];
+        return Vec::new();
     };
-    if arr.is_empty() {
-        return vec!["  (none)".to_string()];
-    }
-    arr.iter()
-        .filter_map(|hook| {
-            let name = hook.get("name")?.as_str()?;
-            let event = hook.get("event").and_then(|v| v.as_str()).unwrap_or("?");
-            let ext = hook
+
+    let mut groups: Vec<HookEventGroup> = Vec::new();
+    for hook in arr {
+        let Some(name) = hook.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let event = hook
+            .get("event")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let entry = HookEntryView {
+            name: name.to_string(),
+            extension: hook
                 .get("extension")
                 .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let disabled = hook
+                .unwrap_or("?")
+                .to_string(),
+            disabled: hook
                 .get("disabled")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if disabled {
-                Some(format!("  ○ {name} [{event}] (ext: {ext}) [disabled]"))
-            } else {
-                Some(format!("  • {name} [{event}] (ext: {ext})"))
-            }
-        })
-        .collect()
+                .unwrap_or(false),
+        };
+        match groups.iter_mut().find(|group| group.event == event) {
+            Some(group) => group.hooks.push(entry),
+            None => groups.push(HookEventGroup {
+                event,
+                hooks: vec![entry],
+            }),
+        }
+    }
+    // Stable sort: known events by lifecycle rank, unknown events keep their
+    // first-seen order after all known ones.
+    groups.sort_by_key(|group| agent_hook_event_rank(&group.event));
+    groups
 }

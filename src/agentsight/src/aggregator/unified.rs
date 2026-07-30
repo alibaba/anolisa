@@ -96,7 +96,7 @@ impl Aggregator {
 
     /// Process parse result
     pub fn process_result(&mut self, result: ParseResult) -> Vec<AggregatedResult> {
-        log::debug!(
+        log::trace!(
             "Aggregating parsed results({}): {}",
             result.messages.len(),
             result

@@ -54,6 +54,7 @@ const char *agentsight_last_error(void);
 AgentsightConfigHandle *agentsight_config_new(void);
 void agentsight_config_set_verbose(AgentsightConfigHandle *cfg, int verbose);
 void agentsight_config_set_log_path(AgentsightConfigHandle *cfg, const char *path);
+void agentsight_config_set_enable_raw_https(AgentsightConfigHandle *cfg, int enabled);
 void agentsight_config_add_cmdline_rule(AgentsightConfigHandle *cfg, const char *const *rule, const char *agent_name, int allow);
 void agentsight_config_add_https(AgentsightConfigHandle *cfg, const char *rule);
 int  agentsight_config_add_http(AgentsightConfigHandle *cfg, const char *target);

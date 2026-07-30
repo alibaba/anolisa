@@ -60,6 +60,12 @@ echo '{"type":"user","message":{"role":"user","content":"列出当前目录文�
 ```bash
 # 启动交互式 AI Shell
 cosh-shell
+
+# 浏览当前工作空间中可恢复的对话
+cosh-shell --resume
+
+# 或直接选择已知的 provider 会话
+cosh-shell --resume <session-id>
 ```
 
 ## 配置
@@ -73,4 +79,6 @@ cosh-shell
 - [cosh-cli 总览](cli/overview.md) — 了解 CLI 子系统
 - [cosh-core 总览](core/overview.md) — 了解无头模式与 LLM 集成
 - [cosh-shell 总览](shell/overview.md) — 了解交互式终端
+- [会话恢复](shell/session-recovery.md) — 恢复、检查并安全清理 Agent 对话
+- [会话压缩](shell/session-compaction.md) — 在不删除 transcript 的前提下缩减模型可见上下文
 - [输出格式](output-format.md) — 理解 JSON 信封与错误码

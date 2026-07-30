@@ -8,8 +8,13 @@ pub use implementation::{
     AuthFieldInfo, AuthProviderInfo, AuthResponse, ClaudeCodeAdapter, ControlProtocolCapabilities,
     CoshCoreAdapter, FakeAgentAdapter, HostExecutedShellMetadata, HostExecutedShellResult,
     ProviderCancellationArtifact, ProviderCancellationArtifactKind,
-    ProviderCancellationArtifactStore, QwenCliAdapter, ShellEvidenceAction,
+    ProviderCancellationArtifactStore, QwenCliAdapter, SessionClearFailure,
+    SessionClearInterruption, SessionClearPlan, SessionClearResult, SessionErrorInfo,
+    SessionHealth, SessionList, SessionManagementClient, SessionRecovery, SessionRecoveryState,
+    SessionRuntimeState, SessionSummary, ShellEvidenceAction,
 };
 
 #[allow(unused_imports)]
-pub(crate) use implementation::{prompt_from_request, provider_prompt_contract};
+pub(crate) use implementation::{
+    prompt_from_request, provider_prompt_contract, FreshSessionOutcome,
+};

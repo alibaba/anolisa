@@ -13,6 +13,7 @@ import {
   hasAliyunCredentials,
   getAliyunCredsPath,
 } from './aliyunCredentials.js';
+import { loadCoshNgAuth } from '../config/coshNgAuth.js';
 
 vi.mock('node:fs', () => ({
   promises: {
@@ -21,6 +22,12 @@ vi.mock('node:fs', () => ({
     mkdir: vi.fn(),
     unlink: vi.fn(),
   },
+}));
+
+// config.toml parsing is covered by ../config/coshNgAuth.test.ts; here we only
+// exercise how the credential loader consumes its result.
+vi.mock('../config/coshNgAuth.js', () => ({
+  loadCoshNgAuth: vi.fn(),
 }));
 
 vi.mock('../utils/credential-encryptor.js', () => ({
@@ -55,6 +62,8 @@ describe('aliyunCredentials', () => {
     vi.clearAllMocks();
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue(undefined);
+    // No cosh-ng config unless a test says otherwise.
+    vi.mocked(loadCoshNgAuth).mockReturnValue(undefined);
   });
 
   describe('saveAliyunCredentials', () => {
@@ -138,6 +147,93 @@ describe('aliyunCredentials', () => {
 
       const result = await loadAliyunCredentials();
       expect(result).toBeNull();
+    });
+  });
+
+  describe('loadAliyunCredentials cosh-ng fallback', () => {
+    const enoent = () =>
+      Object.assign(new Error('ENOENT'), { code: 'ENOENT' as const });
+
+    const coshNgCredentials = {
+      kind: 'aliyun' as const,
+      accessKeyId: 'LTAI-from-cosh-ng',
+      accessKeySecret: 'secret-from-cosh-ng',
+    };
+
+    it('should use cosh-ng AK/SK when aliyun_creds.json is absent', async () => {
+      mockFs.readFile.mockRejectedValue(enoent());
+      vi.mocked(loadCoshNgAuth).mockReturnValue(coshNgCredentials);
+
+      expect(await loadAliyunCredentials()).toEqual({
+        accessKeyId: 'LTAI-from-cosh-ng',
+        accessKeySecret: 'secret-from-cosh-ng',
+      });
+    });
+
+    it('should never produce STS credentials from the fallback', async () => {
+      mockFs.readFile.mockRejectedValue(enoent());
+      vi.mocked(loadCoshNgAuth).mockReturnValue(coshNgCredentials);
+
+      const credentials = await loadAliyunCredentials();
+
+      // A securityToken would make the generator treat these as STS and
+      // persist refreshed credentials on expiry, which the read-only fallback
+      // must never trigger. loadCoshNgAuth() refuses token-bearing providers.
+      expect(credentials).not.toHaveProperty('securityToken');
+      expect(credentials).not.toHaveProperty('expiration');
+    });
+
+    it('should prefer native aliyun_creds.json over cosh-ng', async () => {
+      mockFs.readFile.mockResolvedValue(
+        `enc:mock:mock:${JSON.stringify(testCredentials)}`,
+      );
+      vi.mocked(loadCoshNgAuth).mockReturnValue(coshNgCredentials);
+
+      expect(await loadAliyunCredentials()).toEqual(testCredentials);
+    });
+
+    it('should not switch identities when native credentials are corrupt', async () => {
+      mockFs.readFile.mockResolvedValue('enc:unknown:bad:data');
+      vi.mocked(loadCoshNgAuth).mockReturnValue(coshNgCredentials);
+
+      expect(await loadAliyunCredentials()).toBeNull();
+      expect(loadCoshNgAuth).not.toHaveBeenCalled();
+    });
+
+    it('should not fall back after a native credential read error', async () => {
+      mockFs.readFile.mockRejectedValue(new Error('permission denied'));
+      vi.mocked(loadCoshNgAuth).mockReturnValue(coshNgCredentials);
+
+      expect(await loadAliyunCredentials()).toBeNull();
+      expect(loadCoshNgAuth).not.toHaveBeenCalled();
+    });
+
+    it('should ignore an OpenAI-compatible cosh-ng provider', async () => {
+      mockFs.readFile.mockRejectedValue(enoent());
+      vi.mocked(loadCoshNgAuth).mockReturnValue({
+        kind: 'openai',
+        apiKey: 'sk-from-cosh-ng',
+        baseUrl: 'https://example.com/v1',
+      });
+
+      expect(await loadAliyunCredentials()).toBeNull();
+    });
+
+    it('should never write either credential store', async () => {
+      mockFs.readFile.mockRejectedValue(enoent());
+      vi.mocked(loadCoshNgAuth).mockReturnValue(coshNgCredentials);
+
+      await loadAliyunCredentials();
+
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(mockFs.mkdir).not.toHaveBeenCalled();
+    });
+
+    it('should report credentials as present via hasAliyunCredentials', async () => {
+      mockFs.readFile.mockRejectedValue(enoent());
+      vi.mocked(loadCoshNgAuth).mockReturnValue(coshNgCredentials);
+
+      expect(await hasAliyunCredentials()).toBe(true);
     });
   });
 

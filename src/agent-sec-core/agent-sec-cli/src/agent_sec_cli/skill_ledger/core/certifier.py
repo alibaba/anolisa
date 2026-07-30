@@ -16,7 +16,13 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
 )
-from agent_sec_cli.skill_ledger.core.live_root import require_live_skill_dir
+from agent_sec_cli.skill_ledger.core.live_root import (
+    ResolvedSkillRoot,
+    SkillRootInput,
+    canonical_skill_operation,
+    resolve_skill_root,
+    validate_resolved_skill_root,
+)
 from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     manifest_hash_error,
     verify_manifest_integrity,
@@ -33,6 +39,7 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
 )
 from agent_sec_cli.skill_ledger.errors import (
     FindingsFileError,
+    SkillLedgerError,
 )
 from agent_sec_cli.skill_ledger.models.finding import NormalizedFinding
 from agent_sec_cli.skill_ledger.models.manifest import (
@@ -42,6 +49,9 @@ from agent_sec_cli.skill_ledger.models.manifest import (
 from agent_sec_cli.skill_ledger.models.scan import (
     ScanEntry,
     aggregate_scan_status,
+)
+from agent_sec_cli.skill_ledger.path_identity import (
+    normalize_canonical_skill_dir,
 )
 from agent_sec_cli.skill_ledger.scanner import skill_code_scanner
 from agent_sec_cli.skill_ledger.scanner.builtins.dispatcher import (
@@ -57,7 +67,7 @@ from agent_sec_cli.skill_ledger.scanner.registry import (
     ScannerRegistry,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
-from agent_sec_cli.skill_ledger.utils import utc_now_iso, validate_skill_dir
+from agent_sec_cli.skill_ledger.utils import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -316,9 +326,10 @@ def _new_manifest(
     skill_dir: str,
     current_hashes: dict[str, str],
     previous_manifest: SignedManifest | None,
+    *,
+    skill_name: str,
 ) -> SignedManifest:
     """Create a new unsigned manifest object for the current skill contents."""
-    skill_name = Path(skill_dir).name
     inherited_decision = None
     if (
         previous_manifest is not None
@@ -341,23 +352,36 @@ def _prepare_manifest_for_update(
     skill_dir: str,
     current_hashes: dict[str, str],
     backend: SigningBackend,
+    *,
+    skill_name: str | None = None,
 ) -> tuple[SignedManifest, _ManifestState, bool]:
     """Return a manifest ready to receive scan entries.
 
     Missing, drifted, or tampered manifests create a new version. Unsigned
     baselines are reused and signed in-place.
     """
+    effective_skill_name = skill_name or Path(skill_dir).name
     loaded, corrupted = _safe_load_latest_manifest(skill_dir)
     state = _classify_manifest(loaded, current_hashes, backend, corrupted=corrupted)
     if state in {"missing", "drifted", "tampered"}:
         previous_manifest = loaded
         if state == "tampered":
             previous_manifest = _last_trusted_version_manifest(skill_dir, backend)
-        manifest = _new_manifest(skill_dir, current_hashes, previous_manifest)
+        manifest = _new_manifest(
+            skill_dir,
+            current_hashes,
+            previous_manifest,
+            skill_name=effective_skill_name,
+        )
         return manifest, state, True
     if loaded is None:
         # Defensive fallback; state should be "missing" above.
-        manifest = _new_manifest(skill_dir, current_hashes, None)
+        manifest = _new_manifest(
+            skill_dir,
+            current_hashes,
+            None,
+            skill_name=effective_skill_name,
+        )
         return manifest, "missing", True
     return loaded, state, False
 
@@ -395,7 +419,7 @@ def _merge_scan_entries(
 
 
 def _persist_manifest_update(
-    skill_dir: str,
+    root: ResolvedSkillRoot,
     manifest: SignedManifest,
     scan_entries: list[ScanEntry],
     backend: SigningBackend,
@@ -403,9 +427,18 @@ def _persist_manifest_update(
     new_version_created: bool = False,
 ) -> None:
     """Merge scan entries, sign the manifest, and save latest/version JSON."""
+    _merge_scan_entries(manifest, scan_entries)
+    for entry in manifest.scans:
+        entry.findings = [
+            root.canonicalize_payload(finding) for finding in entry.findings
+        ]
+    if root.contains_io_path([entry.findings for entry in manifest.scans]):
+        raise SkillLedgerError(
+            f"scanner findings for {root.canonical_dir} contain an internal I/O path"
+        )
+    skill_dir = str(root.io_dir)
     if new_version_created:
         create_snapshot(skill_dir, manifest.versionId)
-    _merge_scan_entries(manifest, scan_entries)
     manifest.updatedAt = utc_now_iso()
     _sign_manifest(manifest, backend)
     save_manifest(skill_dir, manifest, write_version=True)
@@ -414,7 +447,7 @@ def _persist_manifest_update(
 def _result_payload(
     manifest: SignedManifest,
     *,
-    skill_dir: str,
+    root: ResolvedSkillRoot,
     new_version_created: bool,
     scanners_run: list[str],
     skipped_scanners: list[str] | None = None,
@@ -426,7 +459,8 @@ def _result_payload(
         "versionId": manifest.versionId,
         "scanStatus": manifest.scanStatus,
         "newVersion": new_version_created,
-        "skillName": Path(skill_dir).name,
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "createdAt": manifest.createdAt,
         "updatedAt": manifest.updatedAt,
         "fileCount": len(manifest.fileHashes),
@@ -458,19 +492,21 @@ def _tampered_recovery_event(
     }
 
 
+@canonical_skill_operation
 def scan_skill(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     scanner_names: list[str] | None = None,
     *,
     force: bool = False,
 ) -> dict[str, Any]:
     """Run built-in scanners as needed and record signed scan results."""
-    skill_dir = str(require_live_skill_dir(skill_dir, backend))
-    validate_skill_dir(skill_dir)
-    _remember_skill_dir_best_effort(skill_dir)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
+    _remember_skill_dir_best_effort(str(root.canonical_dir))
 
-    current_hashes = compute_file_hashes(skill_dir)
+    current_hashes = compute_file_hashes(io_skill_dir)
     registry = ScannerRegistry.from_config()
     requested = [
         canonicalize_scanner_name(name)
@@ -478,7 +514,10 @@ def scan_skill(
     ]
 
     manifest, state, new_version_created = _prepare_manifest_for_update(
-        skill_dir, current_hashes, backend
+        io_skill_dir,
+        current_hashes,
+        backend,
+        skill_name=root.skill_name,
     )
 
     if force or state in {"missing", "unsigned", "drifted", "tampered"}:
@@ -490,18 +529,18 @@ def scan_skill(
     if not scanners_to_run:
         return _result_payload(
             manifest,
-            skill_dir=skill_dir,
+            root=root,
             new_version_created=False,
             scanners_run=[],
             skipped_scanners=requested,
             status="noop",
         )
 
-    scan_entries = _auto_invoke_scanners(skill_dir, registry, scanners_to_run)
+    scan_entries = _auto_invoke_scanners(io_skill_dir, registry, scanners_to_run)
     if not scan_entries:
         return _result_payload(
             manifest,
-            skill_dir=skill_dir,
+            root=root,
             new_version_created=False,
             scanners_run=[],
             skipped_scanners=scanners_to_run,
@@ -509,7 +548,7 @@ def scan_skill(
         )
 
     _persist_manifest_update(
-        skill_dir,
+        root,
         manifest,
         scan_entries,
         backend,
@@ -527,7 +566,7 @@ def scan_skill(
         ]
     return _result_payload(
         manifest,
-        skill_dir=skill_dir,
+        root=root,
         new_version_created=new_version_created,
         scanners_run=scanners_run,
         skipped_scanners=[name for name in requested if name not in scanners_to_run],
@@ -555,9 +594,11 @@ def scan_batch(
                 )
             )
         except Exception as exc:
+            canonical_dir = normalize_canonical_skill_dir(skill_dir)
             results.append(
                 {
-                    "skillName": skill_dir.name,
+                    "canonicalSkillDir": str(canonical_dir),
+                    "skillName": canonical_dir.name,
                     "status": "error",
                     "error": str(exc),
                 }
@@ -565,8 +606,9 @@ def scan_batch(
     return results
 
 
+@canonical_skill_operation
 def certify(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     findings_path: str | None = None,
     scanner: str = "skill-vetter",
@@ -581,14 +623,18 @@ def certify(
             "--findings is required for certify; use 'skill-ledger scan' for built-in scanners",
         )
 
-    skill_dir = str(require_live_skill_dir(skill_dir, backend))
-    validate_skill_dir(skill_dir)
-    _remember_skill_dir_best_effort(skill_dir)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
+    _remember_skill_dir_best_effort(str(root.canonical_dir))
 
-    current_hashes = compute_file_hashes(skill_dir)
+    current_hashes = compute_file_hashes(io_skill_dir)
     registry = ScannerRegistry.from_config()
     manifest, state, new_version_created = _prepare_manifest_for_update(
-        skill_dir, current_hashes, backend
+        io_skill_dir,
+        current_hashes,
+        backend,
+        skill_name=root.skill_name,
     )
 
     raw_findings = _load_findings(findings_path)
@@ -596,7 +642,7 @@ def certify(
     scan_entry = _build_scan_entry(normalized, scanner, scanner_version)
 
     _persist_manifest_update(
-        skill_dir,
+        root,
         manifest,
         [scan_entry],
         backend,
@@ -624,7 +670,7 @@ def certify(
 
     return _result_payload(
         manifest,
-        skill_dir=skill_dir,
+        root=root,
         new_version_created=new_version_created,
         scanners_run=scanners_run,
         extra=delete_result,
@@ -652,9 +698,11 @@ def certify_batch(
                 )
             )
         except Exception as exc:
+            canonical_dir = normalize_canonical_skill_dir(skill_dir)
             results.append(
                 {
-                    "skillName": skill_dir.name,
+                    "canonicalSkillDir": str(canonical_dir),
+                    "skillName": canonical_dir.name,
                     "status": "error",
                     "error": str(exc),
                 }

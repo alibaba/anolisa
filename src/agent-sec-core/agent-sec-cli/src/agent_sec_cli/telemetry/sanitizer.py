@@ -1,9 +1,23 @@
-"""Map SecurityEvent details into telemetry business fields."""
+"""Strict scalar projectors for privacy-safe telemetry fields."""
 
-import json
 import math
+import re
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any
+
+_ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,127}$")
+
+
+class AgentName(StrEnum):
+    """Approved agent product names emitted in telemetry."""
+
+    CODEX = "codex"
+    COSH = "cosh"
+    HERMES = "hermes"
+    OPENCLAW = "openclaw"
+    QODER = "qoder"
+    QWENCODE = "qwencode"
 
 
 def now_iso() -> str:
@@ -11,9 +25,17 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def to_json_safe(value: Any) -> Any:
-    """Return a JSON-safe representation of *value*."""
-    return _make_json_safe(value)
+def timestamp_value(value: Any) -> str | None:
+    """Return a canonical timezone-aware ISO-8601 timestamp."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.isoformat()
 
 
 def details_dict(value: Any) -> dict[str, Any]:
@@ -21,13 +43,6 @@ def details_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
-
-
-def value_or_none(value: Any) -> Any:
-    """Return None for missing string fields encoded as empty strings."""
-    if value == "":
-        return None
-    return value
 
 
 def result_dict(details: dict[str, Any]) -> dict[str, Any]:
@@ -38,63 +53,64 @@ def result_dict(details: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def request_value(details: dict[str, Any]) -> Any:
-    """Return the JSON-safe request field or None when absent."""
-    if "request" not in details:
+def string_value(
+    value: Any,
+    *,
+    max_length: int,
+    allow_empty: bool = False,
+) -> str | None:
+    """Return a trimmed, bounded string or ``None`` for an invalid value."""
+    if not isinstance(value, str):
         return None
-    return to_json_safe(details.get("request"))
-
-
-def error_value(details: dict[str, Any]) -> Any:
-    """Return the explicit error value from event details."""
-    if "error" not in details:
+    normalized = value.strip()
+    if not normalized and not allow_empty:
         return None
-    return to_json_safe(details.get("error"))
+    return normalized[:max_length]
 
 
-def error_type_value(details: dict[str, Any]) -> Any:
-    """Return the explicit error type from event details."""
-    if "error_type" not in details:
-        return None
-    return to_json_safe(details.get("error_type"))
+def agent_name_value(value: Any) -> str:
+    """Return an approved agent product name or an empty string."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        return AgentName(value.strip()).value
+    except ValueError:
+        return ""
 
 
-def result_value(result: dict[str, Any], key: str) -> Any:
-    """Return a JSON-safe result field, or None when it is absent."""
-    if key not in result:
-        return None
-    return to_json_safe(result.get(key))
+def enum_value(value: Any, allowed: frozenset[str]) -> str | None:
+    """Return *value* only when it is an explicitly approved string value."""
+    if isinstance(value, str) and value in allowed:
+        return value
+    return None
 
 
-def _is_json_scalar(value: Any) -> bool:
-    """Return whether *value* can be represented as a JSON scalar."""
-    return value is None or isinstance(value, (str, bool, int, float))
-
-
-def _normalize_json_scalar(value: Any) -> Any:
-    """Return the strict JSON representation of a scalar value."""
-    if isinstance(value, float) and not math.isfinite(value):
+def error_type_value(value: Any) -> str | None:
+    """Return a bounded structured error type, never an error message."""
+    if not isinstance(value, str) or not _ERROR_TYPE_RE.fullmatch(value):
         return None
     return value
 
 
-def _make_json_safe(value: Any) -> Any:
-    """Convert arbitrary Python values into JSON-serializable values."""
-    if _is_json_scalar(value):
-        return _normalize_json_scalar(value)
-    if isinstance(value, dict):
-        return {str(key): _make_json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_make_json_safe(item) for item in value]
-    if isinstance(value, set):
-        return [_make_json_safe(item) for item in sorted(value, key=repr)]
+def integer_value(value: Any) -> int | None:
+    """Return an integer while rejecting booleans and other coercible values."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        return _make_json_safe(model_dump())
 
-    try:
-        json.dumps(value, allow_nan=False)
-    except (TypeError, ValueError):
-        return str(value)
+def nonnegative_integer_value(value: Any) -> int | None:
+    """Return a non-negative integer or ``None``."""
+    normalized = integer_value(value)
+    if normalized is None or normalized < 0:
+        return None
+    return normalized
+
+
+def nonnegative_number_value(value: Any) -> int | float | None:
+    """Return a finite non-negative number while rejecting booleans."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or not math.isfinite(value):
+        return None
     return value

@@ -1,25 +1,27 @@
 """Build telemetry records from SecurityEvent values."""
 
-import uuid
 from typing import Any, Protocol
 
 from agent_sec_cli.security_events.schema import SecurityEvent
-from agent_sec_cli.telemetry.config import (
-    COMPONENT_AGENT_NAME,
-    get_component_fields,
-)
+from agent_sec_cli.telemetry.config import get_component_fields
 from agent_sec_cli.telemetry.sanitizer import (
+    agent_name_value,
     details_dict,
+    enum_value,
     error_type_value,
-    error_value,
+    integer_value,
+    nonnegative_integer_value,
+    nonnegative_number_value,
     now_iso,
-    request_value,
     result_dict,
-    result_value,
-    value_or_none,
+    timestamp_value,
 )
 
+_VERDICTS = frozenset({"pass", "warn", "deny", "error"})
+_RESULTS = frozenset({"succeeded", "failed"})
 _BASELINE_ACTION = "harden"
+_ASSET_VERIFY_ACTION = "verify"
+_SCAN_ACTIONS = frozenset({"code_scan", "prompt_scan", "pii_scan"})
 
 
 class TelemetryContext(Protocol):
@@ -32,7 +34,7 @@ def build_telemetry_security_event(
     event: SecurityEvent,
     ctx: TelemetryContext,
 ) -> dict[str, Any]:
-    """Build a telemetry JSON record from a canonical SecurityEvent."""
+    """Build a telemetry record using action-specific field projections."""
     if event.event_type == _BASELINE_ACTION:
         return _build_baseline_record(event, ctx)
     return _build_seccore_record(event, ctx)
@@ -42,33 +44,45 @@ def _build_seccore_record(
     event: SecurityEvent,
     ctx: TelemetryContext,
 ) -> dict[str, Any]:
-    """Build a seccore.* telemetry record."""
+    """Build an allowlisted seccore.* telemetry record."""
     details = details_dict(event.details)
     result = result_dict(details)
-
-    record = _component_fields(ctx)
+    record: dict[str, Any] = _component_fields(ctx)
     record.update(
         {
-            "seccore.event_id": _event_id(event),
-            "seccore.event_type": value_or_none(event.event_type),
-            "seccore.category": value_or_none(event.category),
-            "seccore.result": value_or_none(event.result),
+            "seccore.event_type": event.event_type,
+            "seccore.category": event.category,
+            "seccore.result": enum_value(event.result, _RESULTS) or "failed",
             "seccore.timestamp": _timestamp(event),
-            "seccore.trace_id": value_or_none(event.trace_id),
-            "seccore.session_id": value_or_none(event.session_id),
-            "seccore.run_id": value_or_none(event.run_id),
-            "seccore.call_id": value_or_none(event.call_id),
-            "seccore.tool_call_id": value_or_none(event.tool_call_id),
-            "seccore.request": request_value(details),
-            "seccore.error": error_value(details),
-            "seccore.error_type": error_type_value(details),
-            "seccore.verdict": result_value(result, "verdict"),
-            "seccore.summary": result_value(result, "summary"),
-            "seccore.elapsed_ms": result_value(result, "elapsed_ms"),
-            "seccore.asset_passed_count": result_value(result, "passed"),
-            "seccore.asset_failed_count": result_value(result, "failed"),
-            "seccore.details": {},
         }
+    )
+
+    if event.event_type in _SCAN_ACTIONS:
+        _add_optional(
+            record,
+            "seccore.verdict",
+            enum_value(result.get("verdict"), _VERDICTS),
+        )
+        _add_optional(
+            record,
+            "seccore.elapsed_ms",
+            nonnegative_number_value(result.get("elapsed_ms")),
+        )
+
+    if event.event_type == _ASSET_VERIFY_ACTION:
+        _add_optional(
+            record,
+            "seccore.asset_passed_count",
+            nonnegative_integer_value(result.get("passed")),
+        )
+        _add_optional(
+            record,
+            "seccore.asset_failed_count",
+            nonnegative_integer_value(result.get("failed")),
+        )
+
+    _add_error_fields(
+        record, details, namespace="seccore", failed=event.result == "failed"
     )
     return record
 
@@ -77,25 +91,24 @@ def _build_baseline_record(
     event: SecurityEvent,
     ctx: TelemetryContext,
 ) -> dict[str, Any]:
-    """Build a baseline.* telemetry record."""
+    """Build an allowlisted baseline.* telemetry record."""
     details = details_dict(event.details)
     result = result_dict(details)
-
-    record = _component_fields(ctx)
+    record: dict[str, Any] = _component_fields(ctx)
     record.update(
         {
-            "baseline.event_id": _event_id(event),
-            "baseline.result": value_or_none(event.result),
+            "baseline.result": enum_value(event.result, _RESULTS) or "failed",
             "baseline.timestamp": _timestamp(event),
-            "baseline.request": request_value(details),
-            "baseline.error": error_value(details),
-            "baseline.error_type": error_type_value(details),
-            "baseline.passed": result_value(result, "passed"),
-            "baseline.fixed": result_value(result, "fixed"),
-            "baseline.failed": result_value(result, "failed"),
-            "baseline.total": result_value(result, "total"),
-            "baseline.details": {},
         }
+    )
+    for key in ("passed", "fixed", "failed", "total"):
+        _add_optional(
+            record,
+            f"baseline.{key}",
+            nonnegative_integer_value(result.get(key)),
+        )
+    _add_error_fields(
+        record, details, namespace="baseline", failed=event.result == "failed"
     )
     return record
 
@@ -108,20 +121,34 @@ def _component_fields(ctx: TelemetryContext) -> dict[str, str]:
 
 
 def _component_agent_name(ctx: TelemetryContext) -> str:
-    if ctx.agent_name:
-        return ctx.agent_name.strip() or COMPONENT_AGENT_NAME
-    return COMPONENT_AGENT_NAME
-
-
-def _event_id(event: SecurityEvent) -> str:
-    """Return the source event ID or generate a UUID when missing."""
-    if event.event_id:
-        return event.event_id
-    return str(uuid.uuid4())
+    return agent_name_value(ctx.agent_name)
 
 
 def _timestamp(event: SecurityEvent) -> str:
     """Return the source timestamp or generate one when missing."""
-    if event.timestamp:
-        return event.timestamp
-    return now_iso()
+    return timestamp_value(event.timestamp) or now_iso()
+
+
+def _add_error_fields(
+    record: dict[str, Any],
+    details: dict[str, Any],
+    *,
+    namespace: str,
+    failed: bool,
+) -> None:
+    if not failed:
+        return
+    normalized_error_type = error_type_value(details.get("error_type"))
+    if normalized_error_type is None:
+        return
+    record[f"{namespace}.error_type"] = normalized_error_type
+    _add_optional(
+        record,
+        f"{namespace}.exit_code",
+        integer_value(details.get("exit_code")),
+    )
+
+
+def _add_optional(record: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        record[key] = value

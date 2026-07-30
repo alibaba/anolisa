@@ -1,9 +1,6 @@
-use std::thread;
-use std::time::Duration;
-
 use crate::types::{AgentEvent, AgentRequest};
 
-use super::AdapterError;
+use super::{fake_stream_pacing_sleep, AdapterError};
 
 pub(super) fn emit_fake_markdown_stream(
     input: &str,
@@ -21,12 +18,12 @@ pub(super) fn emit_fake_markdown_stream(
             run_id: run_id.clone(),
             text: "# Streaming table\n\n".to_string(),
         })?;
-        thread::sleep(Duration::from_millis(100));
+        fake_stream_pacing_sleep();
         sink(AgentEvent::TextDelta {
             run_id: run_id.clone(),
             text: "| 排名 | 进程 | RSS |\n".to_string(),
         })?;
-        thread::sleep(Duration::from_millis(100));
+        fake_stream_pacing_sleep();
         sink(AgentEvent::TextDelta {
             run_id: run_id.clone(),
             text: "| --- | --- | --- |\n| 1 | ps aux \\| grep cosh | ~42 MB |\n\nDone.".to_string(),
@@ -48,7 +45,7 @@ pub(super) fn emit_fake_markdown_stream(
             run_id: run_id.clone(),
             text: "# Streaming paragraph\n\nThis Agent answer starts\n".to_string(),
         })?;
-        thread::sleep(Duration::from_millis(100));
+        fake_stream_pacing_sleep();
         sink(AgentEvent::TextDelta {
             run_id: run_id.clone(),
             text: "and continues on another source line with 中文内容.\n\nDone.".to_string(),
@@ -70,12 +67,12 @@ pub(super) fn emit_fake_markdown_stream(
             run_id: run_id.clone(),
             text: "# Streaming check\n\n".to_string(),
         })?;
-        thread::sleep(Duration::from_millis(100));
+        fake_stream_pacing_sleep();
         sink(AgentEvent::TextDelta {
             run_id: run_id.clone(),
             text: "- First item\n- Second item\n\n".to_string(),
         })?;
-        thread::sleep(Duration::from_millis(100));
+        fake_stream_pacing_sleep();
         sink(AgentEvent::TextDelta {
             run_id: run_id.clone(),
             text: "```bash\ncargo test --package cosh-shell\n```\n\nDone.".to_string(),

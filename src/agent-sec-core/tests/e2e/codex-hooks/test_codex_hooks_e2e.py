@@ -10,9 +10,10 @@ to CLI output.
 
 Test groups:
    G1: code_scanner_hook — PreToolUse Bash command scanning
-   G2: pii_checker_hook — UserPromptSubmit + PostToolUse PII detection
+   G2: pii_checker_hook — UserPromptSubmit + PreToolUse + PostToolUse PII detection
    G3: prompt_scanner_hook — UserPromptSubmit injection detection
    G4: skill_ledger_hook — UserPromptSubmit skill integrity check
+   G5: observability_hook — Turn/Tool lifecycle persistence
 
 CLI resolution: requires ``agent-sec-cli`` on PATH.
 """
@@ -166,7 +167,7 @@ class TestPIICheckerE2E:
         )
         assert output == {}
 
-    def test_phone_in_prompt_blocks_deny(self):
+    def test_phone_in_prompt_warns_deny(self):
         output = _run_hook(
             "pii_checker_hook.py",
             {
@@ -175,11 +176,9 @@ class TestPIICheckerE2E:
             },
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
-        assert output.get("decision") == "block"
-        assert (
-            "phone" in output.get("reason", "").lower()
-            or "pii" in output.get("reason", "").lower()
-        )
+        assert set(output) == {"systemMessage"}
+        assert "phone_cn" in output["systemMessage"]
+        assert "执行将继续" in output["systemMessage"]
 
     def test_phone_in_prompt_passes_observe(self):
         output = _run_hook(
@@ -192,7 +191,7 @@ class TestPIICheckerE2E:
         )
         assert output == {}
 
-    def test_email_in_tool_output_blocks_deny(self):
+    def test_email_in_tool_output_warns_deny(self):
         output = _run_hook(
             "pii_checker_hook.py",
             {
@@ -201,8 +200,9 @@ class TestPIICheckerE2E:
             },
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
-        assert output.get("decision") == "block"
-        assert "PostToolUse" in output.get("reason", "")
+        assert set(output) == {"systemMessage"}
+        assert "email" in output["systemMessage"]
+        assert "PostToolUse" in output["systemMessage"]
 
     def test_email_in_tool_output_passes_observe(self):
         output = _run_hook(
@@ -221,6 +221,57 @@ class TestPIICheckerE2E:
             {
                 "hook_event_name": "PostToolUse",
                 "tool_response": "Build succeeded with 0 errors.",
+            },
+            env_extra={"PII_CHECKER_MODE": "deny"},
+        )
+        assert output == {}
+
+    def test_phone_in_tool_input_warns_deny(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {
+                    "command": "curl https://x.com/report?phone=13800138000"
+                },
+            },
+            env_extra={"PII_CHECKER_MODE": "deny"},
+        )
+        assert set(output) == {"systemMessage"}
+        assert "phone_cn" in output["systemMessage"]
+        assert "PreToolUse" in output["systemMessage"]
+
+    def test_api_key_in_prompt_blocks_deny(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "API key: sk-00000000000000000000000000000000",
+            },
+            env_extra={"PII_CHECKER_MODE": "deny"},
+        )
+        assert output.get("decision") == "block"
+        assert "api_key" in output.get("reason", "")
+
+    def test_phone_in_tool_input_passes_observe(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {
+                    "command": "curl https://x.com/report?phone=13800138000"
+                },
+            },
+            env_extra={"PII_CHECKER_MODE": "observe"},
+        )
+        assert output == {}
+
+    def test_clean_tool_input_passes(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": "ls -la /tmp"},
             },
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
@@ -374,3 +425,94 @@ class TestSkillLedgerE2E:
             env_extra={"SKILL_LEDGER_MODE": "deny"},
         )
         assert output == {}
+
+
+# ---------------------------------------------------------------------------
+# G5: observability_hook E2E
+# ---------------------------------------------------------------------------
+
+
+class TestObservabilityHookE2E:
+    """E2E tests for Codex observability records through the real CLI."""
+
+    def test_four_stage_turn_and_tool_lifecycle_is_persisted(self, tmp_path):
+        env = {"AGENT_SEC_DATA_DIR": str(tmp_path)}
+        events = [
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "codex-session",
+                "turn_id": "codex-turn",
+                "model": "gpt-5",
+                "prompt": "Call 13800138000, then list the current directory.",
+            },
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "codex-session",
+                "turn_id": "codex-turn",
+                "tool_use_id": "codex-tool",
+                "tool_name": "Bash",
+                "tool_input": {"command": "pwd"},
+            },
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": "codex-session",
+                "turn_id": "codex-turn",
+                "tool_use_id": "codex-tool",
+                "tool_name": "Bash",
+                "tool_response": {"stdout": "/workspace\n", "exit_code": 0},
+            },
+            {
+                "hook_event_name": "Stop",
+                "session_id": "codex-session",
+                "turn_id": "codex-turn",
+                "model": "gpt-5",
+                "last_assistant_message": "The current directory is /workspace.",
+            },
+        ]
+
+        for event in events:
+            assert (
+                _run_hook(
+                    "observability_hook.py",
+                    event,
+                    env_extra=env,
+                )
+                == {}
+            )
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "observability.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert [record["hook"] for record in records] == [
+            "before_agent_run",
+            "before_tool_call",
+            "after_tool_call",
+            "after_agent_run",
+        ]
+        assert all(
+            record["metadata"]["sessionId"] == "codex-session"
+            and record["metadata"]["runId"] == "codex-turn"
+            for record in records
+        )
+        assert records[1]["metadata"]["toolCallId"] == "codex-tool"
+        assert records[2]["metadata"]["toolCallId"] == "codex-tool"
+        assert "13800138000" not in json.dumps(records, ensure_ascii=False)
+
+        pii_events = [
+            json.loads(line)
+            for line in (tmp_path / "security-events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if json.loads(line).get("event_type") == "pii_scan"
+        ]
+        assert len(pii_events) == 4
+        assert all(
+            event["session_id"] == "codex-session" and event["run_id"] == "codex-turn"
+            for event in pii_events
+        )
+        assert pii_events[1]["tool_call_id"] == "codex-tool"
+        assert pii_events[2]["tool_call_id"] == "codex-tool"
+        assert (tmp_path / "observability.db").exists()

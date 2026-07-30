@@ -28,6 +28,10 @@ build-frontend: ## Build and embed frontend into frontend-dist/
 .PHONY: build-all
 build-all: build-frontend build build-enforcer ## Build frontend, AgentSight, and enforcer
 
+.PHONY: build-mac
+build-mac: build-frontend ## Build macOS local viewer (serve only; no eBPF)
+	cargo build --release --bin agentsight
+
 .PHONY: example
 example: build ## Build C FFI example (requires libagentsight)
 	gcc -o target/release/agentsight_example examples/agentsight_example.c \
@@ -48,6 +52,7 @@ PREFIX ?= /usr
 BINDIR ?= /usr/local/bin
 INSTALL_SYSTEMD ?= 1
 endif
+SYSCONFDIR ?= /etc
 LIBDIR ?= $(PREFIX)/lib
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 SERVICE_BINDIR ?= $(BINDIR)
@@ -56,8 +61,10 @@ SETCAP ?= auto
 .PHONY: install uninstall
 install: build-all ## Build and install agentsight binary and set BPF capabilities
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
+	install -d -m 0755 $(DESTDIR)$(SYSCONFDIR)/agentsight
 	install -p -m 0755 target/release/agentsight $(DESTDIR)$(BINDIR)/
 	install -p -m 0755 target/release/agentsight-enforcer $(DESTDIR)$(BINDIR)/
+	install -p -m 0644 agentsight.json $(DESTDIR)$(SYSCONFDIR)/agentsight/config.json
 	@if [ "$(SETCAP)" = "1" ] || { [ "$(SETCAP)" = "auto" ] && [ "$(INSTALL_PROFILE)" = "system" ] && [ -z "$(DESTDIR)" ] && command -v setcap >/dev/null 2>&1; }; then \
 		setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(BINDIR)/agentsight; \
 	else \
@@ -80,6 +87,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/agentsight-start
 	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service
 	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight-enforcer.service
+	rm -f $(DESTDIR)$(SYSCONFDIR)/agentsight/config.json
 
 # =============================================================================
 # TEST & QUALITY

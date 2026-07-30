@@ -13,6 +13,7 @@ class TestActionResult(unittest.TestCase):
         self.assertEqual(r.stdout, "")
         self.assertEqual(r.exit_code, 0)
         self.assertEqual(r.error, "")
+        self.assertEqual(r.error_type, "")
 
     def test_custom_values(self):
         r = ActionResult(
@@ -21,12 +22,14 @@ class TestActionResult(unittest.TestCase):
             stdout="output",
             exit_code=42,
             error="boom",
+            error_type="RuntimeError",
         )
         self.assertFalse(r.success)
         self.assertEqual(r.data["key"], "val")
         self.assertEqual(r.stdout, "output")
         self.assertEqual(r.exit_code, 42)
         self.assertEqual(r.error, "boom")
+        self.assertEqual(r.error_type, "RuntimeError")
 
 
 if __name__ == "__main__":

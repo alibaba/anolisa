@@ -6,6 +6,11 @@
  * Otherwise fall back to REACT_APP_API_BASE or localhost:7396 for local dev.
  */
 
+import type {
+  OptimizeSessionResults,
+  OptimizeLlmConfig,
+} from '../types/optimization';
+
 const API_BASE: string = (() => {
   // Explicit override via env var (set at build time for non-embedded deployments)
   if (typeof process !== 'undefined' && (process.env as any).REACT_APP_API_BASE) {
@@ -30,6 +35,10 @@ export interface SessionSummary {
   total_output_tokens: number;
   model: string | null;
   agent_name: string | null;
+  /** Earliest user query in the window (≤ 200 chars, best-effort) */
+  first_user_query?: string | null;
+  /** Latest user query in the window (≤ 200 chars, best-effort) */
+  last_user_query?: string | null;
 }
 
 export interface TraceSummary {
@@ -73,8 +82,20 @@ export interface TraceEventDetail {
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
-async function apiFetch<T>(url: string): Promise<T> {
-  const res = await fetch(url, { credentials: 'same-origin' });
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly body: Record<string, unknown> | null;
+
+  constructor(url: string, status: number, text: string, body: Record<string, unknown> | null) {
+    super(`API ${url} -> ${status}: ${text}`);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(url, { ...init, credentials: 'same-origin' });
   if (res.status === 401) {
     // Session expired or invalid — redirect to login
     window.location.hash = '#/login';
@@ -82,7 +103,16 @@ async function apiFetch<T>(url: string): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`API ${url} -> ${res.status}: ${text}`);
+    let body: Record<string, unknown> | null = null;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Error responses may be plain text.
+    }
+    throw new ApiRequestError(url, res.status, text, body);
   }
   return res.json() as Promise<T>;
 }
@@ -277,6 +307,37 @@ export async function fetchTraceDetail(traceId: string): Promise<TraceEventDetai
   );
 }
 
+// ─── Collected trajectory APIs ───────────────────────────────────────────────
+
+/** Summary row from trajectories.db (log-collected sessions). */
+export interface TrajectorySummary {
+  session_id: string;
+  schema_version: string;
+  agent_name: string;
+  model_name: string | null;
+  num_steps: number;
+  total_prompt_tokens: number | null;
+  total_completion_tokens: number | null;
+  start_time: string | null;
+  end_time: string | null;
+  /** First user-authored message preview (≤ 200 chars) from the ATIF steps */
+  first_user_message?: string | null;
+  /** Last user-authored message preview (≤ 200 chars) from the ATIF steps */
+  last_user_message?: string | null;
+  project: string;
+  source: string;
+  is_subagent: boolean;
+  collected_at_ns: number;
+}
+
+/**
+ * List log-collected trajectories (newest first). Returns an empty list when
+ * trajectory collection has never run (graceful degradation).
+ */
+export async function fetchTrajectories(limit = 1000): Promise<TrajectorySummary[]> {
+  return apiFetch<TrajectorySummary[]>(`${API_BASE}/api/trajectories?limit=${limit}`);
+}
+
 /**
  * Fetch detailed LLM call events for a conversation (user query).
  */
@@ -284,6 +345,142 @@ export async function fetchConversationDetail(conversationId: string): Promise<T
   return apiFetch<TraceEventDetail[]>(
     `${API_BASE}/api/conversations/${encodeURIComponent(conversationId)}`
   );
+}
+
+// ─── Grader APIs ─────────────────────────────────────────────────────────────
+
+export type EvaluationVerdict = 'pass' | 'warn' | 'fail';
+export type EvaluationRootCause =
+  | 'none'
+  | 'no_final_answer'
+  | 'interrupted_main_call'
+  | 'agent_crash'
+  | 'runtime_error'
+  | 'tool_failure'
+  | 'safety_risk'
+  | 'loop_detected'
+  | 'excessive_cost'
+  | 'partial_snapshot';
+
+export interface EvaluationTarget {
+  conversation_id: string;
+  trace_id?: string | null;
+  call_id?: string | null;
+  step_id?: string | null;
+}
+
+export interface EvaluationRef {
+  type: 'genai_event' | 'interruption' | 'security_event' | 'trace' | 'tool_call' | 'atif_step';
+  id: string;
+  label: string;
+  severity?: string | null;
+  target: EvaluationTarget;
+  deeplink?: {
+    route: string;
+    query: Record<string, unknown>;
+  } | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface EvaluationDimension {
+  name: string;
+  score: number;
+  verdict: EvaluationVerdict;
+  reason: string;
+  evidence_refs: EvaluationRef[];
+}
+
+export interface EvaluationFinding {
+  code: string;
+  severity: string;
+  message: string;
+  evidence_refs: EvaluationRef[];
+}
+
+export interface EvaluationMetadata {
+  evaluated_with_pending: boolean;
+  pending_call_count: number;
+  input_event_count: number;
+  grader_type: 'rule' | 'llm' | 'agent';
+  grader_version: string;
+  rubric_version: string | null;
+  judge_model: string | null;
+  prompt_hash: string | null;
+  confidence: number | null;
+}
+
+export interface EvaluationResult {
+  target_type: 'conversation';
+  target_id: string;
+  run_id: string;
+  input_hash: string;
+  verdict: EvaluationVerdict;
+  score: number;
+  summary: string;
+  root_cause: EvaluationRootCause;
+  recommended_action: string;
+  dimensions: EvaluationDimension[];
+  findings: EvaluationFinding[];
+  metadata: EvaluationMetadata;
+}
+
+export interface EvaluationResponse {
+  result: EvaluationResult;
+  reused_existing_run: boolean;
+}
+
+export class EvaluationNotReadyError extends Error {
+  readonly pendingCallCount: number;
+
+  constructor(message: string, pendingCallCount: number) {
+    super(message);
+    this.name = 'EvaluationNotReadyError';
+    this.pendingCallCount = pendingCallCount;
+  }
+}
+
+/**
+ * Fetch the latest persisted evaluation for a conversation.
+ */
+export async function fetchLatestEvaluation(conversationId: string): Promise<EvaluationResult | null> {
+  const params = new URLSearchParams({
+    target_type: 'conversation',
+    target_id: conversationId,
+  });
+  return apiFetch<EvaluationResult | null>(`${API_BASE}/api/grader/latest?${params.toString()}`);
+}
+
+/**
+ * Manually evaluate a conversation with the rule-based grader.
+ */
+export async function evaluateConversation(
+  conversationId: string,
+  force = false,
+): Promise<EvaluationResponse> {
+  try {
+    return await apiFetch<EvaluationResponse>(`${API_BASE}/api/grader/evaluate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target_type: 'conversation',
+        target_id: conversationId,
+        force,
+      }),
+    });
+  } catch (error) {
+    if (
+      error instanceof ApiRequestError &&
+      error.status === 409 &&
+      error.body?.error === 'conversation_not_ready'
+    ) {
+      const message = error.body.message;
+      throw new EvaluationNotReadyError(
+        typeof message === 'string' ? message : 'Conversation still has pending LLM calls.',
+        Number(error.body.pending_call_count ?? 0),
+      );
+    }
+    throw error;
+  }
 }
 
 // ─── Agent-name & time-series APIs ───────────────────────────────────────────
@@ -463,7 +660,7 @@ export async function fetchSessionSavings(
 }
 
 /**
- * Export a single trace as an ATIF v1.6 trajectory document.
+ * Export a single trace as an ATIF trajectory document (shared v1.7 schema).
  */
 export async function fetchAtifByTrace(traceId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
@@ -472,7 +669,7 @@ export async function fetchAtifByTrace(traceId: string): Promise<AtifDocument> {
 }
 
 /**
- * Export a full session (all traces) as an ATIF v1.6 trajectory document.
+ * Export a full session (all traces) as an ATIF trajectory document (v1.7).
  */
 export async function fetchAtifBySession(sessionId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
@@ -481,11 +678,21 @@ export async function fetchAtifBySession(sessionId: string): Promise<AtifDocumen
 }
 
 /**
- * Export a conversation (all LLM calls for a user query) as an ATIF v1.6 trajectory document.
+ * Export a conversation (all LLM calls for a user query) as an ATIF document (v1.7).
  */
 export async function fetchAtifByConversation(conversationId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
     `${API_BASE}/api/export/atif/conversation/${encodeURIComponent(conversationId)}`
+  );
+}
+
+/**
+ * Read the stored ATIF v1.7 document of a log-collected trajectory.
+ * 404s when trajectory collection never ran or the session was not collected.
+ */
+export async function fetchTrajectoryAtif(sessionId: string): Promise<AtifDocument> {
+  return apiFetch<AtifDocument>(
+    `${API_BASE}/api/trajectories/${encodeURIComponent(sessionId)}`
   );
 }
 
@@ -584,6 +791,12 @@ export const INTERRUPTION_TYPE_CN: Record<string, string> = {
   safety_filter: '安全过滤',
   retry_storm: '重试风暴',
   dead_loop: '死循环',
+  tool_failure: '工具调用失败',
+  empty_response: '空响应',
+  resource_exhaustion: '资源耗尽',
+  slow_response: '响应过慢',
+  state_machine_error: '状态机异常',
+  unauthorized_action: '未授权操作',
 };
 
 /**
@@ -780,6 +993,9 @@ export interface SecurityEventRecord {
   event_type?: string | null;
   category?: string | null;
   result?: string | null;
+  verdict?: string | null;
+  command?: string | null;
+  skill_name?: string | null;
   timestamp?: string | null;
   timestamp_ns?: number | null;
   timestamp_epoch?: number | null;
@@ -1348,8 +1564,21 @@ export async function fetchSkillMetrics(
 
 // ─── Authentication API ──────────────────────────────────────────────────────
 
+export type AppCapability =
+  | 'agent_observability'
+  | 'sessions'
+  | 'token_savings'
+  | 'optimization'
+  | 'skills'
+  | 'security'
+  | 'atif'
+  | 'settings'
+  | 'agent_health';
+
 export interface AuthStatusResponse {
   auth_enabled: boolean;
+  mode?: 'linux' | 'local' | string;
+  capabilities?: AppCapability[];
 }
 
 export interface AuthVerifyResponse {
@@ -1385,4 +1614,83 @@ export async function login(token: string): Promise<boolean> {
     body: JSON.stringify({ token }),
   });
   return res.ok;
+}
+
+// ─── Optimization analysis API ───────────────────────────────────────────────
+
+export type OptimizeDimension =
+  | 'perf'
+  | 'perf-issues'
+  | 'cost'
+  | 'cost-waste'
+  | 'accuracy'
+  | 'summary';
+
+/** Dimension keys as persisted in optimization.db (underscored, unlike the route form). */
+export type OptimizeHistoryDimension =
+  | 'perf'
+  | 'perf_issues'
+  | 'cost'
+  | 'cost_waste'
+  | 'accuracy'
+  | 'summary';
+
+/** One row of the analysis history list — presence flags only, no payloads. */
+export interface OptimizeHistoryEntry {
+  session_id: string;
+  dimensions: OptimizeHistoryDimension[];
+  created_at_ns: number;
+  updated_at_ns: number;
+}
+
+/**
+ * List previously analyzed sessions, newest first. The server defaults to the
+ * last 30 days and caps `limit` at 200.
+ */
+export async function fetchOptimizeHistory(limit?: number): Promise<OptimizeHistoryEntry[]> {
+  const qs = limit === undefined ? '' : `?limit=${limit}`;
+  return apiFetch<OptimizeHistoryEntry[]>(`${API_BASE}/api/optimize/results${qs}`);
+}
+
+/** Load persisted analysis results for a session (each dimension may be null). */
+export async function fetchOptimizeResults(sessionId: string): Promise<OptimizeSessionResults> {
+  return apiFetch<OptimizeSessionResults>(
+    `${API_BASE}/api/optimize/sessions/${encodeURIComponent(sessionId)}/results`
+  );
+}
+
+/**
+ * Trigger one analysis dimension for a session.
+ * perf/cost return in milliseconds; perf-issues/cost-waste take 10-30s;
+ * accuracy can take 30-60s+ — callers must not set a short timeout.
+ */
+export async function runOptimizeDimension<T>(
+  sessionId: string,
+  dimension: OptimizeDimension
+): Promise<T> {
+  return apiFetch<T>(
+    `${API_BASE}/api/optimize/sessions/${encodeURIComponent(sessionId)}/${dimension}`,
+    { method: 'POST' }
+  );
+}
+
+/** Read the current LLM config (api_key is masked by the backend). */
+export async function fetchOptimizeConfig(): Promise<OptimizeLlmConfig> {
+  return apiFetch<OptimizeLlmConfig>(`${API_BASE}/api/optimize/config`);
+}
+
+/**
+ * Save the LLM config. Omitted/empty fields keep their current value;
+ * an api_key containing masking dots (•) is ignored by the backend.
+ */
+export async function saveOptimizeConfig(body: {
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+}): Promise<OptimizeLlmConfig> {
+  return apiFetch<OptimizeLlmConfig>(`${API_BASE}/api/optimize/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }

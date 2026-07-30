@@ -274,6 +274,17 @@ impl AgentScanner {
     }
 }
 
+/// Read the process comm (`/proc/<pid>/comm`), trimmed.
+///
+/// Returns `None` when the file is unreadable (process gone) or empty. This is
+/// the *process* name (main-thread comm), not a per-event worker-thread name.
+pub fn read_comm(pid: u32) -> Option<String> {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Read and parse cmdline file
 ///
 /// The cmdline file contains arguments separated by null bytes.
@@ -379,6 +390,20 @@ mod tests {
         // Deny works
         assert!(scanner.is_denied(&["deny-me-process".to_string()]));
         assert!(!scanner.is_denied(&["node".to_string(), "/path/claude-code".to_string()]));
+    }
+
+    #[test]
+    fn test_read_comm_current_process() {
+        // The current process comm is readable and non-empty.
+        let comm = read_comm(std::process::id());
+        assert!(comm.is_some());
+        assert!(!comm.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_read_comm_bogus_pid() {
+        // A pid that cannot exist yields None (no panic, no empty string).
+        assert!(read_comm(u32::MAX).is_none());
     }
 
     #[test]

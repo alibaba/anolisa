@@ -275,10 +275,11 @@ fn fixture_report(
 
 fn fixture_source(name: &str) -> Option<&'static str> {
     match name {
-        "linux-healthy" => Some(include_str!("fixtures/linux-healthy.health")),
-        "linux-warning" => Some(include_str!("fixtures/linux-warning.health")),
-        "linux-critical" => Some(include_str!("fixtures/linux-critical.health")),
-        "linux-degraded" => Some(include_str!("fixtures/linux-degraded.health")),
+        "linux-healthy" | "healthy" => Some(include_str!("fixtures/linux-healthy.health")),
+        "linux-warning" | "warning" => Some(include_str!("fixtures/linux-warning.health")),
+        "linux-critical" | "critical" => Some(include_str!("fixtures/linux-critical.health")),
+        "linux-degraded" | "degraded" => Some(include_str!("fixtures/linux-degraded.health")),
+        "linux-partial" | "partial" => Some(include_str!("fixtures/linux-partial.health")),
         _ => None,
     }
 }
@@ -360,6 +361,11 @@ fn parse_fixture_category(value: &str) -> Option<HealthFactCategory> {
         "disk" => Some(HealthFactCategory::Disk),
         "kernel" => Some(HealthFactCategory::Kernel),
         "service" => Some(HealthFactCategory::Service),
+        "provider" => Some(HealthFactCategory::Provider),
+        "config" => Some(HealthFactCategory::Config),
+        "hooks" => Some(HealthFactCategory::Hooks),
+        "pty" => Some(HealthFactCategory::Pty),
+        "permissions" => Some(HealthFactCategory::Permissions),
         _ => None,
     }
 }
@@ -383,6 +389,11 @@ fn parse_fixture_collector(value: &str) -> Option<HealthCollector> {
         "disk" => Some(HealthCollector::Disk),
         "kernel_signal" => Some(HealthCollector::KernelSignal),
         "configured_service" => Some(HealthCollector::ConfiguredService),
+        "provider" => Some(HealthCollector::Provider),
+        "config" => Some(HealthCollector::Config),
+        "hooks" => Some(HealthCollector::Hooks),
+        "pty" => Some(HealthCollector::Pty),
+        "permissions" => Some(HealthCollector::Permissions),
         _ => None,
     }
 }

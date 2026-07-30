@@ -54,6 +54,9 @@ pub const DEFAULT_PID_CACHE_SIZE: usize = 1024;
 /// Default tokenizer cache size (number of loaded tokenizer models).
 pub const DEFAULT_TOKENIZER_CACHE_SIZE: usize = 4;
 
+/// Default seconds between two trajectory-collector scan rounds.
+pub const DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS: u64 = 30;
+
 /// Default maximum per-connection HTTP body buffer size (8 MB).
 pub const DEFAULT_MAX_CONNECTION_BODY_BYTES: usize = 8 * 1024 * 1024;
 
@@ -136,6 +139,13 @@ pub enum HttpTarget {
 /// Uses the same format as FFI's `agentsight_config_load_config()`:
 /// `cmdline.allow` entries with `rule` and `agent_name`.
 const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
+
+/// Current schema version of `agentsight.json`.
+///
+/// At startup the on-disk config's `schema_version` is compared against this
+/// value. If the on-disk version is missing or older, the config file is
+/// backed up (`.bak`) and overwritten with the embedded default.
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 // ==================== TCP Target Configuration ====================
 
@@ -276,6 +286,8 @@ struct JsonFullConfig {
     runtime_limits: Option<JsonRuntimeLimits>,
     #[serde(default)]
     server: Option<JsonServer>,
+    #[serde(default)]
+    schema_version: Option<u32>,
 }
 
 /// DeadLoop 检测配置区段
@@ -312,6 +324,8 @@ pub struct JsonFeatures {
     pub token_consumption: Option<bool>,
     /// SLS Logtail export.
     pub sls_logtail: Option<bool>,
+    /// Qoder/QoderWork trajectory collection into trajectories.db.
+    pub trajectory_collection: Option<JsonTrajectoryCollectionFeature>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug, Default)]
@@ -353,6 +367,17 @@ pub struct JsonInterruptionFeature {
     pub retention_days: Option<u64>,
     #[serde(default)]
     pub max_db_size_mb: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonTrajectoryCollectionFeature {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub scan_interval_secs: Option<u64>,
+    /// Optional override of the projects directories to scan.
+    #[serde(default)]
+    pub scan_dirs: Option<Vec<String>>,
 }
 
 /// Resource limits and channel policy for memory-leak prevention.
@@ -486,22 +511,103 @@ pub fn parse_json_rules(
     Ok(extract_rules(&parsed))
 }
 
-/// Ensure the agents configuration file exists at the given path.
+/// Ensure the agents configuration file exists and is up to date.
 ///
-/// If the file does not exist, creates it with the embedded default configuration.
+/// - If the file does not exist, creates it with the embedded default.
+/// - If the file exists but `schema_version` is missing or older than
+///   `CURRENT_SCHEMA_VERSION`, backs up the old file (`.bak`) and overwrites
+///   with the embedded default.
+/// - If the file exists and `schema_version` matches, leaves it untouched.
 pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
-    if path.exists() {
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {parent:?}"))?;
+        }
+        std::fs::write(path, DEFAULT_AGENTS_JSON)
+            .with_context(|| format!("Failed to write default agents config to {path:?}"))?;
+        log::info!("Generated default agents config at {path:?}");
         return Ok(());
     }
-    // Create parent directory if needed
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory {parent:?}"))?;
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read existing config at {path:?}"))?;
+
+    // If the file is not valid JSON at all, leave it untouched so the caller's
+    // load_from_file → parse_json_rules surfaces "JSON parse error: ..." and
+    // AgentSight::new emits its `Failed to load config from {path:?}: {e},
+    // using embedded defaults` warn log. Auto-upgrade is only meaningful for
+    // *valid* JSON whose schema_version is outdated; silently overwriting an
+    // invalid file masks the parse error and breaks the documented fallback
+    // contract (see issue #1502).
+    if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+        return Ok(());
     }
-    std::fs::write(path, DEFAULT_AGENTS_JSON)
-        .with_context(|| format!("Failed to write default agents config to {path:?}"))?;
-    log::info!("Generated default agents config at {path:?}");
+
+    let on_disk_version = extract_schema_version(&content);
+
+    if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
+        return Ok(());
+    }
+
+    // Shallow-merge: start from the embedded default, overlay all top-level
+    // keys the user has set (except schema_version itself), then bump version.
+    // This preserves user customizations (cmdline rules, https rules,
+    // codex_offsets, feature overrides) while adding any NEW sections from the
+    // default that the old config was missing. Fixes #1496 — the previous
+    // implementation did a destructive overwrite that silently lost user data.
+    let mut base: serde_json::Value = serde_json::from_str(DEFAULT_AGENTS_JSON)
+        .expect("embedded DEFAULT_AGENTS_JSON must be valid");
+    let user: serde_json::Value =
+        serde_json::from_str(&content).expect("JSON validity already confirmed above");
+
+    if let (Some(base_obj), Some(user_obj)) = (base.as_object_mut(), user.as_object()) {
+        for (key, value) in user_obj {
+            if key == "schema_version" {
+                continue;
+            }
+            base_obj.insert(key.clone(), value.clone());
+        }
+        base_obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()),
+        );
+    }
+
+    let merged = serde_json::to_string_pretty(&base).expect("merged config must serialize");
+
+    let backup = {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        path.with_extension(format!("json.bak.{ts}"))
+    };
+    std::fs::copy(path, &backup)
+        .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
+    std::fs::write(path, &merged)
+        .with_context(|| format!("Failed to write merged config to {path:?}"))?;
+    log::info!(
+        "Config schema_version {:?} < {}, merged user config with defaults at {path:?} (backup at {backup:?})",
+        on_disk_version,
+        CURRENT_SCHEMA_VERSION
+    );
     Ok(())
+}
+
+/// Extract `schema_version` from a JSON config string.
+///
+/// Returns `None` when the field is absent or the JSON is unparseable,
+/// which covers the old 0.6-era configs that have no version field.
+fn extract_schema_version(json: &str) -> Option<u32> {
+    #[derive(serde::Deserialize)]
+    struct VersionProbe {
+        #[serde(default)]
+        schema_version: Option<u32>,
+    }
+    serde_json::from_str::<VersionProbe>(json)
+        .ok()
+        .and_then(|p| p.schema_version)
 }
 
 /// Load default cmdline rules (embedded), without touching the filesystem.
@@ -582,6 +688,12 @@ pub struct FeatureFlags {
     pub token_consumption_enabled: bool,
     /// SLS Logtail export.
     pub sls_logtail_enabled: bool,
+    /// Qoder/QoderWork trajectory collection (scan + ATIF convert + persist).
+    pub trajectory_collection_enabled: bool,
+    /// Seconds between two trajectory scan rounds.
+    pub trajectory_scan_interval_secs: u64,
+    /// Optional override of the trajectory projects directories to scan.
+    pub trajectory_scan_dirs: Option<Vec<String>>,
 }
 
 impl Default for FeatureFlags {
@@ -600,6 +712,9 @@ impl Default for FeatureFlags {
             audit_enabled: false,
             token_consumption_enabled: false,
             sls_logtail_enabled: false,
+            trajectory_collection_enabled: false,
+            trajectory_scan_interval_secs: DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS,
+            trajectory_scan_dirs: None,
         }
     }
 }
@@ -752,6 +867,9 @@ pub struct AgentsightConfig {
     pub https_rules: Vec<HttpsRule>,
     /// User-defined HTTP targets (IP/port endpoints + domains for tcpsniff)
     pub http_targets: Vec<HttpTarget>,
+    /// Whether FFI mode emits raw HTTPS fallback events.
+    /// This is configured only through the C API and is not part of agentsight.json.
+    pub ffi_enable_raw_https: bool,
 
     // --- Config File Path ---
     /// Path to JSON configuration file
@@ -839,6 +957,7 @@ impl Default for AgentsightConfig {
             cmdline_rules: Vec::new(),
             https_rules: Vec::new(),
             http_targets: Vec::new(),
+            ffi_enable_raw_https: false,
 
             // Config file path default
             config_path: None,
@@ -946,6 +1065,18 @@ impl AgentsightConfig {
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
         let mut parsed: JsonFullConfig =
             serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
+
+        // Warn if the config's schema_version is older than expected. By this
+        // point ensure_default_agents_config should have already upgraded stale
+        // configs, so this is just a safety net for edge cases.
+        if let Some(v) = parsed.schema_version {
+            if v < CURRENT_SCHEMA_VERSION {
+                log::warn!(
+                    "Config schema_version {v} < {CURRENT_SCHEMA_VERSION}; \
+                     some features may not work as expected"
+                );
+            }
+        }
 
         if let Some(t) = parsed.trace_enabled {
             self.trace_enabled = t;
@@ -1062,6 +1193,20 @@ impl AgentsightConfig {
                 audit_enabled: features.audit.unwrap_or(false),
                 token_consumption_enabled: features.token_consumption.unwrap_or(false),
                 sls_logtail_enabled: features.sls_logtail.unwrap_or(false),
+                trajectory_collection_enabled: features
+                    .trajectory_collection
+                    .as_ref()
+                    .and_then(|f| f.enabled)
+                    .unwrap_or(false),
+                trajectory_scan_interval_secs: features
+                    .trajectory_collection
+                    .as_ref()
+                    .and_then(|f| f.scan_interval_secs)
+                    .unwrap_or(DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS),
+                trajectory_scan_dirs: features
+                    .trajectory_collection
+                    .as_ref()
+                    .and_then(|f| f.scan_dirs.clone()),
             };
         }
 
@@ -1844,6 +1989,50 @@ mod tests {
         assert!(!config.features.audit_enabled);
         assert!(config.features.token_consumption_enabled);
         assert!(config.features.sls_logtail_enabled);
+        // trajectory_collection absent -> defaults (disabled, 30s)
+        assert!(!config.features.trajectory_collection_enabled);
+        assert_eq!(
+            config.features.trajectory_scan_interval_secs,
+            DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS
+        );
+        assert!(config.features.trajectory_scan_dirs.is_none());
+    }
+
+    #[test]
+    fn test_load_from_json_trajectory_collection() {
+        let json = r#"{
+            "features": {
+                "trajectory_collection": {
+                    "enabled": true,
+                    "scan_interval_secs": 15,
+                    "scan_dirs": ["/tmp/projects"]
+                }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.features.trajectory_collection_enabled);
+        assert_eq!(config.features.trajectory_scan_interval_secs, 15);
+        assert_eq!(
+            config.features.trajectory_scan_dirs,
+            Some(vec!["/tmp/projects".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_load_from_json_trajectory_collection_disabled() {
+        let json = r#"{
+            "features": {
+                "trajectory_collection": { "enabled": false }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.features.trajectory_collection_enabled);
+        assert_eq!(
+            config.features.trajectory_scan_interval_secs,
+            DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS
+        );
     }
 
     #[test]
@@ -1880,5 +2069,257 @@ mod tests {
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert!(!config.server_auth.enabled);
+    }
+
+    // ── schema_version / config upgrade ─────────────────────────────────
+
+    /// Helper: create a unique temp dir under std env temp.
+    fn unique_temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn extract_schema_version_returns_value_when_present() {
+        let json = r#"{"schema_version": 2, "features": {}}"#;
+        assert_eq!(extract_schema_version(json), Some(2));
+    }
+
+    #[test]
+    fn extract_schema_version_returns_none_when_absent() {
+        let json = r#"{"features": {}}"#;
+        assert_eq!(extract_schema_version(json), None);
+    }
+
+    #[test]
+    fn extract_schema_version_returns_none_on_invalid_json() {
+        assert_eq!(extract_schema_version("not json"), None);
+    }
+
+    #[test]
+    fn ensure_default_agents_config_creates_file_when_missing() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        assert!(!path.exists());
+        ensure_default_agents_config(&path).unwrap();
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_upgrades_stale_config() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        std::fs::write(&path, r#"{"cmdline": {"allow": []}}"#).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        // The old file should be backed up to a timestamped .bak.* file.
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one backup file");
+        assert_eq!(
+            std::fs::read_to_string(backups[0].path()).unwrap(),
+            r#"{"cmdline": {"allow": []}}"#
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_preserves_current_config() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let custom = format!(
+            r#"{{"schema_version": {}, "features": {{"token_stats": true}}}}"#,
+            CURRENT_SCHEMA_VERSION
+        );
+        std::fs::write(&path, &custom).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        // No backup should exist (config was not upgraded).
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(backups.is_empty(), "no backup expected for current schema");
+    }
+
+    #[test]
+    fn ensure_default_agents_config_upgrades_old_schema_version() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        std::fs::write(&path, r#"{"schema_version": 1}"#).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one backup file");
+        assert_eq!(
+            std::fs::read_to_string(backups[0].path()).unwrap(),
+            r#"{"schema_version": 1}"#
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_leaves_invalid_json_untouched() {
+        // Regression for issue #1502: an unparseable config file must NOT be
+        // silently backed up + overwritten with the default. The caller's
+        // load_from_file → parse_json_rules surfaces "JSON parse error: ..."
+        // and AgentSight::new emits its "using embedded defaults" warn log.
+        // Auto-upgrade is only meaningful for valid JSON with an outdated
+        // schema_version.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let invalid = "NOT_VALID_JSON_AT_ALL{{{";
+        std::fs::write(&path, invalid).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        // File content must be unchanged — no silent overwrite.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        // No backup file should be created either.
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(
+            backups.is_empty(),
+            "invalid JSON must not trigger backup+overwrite"
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_leaves_truncated_json_untouched() {
+        // Same regression, with a truncated-JSON variant (parses as partial
+        // JSON, fails serde_json::from_str). Should also be left untouched.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let truncated = r#"{"cmdline": {"allow": [{"rule": ["*cosh*""#;
+        std::fs::write(&path, truncated).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), truncated);
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(backups.is_empty());
+    }
+
+    #[test]
+    fn ensure_default_agents_config_preserves_user_cmdline_rules_on_merge() {
+        // Regression for #1496: when migrating a valid v1 config to v2, user
+        // customizations (cmdline rules, etc.) must survive — not be overwritten
+        // with the embedded default. Discriminating: reverting to the old
+        // overwrite logic would lose "MyCustomAgent" and fail this test.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let user_config = r#"{
+            "schema_version": 1,
+            "cmdline": {
+                "allow": [
+                    {"rule": ["*mycustomagent*"], "agent_name": "MyCustomAgent"}
+                ],
+                "deny": [{"rule": ["*noisy*"]}]
+            },
+            "https": [{"rule": ["custom.api.example.com"]}]
+        }"#;
+        std::fs::write(&path, user_config).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        // User's custom agent rule must survive migration
+        assert!(
+            result.contains("MyCustomAgent"),
+            "user cmdline rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("custom.api.example.com"),
+            "user https rule lost during migration: {result}"
+        );
+        assert!(
+            result.contains("*noisy*"),
+            "user deny rule lost during migration: {result}"
+        );
+        // schema_version must be bumped to current
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            migrated["schema_version"].as_u64().unwrap() as u32,
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_adds_missing_sections_on_merge() {
+        // A v1 config that only has cmdline should gain features/runtime_limits
+        // from the default after migration — verifies additive merge.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let minimal_v1 = r#"{
+            "cmdline": {"allow": [{"rule": ["*test*"], "agent_name": "Test"}]}
+        }"#;
+        std::fs::write(&path, minimal_v1).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        let migrated: serde_json::Value = serde_json::from_str(&result).unwrap();
+        // New sections from default must be present
+        assert!(
+            migrated.get("features").is_some(),
+            "features section not added from default"
+        );
+        assert!(
+            migrated.get("runtime_limits").is_some(),
+            "runtime_limits section not added from default"
+        );
+        // User's original rule must still be there
+        assert!(result.contains("Test"), "user rule lost");
     }
 }

@@ -69,7 +69,14 @@ pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
                         terminal_output_ref: event.terminal_output_ref.clone(),
                         terminal_output_bytes: event.terminal_output_bytes.unwrap_or(0),
                     },
+                    shell_environment_generation: start.shell_environment_generation,
+                    audit_identity: event.audit_identity.clone().or(start.audit_identity),
                 });
+            }
+            ShellEventKind::UserInputIntercepted => {
+                if let Some(command_id) = &event.command_id {
+                    starts.remove(command_id);
+                }
             }
             _ => {}
         }
@@ -80,4 +87,43 @@ pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
     }
 
     LedgerOutput { blocks, errors }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_command_blocks;
+    use crate::types::{ShellEvent, ShellEventKind};
+
+    #[test]
+    fn command_block_copies_generation_only_from_start_event() {
+        let mut start = ShellEvent::command_started("session", "command", "echo ok", "/tmp", 1);
+        start.shell_environment_generation = Some(7);
+        let mut finish = ShellEvent::command_finished(
+            ShellEventKind::CommandCompleted,
+            "session",
+            "command",
+            0,
+            2,
+            "/tmp/output",
+        );
+        finish.shell_environment_generation = Some(99);
+
+        let output = build_command_blocks(&[start, finish]);
+
+        assert!(output.errors.is_empty());
+        assert_eq!(output.blocks[0].shell_environment_generation, Some(7));
+    }
+
+    #[test]
+    fn correlated_intercept_closes_start_without_creating_command_block() {
+        let start = ShellEvent::command_started("session", "command", "Who are you", "/tmp", 1);
+        let mut intercept = ShellEvent::user_input_intercepted("session", "Who are you");
+        intercept.command_id = Some("command".to_string());
+        intercept.component = Some("natural_language".to_string());
+
+        let output = build_command_blocks(&[start, intercept]);
+
+        assert!(output.errors.is_empty());
+        assert!(output.blocks.is_empty());
+    }
 }

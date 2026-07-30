@@ -14,6 +14,12 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_snapshot_file_hashes,
     diff_file_hashes,
 )
+from agent_sec_cli.skill_ledger.core.live_root import (
+    SkillRootInput,
+    canonical_skill_operation,
+    resolve_skill_root,
+    validate_resolved_skill_root,
+)
 from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     MISSING_SIGNATURE_ERROR,
     manifest_hash_error,
@@ -26,12 +32,19 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
     snapshot_dir_path,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
-from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 from pydantic import ValidationError
 
 
+def _public_manifest_error(error: ValueError) -> str:
+    """Avoid returning manifest-controlled values from Pydantic diagnostics."""
+    if isinstance(error, ValidationError):
+        return "schema validation failed"
+    return str(error)
+
+
+@canonical_skill_operation
 def audit(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     verify_snapshots: bool = False,
 ) -> dict[str, Any]:
@@ -39,14 +52,17 @@ def audit(
 
     Returns ``{"valid": bool, "versions_checked": int, "errors": [...]}``.
     """
-    # Validate skill directory before any work
-    validate_skill_dir(skill_dir)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
 
     errors: list[dict[str, Any]] = []
-    version_ids = list_version_ids(skill_dir)
+    version_ids = list_version_ids(io_skill_dir)
 
     if not version_ids:
         return {
+            "canonicalSkillDir": str(root.canonical_dir),
+            "skillName": root.skill_name,
             "valid": True,
             "versions_checked": 0,
             "errors": [],
@@ -57,12 +73,15 @@ def audit(
 
     for vid in version_ids:
         try:
-            manifest = load_version_manifest(skill_dir, vid)
+            manifest = load_version_manifest(io_skill_dir, vid)
         except (ValueError, ValidationError) as exc:
             errors.append(
                 {
                     "versionId": vid,
-                    "error": f"Version manifest {vid}.json is corrupted: {exc}",
+                    "error": (
+                        f"Version manifest {vid}.json is corrupted: "
+                        f"{_public_manifest_error(exc)}"
+                    ),
                 }
             )
             prev_signature = None
@@ -131,7 +150,7 @@ def audit(
 
         # 3d: Optional snapshot verification
         if verify_snapshots:
-            snap_path = snapshot_dir_path(skill_dir, vid)
+            snap_path = snapshot_dir_path(io_skill_dir, vid)
             if snap_path.is_dir():
                 try:
                     snap_hashes = compute_snapshot_file_hashes(str(snap_path))
@@ -170,12 +189,12 @@ def audit(
 
     # Verify latest.json consistency
     try:
-        latest = load_latest_manifest(skill_dir)
+        latest = load_latest_manifest(io_skill_dir)
     except (ValueError, ValidationError) as exc:
         errors.append(
             {
                 "versionId": "latest.json",
-                "error": f"latest.json is corrupted: {exc}",
+                "error": f"latest.json is corrupted: {_public_manifest_error(exc)}",
             }
         )
         latest = None
@@ -192,8 +211,11 @@ def audit(
                 }
             )
 
-    return {
+    result = {
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "valid": len(errors) == 0,
         "versions_checked": len(version_ids),
         "errors": errors,
     }
+    return root.canonicalize_payload(result)

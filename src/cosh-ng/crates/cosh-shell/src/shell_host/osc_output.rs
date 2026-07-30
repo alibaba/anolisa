@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::types::COMMAND_OUTPUT_REF_MAX_BYTES;
@@ -36,7 +36,9 @@ pub(super) fn write_output_ref_with_session_cap(
 ) -> io::Result<OutputRefCapture> {
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    let captured = capped_output_ref_bytes(output, COMMAND_OUTPUT_REF_MAX_BYTES);
+    let output = String::from_utf8_lossy(output);
+    let (output, _) = crate::evidence::redact_sensitive_text(&output);
+    let captured = capped_output_ref_bytes(output.as_bytes(), COMMAND_OUTPUT_REF_MAX_BYTES);
     if session_captured_bytes.saturating_add(captured.len()) > session_cap_bytes {
         return Ok(OutputRefCapture {
             path: None,
@@ -46,11 +48,10 @@ pub(super) fn write_output_ref_with_session_cap(
     }
 
     let path = dir.join(format!("{command_id}.txt"));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
     file.write_all(&captured)?;
     file.sync_all()?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;

@@ -83,10 +83,12 @@ All output is written to stdout, also line-by-line JSON.
 ### system — System Message
 
 ```json
-{"type":"system","subtype":"init","session_id":"...","model":"qwen3.7-plus","tools":["ask_user_question","edit","grep","read_file","shell","skill","todo","write_file"]}
+{"type":"system","subtype":"init","session_id":"...","session_resumable":true,"model":"qwen3.7-plus","tools":["ask_user_question","edit","grep","read_file","shell","skill","todo","write_file"]}
 ```
 
 Common `subtype` values: `init`, `auth_required`, `auth_ok`, `model_switched`, `config_reloaded`.
+`session_resumable` is present on `init`; callers must not reuse the emitted
+session ID when it is `false`.
 
 ### stream_event — Streaming Event
 
@@ -125,7 +127,7 @@ Standard startup sequence:
 ```
 Shell → Core:  {"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}
 Core → Shell:  {"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{...}}}}
-Core → Shell:  {"type":"system","subtype":"init","session_id":"...","model":"...","tools":[...]}
+Core → Shell:  {"type":"system","subtype":"init","session_id":"...","session_resumable":true,"model":"...","tools":[...]}
 ```
 
 `capabilities` declares the protocol capabilities Core supports:
@@ -152,7 +154,40 @@ Core → Shell:  {"type":"system","subtype":"auth_ok"}
 cosh-core --headless --resume <session-id>
 ```
 
-Core loads history messages from `~/.copilot-shell/sessions/<session-id>.json` and restores the conversation context.
+Core resolves the workspace supplied through `--workspace` (or the process
+cwd when the flag is absent), loads that workspace's
+`.copilot-shell/config.toml`, validates the canonical UUID, and loads the same
+versioned session envelope used by cosh-shell's interactive recovery. The
+default root is `~/.copilot-shell/cosh-core/sessions/`; records are kept under
+deterministic workspace-scoped directories. A relative `session.persist_dir`
+is resolved from that workspace, not from an unrelated launcher cwd.
+
+Supplying the UUID of a pre-upgrade raw message-array file checks only an old
+flat directory that can be proven to belong to the requested workspace. For
+the former relative default, that is `<workspace>/sessions/<uuid>.json`;
+ambiguous shared roots and the launcher cwd are not searched. Core loads the
+legacy array in memory without changing it. Only a later successful persist
+atomically writes the schema-v1 envelope and then removes the old file. Legacy
+files are not shown in picker summaries because they contain no workspace
+identity. Proven workspace-owned legacy IDs are still included by clear-all,
+and an explicit clear removes either the legacy file or its upgraded copy.
+
+The provider session ID is immutable after startup. A missing ID or the legacy
+`"default"` value in a later user message does not replace it, while a
+different explicit ID is rejected as a recoverable protocol error. Core
+persists model-visible history after every mutated turn, including a turn that
+ends with a recoverable provider error.
+
+For a new session, the stored model is finalized after authentication and
+provider selection. A resumed session normally keeps its stored model; an
+explicit `--model <name>` takes precedence over that stored value.
+
+When `session.auto_persist = false`, Core keeps the current process history in
+memory but emits `session_resumable: false`. cosh-shell does not commit that
+UUID or pass it to a later `--resume` invocation.
+
+See [Session Recovery](../shell/session-recovery.md) for the interactive
+workflow and storage behavior.
 
 ## Error Handling
 
@@ -161,5 +196,16 @@ Protocol-level errors are delivered via `result` messages:
 ```json
 {"type":"result","is_error":true,"errors":["provider returned HTTP 429: rate limit exceeded"],"session_id":"..."}
 ```
+
+Session-load and persistence failures additionally carry a machine-readable
+code and phase that are separate from provider error text:
+
+```json
+{"type":"result","is_error":true,"errors":["session recovery failed [not_found]: session not found"],"session_error_code":"not_found","session_error_phase":"load","session_id":"..."}
+```
+
+Persistence failures use `"session_error_phase":"persist"`. When an automatic
+resume cannot persist, cosh-shell releases only the matching active session so
+it cannot silently retry stale history; unrelated selections remain intact.
 
 Input lines with JSON parse failures are silently ignored (debug log only) and do not terminate the process.

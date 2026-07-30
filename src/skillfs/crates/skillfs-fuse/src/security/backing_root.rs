@@ -14,9 +14,11 @@
 //! propagated into the backing root.  Without this isolation the daemon
 //! would see the FUSE hidden view instead of the real source tree.
 //!
-//! All daemon-facing operations — notify `skillDir`, activation bootstrap,
-//! activation reload, startup reconcile, and activation watching — use the
-//! backing root path. The agent-visible FUSE path is unchanged.
+//! Daemon live-source operations — activation bootstrap, reload, watching,
+//! and N3 protocol event `skillDir` — use the backing root path. Socket notify
+//! v2 keeps the canonical source identity, which the daemon resolves to this
+//! live path through the control socket. The agent-visible FUSE view is
+//! unchanged.
 //!
 //! Fail-closed: if the backing root exists but ownership, permissions, path
 //! shape, or mount setup is unsafe, startup is rejected.
@@ -428,9 +430,11 @@ impl LedgerBackingRoot {
         }
     }
 
-    /// The daemon-facing root path. All daemon-facing operations
-    /// (notify `skillDir`, activation bootstrap, activation reload, etc.)
-    /// join skill names onto this path.
+    /// The daemon-facing live root path.
+    ///
+    /// Activation bootstrap, reload, watching, and N3 protocol event
+    /// `skillDir` join skill names onto this path. Socket notify v2 uses the
+    /// separate canonical source root.
     pub fn path(&self) -> &Path {
         &self.path
     }

@@ -20,6 +20,7 @@ class Rule(BaseModel):
     keywords: list[str] = Field(default_factory=list)  # Fast pre-filter tokens
     description: str = ""
     enabled: bool = True
+    single_line: bool = False  # True: '.' does not match newlines for this rule
 
 
 _RULES_DIR = Path(__file__).parent

@@ -30,12 +30,62 @@
 //! over. That dev-tree fallback is the reason this helper returns
 //! `Option<PathBuf>` rather than panicking.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anolisa_platform::fs_layout::FsLayout;
 
 /// Name of the env var that overrides the packaged datadir lookup.
 pub const DATA_DIR_ENV: &str = "ANOLISA_DATA_DIR";
+
+/// Process inputs used to locate the packaged `share/anolisa/` tree.
+///
+/// Capture these once at the CLI boundary so command execution and tests do
+/// not observe process-global environment changes partway through a run.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PackagedDataProbe {
+    env_override: Option<PathBuf>,
+    executable: Option<PathBuf>,
+}
+
+impl PackagedDataProbe {
+    /// Capture the packaged-data inputs from the current process.
+    pub(crate) fn detect() -> Self {
+        Self {
+            env_override: std::env::var_os(DATA_DIR_ENV).map(PathBuf::from),
+            executable: std::env::current_exe().ok(),
+        }
+    }
+
+    /// Build a probe from explicit inputs.
+    #[cfg(test)]
+    pub(crate) fn from_inputs(env_override: Option<PathBuf>, executable: Option<PathBuf>) -> Self {
+        Self {
+            env_override,
+            executable,
+        }
+    }
+
+    /// Resolve the first existing packaged-data candidate for `layout`.
+    pub(crate) fn resolve(&self, layout: &FsLayout) -> Option<PathBuf> {
+        if let Some(candidate) = self.env_override.as_deref()
+            && candidate.is_dir()
+        {
+            return Some(candidate.to_path_buf());
+        }
+        if let Some(prefix) = self
+            .executable
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
+            let candidate = prefix.join("share").join("anolisa");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        layout.datadir.is_dir().then(|| layout.datadir.clone())
+    }
+}
 
 /// Discover the packaged `share/anolisa/` root for the running binary.
 ///
@@ -43,82 +93,8 @@ pub const DATA_DIR_ENV: &str = "ANOLISA_DATA_DIR";
 /// existing directory. Callers must fall back to whatever non-packaged
 /// source they care about, such as dev-tree manifests. This helper
 /// deliberately does NOT consult those because it lives in a separate concern.
-pub fn packaged_datadir_root(layout: &FsLayout) -> Option<PathBuf> {
-    if let Some(env_dir) = std::env::var_os(DATA_DIR_ENV) {
-        let candidate = PathBuf::from(env_dir);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        // <exe>.parent() == bin/, then .parent() == prefix. Datadir is
-        // sibling of bin/ named share/anolisa/.
-        if let Some(prefix) = exe.parent().and_then(|p| p.parent()) {
-            let candidate = prefix.join("share").join("anolisa");
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-        }
-    }
-    if layout.datadir.is_dir() {
-        return Some(layout.datadir.clone());
-    }
-    None
-}
-
-/// Crate-wide mutex for tests that mutate `ANOLISA_DATA_DIR`. Cargo runs
-/// tests within a crate concurrently, and `ANOLISA_DATA_DIR` is
-/// process-global, so every test that sets or reads it must hold this lock.
-#[cfg(test)]
-pub(crate) static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// RAII guard that sets `ANOLISA_DATA_DIR` on creation and restores (or
-/// removes) the original value on drop — even if the test panics.
-#[cfg(test)]
-pub(crate) struct DataDirEnvGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    saved: Option<std::ffi::OsString>,
-}
-
-#[cfg(test)]
-impl DataDirEnvGuard {
-    /// Acquire the env lock, save the current `ANOLISA_DATA_DIR`, and set
-    /// the new value.
-    pub(crate) fn set(value: &std::path::Path) -> Self {
-        let lock = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os(DATA_DIR_ENV);
-        // SAFETY: guarded by DATA_DIR_ENV_LOCK.
-        unsafe {
-            std::env::set_var(DATA_DIR_ENV, value);
-        }
-        Self { _lock: lock, saved }
-    }
-
-    /// Acquire the env lock and remove `ANOLISA_DATA_DIR` so the test
-    /// runs as if no env override is set. The original value is restored
-    /// on drop.
-    pub(crate) fn clear() -> Self {
-        let lock = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os(DATA_DIR_ENV);
-        // SAFETY: guarded by DATA_DIR_ENV_LOCK.
-        unsafe {
-            std::env::remove_var(DATA_DIR_ENV);
-        }
-        Self { _lock: lock, saved }
-    }
-}
-
-#[cfg(test)]
-impl Drop for DataDirEnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: guarded by the lock held in self._lock.
-        unsafe {
-            match &self.saved {
-                Some(v) => std::env::set_var(DATA_DIR_ENV, v),
-                None => std::env::remove_var(DATA_DIR_ENV),
-            }
-        }
-    }
+pub fn packaged_datadir_root(layout: &FsLayout, probe: &PackagedDataProbe) -> Option<PathBuf> {
+    probe.resolve(layout)
 }
 
 #[cfg(test)]
@@ -132,8 +108,8 @@ mod tests {
     fn env_override_wins() {
         let tmp = tempdir().expect("tmp");
         let layout = FsLayout::system(Some(PathBuf::from("/nonexistent-anolisa-prefix")));
-        let _guard = DataDirEnvGuard::set(tmp.path());
-        let got = packaged_datadir_root(&layout);
+        let probe = PackagedDataProbe::from_inputs(Some(tmp.path().to_path_buf()), None);
+        let got = packaged_datadir_root(&layout, &probe);
         assert_eq!(got.as_deref(), Some(tmp.path()));
     }
 
@@ -142,22 +118,40 @@ mod tests {
     #[test]
     fn env_override_falls_through_when_missing() {
         let layout = FsLayout::system(Some(PathBuf::from("/nonexistent-anolisa-prefix")));
-        let _guard =
-            DataDirEnvGuard::set(std::path::Path::new("/definitely/does/not/exist/anolisa"));
-        let got = packaged_datadir_root(&layout);
+        let probe = PackagedDataProbe::from_inputs(
+            Some(PathBuf::from("/definitely/does/not/exist/anolisa")),
+            None,
+        );
+        let got = packaged_datadir_root(&layout, &probe);
         assert!(got.is_none(), "expected fallthrough, got {got:?}");
+    }
+
+    #[test]
+    fn executable_sibling_precedes_layout_datadir() {
+        let tmp = tempdir().expect("tmp");
+        let executable = tmp.path().join("prefix/bin/anolisa");
+        let packaged = tmp.path().join("prefix/share/anolisa");
+        fs::create_dir_all(executable.parent().expect("bin parent")).expect("mkdir bin");
+        fs::create_dir_all(&packaged).expect("mkdir packaged");
+        let layout = FsLayout::system(Some(tmp.path().join("layout")));
+        fs::create_dir_all(&layout.datadir).expect("mkdir layout datadir");
+        let probe = PackagedDataProbe::from_inputs(None, Some(executable));
+
+        let got = packaged_datadir_root(&layout, &probe);
+
+        assert_eq!(got.as_deref(), Some(packaged.as_path()));
     }
 
     /// Without env override, an existing layout.datadir wins over a
     /// missing exe-sibling probe.
     #[test]
     fn layout_datadir_used_when_it_exists() {
-        let _guard = DataDirEnvGuard::clear();
         let tmp = tempdir().expect("tmp");
         let prefix = tmp.path().to_path_buf();
         let layout = FsLayout::system(Some(prefix.clone()));
         fs::create_dir_all(&layout.datadir).expect("mkdir datadir");
-        let got = packaged_datadir_root(&layout);
+        let probe = PackagedDataProbe::from_inputs(None, None);
+        let got = packaged_datadir_root(&layout, &probe);
         assert_eq!(got.as_deref(), Some(layout.datadir.as_path()));
     }
 }

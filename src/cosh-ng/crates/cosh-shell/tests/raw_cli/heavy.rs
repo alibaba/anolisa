@@ -192,8 +192,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-exe
                 b"?? provider-host-executed-fullscreen-timeout\n".to_vec(),
                 Duration::from_millis(500),
             ),
-            (b"\n".to_vec(), Duration::from_millis(2_000)),
-            (b"exit 0\n".to_vec(), Duration::from_millis(5_000)),
+            (b"\n".to_vec(), Duration::from_secs(5)),
+            (b"exit 0\n".to_vec(), Duration::from_secs(8)),
         ],
     );
     let _ = fs::remove_dir_all(&home);

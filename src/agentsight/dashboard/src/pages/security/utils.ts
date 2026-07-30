@@ -163,7 +163,8 @@ export function securityDetailRows(details: unknown): Array<{ label: string; val
 }
 
 export function securityEventVerdict(event: SecurityEventRecord): string {
-  const value = findDetailValue(event.details ?? event.details_preview, ['verdict']);
+  const value = event.verdict
+    ?? findDetailValue(event.details ?? event.details_preview, ['verdict']);
   return value === undefined || value === null ? '-' : recordPreview(value);
 }
 
@@ -187,11 +188,19 @@ export function verdictTone(value: string | null | undefined): VerdictTone {
   ) {
     return 'pass';
   }
-  if (v.includes('warn') || v.includes('review') || v.includes('caution') || v.includes('suspicious')) {
+  if (
+    v === 'drifted'
+    || v === 'unmanaged'
+    || v.includes('warn')
+    || v.includes('review')
+    || v.includes('caution')
+    || v.includes('suspicious')
+  ) {
     return 'warning';
   }
   if (
-    v.includes('deny')
+    v === 'tampered'
+    || v.includes('deny')
     || v.includes('block')
     || v.includes('fail')
     || v.includes('error')

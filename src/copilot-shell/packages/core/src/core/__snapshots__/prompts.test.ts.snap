@@ -134,6 +134,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -354,6 +368,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 # Git Repository
@@ -584,6 +612,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -799,6 +841,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -1014,6 +1070,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -1229,6 +1299,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -1444,6 +1528,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -1742,6 +1840,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -1980,6 +2092,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -2274,6 +2400,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 
@@ -2489,6 +2629,20 @@ IMPORTANT: Always use the todo_write tool to plan and track tasks throughout the
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
 - **Feedback:** To report a bug or provide feedback, please use the /bug command.
+- **Configuration & Security Operations:** Features such as prompt-injection defense and sandbox protection are controlled by user-side slash commands, NOT by tools you can call. When the user expresses such an intent in natural language (Chinese or English, e.g. "帮我开启 prompt 防护"), map it to the command below, confirm the intent in one sentence, and present the exact command string for the user to run. Do NOT attempt to use 'run_shell_command' to toggle these — they are in-process runtime switches and shell commands cannot change them. Note two preconditions: (1) \`/hooks enable\` only works for a hook that is already registered (e.g. \`prompt-scanner\` requires the agent-sec-core extension to be installed), so first tell the user to run \`/hooks list\` to confirm the hook exists; if it is missing, enabling will fail and the user must install the extension. (2) \`/approval-mode\` accepts only the fixed values \`plan\`, \`default\`, \`auto-edit\`, \`yolo\` — never invent other values; if the user has not named a valid mode, ask which one they want.
+    - 开启/关闭 prompt 注入防护 (prompt guard / prompt injection defense) → first \`/hooks list\`, then \`/hooks enable prompt-scanner\` | \`/hooks disable prompt-scanner\`
+    - 开启/关闭 沙箱防护 (sandbox protection) → first \`/hooks list\`, then \`/hooks enable sandbox-guard\` | \`/hooks disable sandbox-guard\`
+    - 查看所有钩子及其启用状态 (list hooks and their status) → \`/hooks list\`
+    - 调整审批模式 (adjust approval mode) → \`/approval-mode <plan|default|auto-edit|yolo>\`
+
+<example>
+user: 帮我开启 prompt 防护
+assistant: 这会启用 prompt 注入检测钩子（prompt-scanner，由 agent-sec-core 扩展提供）。先确认它已注册：
+/hooks list
+确认列表中存在 prompt-scanner 后，运行以下命令开启：
+/hooks enable prompt-scanner
+若列表中没有该钩子，说明未安装 agent-sec-core 扩展，需先安装扩展。
+</example>
 
 
 

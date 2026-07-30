@@ -31,6 +31,7 @@ class AssetVerifyBackend(BaseBackend):
                 success=False,
                 error=f"Verification error: {exc}",
                 exit_code=1,
+                error_type=type(exc).__name__,
             )
 
         passed = results["passed"]

@@ -3,7 +3,7 @@
 //! This module provides the `discover` subcommand which scans the system
 //! for running AI agent processes.
 
-use agentsight::{AgentScanner, CmdlineGlobMatcher};
+use agentsight::{AgentScanner, CmdlineGlobMatcher, ProcessContext};
 use structopt::StructOpt;
 
 /// Discover subcommand for finding AI agents running on the system
@@ -13,7 +13,7 @@ pub struct DiscoverCommand {
     #[structopt(short, long)]
     pub verbose: bool,
 
-    /// List all known agents without scanning
+    /// List all known agents and show currently matched PIDs
     #[structopt(long)]
     pub list_known: bool,
 }
@@ -31,21 +31,40 @@ impl DiscoverCommand {
     /// List all known agents that can be detected
     fn list_known_agents(&self) {
         let rules = agentsight::default_cmdline_rules();
-        let scanner = AgentScanner::from_rules(&rules, &[]);
-        let count = scanner.matcher_count();
+        let matchers: Vec<CmdlineGlobMatcher> = rules
+            .iter()
+            .filter_map(CmdlineGlobMatcher::from_config)
+            .collect();
+        let mut scanner = AgentScanner::from_rules(&rules, &[]);
+        let running_agents = scanner.scan();
 
-        println!("Known AI Agents ({count} total):");
+        println!("已知 AI Agent（共 {} 条规则）:", matchers.len());
         println!("{}", "=".repeat(60));
         println!();
 
-        // Use CmdlineGlobMatcher to list agent info
-        for matcher in agentsight::default_cmdline_rules()
-            .iter()
-            .filter_map(CmdlineGlobMatcher::from_config)
-        {
+        for matcher in &matchers {
             let agent = matcher.info();
+            let matched_pids: Vec<String> = running_agents
+                .iter()
+                .filter(|running_agent| {
+                    let ctx = ProcessContext {
+                        comm: String::new(),
+                        cmdline_args: running_agent.cmdline_args.clone(),
+                        exe_path: running_agent.exe_path.clone(),
+                    };
+                    matcher.matches(&ctx)
+                })
+                .map(|running_agent| running_agent.pid.to_string())
+                .collect();
+            let running_pids = if matched_pids.is_empty() {
+                "无".to_string()
+            } else {
+                matched_pids.join(", ")
+            };
+
             println!("  {} ({})", agent.name, agent.category);
-            println!("    Process names: {}", agent.process_names.join(", "));
+            println!("    命令行规则: {}", matcher.patterns().join(" "));
+            println!("    运行中 PID: {running_pids}");
             println!("    {}", agent.description);
             println!();
         }
@@ -57,19 +76,19 @@ impl DiscoverCommand {
         let agents = scanner.scan();
 
         if agents.is_empty() {
-            println!("No AI agents found running on this system.");
+            println!("未发现正在运行的 AI Agent。");
             println!();
-            println!("Tip: Use --list-known to see all detectable agents.");
+            println!("提示：使用 --list-known 查看所有可检测的 Agent。");
             return;
         }
 
-        println!("Discovered AI Agents ({} found):", agents.len());
+        println!("已发现 AI Agent（共 {} 个）:", agents.len());
         println!("{}", "=".repeat(60));
         println!();
 
         for agent in &agents {
             println!("  {} [PID: {}]", agent.agent_info.name, agent.pid);
-            println!("    Category: {}", agent.agent_info.category);
+            println!("    类别: {}", agent.agent_info.category);
 
             // Truncate long command lines
             let cmdline_str = agent.cmdline_args.join(" ");
@@ -78,15 +97,15 @@ impl DiscoverCommand {
             } else {
                 cmdline_str
             };
-            println!("    Command:  {cmdline}");
+            println!("    命令:  {cmdline}");
 
             if self.verbose && !agent.exe_path.is_empty() {
-                println!("    Executable: {}", agent.exe_path);
+                println!("    可执行文件: {}", agent.exe_path);
             }
 
             println!();
         }
 
-        println!("Total: {} agent(s) found", agents.len());
+        println!("总计: {} 个 Agent", agents.len());
     }
 }

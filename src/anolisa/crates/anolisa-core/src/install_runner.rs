@@ -1,10 +1,7 @@
 //! Install runner: copy a cached artifact into the ANOLISA-owned layout.
 //!
-//! This milestone only supports two backends:
-//! * `binary` - the cached file IS the installed binary (one file in,
-//!   one file out). Manifest must declare exactly one dest.
-//! * `tar_gz` - extract a gzipped tar archive, then copy each entry
-//!   whose basename matches a manifest dest into that dest.
+//! This runner supports `tar_gz` artifacts. It extracts a gzipped tar archive,
+//! then copies each entry whose basename matches a manifest dest.
 //!
 //! All destinations must resolve under one of the ANOLISA-owned roots
 //! (`bin_dir`, `etc_dir`, `state_dir`, `lib_dir`, `libexec_dir`, `datadir`,
@@ -25,16 +22,11 @@ use tar::Archive;
 
 use crate::manifest::FileKind;
 
-/// Wire-form `artifact_type` strings the install runner understands today.
+/// Wire-form `artifact_type` strings accepted by the raw install runner.
 ///
-/// Single source of truth shared with `contract_lint` so a new entry in
-/// `DistributionIndex` cannot pass lint and then fail at runtime —
-/// `lint_distribution` rejects any `artifact_type` not in this list with
-/// `E_UNSUPPORTED_ARTIFACT_TYPE`, so unimplemented backends never enter a
-/// `Ready` plan. Keep these in sync with the `match` arm in
-/// [`InstallRunner::install_files`]; if you add `rpm`/`deb`/`oci`, push the
-/// label here and the lint will start accepting it.
-pub const SUPPORTED_ARTIFACT_TYPES: &[&str] = &["binary", "tar_gz"];
+/// Keep this in sync with [`InstallRunner::install_files`]; the CLI resolver
+/// uses the same list to reject unsupported artifacts before downloading them.
+pub const SUPPORTED_ARTIFACT_TYPES: &[&str] = &["tar_gz"];
 
 /// One destination file written by the runner, with the sha256 of the
 /// installed bytes. Sub-C records these in `InstalledState`.
@@ -91,7 +83,7 @@ pub struct InstallOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
     /// Artifact backend is not implemented by this milestone's runner.
-    #[error("artifact_type '{0}' is not supported by this milestone (only 'binary' and 'tar_gz')")]
+    #[error("artifact_type '{0}' is not supported by this milestone (only 'tar_gz')")]
     UnsupportedArtifactType(String),
 
     /// Manifest resolved to no destination files.
@@ -104,10 +96,6 @@ pub enum InstallError {
         /// Symlink destination with no referent to point at.
         path: PathBuf,
     },
-
-    /// Raw binary artifacts can only map to one installed destination.
-    #[error("'binary' install requires exactly one manifest dest, got {0}")]
-    BinaryRequiresSingleDest(usize),
 
     /// Destination is outside the active ANOLISA-owned layout.
     #[error("destination '{path}' is not under an ANOLISA-owned root")]
@@ -256,7 +244,7 @@ pub fn read_embedded_component_manifest_text(
 }
 
 /// Stateless installer bound to an [`FsLayout`] for ANOLISA-owned-root
-/// validation. Construct one per `enable` invocation.
+/// validation. Construct one per install or update invocation.
 pub struct InstallRunner<'a> {
     layout: &'a FsLayout,
 }
@@ -272,8 +260,7 @@ impl<'a> InstallRunner<'a> {
     /// which must be absolute paths already substituted against the layout
     /// (Sub-C will pass the planner's `ComponentPlan.resolved_files`).
     ///
-    /// `artifact_type` is the wire string from the install plan (e.g. "binary",
-    /// "tar_gz").
+    /// `artifact_type` is the wire string from the install plan (`"tar_gz"`).
     ///
     /// On success returns one `InstalledFile` per written path with the
     /// final sha256 — Sub-C will copy these into `InstalledState.objects[].files`.
@@ -293,10 +280,9 @@ impl<'a> InstallRunner<'a> {
 
     /// Install files using explicit source-to-destination mappings.
     ///
-    /// Source paths are meaningful for archives; raw binaries must still
-    /// resolve to exactly one destination. All destinations are validated
-    /// before any file is written so a rejected path cannot leave a
-    /// partial install behind.
+    /// Source paths identify entries in the archive. All destinations are
+    /// validated before any file is written so a rejected path cannot leave
+    /// a partial install behind.
     ///
     /// # Errors
     ///
@@ -311,6 +297,126 @@ impl<'a> InstallRunner<'a> {
         cached_artifact: &Path,
         files: &[ResolvedInstallFile],
     ) -> Result<InstallOutcome, InstallError> {
+        let prepared = self.prepare_files(artifact_type, cached_artifact, files)?;
+        self.install_prepared(prepared)
+    }
+
+    /// Install a file set previously returned by [`Self::prepare_files`].
+    ///
+    /// The prepared regular-file bytes are the exact bytes that were
+    /// inspected and verified; the cache is not reopened. Destination
+    /// safety and vacancy are rechecked immediately before placement so a
+    /// caller may safely carry this value across a lifecycle lock boundary.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a destination is no longer safe or vacant, or if placement
+    /// fails. A later placement failure best-effort removes paths created by
+    /// this call.
+    pub fn install_prepared(
+        &self,
+        prepared: PreparedFileSet,
+    ) -> Result<InstallOutcome, InstallError> {
+        let regular_files = prepared
+            .regular
+            .iter()
+            .map(|(file, _)| file.clone())
+            .collect::<Vec<_>>();
+        let links = prepared
+            .links
+            .iter()
+            .map(PreparedSymlink::as_resolved)
+            .collect::<Vec<_>>();
+        self.validate_install_targets(&regular_files, DestinationPolicy::Vacant)?;
+        self.validate_symlink_entries(&links, DestinationPolicy::Vacant)?;
+        let mut installed = Vec::with_capacity(prepared.regular.len() + prepared.links.len());
+        for (file, bytes) in prepared.regular {
+            match write_dest_atomic(&file.dest, &bytes, file.mode.as_deref()) {
+                Ok(file) => installed.push(file),
+                Err(err) => {
+                    rollback_installed_files(&installed);
+                    return Err(err);
+                }
+            }
+        }
+        for link in &prepared.links {
+            match create_symlink(link) {
+                Ok(file) => installed.push(file),
+                Err(err) => {
+                    rollback_installed_files(&installed);
+                    return Err(err);
+                }
+            }
+        }
+        Ok(InstallOutcome { files: installed })
+    }
+
+    /// Resolve the exact regular files, symlinks, and digests an install
+    /// would create without writing them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same artifact, mapping, path-safety, and destination
+    /// errors as [`Self::install_files`].
+    pub fn inspect_files(
+        &self,
+        artifact_type: &str,
+        cached_artifact: &Path,
+        files: &[ResolvedInstallFile],
+    ) -> Result<InstallOutcome, InstallError> {
+        let prepared = self.prepare_files(artifact_type, cached_artifact, files)?;
+        Ok(prepared.preview())
+    }
+
+    /// Read and validate an artifact once, retaining the exact bytes that a
+    /// later [`Self::install_prepared`] call will place.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same artifact, mapping, path-safety, and destination
+    /// errors as [`Self::install_files`].
+    pub fn prepare_files(
+        &self,
+        artifact_type: &str,
+        cached_artifact: &Path,
+        files: &[ResolvedInstallFile],
+    ) -> Result<PreparedFileSet, InstallError> {
+        self.prepare_files_with_policy(
+            artifact_type,
+            cached_artifact,
+            files,
+            DestinationPolicy::Vacant,
+        )
+    }
+
+    /// Prepare replacement bytes while the recorded destinations still
+    /// exist; [`Self::install_prepared`] still requires them to be vacant.
+    ///
+    /// # Errors
+    ///
+    /// Returns artifact, mapping, and path-safety errors. Existing
+    /// destinations are not an error during preparation.
+    pub fn prepare_replacement_files(
+        &self,
+        artifact_type: &str,
+        cached_artifact: &Path,
+        files: &[ResolvedInstallFile],
+    ) -> Result<PreparedFileSet, InstallError> {
+        self.prepare_files_with_policy(
+            artifact_type,
+            cached_artifact,
+            files,
+            DestinationPolicy::MayExist,
+        )
+    }
+
+    fn prepare_files_with_policy(
+        &self,
+        artifact_type: &str,
+        cached_artifact: &Path,
+        files: &[ResolvedInstallFile],
+        destination_policy: DestinationPolicy,
+    ) -> Result<PreparedFileSet, InstallError> {
         if files.is_empty() {
             return Err(InstallError::NoDestinations);
         }
@@ -321,36 +427,41 @@ impl<'a> InstallRunner<'a> {
             .iter()
             .cloned()
             .partition(|f| f.kind == FileKind::Symlink);
-        self.validate_symlink_entries(&links)?;
+        self.validate_symlink_entries(&links, destination_policy)?;
+        let links = links
+            .into_iter()
+            .map(|link| {
+                let referent = link
+                    .source
+                    .ok_or_else(|| InstallError::SymlinkMissingSource {
+                        path: link.dest.clone(),
+                    })?;
+                Ok(PreparedSymlink {
+                    dest: link.dest,
+                    referent: PathBuf::from(referent),
+                })
+            })
+            .collect::<Result<Vec<_>, InstallError>>()?;
         if regular.is_empty() {
             // A links-only manifest has no use for the downloaded artifact —
             // treat it as the same defect as declaring no files at all.
             return Err(InstallError::NoDestinations);
         }
-        let mut outcome = match artifact_type {
-            "binary" => {
-                self.validate_install_targets(&regular)?;
-                self.install_binary(cached_artifact, &regular)
-            }
-            "tar_gz" => self.install_tar_gz(cached_artifact, &regular),
+        let regular = match artifact_type {
+            "tar_gz" => self.prepare_tar_gz(cached_artifact, &regular, destination_policy),
             other => Err(InstallError::UnsupportedArtifactType(other.to_string())),
         }?;
-        for link in &links {
-            match create_symlink(link) {
-                Ok(installed) => outcome.files.push(installed),
-                Err(err) => {
-                    rollback_installed_files(&outcome.files);
-                    return Err(err);
-                }
-            }
-        }
-        Ok(outcome)
+        Ok(PreparedFileSet { regular, links })
     }
 
     /// Up-front checks for symlink entries, run before any byte lands so a
-    /// rejected link cannot leave a half-finished install: referent
-    /// declared and ANOLISA-owned, destination ANOLISA-owned and vacant.
-    fn validate_symlink_entries(&self, links: &[ResolvedInstallFile]) -> Result<(), InstallError> {
+    /// rejected link cannot leave a half-finished install: referent and
+    /// destination must be ANOLISA-owned; vacancy follows the caller policy.
+    fn validate_symlink_entries(
+        &self,
+        links: &[ResolvedInstallFile],
+        destination_policy: DestinationPolicy,
+    ) -> Result<(), InstallError> {
         let mut seen = BTreeSet::new();
         for link in links {
             let referent =
@@ -368,47 +479,18 @@ impl<'a> InstallRunner<'a> {
                     path: link.dest.clone(),
                 });
             }
-            // Same fresh-install rule as regular destinations, with
-            // symlink_metadata so an existing broken link is still refused.
-            match fs::symlink_metadata(&link.dest) {
-                Ok(_) => {
-                    return Err(InstallError::DestExists {
-                        path: link.dest.clone(),
-                    });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(InstallError::Io {
-                        path: link.dest.clone(),
-                        source,
-                    });
-                }
+            if destination_policy == DestinationPolicy::Vacant {
+                ensure_destination_vacant(&link.dest)?;
             }
         }
         Ok(())
     }
-
-    fn install_binary(
+    fn prepare_tar_gz(
         &self,
         cached_artifact: &Path,
         files: &[ResolvedInstallFile],
-    ) -> Result<InstallOutcome, InstallError> {
-        if files.len() != 1 {
-            return Err(InstallError::BinaryRequiresSingleDest(files.len()));
-        }
-        let dest = &files[0].dest;
-        let bytes = read_file_bytes(cached_artifact)?;
-        let installed = write_dest_atomic(dest, &bytes, files[0].mode.as_deref())?;
-        Ok(InstallOutcome {
-            files: vec![installed],
-        })
-    }
-
-    fn install_tar_gz(
-        &self,
-        cached_artifact: &Path,
-        files: &[ResolvedInstallFile],
-    ) -> Result<InstallOutcome, InstallError> {
+        destination_policy: DestinationPolicy,
+    ) -> Result<Vec<(ResolvedInstallFile, Vec<u8>)>, InstallError> {
         let entries = read_tar_gz_entries(cached_artifact)?;
 
         let mut expanded: Vec<(ResolvedInstallFile, Vec<u8>)> = Vec::new();
@@ -458,19 +540,9 @@ impl<'a> InstallRunner<'a> {
 
         let expanded_files: Vec<ResolvedInstallFile> =
             expanded.iter().map(|(file, _)| file.clone()).collect();
-        self.validate_install_targets(&expanded_files)?;
+        self.validate_install_targets(&expanded_files, destination_policy)?;
 
-        let mut out = Vec::with_capacity(expanded.len());
-        for (file, bytes) in expanded {
-            match write_dest_atomic(&file.dest, &bytes, file.mode.as_deref()) {
-                Ok(installed) => out.push(installed),
-                Err(err) => {
-                    rollback_installed_files(&out);
-                    return Err(err);
-                }
-            }
-        }
-        Ok(InstallOutcome { files: out })
+        Ok(expanded)
     }
 
     fn validate_dest(&self, dest: &Path) -> Result<(), InstallError> {
@@ -493,7 +565,11 @@ impl<'a> InstallRunner<'a> {
         })
     }
 
-    fn validate_install_targets(&self, files: &[ResolvedInstallFile]) -> Result<(), InstallError> {
+    fn validate_install_targets(
+        &self,
+        files: &[ResolvedInstallFile],
+        destination_policy: DestinationPolicy,
+    ) -> Result<(), InstallError> {
         let mut seen = BTreeSet::new();
         for file in files {
             if !seen.insert(file.dest.clone()) {
@@ -503,38 +579,79 @@ impl<'a> InstallRunner<'a> {
             }
             self.validate_dest(&file.dest)?;
         }
-        // Fresh-install only for P1-F: refuse to overwrite anything already
-        // on disk. Backup/restore of pre-existing ANOLISA-owned files lands
-        // in P1-G; until then, the runner must never silently clobber.
-        // Check all dests up front so a partial run can't leave half-written
-        // siblings behind. Use `symlink_metadata` rather than `exists()` so
-        // a broken symlink (target missing, `exists()` returns false) is
-        // still caught and refused.
-        for file in files {
-            match fs::symlink_metadata(&file.dest) {
-                Ok(_) => {
-                    return Err(InstallError::DestExists {
-                        path: file.dest.clone(),
-                    });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(InstallError::Io {
-                        path: file.dest.clone(),
-                        source,
-                    });
-                }
+        if destination_policy == DestinationPolicy::Vacant {
+            for file in files {
+                ensure_destination_vacant(&file.dest)?;
             }
         }
         Ok(())
     }
 }
 
-fn read_file_bytes(path: &Path) -> Result<Vec<u8>, InstallError> {
-    fs::read(path).map_err(|source| InstallError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestinationPolicy {
+    Vacant,
+    MayExist,
+}
+
+/// Validated install destinations together with their verified regular-file
+/// bytes.
+///
+/// Fields are private so every instance preserves the path, archive, and
+/// symlink invariants established by [`InstallRunner::prepare_files`].
+pub struct PreparedFileSet {
+    regular: Vec<(ResolvedInstallFile, Vec<u8>)>,
+    links: Vec<PreparedSymlink>,
+}
+
+impl PreparedFileSet {
+    /// Describe the files this set will install without touching disk.
+    pub fn preview(&self) -> InstallOutcome {
+        let mut files = self
+            .regular
+            .iter()
+            .map(|(file, bytes)| InstalledFile {
+                path: file.dest.clone(),
+                sha256: to_lower_hex(&Sha256::digest(bytes)),
+                referent: None,
+            })
+            .collect::<Vec<_>>();
+        files.extend(self.links.iter().map(|link| InstalledFile {
+            path: link.dest.clone(),
+            sha256: String::new(),
+            referent: Some(link.referent.clone()),
+        }));
+        InstallOutcome { files }
+    }
+}
+
+struct PreparedSymlink {
+    dest: PathBuf,
+    referent: PathBuf,
+}
+
+impl PreparedSymlink {
+    fn as_resolved(&self) -> ResolvedInstallFile {
+        ResolvedInstallFile {
+            source: Some(self.referent.to_string_lossy().into_owned()),
+            dest: self.dest.clone(),
+            mode: None,
+            kind: FileKind::Symlink,
+        }
+    }
+}
+
+fn ensure_destination_vacant(dest: &Path) -> Result<(), InstallError> {
+    match fs::symlink_metadata(dest) {
+        Ok(_) => Err(InstallError::DestExists {
+            path: dest.to_path_buf(),
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(InstallError::Io {
+            path: dest.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// Tar entries keyed by their full archive path plus the legacy lookup map.
@@ -649,18 +766,10 @@ fn archive_key_from_path(path: &Path) -> Result<Option<String>, InstallError> {
 /// the recorded referent rather than hashing content through the link.
 /// A referent that does not exist fails here: installing a dangling
 /// convenience link would be a manifest defect, not a usable install.
-fn create_symlink(link: &ResolvedInstallFile) -> Result<InstalledFile, InstallError> {
-    // Validated in validate_symlink_entries; unreachable here.
-    let referent = link
-        .source
-        .as_deref()
-        .ok_or_else(|| InstallError::SymlinkMissingSource {
-            path: link.dest.clone(),
-        })?;
-    let referent_path = Path::new(referent);
-    if !referent_path.exists() {
+fn create_symlink(link: &PreparedSymlink) -> Result<InstalledFile, InstallError> {
+    if !link.referent.exists() {
         return Err(InstallError::Io {
-            path: referent_path.to_path_buf(),
+            path: link.referent.clone(),
             source: std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "symlink referent does not exist",
@@ -673,14 +782,14 @@ fn create_symlink(link: &ResolvedInstallFile) -> Result<InstalledFile, InstallEr
             source,
         })?;
     }
-    std::os::unix::fs::symlink(referent, &link.dest).map_err(|source| InstallError::Io {
+    std::os::unix::fs::symlink(&link.referent, &link.dest).map_err(|source| InstallError::Io {
         path: link.dest.clone(),
         source,
     })?;
     Ok(InstalledFile {
         path: link.dest.clone(),
         sha256: String::new(),
-        referent: Some(PathBuf::from(referent)),
+        referent: Some(link.referent.clone()),
     })
 }
 
@@ -851,65 +960,17 @@ mod tests {
     }
 
     #[test]
-    fn binary_install_single_dest_succeeds() {
+    fn tar_gz_install_unresolved_template_rejected() {
         let home = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-
-        let payload = b"fake-binary-bytes";
-        let cached = write_cached(cache.path(), "agentsight", payload);
-        let dest = layout.bin_dir.join("agentsight");
-
-        let outcome = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
-            .expect("install ok");
-
-        assert_eq!(outcome.files.len(), 1);
-        assert_eq!(outcome.files[0].path, dest);
-        assert_eq!(outcome.files[0].sha256, sha256_of(payload));
-        assert!(dest.exists());
-        let got = fs::read(&dest).unwrap();
-        assert_eq!(got, payload);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o755);
-        }
-    }
-
-    #[test]
-    fn binary_install_two_dests_rejected() {
-        let home = tempdir().unwrap();
-        let cache = tempdir().unwrap();
-        let layout = layout_for(home.path());
-        let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "x", b"x");
-
-        let d1 = layout.bin_dir.join("a");
-        let d2 = layout.bin_dir.join("b");
-        let err = runner
-            .install("binary", &cached, &[d1, d2])
-            .expect_err("must error");
-        match err {
-            InstallError::BinaryRequiresSingleDest(n) => assert_eq!(n, 2),
-            other => panic!("expected BinaryRequiresSingleDest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn binary_install_unresolved_template_rejected() {
-        let home = tempdir().unwrap();
-        let cache = tempdir().unwrap();
-        let layout = layout_for(home.path());
-        let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "x", b"x");
+        let gz = build_tar_gz(&[("foo", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         let dest = PathBuf::from("{bindir}/foo");
         let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
+            .install("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must error");
         match err {
             InstallError::UnresolvedTemplate { path } => assert_eq!(path, dest),
@@ -918,16 +979,17 @@ mod tests {
     }
 
     #[test]
-    fn binary_install_external_path_rejected() {
+    fn tar_gz_install_external_path_rejected() {
         let home = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "x", b"x");
+        let gz = build_tar_gz(&[("foo", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         let dest = PathBuf::from("/tmp/escape/foo");
         let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
+            .install("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must error");
         match err {
             InstallError::ExternalPath { path } => assert_eq!(path, dest),
@@ -936,16 +998,17 @@ mod tests {
     }
 
     #[test]
-    fn binary_install_creates_missing_parent_dirs() {
+    fn tar_gz_install_creates_missing_parent_dirs() {
         let home = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "x", b"deep");
+        let gz = build_tar_gz(&[("file.bin", b"deep")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         let dest = layout.state_dir.join("sub").join("deep").join("file.bin");
         let outcome = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
+            .install("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect("install ok");
         assert!(dest.exists());
         assert_eq!(outcome.files[0].sha256, sha256_of(b"deep"));
@@ -978,6 +1041,88 @@ mod tests {
         assert_eq!(fs::read(&dest_data).unwrap(), data_bytes);
         assert_eq!(outcome.files[0].sha256, sha256_of(bin_bytes));
         assert_eq!(outcome.files[1].sha256, sha256_of(data_bytes));
+    }
+
+    #[test]
+    fn inspected_files_match_the_install_outcome() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let payload: &[u8] = b"skillfs-binary";
+        let gz = build_tar_gz(&[("bin/skillfs", payload)]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+        let dest = layout.bin_dir.join("skillfs");
+        let files = [ResolvedInstallFile::dest_only(dest)];
+
+        let inspected = runner
+            .inspect_files("tar_gz", &cached, &files)
+            .expect("inspect files");
+        let installed = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect("install files");
+
+        assert_eq!(inspected.files, installed.files);
+    }
+
+    #[test]
+    fn prepared_files_keep_verified_bytes_when_the_cache_changes() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let original: &[u8] = b"verified-skillfs";
+        let changed: &[u8] = b"changed-after-preview";
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/skillfs", original)]),
+        );
+        let dest = layout.bin_dir.join("skillfs");
+        let files = [ResolvedInstallFile::dest_only(dest.clone())];
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare verified files");
+        let expected = prepared.preview();
+        std::fs::write(&cached, build_tar_gz(&[("bin/skillfs", changed)]))
+            .expect("replace cache entry");
+
+        let installed = runner
+            .install_prepared(prepared)
+            .expect("install prepared files");
+
+        assert_eq!(installed.files, expected.files);
+        assert_eq!(std::fs::read(dest).expect("read installed file"), original);
+    }
+
+    #[test]
+    fn replacement_preparation_allows_recorded_destinations_until_install() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/skillfs", b"replacement")]),
+        );
+        let dest = layout.bin_dir.join("skillfs");
+        std::fs::create_dir_all(&layout.bin_dir).expect("create bin dir");
+        std::fs::write(&dest, b"recorded").expect("write recorded file");
+        let files = [ResolvedInstallFile::dest_only(dest.clone())];
+
+        let prepared = runner
+            .prepare_replacement_files("tar_gz", &cached, &files)
+            .expect("prepare replacement");
+        std::fs::remove_file(&dest).expect("remove recorded file");
+        runner
+            .install_prepared(prepared)
+            .expect("install prepared replacement");
+
+        assert_eq!(
+            std::fs::read(dest).expect("read replacement"),
+            b"replacement"
+        );
     }
 
     #[test]
@@ -1097,15 +1242,16 @@ mod tests {
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "tool", b"tool-bytes");
+        let gz = build_tar_gz(&[("tool", b"tool-bytes")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         let dest = layout.bin_dir.join("tool");
         let err = runner
             .install_files(
-                "binary",
+                "tar_gz",
                 &cached,
                 &[ResolvedInstallFile {
-                    source: None,
+                    source: Some("tool".to_string()),
                     dest: dest.clone(),
                     mode: Some("not-octal".to_string()),
                     kind: FileKind::Data,
@@ -1142,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_artifact_type_rejected() {
+    fn binary_artifact_type_rejected() {
         let home = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
@@ -1151,10 +1297,10 @@ mod tests {
 
         let dest = layout.bin_dir.join("a");
         let err = runner
-            .install("rpm", &cached, &[dest])
+            .install("binary", &cached, &[dest])
             .expect_err("must error");
         match err {
-            InstallError::UnsupportedArtifactType(s) => assert_eq!(s, "rpm"),
+            InstallError::UnsupportedArtifactType(s) => assert_eq!(s, "binary"),
             other => panic!("expected UnsupportedArtifactType, got {other:?}"),
         }
     }
@@ -1168,37 +1314,9 @@ mod tests {
         let cached = write_cached(cache.path(), "x", b"x");
 
         let err = runner
-            .install("binary", &cached, &[])
+            .install("tar_gz", &cached, &[])
             .expect_err("must error");
         assert!(matches!(err, InstallError::NoDestinations));
-    }
-
-    #[test]
-    fn binary_install_refuses_to_overwrite_existing_dest() {
-        let home = tempdir().unwrap();
-        let cache = tempdir().unwrap();
-        let layout = layout_for(home.path());
-        let runner = InstallRunner::new(&layout);
-
-        let cached = write_cached(cache.path(), "agentsight", b"v2-bytes");
-        let dest = layout.bin_dir.join("agentsight");
-
-        // Pre-existing file from a prior install / external source.
-        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        std::fs::write(&dest, b"v1-bytes").unwrap();
-
-        let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
-            .expect_err("second install must refuse");
-        match err {
-            InstallError::DestExists { path } => assert_eq!(path, dest),
-            other => panic!("expected DestExists, got {other:?}"),
-        }
-
-        // Pre-existing file must be untouched — and no .tmp sibling left behind.
-        assert_eq!(std::fs::read(&dest).unwrap(), b"v1-bytes");
-        let tmp = tmp_sibling(&dest);
-        assert!(!tmp.exists(), ".tmp sibling must not be created");
     }
 
     #[test]
@@ -1236,18 +1354,28 @@ mod tests {
     }
 
     #[test]
-    fn binary_install_dotdot_segment_rejected() {
+    fn tar_gz_install_dotdot_segment_rejected() {
         let home = tempdir().unwrap();
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "x", b"x");
+        let gz = build_tar_gz(&[("file", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         // dest = <bin_dir>/../escape/file — passes the old lexical
         // starts_with check but would write outside bin_dir.
         let dest = layout.bin_dir.join("..").join("escape").join("file");
         let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: Some("file".to_string()),
+                    dest: dest.clone(),
+                    mode: None,
+                    kind: FileKind::Data,
+                }],
+            )
             .expect_err("must reject");
         match err {
             InstallError::TraversalSegment { path } => assert_eq!(path, dest),
@@ -1256,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_install_dotdot_at_tail_rejected() {
+    fn tar_gz_install_dotdot_at_tail_rejected() {
         // `..` as the final segment would resolve to a directory and let
         // rename overwrite something the user did not name. Same defense
         // as the mid-path case but covers the tail position explicitly.
@@ -1264,11 +1392,21 @@ mod tests {
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "x", b"x");
+        let gz = build_tar_gz(&[("file", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         let dest = layout.bin_dir.join("sub").join("..");
         let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: Some("file".to_string()),
+                    dest: dest.clone(),
+                    mode: None,
+                    kind: FileKind::Data,
+                }],
+            )
             .expect_err("must reject");
         match err {
             InstallError::TraversalSegment { path } => assert_eq!(path, dest),
@@ -1278,7 +1416,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn binary_install_refuses_broken_symlink_dest() {
+    fn tar_gz_install_refuses_broken_symlink_dest() {
         // exists() returns false for a broken symlink (target missing) but
         // symlink_metadata() returns Ok. We must treat the broken symlink
         // as "occupied" and refuse, otherwise rename() would silently
@@ -1287,7 +1425,8 @@ mod tests {
         let cache = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "agentsight", b"new-bytes");
+        let gz = build_tar_gz(&[("agentsight", b"new-bytes")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         let dest = layout.bin_dir.join("agentsight");
         fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -1299,7 +1438,7 @@ mod tests {
         );
 
         let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
+            .install("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must refuse");
         match err {
             InstallError::DestExists { path } => assert_eq!(path, dest),
@@ -1311,7 +1450,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn binary_install_symlink_ancestor_escapes_root_rejected() {
+    fn tar_gz_install_symlink_ancestor_escapes_root_rejected() {
         // bin_dir/escape -> <outside>, dest = bin_dir/escape/file. The
         // lexical starts_with check passes (it's literally under bin_dir),
         // but canonicalize_nearest_existing resolves the symlink and the
@@ -1321,7 +1460,8 @@ mod tests {
         let outside = tempdir().unwrap();
         let layout = layout_for(home.path());
         let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "x", b"x");
+        let gz = build_tar_gz(&[("file", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
 
         fs::create_dir_all(&layout.bin_dir).unwrap();
         let escape_link = layout.bin_dir.join("escape");
@@ -1329,7 +1469,7 @@ mod tests {
 
         let dest = escape_link.join("file");
         let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
+            .install("tar_gz", &cached, std::slice::from_ref(&dest))
             .expect_err("must reject");
         assert!(
             matches!(err, InstallError::ExternalPath { ref path } if path == &dest),
@@ -1339,53 +1479,6 @@ mod tests {
             !outside.path().join("file").exists(),
             "must not write through the symlink",
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn binary_install_refuses_when_tmp_sibling_is_a_symlink() {
-        // The atomic-write step writes to `{dest}.tmp` and then rename(2)s
-        // it into place. If `{dest}.tmp` is a pre-placed symlink to a file
-        // outside the ANOLISA-owned roots, the old code (`File::create`)
-        // would follow it and corrupt that external file — bypassing
-        // every dest-side guard we just added. The fix opens with
-        // O_CREAT|O_EXCL (+ O_NOFOLLOW on Unix) so the open itself fails.
-        let home = tempdir().unwrap();
-        let cache = tempdir().unwrap();
-        let outside = tempdir().unwrap();
-        let layout = layout_for(home.path());
-        let runner = InstallRunner::new(&layout);
-        let cached = write_cached(cache.path(), "agentsight", b"new-bytes");
-
-        let dest = layout.bin_dir.join("agentsight");
-        fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        // The plant lives at `{dest}.tmp` — the exact path
-        // `tmp_sibling(dest)` returns — and targets an external file.
-        let outside_target = outside.path().join("victim");
-        fs::write(&outside_target, b"untouched-bytes").unwrap();
-        let tmp_plant = {
-            let mut s = dest.as_os_str().to_os_string();
-            s.push(".tmp");
-            PathBuf::from(s)
-        };
-        std::os::unix::fs::symlink(&outside_target, &tmp_plant).unwrap();
-
-        let err = runner
-            .install("binary", &cached, std::slice::from_ref(&dest))
-            .expect_err("must refuse to write through symlinked tmp");
-        match err {
-            InstallError::Io { path, .. } => assert_eq!(path, tmp_plant),
-            other => panic!("expected Io on tmp, got {other:?}"),
-        }
-
-        // External file is untouched (the most important invariant).
-        let victim_bytes = fs::read(&outside_target).expect("external file readable");
-        assert_eq!(
-            victim_bytes, b"untouched-bytes",
-            "the symlink target must not be written through",
-        );
-        // Destination was never created.
-        assert!(!dest.exists(), "dest must not be installed");
     }
 
     #[cfg(unix)]
@@ -1645,7 +1738,7 @@ mod tests {
             layout.bin_dir.join("foo-link"),
         )];
         let err = runner
-            .install_files("binary", &cached, &files)
+            .install_files("tar_gz", &cached, &files)
             .expect_err("must error");
         assert!(matches!(err, InstallError::NoDestinations));
     }

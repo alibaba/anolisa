@@ -1,95 +1,122 @@
-"""Unit tests for telemetry sanitizer helpers."""
+"""Unit tests for strict telemetry scalar projectors."""
 
-import json
 from datetime import datetime
 
 from agent_sec_cli.telemetry.sanitizer import (
+    AgentName,
+    agent_name_value,
     details_dict,
+    enum_value,
     error_type_value,
-    error_value,
+    integer_value,
+    nonnegative_integer_value,
+    nonnegative_number_value,
     now_iso,
-    request_value,
     result_dict,
-    result_value,
-    to_json_safe,
-    value_or_none,
+    string_value,
+    timestamp_value,
 )
 
 
-class ModelLike:
-    def model_dump(self):
-        return {"items": ("a", "b"), "bad": float("nan")}
+class StringCanary:
+    def __init__(self) -> None:
+        self.stringified = False
 
-
-class NotJsonSerializable:
-    def __str__(self):
-        return "fallback-string"
+    def __str__(self) -> str:
+        self.stringified = True
+        return "CUSTOMER-CANARY"
 
 
 def test_now_iso_returns_parseable_timestamp() -> None:
     datetime.fromisoformat(now_iso())
 
 
-def test_to_json_safe_normalizes_nested_values() -> None:
-    value = {
-        1: ("x", float("nan")),
-        "set": {"z", "a"},
-        "list": [float("inf"), float("-inf"), 1.25],
-    }
-
-    safe = to_json_safe(value)
-
-    assert safe == {
-        "1": ["x", None],
-        "set": ["a", "z"],
-        "list": [None, None, 1.25],
-    }
-    json.dumps(safe, allow_nan=False)
+def test_timestamp_value_accepts_only_timezone_aware_iso_values() -> None:
+    assert timestamp_value(" 2026-07-16T08:00:00Z ") == "2026-07-16T08:00:00+00:00"
+    assert timestamp_value("2026-07-16T08:00:00") is None
+    assert timestamp_value("CUSTOMER-CANARY") is None
+    assert timestamp_value(123) is None
 
 
-def test_to_json_safe_uses_model_dump_and_string_fallback() -> None:
-    assert to_json_safe(ModelLike()) == {"items": ["a", "b"], "bad": None}
-    assert to_json_safe(NotJsonSerializable()) == "fallback-string"
-
-
-def test_details_dict_returns_dict_or_empty_dict() -> None:
-    details = {"request": {"source": "manual"}}
+def test_details_and_result_only_accept_dicts() -> None:
+    result = {"verdict": "deny"}
+    details = {"result": result}
 
     assert details_dict(details) is details
     assert details_dict(("not", "a", "dict")) == {}
-    assert details_dict(None) == {}
-
-
-def test_value_or_none_converts_empty_string_only() -> None:
-    assert value_or_none("") is None
-    assert value_or_none("value") == "value"
-    assert value_or_none(False) is False
-    assert value_or_none(0) == 0
-
-
-def test_result_dict_returns_nested_result_dict_or_empty_dict() -> None:
-    result = {"verdict": "deny"}
-
-    assert result_dict({"result": result}) is result
-    assert result_dict({}) == {}
+    assert result_dict(details) is result
     assert result_dict({"result": "not-a-dict"}) == {}
 
 
-def test_request_value_handles_missing_and_json_safe_values() -> None:
-    assert request_value({}) is None
-    assert request_value({"request": {"items": ("a", "b")}}) == {"items": ["a", "b"]}
+def test_string_value_trims_bounds_and_rejects_non_strings() -> None:
+    assert string_value(" value ", max_length=10) == "value"
+    assert string_value("abcdef", max_length=3) == "abc"
+    assert string_value(" ", max_length=10) is None
+    assert string_value(" ", max_length=10, allow_empty=True) == ""
+    assert string_value(42, max_length=10) is None
 
 
-def test_error_values_handle_missing_and_json_safe_values() -> None:
-    assert error_value({}) is None
-    assert error_type_value({}) is None
-    assert error_value({"error": float("nan")}) is None
-    assert error_type_value({"error_type": ("RuntimeError",)}) == ["RuntimeError"]
+def test_agent_name_accepts_only_approved_products() -> None:
+    assert {agent_name.value for agent_name in AgentName} == {
+        "codex",
+        "cosh",
+        "hermes",
+        "openclaw",
+        "qoder",
+        "qwencode",
+    }
+    for agent_name in AgentName:
+        assert agent_name_value(f" {agent_name.value} ") == agent_name.value
+
+    for invalid in (
+        "future-agent-runtime",
+        "customer@example.com",
+        "customer-account",
+        "x" * 300,
+        "Codex",
+        False,
+        None,
+    ):
+        assert agent_name_value(invalid) == ""
 
 
-def test_result_value_handles_missing_and_json_safe_values() -> None:
-    result = {"summary": {"values": {"z", "a"}}, "elapsed_ms": float("inf")}
+def test_enum_value_requires_an_approved_exact_string() -> None:
+    allowed = frozenset({"pass", "warn"})
 
-    assert result_value(result, "missing") is None
-    assert result_value(result, "summary") == {"values": ["a", "z"]}
-    assert result_value(result, "elapsed_ms") is None
+    assert enum_value("pass", allowed) == "pass"
+    assert enum_value("PASS", allowed) is None
+    assert enum_value(1, allowed) is None
+
+
+def test_error_type_accepts_only_bounded_structured_names() -> None:
+    assert error_type_value("ValueError") == "ValueError"
+    assert error_type_value("scanner.CodeScanError") == "scanner.CodeScanError"
+    assert error_type_value("A" * 128) == "A" * 128
+    assert error_type_value("A" * 129) is None
+    assert error_type_value("customer error") is None
+    assert error_type_value("ValueError: secret") is None
+    assert error_type_value("") is None
+
+
+def test_error_type_never_stringifies_unknown_objects() -> None:
+    canary = StringCanary()
+
+    assert error_type_value(canary) is None
+    assert canary.stringified is False
+
+
+def test_integer_projectors_reject_bool_and_coercion() -> None:
+    assert integer_value(-9) == -9
+    assert integer_value(True) is None
+    assert integer_value("9") is None
+    assert nonnegative_integer_value(0) == 0
+    assert nonnegative_integer_value(-1) is None
+
+
+def test_number_projector_requires_nonnegative_finite_number() -> None:
+    assert nonnegative_number_value(0) == 0
+    assert nonnegative_number_value(1.25) == 1.25
+    assert nonnegative_number_value(-1) is None
+    assert nonnegative_number_value(float("inf")) is None
+    assert nonnegative_number_value(float("nan")) is None
+    assert nonnegative_number_value(False) is None

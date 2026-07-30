@@ -44,6 +44,7 @@ enum ProbeCommand {
 pub(crate) struct FfiEventSender {
     tx: mpsc::SyncSender<FfiEvent>,
     eventfd: i32,
+    enable_raw_https: bool,
 }
 
 impl FfiEventSender {
@@ -68,6 +69,13 @@ impl FfiEventSender {
                 // Receiver gone; nothing to do.
             }
         }
+    }
+
+    pub fn send_https(&self, record: &HttpRecord) {
+        if !self.enable_raw_https {
+            return;
+        }
+        self.send(FfiEvent::Https(record.clone()));
     }
 }
 
@@ -94,15 +102,25 @@ fn safe_cstring(s: &str) -> CString {
     CString::new(s.replace('\0', "")).unwrap()
 }
 
-/// Copy a Rust string into a fixed-size `[c_char; 16]` buffer (NUL-terminated).
-fn copy_process_name(name: &str) -> [c_char; 16] {
-    let mut buf = [0 as c_char; 16];
-    let bytes = name.as_bytes();
-    let len = bytes.len().min(15);
-    for i in 0..len {
-        buf[i] = bytes[i] as c_char;
+/// Copy a Rust string into a fixed-size `[c_char; N]` buffer (NUL-terminated).
+///
+/// At most `N - 1` bytes are copied; truncation happens at a UTF-8 char
+/// boundary so the C side never sees invalid UTF-8.
+fn copy_to_fixed_buf<const N: usize>(s: &str) -> [c_char; N] {
+    let mut buf = [0 as c_char; N];
+    let mut end = s.len().min(N - 1);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    for (i, &b) in s.as_bytes()[..end].iter().enumerate() {
+        buf[i] = b as c_char;
     }
     buf
+}
+
+/// Copy a Rust string into a fixed-size `[c_char; 16]` buffer (NUL-terminated).
+fn copy_process_name(name: &str) -> [c_char; 16] {
+    copy_to_fixed_buf(name)
 }
 
 /// Drain the eventfd counter so that epoll won't re-trigger.
@@ -147,6 +165,9 @@ pub struct AgentsightLLMData {
     pub session_id: *const c_char,
     pub pid: i32,
     pub process_name: [c_char; 16],
+    /// Space-joined process command line (argv), truncated to 127 bytes.
+    /// Empty string when the process has already exited.
+    pub cmdline: [c_char; 128],
     pub agent_name: *const c_char,
     pub container_id: *const c_char,
     pub timestamp_ns: u64,
@@ -213,17 +234,17 @@ type LlmCallbackFn = Option<unsafe extern "C" fn(*const AgentsightLLMData, *mut 
 pub const AGENTSIGHT_READ_BLOCK: c_int = 1;
 
 // ===========================================================================
-// Temporary data holders (keep CStrings alive during callbacks)
+// Temporary data holders (keep C strings and byte buffers alive during callbacks)
 // ===========================================================================
 
 struct HttpsDataHolder {
     c_data: AgentsightHttpsData,
     _method: CString,
     _path: CString,
-    _req_headers: CString,
-    _req_body: Option<CString>,
-    _resp_headers: CString,
-    _resp_body: Option<CString>,
+    _req_headers: Vec<u8>,
+    _req_body: Option<Vec<u8>>,
+    _resp_headers: Vec<u8>,
+    _resp_body: Option<Vec<u8>>,
 }
 
 struct LlmDataHolder {
@@ -246,28 +267,36 @@ struct LlmDataHolder {
 fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
     let method = safe_cstring(&record.method);
     let path = safe_cstring(&record.path);
-    let req_headers = safe_cstring(&record.request_headers);
-    let req_body = record.request_body.as_ref().map(|b| safe_cstring(b));
-    let resp_headers = safe_cstring(&record.response_headers);
-    let resp_body = record.response_body.as_ref().map(|b| safe_cstring(b));
+    let req_headers = record.request_headers.as_bytes().to_vec();
+    let req_body = record.request_body.as_ref().map(|b| b.as_bytes().to_vec());
+    let resp_headers = record.response_headers.as_bytes().to_vec();
+    let resp_body = record.response_body.as_ref().map(|b| b.as_bytes().to_vec());
 
     let c_data = AgentsightHttpsData {
         pid: record.pid as i32,
-        process_name: copy_process_name(&record.comm),
+        // Process name = the *process* comm (/proc/<pid>/comm), not the SSL
+        // event's per-event thread comm (which may be a worker-thread name such
+        // as "HTTP client"). Falls back to the event comm when /proc is gone.
+        process_name: copy_process_name(
+            &crate::discovery::scanner::read_comm(record.pid)
+                .unwrap_or_else(|| record.comm.clone()),
+        ),
         timestamp_ns: record.timestamp_ns,
         duration_ns: record.duration_ns,
         method: method.as_ptr(),
         path: path.as_ptr(),
         status_code: record.status_code,
         is_sse: record.is_sse as u8,
-        request_headers: req_headers.as_ptr(),
-        request_headers_len: record.request_headers.len() as u32,
-        request_body: req_body.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-        request_body_len: record.request_body.as_ref().map_or(0, |s| s.len() as u32),
-        response_headers: resp_headers.as_ptr(),
-        response_headers_len: record.response_headers.len() as u32,
-        response_body: resp_body.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-        response_body_len: record.response_body.as_ref().map_or(0, |s| s.len() as u32),
+        request_headers: req_headers.as_ptr().cast(),
+        request_headers_len: req_headers.len() as u32,
+        request_body: req_body.as_ref().map_or(ptr::null(), |s| s.as_ptr().cast()),
+        request_body_len: req_body.as_ref().map_or(0, |s| s.len() as u32),
+        response_headers: resp_headers.as_ptr().cast(),
+        response_headers_len: resp_headers.len() as u32,
+        response_body: resp_body
+            .as_ref()
+            .map_or(ptr::null(), |s| s.as_ptr().cast()),
+        response_body_len: resp_body.as_ref().map_or(0, |s| s.len() as u32),
     };
 
     HttpsDataHolder {
@@ -288,7 +317,17 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("conversation_id")
         .map(|s| safe_cstring(s));
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
-    let agent_name = call.agent_name.as_ref().map(|s| safe_cstring(s));
+    // Normalize agent_name to lowercase at the FFI boundary so C consumers
+    // observe a consistent value regardless of config-file casing.
+    let agent_name = call
+        .agent_name
+        .as_ref()
+        .map(|s| safe_cstring(&s.to_lowercase()));
+    // Space-joined argv from /proc/<pid>/cmdline; empty when the process has
+    // already exited (read_cmdline returns an empty vec on error).
+    let cmdline = copy_to_fixed_buf::<128>(
+        &crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", call.pid)).join(" "),
+    );
     let container_id =
         crate::container::extract_container_id_cached(call.pid as u32).map(|s| safe_cstring(&s));
 
@@ -367,6 +406,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         session_id: session_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         pid: call.pid,
         process_name: copy_process_name(&call.process_name),
+        cmdline,
         agent_name: agent_name.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         container_id: container_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         timestamp_ns: call.start_timestamp_ns,
@@ -496,6 +536,21 @@ pub unsafe extern "C" fn agentsight_config_set_log_path(
         } else {
             Some(CStr::from_ptr(path).to_string_lossy().to_string())
         };
+    }
+}
+
+/// Enable or disable raw HTTPS fallback events in FFI mode (0 = off, non-zero = on).
+///
+/// # Safety
+///
+/// `cfg` must be a valid pointer returned by `agentsight_config_new()`, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_set_enable_raw_https(
+    cfg: *mut AgentsightConfigHandle,
+    enabled: c_int,
+) {
+    if !cfg.is_null() {
+        unsafe { (*cfg).ffi_enable_raw_https = enabled != 0 };
     }
 }
 
@@ -747,7 +802,11 @@ fn ffi_background_thread(
     running: Arc<AtomicBool>,
     probe_cmd_rx: mpsc::Receiver<ProbeCommand>,
 ) {
-    let sender = FfiEventSender { tx, eventfd };
+    let sender = FfiEventSender {
+        tx,
+        eventfd,
+        enable_raw_https: config.ffi_enable_raw_https,
+    };
 
     let mut sight = match AgentSight::new(config) {
         Ok(s) => s,
@@ -1084,6 +1143,24 @@ mod tests {
     }
 
     #[test]
+    fn test_config_set_enable_raw_https() {
+        let cfg = agentsight_config_new();
+        assert!(!cfg.is_null());
+        assert!(!unsafe { (*cfg).ffi_enable_raw_https });
+
+        unsafe { agentsight_config_set_enable_raw_https(cfg, 1) };
+        assert!(unsafe { (*cfg).ffi_enable_raw_https });
+
+        unsafe { agentsight_config_set_enable_raw_https(cfg, 0) };
+        assert!(!unsafe { (*cfg).ffi_enable_raw_https });
+
+        unsafe {
+            agentsight_config_set_enable_raw_https(ptr::null_mut(), 1);
+            agentsight_config_free(cfg);
+        }
+    }
+
+    #[test]
     #[allow(clippy::needless_range_loop)]
     fn test_copy_process_name_truncate() {
         let name = "very_long_process_name_that_exceeds_16";
@@ -1093,6 +1170,193 @@ mod tests {
         for i in 0..15 {
             assert_eq!(buf[i] as u8, name.as_bytes()[i]);
         }
+    }
+
+    #[test]
+    fn test_copy_to_fixed_buf_truncates_at_char_boundary() {
+        fn as_bytes<const N: usize>(buf: &[c_char; N]) -> Vec<u8> {
+            buf.iter()
+                .take_while(|&&c| c != 0)
+                .map(|&c| c as u8)
+                .collect()
+        }
+
+        // ASCII longer than N-1: truncated with NUL termination.
+        let buf = copy_to_fixed_buf::<8>("abcdefghij");
+        assert_eq!(as_bytes(&buf), b"abcdefg");
+        assert_eq!(buf[7], 0);
+
+        // Multi-byte UTF-8: a char straddling the limit is dropped whole,
+        // never split into invalid bytes. "a中b" = 1 + 3 + 1 bytes; N-1 = 3
+        // would cut through 中, so only "a" is copied.
+        let buf = copy_to_fixed_buf::<4>("a中b");
+        assert_eq!(as_bytes(&buf), b"a");
+
+        // Empty input yields an all-zero buffer.
+        let buf = copy_to_fixed_buf::<128>("");
+        assert!(buf.iter().all(|&c| c == 0));
+    }
+
+    // ─── build_llm_data tests ───────────────────────────────────────────────
+
+    fn make_http_record(request_body: Option<String>, response_body: Option<String>) -> HttpRecord {
+        HttpRecord {
+            timestamp_ns: 1,
+            pid: 1,
+            comm: "test".to_string(),
+            method: "POST".to_string(),
+            path: "/raw".to_string(),
+            status_code: 200,
+            request_headers: "{\"host\":\"example.com\"}".to_string(),
+            request_body,
+            response_headers: "{\"content-type\":\"application/octet-stream\"}".to_string(),
+            response_body,
+            duration_ns: 1,
+            is_sse: false,
+            sse_event_count: 0,
+        }
+    }
+
+    #[test]
+    fn test_build_https_data_preserves_interior_nul_bytes() {
+        let request_body = "a\0b\0c".to_string();
+        let response_body = "\0x\0y\0".to_string();
+        let request_headers = "{\0\"host\":\"example.com\"\0}".to_string();
+        let response_headers = "{\0\"content-type\":\"application/octet-stream\"\0}".to_string();
+        let mut record = make_http_record(Some(request_body.clone()), Some(response_body.clone()));
+        record.request_headers = request_headers.clone();
+        record.response_headers = response_headers.clone();
+        let holder = build_https_data(&record);
+
+        let copied_request_headers = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.request_headers.cast::<u8>(),
+                holder.c_data.request_headers_len as usize,
+            )
+        };
+        let copied_request = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.request_body.cast::<u8>(),
+                holder.c_data.request_body_len as usize,
+            )
+        };
+        let copied_response_headers = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.response_headers.cast::<u8>(),
+                holder.c_data.response_headers_len as usize,
+            )
+        };
+        let copied_response = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.response_body.cast::<u8>(),
+                holder.c_data.response_body_len as usize,
+            )
+        };
+        assert_eq!(copied_request_headers, request_headers.as_bytes());
+        assert_eq!(copied_request, request_body.as_bytes());
+        assert_eq!(copied_response_headers, response_headers.as_bytes());
+        assert_eq!(copied_response, response_body.as_bytes());
+    }
+
+    #[test]
+    fn test_disabled_https_sender_does_not_consume_channel_capacity() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let sender = FfiEventSender {
+            tx,
+            eventfd: -1,
+            enable_raw_https: false,
+        };
+        sender.send_https(&make_http_record(None, None));
+        sender.send(FfiEvent::Llm(make_llm_call(None, 1)));
+        assert!(matches!(rx.try_recv(), Ok(FfiEvent::Llm(_))));
+    }
+
+    #[test]
+    fn test_enabled_https_sender_enqueues_event() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let sender = FfiEventSender {
+            tx,
+            eventfd: -1,
+            enable_raw_https: true,
+        };
+        sender.send_https(&make_http_record(None, None));
+        assert!(matches!(rx.try_recv(), Ok(FfiEvent::Https(_))));
+    }
+
+    fn make_llm_call(agent_name: Option<&str>, pid: i32) -> LLMCall {
+        use crate::genai::semantic::{LLMRequest, LLMResponse};
+        LLMCall {
+            call_id: "call-1".to_string(),
+            start_timestamp_ns: 1_000_000_000,
+            end_timestamp_ns: 2_000_000_000,
+            duration_ns: 1_000_000_000,
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            request: LLMRequest {
+                messages: vec![],
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            response: LLMResponse {
+                messages: vec![],
+                streamed: false,
+                raw_body: None,
+            },
+            token_usage: None,
+            error: None,
+            pid,
+            process_name: "test".to_string(),
+            agent_name: agent_name.map(str::to_string),
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_build_llm_data_lowercases_agent_name() {
+        let holder = build_llm_data(&make_llm_call(Some("Claude"), 1234));
+        assert!(!holder.c_data.agent_name.is_null());
+        let name = unsafe { CStr::from_ptr(holder.c_data.agent_name) };
+        assert_eq!(name.to_str().unwrap(), "claude");
+    }
+
+    #[test]
+    fn test_build_llm_data_agent_name_none_is_null() {
+        let holder = build_llm_data(&make_llm_call(None, 1234));
+        assert!(holder.c_data.agent_name.is_null());
+    }
+
+    #[test]
+    fn test_build_llm_data_cmdline_live_process() {
+        // The current test process has a readable /proc/<pid>/cmdline, so the
+        // buffer must hold a non-empty NUL-terminated string.
+        let holder = build_llm_data(&make_llm_call(None, std::process::id() as i32));
+        let end = holder
+            .c_data
+            .cmdline
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(128);
+        assert!(end > 0, "cmdline should be non-empty for a live process");
+        assert!(
+            end < 128,
+            "cmdline must be NUL-terminated within the buffer"
+        );
+    }
+
+    #[test]
+    fn test_build_llm_data_cmdline_dead_pid_empty() {
+        // A non-existent pid makes read_cmdline fail, yielding an empty buffer.
+        let holder = build_llm_data(&make_llm_call(None, i32::MAX));
+        assert_eq!(holder.c_data.cmdline[0], 0);
     }
 
     #[test]

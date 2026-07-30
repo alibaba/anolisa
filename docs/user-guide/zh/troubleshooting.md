@@ -41,11 +41,11 @@ anolisa bug
 # 查看特定组件日志
 anolisa logs <component>
 
-# 实时跟踪日志
-anolisa logs <component> --follow
+# 查看 warning 和 error 记录
+anolisa logs <component> --severity warn
 
 # 显示最后 N 行
-anolisa logs <component> --tail 50
+anolisa logs <component> --limit 50
 ```
 
 ---
@@ -93,11 +93,11 @@ ls -la /dev/fuse
 **解决**：
 
 ```bash
-# 检查网络连接
-anolisa doctor --check network
+# 查看检测到的运行环境
+anolisa env
 
 # 使用 verbose 模式重试
-anolisa install tokenless --verbose
+anolisa --verbose install tokenless
 
 # 替代方式：使用 YUM
 sudo yum install tokenless
@@ -116,8 +116,8 @@ rustup show
 # 更新到最新 stable
 rustup update stable
 
-# 检查缺失的系统依赖
-anolisa doctor --check build-deps
+# 查看检测到的构建环境
+anolisa env
 ```
 
 ---
@@ -187,6 +187,35 @@ ws-ckpt config set workspace.path /home/user/projects/my-project
 
 ---
 
+**现象**：`ws-ckpt checkpoint` 或 `init` 失败，提示 "workspace root is an active
+mount point"，旧版本上表现为 "failed to rename original directory to backup:
+Device or resource busy (os error 16)"
+
+**原因**：初始化工作区要把原目录改名后作为备份，而 `rename(2)` 对「自身是挂载点」的
+目录会返回 `EBUSY`。最常见的触发方式是先用 in-place 模式挂载了 SkillFS，再对同一路径
+打快照。
+
+**解决**：先确认该路径是不是挂载点，卸载后重试：
+
+```bash
+# 确认是否为挂载点
+findmnt /path/to/workspace
+
+# in-place SkillFS 挂载
+skillfs stop /path/to/workspace
+
+# 其他 FUSE 挂载
+fusermount3 -u /path/to/workspace
+
+ws-ckpt checkpoint -w /path/to/workspace -s my-snapshot
+```
+
+被拒绝的只有工作区根目录本身。工作区内部的嵌套挂载不会阻止 `init`，但挂载会留在初始化
+时改名移走的备份目录上，新工作区里只有其内容的普通副本 —— 初始化前先卸载嵌套挂载，或让
+挂载点保持在工作区目录树之外。工作区初始化完成后再挂载 SkillFS 不影响后续快照。
+
+---
+
 ### SkillFS 问题
 
 **现象**：`skillfs mount` 失败，提示 "FUSE not available"
@@ -218,8 +247,9 @@ ls /dev/fuse
 # 检查内核版本（建议 >= 5.4）
 uname -r
 
-# 验证 eBPF 支持
-anolisa doctor --check ebpf
+# 查看内核能力，再诊断已安装的组件
+anolisa env
+sudo anolisa --install-mode system doctor agentsight
 
 # AgentSight 需要 system mode
 sudo anolisa install agentsight

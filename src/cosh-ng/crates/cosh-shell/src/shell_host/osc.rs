@@ -1,11 +1,18 @@
+// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs.
+mod routing;
+
+use std::collections::HashSet;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
+use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use crate::types::{
-    CommandOrigin, ShellEvent, ShellEventKind, ShellHandoffRequest, SESSION_OUTPUT_REF_MAX_BYTES,
+    CommandOrigin, ShellCaptureLifecycle, ShellCaptureMetadata, ShellCommandAuditIdentity,
+    ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
+    SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
 #[cfg(test)]
@@ -23,6 +30,8 @@ const UNDERLINE_OFF: &[u8] = b"\x1b[24m";
 const ERASE_TO_END_OF_SCREEN: &[u8] = b"\x1b[J";
 const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
 const BEL: u8 = b'\x07';
+const SHELL_PATH_MAX_BYTES: usize = 8 * 1024;
+const SHELL_HISTORY_FILE_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Debug)]
 struct CurrentCommand {
@@ -30,8 +39,20 @@ struct CurrentCommand {
     command: String,
     cwd: String,
     origin: CommandOrigin,
+    audit_identity: Option<ShellCommandAuditIdentity>,
     started_at_ms: u64,
     output_start: usize,
+    attempt_generation: Option<u64>,
+    shell_environment_generation: Option<u64>,
+}
+
+/// Why a display cut was recorded, so consumers can tell an intercepted
+/// input (shell has not painted a prompt for it yet) apart from a real
+/// prompt boundary (precmd/shell-ready).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DisplayCutKind {
+    Intercept,
+    PromptBoundary,
 }
 
 #[derive(Debug)]
@@ -47,17 +68,29 @@ pub(super) struct OscParser {
     current: Option<CurrentCommand>,
     command_seq: usize,
     intervention_cuts: Vec<usize>,
-    intervention_display_cuts: Vec<usize>,
+    intervention_display_cuts: Vec<(usize, DisplayCutKind)>,
     last_prompt_display_start: Option<usize>,
+    prompt_ready_display_start: Option<usize>,
+    /// #1932: the soft-newline upgrade submitted a synthetic empty line so
+    /// bash repaints PS1; its visually blank accept echo is dropped at the
+    /// matching prompt boundary instead of surfacing as a blank line.
+    synthetic_prompt_repaint_armed: bool,
     pub(super) captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
     pending_handoff_echo: Option<PendingHandoffEcho>,
+    pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
+    environment_observer: Option<ShellEnvironmentObserver>,
+    history_file_observer: Option<ShellHistoryFileObserver>,
+    /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
+    /// relay; prompt_ready raises it, preexec lowers it.
+    main_prompt_gate: crate::raw_input::MainPromptGate,
 }
 
 #[derive(Debug, Clone)]
 struct PendingCommandOrigin {
     command: String,
     origin: CommandOrigin,
+    audit_identity: ShellCommandAuditIdentity,
 }
 
 #[derive(Debug, Clone)]
@@ -91,16 +124,42 @@ impl OscParser {
             intervention_cuts: Vec::new(),
             intervention_display_cuts: Vec::new(),
             last_prompt_display_start: None,
+            prompt_ready_display_start: None,
+            synthetic_prompt_repaint_armed: false,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
             pending_handoff_echo: None,
+            shell_environment_snapshot: None,
+            environment_observer: None,
+            history_file_observer: None,
+            main_prompt_gate: crate::raw_input::MainPromptGate::default(),
         }
+    }
+
+    /// Shares the main-prompt gate with the raw input relay (#1721 D16).
+    pub(crate) fn set_main_prompt_gate(&mut self, gate: crate::raw_input::MainPromptGate) {
+        self.main_prompt_gate = gate;
+    }
+
+    pub(super) fn with_environment_observer(mut self, observer: ShellEnvironmentObserver) -> Self {
+        self.environment_observer = Some(observer);
+        self
+    }
+
+    pub(super) fn with_history_file_observer(mut self, observer: ShellHistoryFileObserver) -> Self {
+        self.history_file_observer = Some(observer);
+        self
     }
 
     pub(super) fn register_pending_handoff_origin(&mut self, request: &ShellHandoffRequest) {
         self.pending_command_origin = Some(PendingCommandOrigin {
             command: request.command.clone(),
             origin: command_origin_from_handoff_request(request),
+            audit_identity: ShellCommandAuditIdentity {
+                run_id: request.run_id.clone(),
+                request_id: request.request_id.clone(),
+                tool_use_id: request.tool_use_id.clone(),
+            },
         });
     }
 
@@ -154,6 +213,10 @@ impl OscParser {
                     component: Some("osc_parser".to_string()),
                     message: Some(format!("marker parse failed: {err}")),
                     command_origin: None,
+                    shell_environment_generation: None,
+                    audit_identity: None,
+                    routing: None,
+                    capture: None,
                 }),
             }
         }
@@ -164,42 +227,79 @@ impl OscParser {
             return Ok(());
         }
 
-        let session_id = marker.session_id.unwrap_or_else(|| self.session_id.clone());
+        if marker
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| session_id != self.session_id)
+        {
+            return Ok(());
+        }
+
+        if marker.event == "history_file" {
+            if marker.session_id.as_deref() == Some(self.session_id.as_str()) {
+                self.observe_history_file(marker.history_file.as_deref());
+            }
+            return Ok(());
+        }
+
+        let environment_generation = self.observe_shell_environment(&marker);
+        let session_id = marker
+            .session_id
+            .clone()
+            .unwrap_or_else(|| self.session_id.clone());
         let timestamp = marker.timestamp_ms.unwrap_or_else(now_ms);
 
+        if matches!(marker.event.as_str(), "intercept" | "top_level_missing") {
+            self.handle_routing_marker(marker, session_id, timestamp);
+            return Ok(());
+        }
+
         match marker.event.as_str() {
-            "intercept" => {
-                let input = marker.command.unwrap_or_default();
-                let reason = marker
-                    .reason
-                    .unwrap_or_else(|| "natural_language".to_string());
-                self.intervention_cuts.push(self.clean.len());
-                self.intervention_display_cuts.push(self.display.len());
-                self.push_intercept_event(&session_id, input, marker.cwd, &reason);
-                self.current = None;
+            "prompt_ready" => {
+                self.prompt_ready_display_start = Some(self.display.len());
+                // #1721 D16: the shell marker emits prompt_ready only for the
+                // primary prompt (PS1), so this is the authoritative "CJK
+                // drafts may open" signal.
+                self.main_prompt_gate.set_at_prompt(true);
             }
             "preexec" => {
+                self.main_prompt_gate.set_at_prompt(false);
                 let command = marker.command.unwrap_or_default();
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
-                let origin = self.consume_pending_command_origin(&command);
+                let (origin, audit_identity) = self.consume_pending_command_origin(&command);
                 self.current = Some(CurrentCommand {
                     id: command_id.clone(),
                     command: command.clone(),
                     cwd: cwd.clone(),
                     origin,
+                    audit_identity: audit_identity.clone(),
                     started_at_ms: timestamp,
                     output_start: self.clean.len(),
+                    attempt_generation: marker.generation,
+                    shell_environment_generation: marker
+                        .path_trusted
+                        .unwrap_or(false)
+                        .then_some(environment_generation)
+                        .flatten(),
                 });
-                self.events.push(ShellEvent::command_started_with_origin(
+                let mut event = ShellEvent::command_started_with_origin(
                     session_id, command_id, command, cwd, timestamp, origin,
-                ));
+                );
+                event.shell_environment_generation = self
+                    .current
+                    .as_ref()
+                    .and_then(|current| current.shell_environment_generation);
+                event.audit_identity = audit_identity;
+                self.events.push(event);
             }
             "precmd" => {
+                self.prompt_ready_display_start = None;
                 let Some(current) = self.current.take() else {
                     self.intervention_cuts.push(self.clean.len());
-                    self.intervention_display_cuts.push(self.display.len());
+                    self.intervention_display_cuts
+                        .push((self.display.len(), DisplayCutKind::PromptBoundary));
                     self.last_prompt_display_start = Some(self.display.len());
                     self.events.push(ShellEvent {
                         kind: ShellEventKind::ShellReady,
@@ -218,6 +318,10 @@ impl OscParser {
                         component: None,
                         message: None,
                         command_origin: None,
+                        shell_environment_generation: None,
+                        audit_identity: None,
+                        routing: None,
+                        capture: None,
                     });
                     return Ok(());
                 };
@@ -230,7 +334,8 @@ impl OscParser {
                 let output = self.clean[current.output_start..].to_vec();
                 let output_ref = self.capture_command_output_ref(&current.id, &output)?;
                 self.intervention_cuts.push(self.clean.len());
-                self.intervention_display_cuts.push(self.display.len());
+                self.intervention_display_cuts
+                    .push((self.display.len(), DisplayCutKind::PromptBoundary));
                 self.last_prompt_display_start = Some(self.display.len());
                 let kind = if status == 0 {
                     ShellEventKind::CommandCompleted
@@ -252,6 +357,8 @@ impl OscParser {
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
                 event.terminal_output_bytes = Some(output.len() as u64);
                 event.command_origin = Some(current.origin);
+                event.audit_identity = current.audit_identity;
+                event.shell_environment_generation = current.shell_environment_generation;
                 self.events.push(event);
             }
             _ => {}
@@ -260,14 +367,72 @@ impl OscParser {
         Ok(())
     }
 
-    fn consume_pending_command_origin(&mut self, command: &str) -> CommandOrigin {
+    fn observe_shell_environment(&mut self, marker: &Marker) -> Option<u64> {
+        if !matches!(marker.event.as_str(), "precmd" | "preexec") {
+            return None;
+        }
+        if marker.session_id.as_deref() != Some(self.session_id.as_str()) {
+            return None;
+        }
+        let path = marker.path.as_deref()?;
+        if path.len() > SHELL_PATH_MAX_BYTES {
+            return None;
+        }
+        let normalized = normalize_shell_path(path);
+        let marker_sequence = self
+            .shell_environment_snapshot
+            .as_ref()
+            .map_or(Some(1), |snapshot| snapshot.marker_sequence.checked_add(1))?;
+        let generation = self
+            .shell_environment_snapshot
+            .as_ref()
+            .map_or(Some(1), |snapshot| {
+                if snapshot.path == normalized {
+                    Some(snapshot.generation)
+                } else {
+                    snapshot.generation.checked_add(1)
+                }
+            })?;
+        let snapshot = ShellEnvironmentSnapshot {
+            session_id: self.session_id.clone(),
+            marker_sequence,
+            generation,
+            path: normalized,
+        };
+        self.shell_environment_snapshot = Some(snapshot.clone());
+        if let Some(observer) = &self.environment_observer {
+            observer.observe(snapshot);
+        }
+        Some(generation)
+    }
+
+    fn observe_history_file(&self, history_file: Option<&str>) {
+        let Some(path) = history_file.filter(|value| {
+            value.len() <= SHELL_HISTORY_FILE_MAX_BYTES
+                && !value.chars().any(|character| character.is_control())
+        }) else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return;
+        }
+        if let Some(observer) = &self.history_file_observer {
+            observer.observe(path);
+        }
+    }
+
+    fn consume_pending_command_origin(
+        &mut self,
+        command: &str,
+    ) -> (CommandOrigin, Option<ShellCommandAuditIdentity>) {
         let Some(pending) = self.pending_command_origin.take() else {
-            return CommandOrigin::UserInteractive;
+            return (CommandOrigin::UserInteractive, None);
         };
         if pending.command == command {
-            pending.origin
+            (pending.origin, Some(pending.audit_identity))
         } else {
-            CommandOrigin::Unknown
+            (CommandOrigin::Unknown, None)
         }
     }
 
@@ -437,6 +602,8 @@ impl OscParser {
         event.duration_ms = Some(ended_at.saturating_sub(current.started_at_ms));
         event.terminal_output_bytes = Some(output.len() as u64);
         event.command_origin = Some(current.origin);
+        event.audit_identity = current.audit_identity;
+        event.shell_environment_generation = current.shell_environment_generation;
         self.events.push(event);
         Ok(())
     }
@@ -465,8 +632,14 @@ impl OscParser {
             .count()
     }
 
-    pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<usize> {
+    pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<(usize, DisplayCutKind)> {
         std::mem::take(&mut self.intervention_display_cuts)
+    }
+
+    /// True while a marker-tracked foreground command is running (between
+    /// its preexec and precmd markers).
+    pub(super) fn has_active_foreground_command(&self) -> bool {
+        self.current.is_some()
     }
 
     pub(super) fn last_prompt_display(&self) -> &[u8] {
@@ -479,6 +652,24 @@ impl OscParser {
         &self.display[start..]
     }
 
+    /// True after the shell's post-hook marker is followed by visible prompt
+    /// bytes, excluding output produced by user prompt hooks.
+    pub(super) fn has_prompt_painted_since_ready(&self) -> bool {
+        self.prompt_ready_display_start
+            .is_some_and(|start| start < self.display.len())
+    }
+
+    /// Arms the one-shot blank-echo drop for the synthetic PS1 repaint
+    /// submitted by the soft-newline upgrade (#1932).
+    pub(super) fn arm_synthetic_prompt_repaint(&mut self) {
+        self.synthetic_prompt_repaint_armed = true;
+    }
+
+    /// Consumes the one-shot arm at the matching prompt boundary.
+    pub(super) fn take_synthetic_prompt_repaint(&mut self) -> bool {
+        std::mem::take(&mut self.synthetic_prompt_repaint_armed)
+    }
+
     pub(super) fn push_intercept_event(
         &mut self,
         session_id: &str,
@@ -486,24 +677,7 @@ impl OscParser {
         cwd: Option<String>,
         reason: &str,
     ) {
-        self.events.push(ShellEvent {
-            kind: ShellEventKind::UserInputIntercepted,
-            session_id: session_id.to_string(),
-            command_id: None,
-            command: None,
-            cwd,
-            end_cwd: None,
-            exit_code: None,
-            started_at_ms: Some(now_ms()),
-            ended_at_ms: None,
-            duration_ms: None,
-            terminal_output_ref: None,
-            terminal_output_bytes: None,
-            input: Some(input),
-            component: Some(reason.to_string()),
-            message: Some("input intercepted before reaching bash".to_string()),
-            command_origin: None,
-        });
+        self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false);
     }
 
     pub(super) fn push_control_event(&mut self, input: &str) {
@@ -514,12 +688,100 @@ impl OscParser {
         );
     }
 
+    /// Observe-only soft-newline shortcut signal on a passthrough path
+    /// (#1721 T-c): the bytes were relayed to bash unchanged; the runtime
+    /// may surface a one-time discoverability tip at the next prompt-ready.
+    pub(super) fn push_soft_newline_shortcut_event(&mut self) {
+        self.push_self_session_input_event(
+            "soft_newline_shortcut",
+            "soft-newline shortcut observed while relaying to bash",
+            None,
+        );
+    }
+
+    /// #1932 F5: a multi-line bracketed paste was relayed straight to bash;
+    /// the runtime may attach a multi-line entry hint to a failure insight.
+    pub(super) fn push_multiline_paste_event(&mut self) {
+        self.push_self_session_input_event(
+            "multiline_paste",
+            "multi-line bracketed paste relayed to bash",
+            None,
+        );
+    }
+
+    /// #1721 D13: forwards prompt-draft card lifecycle events (open/changed/
+    /// submit/cancel) to the runtime as structured JSON payloads.
+    pub(super) fn push_prompt_draft_event(&mut self, action: &str, payload: Option<&str>) {
+        self.push_self_session_input_event("prompt_draft", action, payload);
+    }
+
+    pub(super) fn push_shell_input_activity_event(&mut self, empty: bool) {
+        self.push_self_session_input_event(
+            "shell_input",
+            if empty {
+                "input empty"
+            } else {
+                "input editing"
+            },
+            None,
+        );
+    }
+
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {
         self.push_self_session_input_event("card", action, Some(value));
     }
 
-    pub(super) fn push_prompt_ghost_event(&mut self, action: &str) {
-        self.push_self_session_input_event("prompt_ghost", action, None);
+    pub(super) fn push_capture_event(
+        &mut self,
+        lifecycle: ShellCaptureLifecycle,
+        generation: u64,
+        kind: Option<&str>,
+        target_id: Option<&str>,
+    ) {
+        let message = match lifecycle {
+            ShellCaptureLifecycle::Submitted => "capture_submitted",
+            ShellCaptureLifecycle::Drained => "capture_drained",
+            ShellCaptureLifecycle::Expired => "capture_expired",
+            ShellCaptureLifecycle::Overflow => "capture_overflow",
+        };
+        self.events.push(ShellEvent {
+            kind: ShellEventKind::UserInputIntercepted,
+            session_id: self.session_id.clone(),
+            command_id: None,
+            command: None,
+            cwd: None,
+            end_cwd: None,
+            exit_code: None,
+            started_at_ms: Some(now_ms()),
+            ended_at_ms: None,
+            duration_ms: None,
+            terminal_output_ref: None,
+            terminal_output_bytes: None,
+            input: None,
+            component: Some("card".to_string()),
+            message: Some(message.to_string()),
+            command_origin: None,
+            shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: Some(ShellCaptureMetadata {
+                kind: kind.map(str::to_string),
+                target_id: target_id.map(str::to_string),
+                generation,
+                lifecycle,
+            }),
+        });
+    }
+
+    pub(super) fn push_secret_card_event(&mut self, action: &str, value: &str) {
+        self.push_self_session_input_event("card_secret", action, Some(value));
+    }
+
+    pub(super) fn push_prompt_ghost_event(&mut self, action: &str, suggestion_id: Option<&str>) {
+        let component = suggestion_id
+            .map(|id| format!("prompt_ghost:{id}"))
+            .unwrap_or_else(|| "prompt_ghost".to_string());
+        self.push_self_session_input_event(&component, action, None);
     }
 
     fn push_self_session_input_event(
@@ -545,6 +807,10 @@ impl OscParser {
             component: Some(component.to_string()),
             message: Some(message.to_string()),
             command_origin: None,
+            shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
         });
     }
 }
@@ -564,6 +830,16 @@ struct Marker {
     command: Option<String>,
     reason: Option<String>,
     status: Option<i32>,
+    path: Option<String>,
+    path_trusted: Option<bool>,
+    history_file: Option<String>,
+    generation: Option<u64>,
+    top_level_missing: Option<bool>,
+    proven: Option<bool>,
+    intent: Option<String>,
+    sensitive: Option<bool>,
+    #[serde(rename = "unsafe")]
+    unsafe_input: Option<bool>,
 }
 
 fn command_finished_event(
@@ -606,8 +882,39 @@ fn command_finished_event(
                 }
             }),
             command_origin: None,
+            shell_environment_generation: None,
+            audit_identity: None,
+            routing: None,
+            capture: None,
         },
     }
+}
+
+fn normalize_shell_path(path: &str) -> String {
+    let mut seen = HashSet::new();
+    path.split(':')
+        .filter_map(normalize_absolute_path)
+        .filter(|entry| seen.insert(entry.clone()))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn normalize_absolute_path(value: &str) -> Option<String> {
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::CurDir => {}
+            Component::ParentDir => normalized.push(".."),
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized.to_string_lossy().into_owned())
 }
 
 fn command_origin_from_handoff_request(request: &ShellHandoffRequest) -> CommandOrigin {

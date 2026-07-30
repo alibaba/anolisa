@@ -2,20 +2,21 @@ use super::*;
 
 #[test]
 fn raw_cli_details_for_activity_uses_structured_panel() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "en-US")],
-        vec![
-            (b"?? request tool approval\n".to_vec(), Duration::ZERO),
-            (b"/details out-1\n".to_vec(), Duration::from_millis(2_500)),
-            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? request tool approval\n"),
+            ("stdout: 24", b"/details out-1\n"),
+            ("Activity details out-1", b"exit\n"),
         ],
     );
 
     assert!(output.contains("Activity details out-1"), "{output}");
     assert!(output.contains("Tool output - stdout captured"), "{output}");
-    assert!(output.contains("Run: fake-run-input-2"), "{output}");
+    assert!(output.contains("Run: fake-run-input-"), "{output}");
     assert!(output.contains("Detail:"), "{output}");
     assert!(output.contains("tool: tool-1"), "{output}");
     assert!(output.contains("stream: stdout"), "{output}");
@@ -35,27 +36,28 @@ fn raw_cli_details_for_activity_uses_structured_panel() {
 
 #[test]
 fn raw_cli_activity_details_uses_zh_language_env() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "zh-CN")],
-        vec![
-            (b"?? request tool approval\n".to_vec(), Duration::ZERO),
-            (b"/details out-1\n".to_vec(), Duration::from_millis(2_500)),
-            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? request tool approval\n"),
+            ("stdout: 24", b"/details out-1\n"),
+            ("活动详情 out-1", b"exit\n"),
         ],
     );
 
     assert!(output.contains("活动详情 out-1"), "{output}");
     assert!(output.contains("Tool 输出 - stdout 已捕获"), "{output}");
-    assert!(output.contains("运行: fake-run-input-2"), "{output}");
+    assert!(output.contains("运行: fake-run-input-"), "{output}");
     assert!(output.contains("详情:"), "{output}");
     assert!(output.contains("tool: tool-1"), "{output}");
     assert!(output.contains("stream: stdout"), "{output}");
     assert!(output.contains("line 24: fake tool output"), "{output}");
     assert!(!output.contains("Activity details out-1"), "{output}");
     assert!(!output.contains("output - stdout captured"), "{output}");
-    assert!(!output.contains("Run: fake-run-input-2"), "{output}");
+    assert!(!output.contains("Run: fake-run-input-"), "{output}");
     assert!(!output.contains("Detail:"), "{output}");
     assert!(!output.contains("bash: /details"), "{output}");
     assert_no_migrated_english_ui_labels(&output, DETAILS_ZH_FORBIDDEN_UI);

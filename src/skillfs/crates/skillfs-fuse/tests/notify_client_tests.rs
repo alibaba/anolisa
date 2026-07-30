@@ -49,8 +49,8 @@ fn spawn_fake_daemon(
 
 fn make_event() -> NotifyChangeEvent {
     NotifyChangeEvent::new(
-        "/srv/skills/weather",
-        "weather",
+        "/srv/skills/category/weather",
+        "category/weather",
         NotifyEventKind::Write,
         vec!["SKILL.md".to_string()],
         5000,
@@ -62,16 +62,34 @@ fn notify_client_accepted() {
     let (sock_path, daemon) = spawn_fake_daemon(|req_json| {
         let parsed: serde_json::Value = serde_json::from_str(req_json).unwrap();
         assert_eq!(parsed["method"], "skill_ledger.skillfs_notify_change");
-        assert_eq!(parsed["params"]["schemaVersion"], 1);
-        assert_eq!(parsed["params"]["skillDir"], "/srv/skills/weather");
-        assert_eq!(parsed["params"]["skillName"], "weather");
+        let params = parsed["params"].as_object().unwrap();
+        assert_eq!(params.len(), 5);
+        assert_eq!(parsed["params"]["schemaVersion"], 2);
+        assert_eq!(
+            parsed["params"]["canonicalSkillDir"],
+            "/srv/skills/category/weather"
+        );
+        assert_eq!(parsed["params"]["skillId"], "category/weather");
         assert_eq!(parsed["params"]["eventKind"], "write");
         assert_eq!(parsed["params"]["paths"], serde_json::json!(["SKILL.md"]));
+        for forbidden in [
+            "skillDir",
+            "skillName",
+            "mountId",
+            "generation",
+            "resolverSocket",
+            "sourceId",
+        ] {
+            assert!(
+                !params.contains_key(forbidden),
+                "unexpected field: {forbidden}"
+            );
+        }
         assert!(!parsed["id"].as_str().unwrap().is_empty());
         assert_eq!(parsed["trace_context"], serde_json::json!({}));
         assert_eq!(parsed["timeout_ms"], 5000);
 
-        r#"{"id":"resp-1","ok":true,"data":{"schemaVersion":1,"accepted":true},"stdout":"","stderr":"","exit_code":0}"#.to_string()
+        r#"{"id":"resp-1","ok":true,"data":{"schemaVersion":2,"accepted":true},"stdout":"","stderr":"","exit_code":0}"#.to_string()
     });
 
     let client = UnixSocketNotifyClient::new(&sock_path, Duration::from_secs(5));
@@ -163,7 +181,7 @@ fn notify_client_timeout() {
 #[test]
 fn notify_client_accepted_false_is_rejected() {
     let (sock_path, daemon) = spawn_fake_daemon(|_| {
-        r#"{"ok":true,"data":{"schemaVersion":1,"accepted":false}}"#.to_string()
+        r#"{"ok":true,"data":{"schemaVersion":2,"accepted":false}}"#.to_string()
     });
 
     let client = UnixSocketNotifyClient::new(&sock_path, Duration::from_secs(5));
@@ -171,6 +189,23 @@ fn notify_client_accepted_false_is_rejected() {
     assert!(
         matches!(result, Err(NotifyError::Rejected { .. })),
         "accepted=false must be Rejected, got {result:?}"
+    );
+
+    daemon.join().unwrap();
+    let _ = std::fs::remove_dir_all(sock_path.parent().unwrap());
+}
+
+#[test]
+fn notify_client_v1_response_is_rejected() {
+    let (sock_path, daemon) = spawn_fake_daemon(|_| {
+        r#"{"ok":true,"data":{"schemaVersion":1,"accepted":true}}"#.to_string()
+    });
+
+    let client = UnixSocketNotifyClient::new(&sock_path, Duration::from_secs(5));
+    let result = client.send(&make_event());
+    assert!(
+        matches!(result, Err(NotifyError::InvalidResponse { .. })),
+        "v1 response must be rejected, got {result:?}"
     );
 
     daemon.join().unwrap();

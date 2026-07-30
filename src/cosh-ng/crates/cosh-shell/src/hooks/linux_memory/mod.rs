@@ -1,6 +1,9 @@
 use crate::hooks::model::{HookInput, HookMatcher, HookTrigger};
 use crate::hooks::BuiltinHook;
-use crate::types::{FindingSeverity, HookFinding};
+use crate::types::{
+    BuiltinFindingFacts, FindingSeverity, HighMemoryProcessFacts, HookFinding, MemoryPressureFacts,
+    MetricsConfidence, ProcessMemoryFact,
+};
 
 mod parser;
 mod presentation;
@@ -30,12 +33,6 @@ struct MemoryUnitFactors {
     no_suffix: f64,
     bare_suffix_mib: f64,
     bare_suffix_step: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MetricsConfidence {
-    Low,
-    High,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,18 +101,12 @@ impl BuiltinHook for HighMemoryProcessHook {
     }
 
     fn evaluate(&self, input: &HookInput) -> Option<HookFinding> {
-        let program = memory_target_program(&input.command);
-        let rows = if program == "top" {
-            if !is_batch_top_command(&input.command) {
-                return None;
-            }
-            parse_top_process_rows(&input.output_preview)
-        } else if program == "ps" {
-            parse_ps_process_rows(&input.output_preview)
-        } else {
-            return None;
-        };
+        let rows = process_rows(input)?;
         high_memory_finding(&rows)
+    }
+
+    fn builtin_facts(&self, input: &HookInput) -> Option<BuiltinFindingFacts> {
+        high_memory_facts(&process_rows(input)?)
     }
 }
 
@@ -155,40 +146,87 @@ impl BuiltinHook for MemoryPressureHook {
     }
 
     fn evaluate(&self, input: &HookInput) -> Option<HookFinding> {
-        let program = memory_target_program(&input.command);
-        let metrics = if program == "top" {
-            if !is_batch_top_command(&input.command) {
-                return None;
-            }
-            parse_top_memory_metrics(&input.output_preview)
-        } else if program == "free" {
-            if is_free_sampling_command(&input.command) {
-                return None;
-            }
-            parse_free_memory_metrics(&input.command, &input.output_preview)
-        } else {
-            return None;
-        };
+        let metrics = memory_metrics(input)?;
         memory_pressure_finding(metrics.as_ref())
+    }
+
+    fn builtin_facts(&self, input: &HookInput) -> Option<BuiltinFindingFacts> {
+        memory_pressure_facts(memory_metrics(input)?.as_ref())
     }
 }
 
-fn max_severity(
-    left: Option<FindingSeverity>,
-    right: Option<FindingSeverity>,
-) -> Option<FindingSeverity> {
-    match (left, right) {
-        (Some(FindingSeverity::Critical), _) | (_, Some(FindingSeverity::Critical)) => {
-            Some(FindingSeverity::Critical)
+fn process_rows(input: &HookInput) -> Option<Vec<ProcessMemoryRow>> {
+    match memory_target_program(&input.command) {
+        "top" if is_batch_top_command(&input.command) => {
+            Some(parse_top_process_rows(&input.output_preview))
         }
-        (Some(FindingSeverity::Warning), _) | (_, Some(FindingSeverity::Warning)) => {
-            Some(FindingSeverity::Warning)
-        }
-        (Some(FindingSeverity::Info), _) | (_, Some(FindingSeverity::Info)) => {
-            Some(FindingSeverity::Info)
-        }
-        (None, None) => None,
+        "ps" => Some(parse_ps_process_rows(&input.output_preview)),
+        _ => None,
     }
+}
+
+fn memory_metrics(input: &HookInput) -> Option<Option<MemoryMetrics>> {
+    match memory_target_program(&input.command) {
+        "top" if is_batch_top_command(&input.command) => {
+            Some(parse_top_memory_metrics(&input.output_preview))
+        }
+        "free" if !is_free_sampling_command(&input.command) => Some(parse_free_memory_metrics(
+            &input.command,
+            &input.output_preview,
+        )),
+        _ => None,
+    }
+}
+
+fn memory_pressure_facts(metrics: Option<&MemoryMetrics>) -> Option<BuiltinFindingFacts> {
+    let metrics = metrics?;
+    if metrics.total_mib <= 0.0 {
+        return None;
+    }
+    Some(BuiltinFindingFacts::MemoryPressure(MemoryPressureFacts {
+        confidence: metrics.confidence,
+        available_ratio: metrics.available_mib / metrics.total_mib,
+        swap_ratio: match (metrics.swap_total_mib, metrics.swap_used_mib) {
+            (Some(total), Some(used)) if total > 0.0 => Some(used / total),
+            _ => None,
+        },
+    }))
+}
+
+fn high_memory_facts(rows: &[ProcessMemoryRow]) -> Option<BuiltinFindingFacts> {
+    let mut rows = rows
+        .iter()
+        .filter(|row| row.mem_pct >= 20.0)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.mem_pct.total_cmp(&left.mem_pct));
+    let processes = rows
+        .into_iter()
+        .take(3)
+        .filter_map(|row| {
+            let command_basename = display_command(&row.command);
+            let command_basename = command_basename.rsplit('/').next()?;
+            is_safe_process_basename(command_basename).then(|| ProcessMemoryFact {
+                pid: row.pid.clone(),
+                command_basename: command_basename.to_string(),
+                mem_pct: row.mem_pct,
+                rss_kib: row.rss_kib,
+            })
+        })
+        .collect::<Vec<_>>();
+    (!processes.is_empty()).then_some(BuiltinFindingFacts::HighMemoryProcesses(
+        HighMemoryProcessFacts {
+            confidence: MetricsConfidence::High,
+            processes,
+        },
+    ))
+}
+
+fn is_safe_process_basename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
 }
 
 #[cfg(test)]

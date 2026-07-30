@@ -8,7 +8,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 
-use anolisa_core::state::{ObjectStatus, RpmMetadata, SubscriptionScope};
+use anolisa_core::domain::InstallationScope;
+use anolisa_core::state::{
+    InstalledObject, ObjectStatus, Ownership, RpmMetadata, SubscriptionScope,
+};
+use anolisa_core::state_migration::migrate_state;
 
 use super::super::UpdateArgs;
 use super::render::build_motd;
@@ -93,15 +97,19 @@ impl PackageQuery for FakeHost {
 }
 
 impl PackageTransaction for FakeHost {
-    fn install(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.txn_calls.set(self.txn_calls.get() + 1);
         Ok(())
     }
-    fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn update(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.txn_calls.set(self.txn_calls.get() + 1);
         Ok(())
     }
-    fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn reinstall(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.txn_calls.set(self.txn_calls.get() + 1);
+        Ok(())
+    }
+    fn remove(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.txn_calls.set(self.txn_calls.get() + 1);
         Ok(())
     }
@@ -201,17 +209,23 @@ fn raw_component(component: &str, version: &str) -> InstalledObject {
     }
 }
 
-fn state_with(objects: Vec<InstalledObject>) -> InstalledState {
-    let mut state = InstalledState::default();
-    for obj in objects {
-        state.upsert_object(obj);
-    }
-    state
+/// Build a v5 store from legacy fixtures via the load-boundary migration, so
+/// these tests double as migration coverage for the check's inputs.
+fn state_with(objects: Vec<InstalledObject>) -> StateStore {
+    let migration = migrate_state(&objects, InstallationScope::System);
+    assert!(
+        migration.quarantined.is_empty(),
+        "check fixtures must migrate cleanly; quarantined: {:?}",
+        migration.quarantined
+    );
+    let mut store = StateStore::empty();
+    store.installations = migration.active;
+    store
 }
 
 fn run(
     host: &FakeHost,
-    installed: &InstalledState,
+    installed: &StateStore,
     target: Option<TargetProfile>,
     target_name: Option<String>,
 ) -> UpdateCheckReport {
@@ -220,7 +234,7 @@ fn run(
 
 fn run_with_index(
     host: &FakeHost,
-    installed: &InstalledState,
+    installed: &StateStore,
     target: Option<TargetProfile>,
     target_name: Option<String>,
     component_index: Option<&crate::resolution::ComponentIndex>,
@@ -230,7 +244,7 @@ fn run_with_index(
 
 fn run_with_index_and_backend(
     host: &FakeHost,
-    installed: &InstalledState,
+    installed: &StateStore,
     target: Option<TargetProfile>,
     target_name: Option<String>,
     component_index: Option<&crate::resolution::ComponentIndex>,
@@ -249,15 +263,12 @@ fn run_with_index_and_backend(
 }
 
 fn system_ctx() -> CliContext {
-    CliContext {
-        install_mode: crate::context::InstallMode::System,
-        prefix: None,
-        json: false,
-        dry_run: false,
-        verbose: false,
-        quiet: true,
-        no_color: true,
-    }
+    crate::test_support::context_for_root(
+        std::path::Path::new("/tmp/anolisa-update-check-validation"),
+        crate::context::InstallMode::System,
+        None,
+        Default::default(),
+    )
 }
 
 // ── CLI parse surface ───────────────────────────────────────────────
@@ -358,7 +369,7 @@ fn update_check_rpm_component_update_candidate() {
     assert_eq!(item.action, ACTION_UPDATE);
     assert_eq!(item.installed.as_deref(), Some("1.0.0-1.al4"));
     assert_eq!(item.available.as_deref(), Some("1.1.0-1.al4"));
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("adopted"));
     assert_eq!(report.summary.updates, 1);
     assert!(report.upgrade_available);
     assert!(report.action_required);
@@ -429,7 +440,7 @@ fn update_check_raw_component_is_unsupported() {
     let report = run(&host, &state, None, None);
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_UNSUPPORTED_RPM);
-    assert_eq!(item.ownership.as_deref(), Some("raw-managed"));
+    assert_eq!(item.ownership.as_deref(), Some("owned"));
     assert_eq!(report.summary.unsupported, 1);
     assert_eq!(report.summary.updates, 0);
     assert_eq!(
@@ -519,7 +530,7 @@ fn update_check_default_present_via_provide_is_not_missing() {
         .find(|c| c.component == "cosh")
         .expect("cosh reported");
     assert_eq!(item.action, ACTION_NOOP);
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("observed"));
     assert_eq!(
         report.summary.missing_defaults, 0,
         "a present-but-unadopted default is not missing"
@@ -590,7 +601,7 @@ fn update_check_default_present_via_index_package_without_provide() {
     );
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_NOOP);
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("observed"));
     assert_eq!(report.summary.missing_defaults, 0);
 }
 
@@ -619,7 +630,7 @@ fn update_check_default_present_via_package_map_without_provide() {
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_NOOP);
     assert_eq!(item.package.as_deref(), Some("copilot-shell"));
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("observed"));
     assert_eq!(report.summary.missing_defaults, 0);
 }
 
@@ -855,6 +866,53 @@ fn update_check_repo_query_failure_is_item_error() {
 }
 
 #[test]
+fn update_check_resolves_legacy_rpm_component_without_metadata() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed.insert(
+        "copilot-shell".to_string(),
+        info("copilot-shell", "2.7.0", Some("1.alnx4")),
+    );
+    let backend = rpm_backend_with_package_map("cosh", "copilot-shell");
+    let mut component = rpm_component(
+        "cosh",
+        "copilot-shell",
+        "2.6.1-1.alnx4",
+        Ownership::RpmManaged,
+    );
+    component.rpm_metadata = None;
+    let state = state_with(vec![component]);
+
+    let report = run_with_index_and_backend(&host, &state, None, None, None, Some(&backend));
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_RECONCILE);
+    assert_eq!(item.package.as_deref(), Some("copilot-shell"));
+    assert_eq!(item.installed.as_deref(), Some("2.7.0-1.alnx4"));
+    assert!(item.backfill_rpm_metadata);
+    let json = serde_json::to_value(&report).expect("serialize report");
+    assert_eq!(json["components"][0]["action"], ACTION_RECONCILE);
+    assert!(json["components"][0]["backfill_rpm_metadata"].is_null());
+    assert_eq!(json["summary"]["reconciliations"], 1);
+    assert!(report.action_required);
+    assert_eq!(report.summary.reconciliations, 1);
+    assert_eq!(report.summary.errors, 0);
+
+    let motd = build_motd(&report).expect("reconciliation appears in MOTD");
+    assert!(motd.contains("ANOLISA state reconciliation is required."));
+    assert!(motd.contains("1 component requires state reconciliation"));
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let path = cache_path(&layout);
+    write_cache(&path, &report).expect("write cache");
+    let cached = read_cache(&path).expect("read cache");
+    assert!(cached.report.action_required);
+    assert_eq!(cached.report.summary.reconciliations, 1);
+    assert_eq!(cached.report.components[0].action, ACTION_RECONCILE);
+    assert!(build_motd(&cached.report).is_some());
+}
+
+#[test]
 fn update_check_component_missing_from_rpmdb_is_item_error() {
     let host = FakeHost::with_cli_noop();
     // No installed entry for the package → rpmdb miss.
@@ -920,6 +978,7 @@ fn update_check_motd_text_lists_upgrades_and_installs() {
         components: Vec::new(),
         summary: CheckSummary {
             updates: 1,
+            reconciliations: 0,
             missing_defaults: 1,
             unsupported: 0,
             errors: 0,
@@ -1012,6 +1071,10 @@ fn update_check_cache_usable_requires_matching_target() {
 
 // ── repo config read-only + target profile ──────────────────────────
 
+fn isolated_packaged_data_probe() -> crate::packaged::PackagedDataProbe {
+    crate::packaged::PackagedDataProbe::from_inputs(None, None)
+}
+
 /// `--check` must load repo config without writing it. Here the config already
 /// exists locally, so the read-only load returns it and touches nothing else;
 /// the missing-config no-write guarantee is covered by
@@ -1020,6 +1083,12 @@ fn update_check_cache_usable_requires_matching_target() {
 fn update_check_read_only_load_uses_existing_config_without_writing() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let ctx = crate::test_support::context_for_root(
+        tmp.path(),
+        crate::context::InstallMode::System,
+        Some(tmp.path().to_path_buf()),
+        Default::default(),
+    );
     std::fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
     let repo_toml = layout.etc_dir.join("repo.toml");
     std::fs::write(
@@ -1028,7 +1097,7 @@ fn update_check_read_only_load_uses_existing_config_without_writing() {
     )
     .expect("write repo.toml");
 
-    let cfg = load_repo_config_read_only(&layout).expect("read-only load");
+    let cfg = load_repo_config_read_only(&ctx, &layout).expect("read-only load");
     assert_eq!(cfg.default_backend, "rpm");
     // No scratch file was left behind by the read-only path.
     assert!(!repo_toml.with_extension("toml.tmp").exists());
@@ -1046,7 +1115,9 @@ fn update_check_target_profile_parses_default_components() {
     )
     .expect("write profile");
 
-    let profile = load_target_profile_by_name(&layout, "image-v1.0").expect("profile loads");
+    let probe = isolated_packaged_data_probe();
+    let profile =
+        load_target_profile_by_name(&layout, "image-v1.0", &probe).expect("profile loads");
     assert_eq!(profile.default_components, vec!["cosh", "sec-core"]);
 }
 
@@ -1054,22 +1125,21 @@ fn update_check_target_profile_parses_default_components() {
 fn update_check_target_profile_rejects_traversal() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let err = load_target_profile_by_name(&layout, "../escape").expect_err("must reject traversal");
+    let probe = isolated_packaged_data_probe();
+    let err = load_target_profile_by_name(&layout, "../escape", &probe)
+        .expect_err("must reject traversal");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
 }
 
 // ── default target profile + user-mode gating ───────────────────────
 
 fn user_ctx() -> CliContext {
-    CliContext {
-        install_mode: crate::context::InstallMode::User,
-        prefix: None,
-        json: false,
-        dry_run: false,
-        verbose: false,
-        quiet: true,
-        no_color: true,
-    }
+    crate::test_support::context_for_root(
+        std::path::Path::new("/tmp/anolisa-update-check-validation"),
+        crate::context::InstallMode::User,
+        None,
+        Default::default(),
+    )
 }
 
 /// A non-system install mode is out of scope for the RPM upgrade check and must
@@ -1128,8 +1198,9 @@ fn update_check_builtin_default_profile_parses() {
 fn update_check_omitted_target_uses_builtin_default() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let probe = isolated_packaged_data_probe();
     let (name, profile) =
-        load_effective_target_profile(&layout, None).expect("default target resolves");
+        load_effective_target_profile(&layout, None, &probe).expect("default target resolves");
     assert_eq!(name, DEFAULT_TARGET_PROFILE_NAME);
     assert!(!profile.default_components.is_empty());
 }
@@ -1150,8 +1221,9 @@ fn update_check_omitted_target_uses_disk_default_profile() {
     )
     .expect("write default profile");
 
+    let probe = isolated_packaged_data_probe();
     let (name, profile) =
-        load_effective_target_profile(&layout, None).expect("default target resolves");
+        load_effective_target_profile(&layout, None, &probe).expect("default target resolves");
     assert_eq!(name, DEFAULT_TARGET_PROFILE_NAME);
     assert_eq!(profile.default_components, vec!["disk-only"]);
 }
@@ -1160,10 +1232,10 @@ fn update_check_omitted_target_uses_disk_default_profile() {
 /// the compiled-in default rather than erroring.
 #[test]
 fn update_check_explicit_default_target_falls_back_to_builtin() {
-    let _guard = crate::packaged::DataDirEnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let profile = load_target_profile_by_name(&layout, DEFAULT_TARGET_PROFILE_NAME)
+    let probe = isolated_packaged_data_probe();
+    let profile = load_target_profile_by_name(&layout, DEFAULT_TARGET_PROFILE_NAME, &probe)
         .expect("explicit default falls back to builtin");
     assert!(!profile.default_components.is_empty());
 }
@@ -1172,10 +1244,10 @@ fn update_check_explicit_default_target_falls_back_to_builtin() {
 /// message names the profile.
 #[test]
 fn update_check_explicit_custom_target_missing_is_invalid_argument() {
-    let _guard = crate::packaged::DataDirEnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let err = load_target_profile_by_name(&layout, "no-such-profile")
+    let probe = isolated_packaged_data_probe();
+    let err = load_target_profile_by_name(&layout, "no-such-profile", &probe)
         .expect_err("missing custom target must error");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(err.reason().contains("no-such-profile"));

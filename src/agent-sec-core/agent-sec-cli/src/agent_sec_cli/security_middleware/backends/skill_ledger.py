@@ -47,6 +47,16 @@ _PASSPHRASE_EXISTING_KEY_ERROR = (
 )
 _CAMEL_ACRONYM_BOUNDARY_RE = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_WORD_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_VERDICT_SEVERITY = {
+    "pass": 0,
+    "none": 1,
+    "warn": 2,
+    "unmanaged": 3,
+    "drifted": 4,
+    "deny": 5,
+    "tampered": 6,
+    "error": 7,
+}
 
 
 def _to_snake_case(value: str) -> str:
@@ -85,9 +95,60 @@ def _snake_case_event_keys(value: Any) -> Any:
     return normalized
 
 
+def _known_verdict(value: Any) -> str | None:
+    """Return a recognized Skill Ledger verdict value."""
+    if isinstance(value, str) and value in _VERDICT_SEVERITY:
+        return value
+    return None
+
+
+def _batch_verdict(results: Any) -> str | None:
+    """Return the most severe verdict from a batch command result."""
+    if not isinstance(results, list):
+        return None
+
+    verdicts: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        for value in (item.get("status"), item.get("verdict")):
+            verdict = _known_verdict(value)
+            if verdict is not None:
+                verdicts.append(verdict)
+
+    if not verdicts:
+        return None
+    return max(verdicts, key=_VERDICT_SEVERITY.__getitem__)
+
+
+def _project_event_verdict(data: dict[str, Any]) -> str | None:
+    """Project command-specific output into the canonical event verdict."""
+    command = data.get("command")
+    if not isinstance(command, str):
+        return None
+
+    if command in {"init", "scan", "check"} and "results" in data:
+        return _batch_verdict(data.get("results"))
+    if command == "show":
+        return _known_verdict(data.get("latest_status"))
+    if command == "check":
+        return _known_verdict(data.get("status"))
+    if command in {"scan", "certify"}:
+        return _known_verdict(data.get("verdict"))
+    if command == "decide":
+        return _known_verdict(data.get("current_status")) or _known_verdict(
+            data.get("verdict")
+        )
+    return None
+
+
 def _normalize_event_result(data: dict[str, Any]) -> dict[str, Any]:
     """Build the Skill Ledger event-only result payload."""
-    return _snake_case_event_keys(data)
+    normalized = _snake_case_event_keys(data)
+    verdict = _project_event_verdict(normalized)
+    if verdict is not None:
+        normalized["verdict"] = verdict
+    return normalized
 
 
 class SkillLedgerBackend(BaseBackend):
@@ -131,6 +192,7 @@ class SkillLedgerBackend(BaseBackend):
                 success=False,
                 error=f"Unknown skill-ledger command: {command!r}",
                 exit_code=1,
+                error_type="ValueError",
             )
         return handler(ctx, **kwargs)
 
@@ -184,6 +246,7 @@ class SkillLedgerBackend(BaseBackend):
                     success=False,
                     error=_PASSPHRASE_EXISTING_KEY_ERROR,
                     exit_code=1,
+                    error_type="ValueError",
                 )
             if force_keys or not keys_exist():
                 key_result = self._generate_keys(
@@ -210,9 +273,15 @@ class SkillLedgerBackend(BaseBackend):
                 stdout=json.dumps(data, ensure_ascii=False) + "\n",
                 data=data,
                 exit_code=1 if has_error else 0,
+                error_type="SkillLedgerError" if has_error else "",
             )
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
     def _do_init_keys(
         self,
@@ -225,7 +294,12 @@ class SkillLedgerBackend(BaseBackend):
         try:
             result = self._generate_keys(force=force, passphrase=passphrase)
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
         data = {"command": "init-keys", **result}
         return ActionResult(
@@ -252,8 +326,10 @@ class SkillLedgerBackend(BaseBackend):
                         success=False,
                         error="No skill directories found in config.json",
                         exit_code=1,
+                        error_type="FileNotFoundError",
                     )
                 results = check_batch(dirs, backend)
+                has_error = any(r.get("status") == "error" for r in results)
                 has_critical = any(
                     r.get("status") in ("tampered", "deny", "error") for r in results
                 )
@@ -263,6 +339,7 @@ class SkillLedgerBackend(BaseBackend):
                     stdout=json.dumps({"results": results}, ensure_ascii=False) + "\n",
                     data=data,
                     exit_code=1 if has_critical else 0,
+                    error_type="SkillLedgerError" if has_error else "",
                 )
             else:
                 if skill_dir is None:
@@ -270,6 +347,7 @@ class SkillLedgerBackend(BaseBackend):
                         success=False,
                         error="skill_dir is required (or use --all)",
                         exit_code=1,
+                        error_type="ValueError",
                     )
                 result = check(skill_dir, backend)
                 status = result.get("status", "")
@@ -287,6 +365,7 @@ class SkillLedgerBackend(BaseBackend):
                 stdout=json.dumps(error_data, ensure_ascii=False) + "\n",
                 data={"command": "check", **error_data},
                 exit_code=1,
+                error_type=type(exc).__name__,
             )
 
     def _do_certify(
@@ -308,18 +387,21 @@ class SkillLedgerBackend(BaseBackend):
                     success=False,
                     error="certify imports external findings only; use 'skill-ledger scan' for built-in scanners",
                     exit_code=1,
+                    error_type="ValueError",
                 )
             if skill_dir is None:
                 return ActionResult(
                     success=False,
                     error="skill_dir is required",
                     exit_code=1,
+                    error_type="ValueError",
                 )
             if findings is None:
                 return ActionResult(
                     success=False,
                     error="--findings is required for certify; use 'skill-ledger scan' for built-in scanners",
                     exit_code=1,
+                    error_type="ValueError",
                 )
             key_created, key_result, warnings = self._ensure_keys()
             backend = NativeEd25519Backend()
@@ -342,7 +424,12 @@ class SkillLedgerBackend(BaseBackend):
                 data={"command": "certify", **result},
             )
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
     def _do_scan(
         self,
@@ -361,6 +448,7 @@ class SkillLedgerBackend(BaseBackend):
                         success=False,
                         error="--all and skill_dir are mutually exclusive.",
                         exit_code=1,
+                        error_type="ValueError",
                     )
                 dirs = resolve_skill_dirs()
                 if not dirs:
@@ -368,6 +456,7 @@ class SkillLedgerBackend(BaseBackend):
                         success=False,
                         error="No skill directories found in config.json",
                         exit_code=1,
+                        error_type="FileNotFoundError",
                     )
                 key_created, key_result, warnings = self._ensure_keys()
                 backend = NativeEd25519Backend()
@@ -392,12 +481,14 @@ class SkillLedgerBackend(BaseBackend):
                     stdout=json.dumps(data, ensure_ascii=False) + "\n",
                     data=data,
                     exit_code=1 if has_error else 0,
+                    error_type="SkillLedgerError" if has_error else "",
                 )
             if skill_dir is None:
                 return ActionResult(
                     success=False,
                     error="skill_dir is required (or use --all)",
                     exit_code=1,
+                    error_type="ValueError",
                 )
             key_created, key_result, warnings = self._ensure_keys()
             backend = NativeEd25519Backend()
@@ -418,7 +509,12 @@ class SkillLedgerBackend(BaseBackend):
                 data={"command": "scan", **result},
             )
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
     def _do_status(
         self,
@@ -438,7 +534,12 @@ class SkillLedgerBackend(BaseBackend):
                 data=data,
             )
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
     def _do_audit(
         self,
@@ -453,7 +554,12 @@ class SkillLedgerBackend(BaseBackend):
         try:
             result = audit(skill_dir, backend, verify_snapshots=verify_snapshots)
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
         return ActionResult(
             success=result["valid"],
@@ -508,6 +614,7 @@ class SkillLedgerBackend(BaseBackend):
                         success=False,
                         error="--action is required unless --clear is set",
                         exit_code=1,
+                        error_type="ValueError",
                     )
                 result = decide_skill(
                     skill_dir,
@@ -528,7 +635,12 @@ class SkillLedgerBackend(BaseBackend):
                 data=data,
             )
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
     def _do_show(
         self,
@@ -548,7 +660,12 @@ class SkillLedgerBackend(BaseBackend):
                 data=data,
             )
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )
 
     def _do_export(
         self,
@@ -576,4 +693,9 @@ class SkillLedgerBackend(BaseBackend):
                 data=data,
             )
         except Exception as exc:
-            return ActionResult(success=False, error=str(exc), exit_code=1)
+            return ActionResult(
+                success=False,
+                error=str(exc),
+                exit_code=1,
+                error_type=type(exc).__name__,
+            )

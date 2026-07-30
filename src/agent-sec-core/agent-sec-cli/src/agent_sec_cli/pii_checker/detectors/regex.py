@@ -16,6 +16,22 @@ _CONTEXT_NEGATIVE_DELTA = -0.35
 _MAX_PRIVATE_KEY_CHARS = 16_384
 _PRIVATE_KEY_EVIDENCE_PLACEHOLDER = "[PRIVATE_KEY_OMITTED]"
 
+BUILTIN_PII_TYPES = frozenset(
+    {
+        "aliyun_access_key_id",
+        "aliyun_access_key_secret",
+        "api_key",
+        "bearer_token",
+        "cn_id",
+        "credit_card",
+        "email",
+        "generic_secret_field",
+        "jwt",
+        "phone_cn",
+        "private_key",
+    }
+)
+
 # Confidence model (v1 fixed heuristic; values are not calibrated probabilities):
 #
 # | Signal class                        | Base |

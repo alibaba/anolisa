@@ -1,14 +1,16 @@
-"""Unit tests for telemetry schema mapping."""
+"""Unit tests for telemetry field projection."""
+
+# ruff: noqa: I001
 
 import copy
 import json
-import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
+import pytest
 from agent_sec_cli import __version__
 from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.telemetry.sanitizer import AgentName
 from agent_sec_cli.telemetry.schema import build_telemetry_security_event
 
 COMPONENT_FIELDS = {
@@ -16,47 +18,36 @@ COMPONENT_FIELDS = {
     "component.version",
     "component.agent_name",
 }
-
-SECCORE_FIELDS = {
-    "seccore.event_id",
+SECCORE_COMMON_FIELDS = {
     "seccore.event_type",
     "seccore.category",
     "seccore.result",
     "seccore.timestamp",
-    "seccore.trace_id",
-    "seccore.session_id",
-    "seccore.run_id",
-    "seccore.call_id",
-    "seccore.tool_call_id",
-    "seccore.request",
-    "seccore.error",
-    "seccore.error_type",
-    "seccore.verdict",
-    "seccore.summary",
-    "seccore.elapsed_ms",
-    "seccore.asset_passed_count",
-    "seccore.asset_failed_count",
-    "seccore.details",
 }
-
+SCAN_FIELDS = {"seccore.verdict", "seccore.elapsed_ms"}
+ASSET_FIELDS = {"seccore.asset_passed_count", "seccore.asset_failed_count"}
 BASELINE_FIELDS = {
-    "baseline.event_id",
     "baseline.result",
     "baseline.timestamp",
-    "baseline.request",
-    "baseline.error",
-    "baseline.error_type",
     "baseline.passed",
     "baseline.fixed",
     "baseline.failed",
     "baseline.total",
-    "baseline.details",
 }
 
 
 @dataclass
 class _TelemetryCtx:
     agent_name: str | None = None
+
+
+class StringCanary:
+    def __init__(self) -> None:
+        self.stringified = False
+
+    def __str__(self) -> str:
+        self.stringified = True
+        return "CUSTOMER-CANARY"
 
 
 def _event(**overrides: Any) -> SecurityEvent:
@@ -66,7 +57,11 @@ def _event(**overrides: Any) -> SecurityEvent:
         "category": "code_scan",
         "result": "succeeded",
         "timestamp": "2026-06-15T12:00:00+00:00",
-        "trace_id": "trace-1",
+        "trace_id": "trace-CUSTOMER-CANARY",
+        "session_id": "session-CUSTOMER-CANARY",
+        "run_id": "run-CUSTOMER-CANARY",
+        "call_id": "call-CUSTOMER-CANARY",
+        "tool_call_id": "tool-CUSTOMER-CANARY",
         "details": {},
     }
     defaults.update(overrides)
@@ -79,244 +74,291 @@ def _assert_component_fields(record: dict[str, Any], agent_name: str = "") -> No
     assert record["component.agent_name"] == agent_name
 
 
-def test_builds_seccore_record_with_component_and_prefixed_fields() -> None:
+@pytest.mark.parametrize(
+    ("action", "category"),
+    [
+        ("sandbox_prehook", "sandbox"),
+        ("summary", "summary"),
+        ("skill_ledger", "skill_ledger"),
+    ],
+)
+def test_envelope_only_actions_have_exact_common_fields(
+    action: str, category: str
+) -> None:
     event = _event(
-        event_type="pii_scan",
-        category="pii_scan",
-        trace_id="trace-123",
-        session_id="session-123",
-        run_id="run-123",
-        call_id="call-123",
-        tool_call_id="tool-123",
+        event_type=action,
+        category=category,
         details={
-            "request": {"source": "manual", "text_sha256": "abc"},
+            "request": {"prompt": "CUSTOMER-CANARY"},
+            "result": {"verdict": "deny", "summary": "CUSTOMER-CANARY"},
+            "error": "CUSTOMER-CANARY",
+            "unknown_customer_field": "CUSTOMER-CANARY",
+        },
+    )
+
+    record = build_telemetry_security_event(event, _TelemetryCtx())
+
+    assert record is not None
+    assert set(record) == COMPONENT_FIELDS | SECCORE_COMMON_FIELDS
+    assert record["seccore.event_type"] == action
+    assert record["seccore.category"] == category
+    assert "CUSTOMER-CANARY" not in json.dumps(record)
+
+
+@pytest.mark.parametrize("action", ["code_scan", "prompt_scan", "pii_scan"])
+def test_scan_actions_share_verdict_and_elapsed_fields(action: str) -> None:
+    event = _event(
+        event_type=action,
+        category=action,
+        details={
+            "request": {"text": "CUSTOMER-CANARY"},
             "result": {
                 "verdict": "deny",
-                "summary": {"total": 1},
-                "elapsed_ms": 28,
+                "elapsed_ms": 28.5,
+                "summary": {"customer": "CUSTOMER-CANARY"},
             },
         },
     )
 
     record = build_telemetry_security_event(event, _TelemetryCtx())
 
-    assert set(record) == COMPONENT_FIELDS | SECCORE_FIELDS
-    _assert_component_fields(record)
-    assert "schema.namespace" not in record
-    assert "data.group" not in record
-    assert record["seccore.event_id"] == "event-1"
-    assert record["seccore.event_type"] == "pii_scan"
-    assert record["seccore.category"] == "pii_scan"
-    assert record["seccore.result"] == "succeeded"
-    assert record["seccore.timestamp"] == "2026-06-15T12:00:00+00:00"
-    assert record["seccore.trace_id"] == "trace-123"
-    assert record["seccore.session_id"] == "session-123"
-    assert record["seccore.run_id"] == "run-123"
-    assert record["seccore.call_id"] == "call-123"
-    assert record["seccore.tool_call_id"] == "tool-123"
-    assert record["seccore.request"] == {"source": "manual", "text_sha256": "abc"}
-    assert record["seccore.error"] is None
-    assert record["seccore.error_type"] is None
+    assert record is not None
+    assert set(record) == COMPONENT_FIELDS | SECCORE_COMMON_FIELDS | SCAN_FIELDS
     assert record["seccore.verdict"] == "deny"
-    assert record["seccore.summary"] == {"total": 1}
-    assert record["seccore.elapsed_ms"] == 28
-    assert record["seccore.asset_passed_count"] is None
-    assert record["seccore.asset_failed_count"] is None
-    assert record["seccore.details"] == {}
-    json.dumps(record)
+    assert record["seccore.elapsed_ms"] == 28.5
+    assert "seccore.request" not in record
+    assert "seccore.summary" not in record
+    assert "CUSTOMER-CANARY" not in json.dumps(record)
 
 
-def test_builds_asset_verify_counts_as_seccore_fields() -> None:
+def test_asset_verify_has_only_approved_numeric_counts() -> None:
     event = _event(
         event_type="verify",
         category="asset_verify",
         result="failed",
-        details={"request": {"skill": "/path"}, "result": {"passed": 12, "failed": 1}},
+        details={
+            "request": {"skill": "/CUSTOMER-CANARY"},
+            "result": {"passed": 12, "failed": 1, "findings": "CUSTOMER-CANARY"},
+        },
     )
 
     record = build_telemetry_security_event(event, _TelemetryCtx())
 
-    _assert_component_fields(record)
+    assert record is not None
+    assert set(record) == COMPONENT_FIELDS | SECCORE_COMMON_FIELDS | ASSET_FIELDS
+    assert record["seccore.category"] == "asset_verify"
     assert record["seccore.asset_passed_count"] == 12
     assert record["seccore.asset_failed_count"] == 1
-    assert record["seccore.verdict"] is None
 
 
-def test_builds_seccore_record_with_ctx_agent_name() -> None:
-    record = build_telemetry_security_event(_event(), _TelemetryCtx(agent_name="cosh"))
-
-    _assert_component_fields(record, agent_name="cosh")
-
-
-def test_builds_seccore_record_strips_ctx_agent_name() -> None:
-    record = build_telemetry_security_event(
-        _event(), _TelemetryCtx(agent_name=" hermes ")
-    )
-
-    _assert_component_fields(record, agent_name="hermes")
-
-
-def test_builds_baseline_record_with_component_and_prefixed_fields() -> None:
+def test_harden_has_exact_baseline_fields() -> None:
     event = _event(
         event_type="harden",
         category="hardening",
         result="failed",
         details={
-            "request": {"args": ["--scan", "--config", "agentos_baseline"]},
-            "result": {"passed": 12, "fixed": 0, "failed": 1, "total": 13},
-        },
-    )
-
-    record = build_telemetry_security_event(event, _TelemetryCtx())
-
-    assert set(record) == COMPONENT_FIELDS | BASELINE_FIELDS
-    _assert_component_fields(record)
-    assert not any(key.startswith("seccore.") for key in record)
-    assert "schema.namespace" not in record
-    assert "data.group" not in record
-    assert record["baseline.event_id"] == "event-1"
-    assert record["baseline.result"] == "failed"
-    assert record["baseline.timestamp"] == "2026-06-15T12:00:00+00:00"
-    assert record["baseline.request"] == {
-        "args": ["--scan", "--config", "agentos_baseline"]
-    }
-    assert record["baseline.error"] is None
-    assert record["baseline.error_type"] is None
-    assert record["baseline.passed"] == 12
-    assert record["baseline.fixed"] == 0
-    assert record["baseline.failed"] == 1
-    assert record["baseline.total"] == 13
-    assert record["baseline.details"] == {}
-    json.dumps(record)
-
-
-def test_builds_baseline_record_with_ctx_agent_name() -> None:
-    event = _event(event_type="harden", category="hardening")
-
-    record = build_telemetry_security_event(event, _TelemetryCtx(agent_name="cosh"))
-
-    _assert_component_fields(record, agent_name="cosh")
-
-
-def test_error_fields_map_from_exception_details() -> None:
-    event = _event(
-        event_type="verify",
-        category="asset_verify",
-        result="failed",
-        details={
-            "request": {"skill": "/path"},
-            "error": "boom",
-            "error_type": "RuntimeError",
-        },
-    )
-
-    record = build_telemetry_security_event(event, _TelemetryCtx())
-
-    assert record["seccore.error"] == "boom"
-    assert record["seccore.error_type"] == "RuntimeError"
-    assert record["seccore.request"] == {"skill": "/path"}
-
-
-def test_error_fields_do_not_fallback_to_result_summary() -> None:
-    event = _event(
-        event_type="pii_scan",
-        category="pii_scan",
-        result="failed",
-        details={
+            "request": {"args": ["--config", "/CUSTOMER-CANARY"]},
             "result": {
-                "verdict": "error",
-                "summary": {"error": "bad input", "error_type": "TypeError"},
-            }
-        },
-    )
-
-    record = build_telemetry_security_event(event, _TelemetryCtx())
-
-    assert record["seccore.error"] is None
-    assert record["seccore.error_type"] is None
-    assert record["seccore.summary"] == {
-        "error": "bad input",
-        "error_type": "TypeError",
-    }
-
-
-def test_error_fields_preserve_explicit_details_null_over_result_values() -> None:
-    event = _event(
-        event_type="pii_scan",
-        category="pii_scan",
-        result="failed",
-        details={
-            "error": None,
-            "error_type": None,
-            "result": {
-                "error": "ignored",
-                "error_type": "IgnoredError",
-                "summary": {"error": "bad input", "error_type": "TypeError"},
+                "passed": 12,
+                "fixed": 2,
+                "failed": 1,
+                "total": 15,
+                "output": "CUSTOMER-CANARY",
             },
         },
     )
 
     record = build_telemetry_security_event(event, _TelemetryCtx())
 
-    assert record["seccore.error"] is None
-    assert record["seccore.error_type"] is None
+    assert record is not None
+    assert set(record) == COMPONENT_FIELDS | BASELINE_FIELDS
+    assert record["baseline.result"] == "failed"
+    assert record["baseline.passed"] == 12
+    assert record["baseline.fixed"] == 2
+    assert record["baseline.failed"] == 1
+    assert record["baseline.total"] == 15
+    assert not any(key.startswith("seccore.") for key in record)
+    assert "CUSTOMER-CANARY" not in json.dumps(record)
 
 
-def test_missing_fields_use_null_except_generated_event_id_timestamp_and_details() -> (
-    None
-):
+def test_agent_name_only_emits_approved_product_names() -> None:
+    for agent_name in AgentName:
+        record = build_telemetry_security_event(
+            _event(), _TelemetryCtx(agent_name=f" {agent_name.value} ")
+        )
+
+        assert record is not None
+        _assert_component_fields(record, agent_name=agent_name.value)
+
+    for invalid in ("future-agent-runtime", "customer@example.com", "customer-account"):
+        record = build_telemetry_security_event(
+            _event(), _TelemetryCtx(agent_name=invalid)
+        )
+
+        _assert_component_fields(record)
+
+
+def test_new_action_uses_common_fields_without_special_projection() -> None:
+    record = build_telemetry_security_event(
+        _event(
+            event_type="future_action",
+            category="future_category",
+            details={"result": {"verdict": "deny", "summary": "CUSTOMER-CANARY"}},
+        ),
+        _TelemetryCtx(),
+    )
+
+    assert set(record) == COMPONENT_FIELDS | SECCORE_COMMON_FIELDS
+    assert record["seccore.event_type"] == "future_action"
+    assert record["seccore.category"] == "future_category"
+    assert "CUSTOMER-CANARY" not in json.dumps(record)
+
+
+def test_untrusted_timestamp_text_is_replaced_not_forwarded() -> None:
+    event = _event()
+    event.timestamp = "CUSTOMER-CANARY"
+    record = build_telemetry_security_event(event, _TelemetryCtx())
+
+    assert record is not None
+    assert record["seccore.timestamp"] != "CUSTOMER-CANARY"
+    assert "CUSTOMER-CANARY" not in json.dumps(record)
+
+
+def test_structured_error_type_and_exit_code_are_emitted_without_message() -> None:
     event = _event(
-        event_id="",
-        timestamp="",
-        trace_id="",
-        details={},
+        event_type="code_scan",
+        result="failed",
+        details={
+            "error": "failed for /CUSTOMER-CANARY and secret prompt",
+            "error_details": {"traceback": "CUSTOMER-CANARY"},
+            "error_type": "CodeScanError",
+            "exit_code": -9,
+            "result": {"verdict": "error", "elapsed_ms": 4},
+        },
     )
 
     record = build_telemetry_security_event(event, _TelemetryCtx())
 
-    uuid.UUID(record["seccore.event_id"])
-    datetime.fromisoformat(record["seccore.timestamp"])
-    assert record["seccore.trace_id"] is None
-    assert record["seccore.request"] is None
-    assert record["seccore.verdict"] is None
-    assert record["seccore.details"] == {}
+    assert record is not None
+    assert record["seccore.error_type"] == "CodeScanError"
+    assert record["seccore.exit_code"] == -9
+    assert "seccore.error" not in record
+    assert "CUSTOMER-CANARY" not in json.dumps(record)
 
 
-def test_mapping_does_not_mutate_input_and_converts_values_to_json_safe() -> None:
+def test_error_metadata_requires_failed_result_and_valid_top_level_type() -> None:
+    successful = build_telemetry_security_event(
+        _event(
+            result="succeeded",
+            details={"error_type": "RuntimeError", "exit_code": 1},
+        ),
+        _TelemetryCtx(),
+    )
+    nested = build_telemetry_security_event(
+        _event(
+            result="failed",
+            details={
+                "result": {
+                    "verdict": "error",
+                    "summary": {"error_type": "RuntimeError"},
+                },
+                "exit_code": 1,
+            },
+        ),
+        _TelemetryCtx(),
+    )
+    invalid = build_telemetry_security_event(
+        _event(
+            result="failed",
+            details={"error_type": "RuntimeError: CUSTOMER-CANARY", "exit_code": 1},
+        ),
+        _TelemetryCtx(),
+    )
+
+    for record in (successful, nested, invalid):
+        assert record is not None
+        assert "seccore.error_type" not in record
+        assert "seccore.exit_code" not in record
+
+
+def test_baseline_uses_same_structured_error_contract() -> None:
+    record = build_telemetry_security_event(
+        _event(
+            event_type="harden",
+            category="hardening",
+            result="failed",
+            details={
+                "error": "CUSTOMER-CANARY",
+                "error_type": "FileNotFoundError",
+                "exit_code": 127,
+                "result": {},
+            },
+        ),
+        _TelemetryCtx(),
+    )
+
+    assert record is not None
+    assert record["baseline.error_type"] == "FileNotFoundError"
+    assert record["baseline.exit_code"] == 127
+    assert "baseline.error" not in record
+
+
+def test_invalid_optional_values_are_omitted_without_losing_safe_envelope() -> None:
+    record = build_telemetry_security_event(
+        _event(
+            event_type="code_scan",
+            details={"result": {"verdict": "critical", "elapsed_ms": float("nan")}},
+        ),
+        _TelemetryCtx(),
+    )
+
+    assert record is not None
+    assert set(record) == COMPONENT_FIELDS | SECCORE_COMMON_FIELDS
+
+
+def test_bool_and_negative_counts_are_not_treated_as_valid_counts() -> None:
+    verify_record = build_telemetry_security_event(
+        _event(
+            event_type="verify",
+            category="asset_verify",
+            details={"result": {"passed": True, "failed": -1}},
+        ),
+        _TelemetryCtx(),
+    )
+    baseline_record = build_telemetry_security_event(
+        _event(
+            event_type="harden",
+            category="hardening",
+            details={"result": {"passed": True, "fixed": -1, "failed": 0, "total": 1}},
+        ),
+        _TelemetryCtx(),
+    )
+
+    assert verify_record is not None
+    assert set(verify_record) == COMPONENT_FIELDS | SECCORE_COMMON_FIELDS
+    assert baseline_record is not None
+    assert "baseline.passed" not in baseline_record
+    assert "baseline.fixed" not in baseline_record
+    assert baseline_record["baseline.failed"] == 0
+    assert baseline_record["baseline.total"] == 1
+
+
+def test_mapping_does_not_mutate_or_stringify_unapproved_values() -> None:
+    canary = StringCanary()
     details = {
-        "request": {"items": ("a", "b")},
-        "result": {"summary": {"values": {"z", "a"}}},
+        "request": {"prompt": canary},
+        "result": {"verdict": "pass", "elapsed_ms": 1, "unknown": canary},
+        "error": canary,
+        "unknown": canary,
     }
     original = copy.deepcopy(details)
-    event = _event(details=details)
 
-    record = build_telemetry_security_event(event, _TelemetryCtx())
-
-    assert details == original
-    assert record["seccore.request"] == {"items": ["a", "b"]}
-    assert record["seccore.summary"] == {"values": ["a", "z"]}
-    json.dumps(record)
-
-
-def test_mapping_converts_non_finite_floats_to_null_for_strict_json() -> None:
-    event = _event(
-        details={
-            "request": {
-                "nan": float("nan"),
-                "values": [float("inf"), float("-inf"), 1.25],
-            },
-            "error": float("nan"),
-            "result": {
-                "elapsed_ms": float("inf"),
-                "summary": {"score": float("nan")},
-            },
-        }
+    record = build_telemetry_security_event(
+        _event(details=details), _TelemetryCtx(agent_name="qwencode")
     )
 
-    record = build_telemetry_security_event(event, _TelemetryCtx())
-
-    assert record["seccore.request"] == {"nan": None, "values": [None, None, 1.25]}
-    assert record["seccore.error"] is None
-    assert record["seccore.elapsed_ms"] is None
-    assert record["seccore.summary"] == {"score": None}
+    assert record is not None
+    assert details.keys() == original.keys()
+    assert details["request"].keys() == original["request"].keys()
+    assert canary.stringified is False
     json.dumps(record, allow_nan=False)

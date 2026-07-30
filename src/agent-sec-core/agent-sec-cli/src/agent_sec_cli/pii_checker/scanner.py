@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Sequence
 
 from agent_sec_cli.pii_checker.detectors.base import PiiCandidate, PiiDetector
+from agent_sec_cli.pii_checker.detectors.custom import CustomPiiDetector
 from agent_sec_cli.pii_checker.detectors.regex import RegexPiiDetector
 from agent_sec_cli.pii_checker.models import (
     PiiFinding,
@@ -25,7 +26,6 @@ ALLOWED_SOURCES = {
     "manual",
     "unknown",
 }
-_MULTI_TYPE_OVERLAPS = {frozenset({"bearer_token", "jwt"})}
 
 
 def _decode_utf8_prefix(data: bytes) -> str:
@@ -58,29 +58,17 @@ def _aggregate_verdict(findings: list[PiiFinding]) -> str:
     return Verdict.PASS.value
 
 
-def _overlaps(left: tuple[int, int], right: tuple[int, int]) -> bool:
-    """Return whether two spans overlap."""
-    return left[0] < right[1] and right[0] < left[1]
-
-
-def _should_drop_overlapping(candidate: PiiCandidate, existing: PiiCandidate) -> bool:
-    """Return whether an overlapping candidate is redundant."""
-    if not _overlaps(candidate.span, existing.span):
-        return False
-    pair = frozenset({candidate.pii_type, existing.pii_type})
-    if candidate.span == existing.span and pair in _MULTI_TYPE_OVERLAPS:
-        return False
-    return True
-
-
 class PiiScanner:
     """PII scanner that orchestrates one or more detector implementations."""
 
     def __init__(self, detectors: Sequence[PiiDetector] | None = None) -> None:
         """Create a scanner with built-in regex detection unless overridden."""
-        self._detectors = (
-            list(detectors) if detectors is not None else [RegexPiiDetector()]
-        )
+        self._custom_detector: CustomPiiDetector | None = None
+        if detectors is not None:
+            self._detectors = list(detectors)
+        else:
+            self._custom_detector = CustomPiiDetector()
+            self._detectors = [RegexPiiDetector(), self._custom_detector]
 
     def scan(
         self,
@@ -112,6 +100,8 @@ class PiiScanner:
             bytes_scanned=bytes_scanned,
             truncated=truncated,
         )
+        if self._custom_detector is not None:
+            summary["custom_rules"] = self._custom_detector.summary()
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
         return PiiScanResult(
@@ -155,7 +145,7 @@ class PiiScanner:
         return self._dedupe(candidates)
 
     def _dedupe(self, candidates: list[PiiCandidate]) -> list[PiiCandidate]:
-        """Drop redundant overlaps while preserving meaningful type enrichment."""
+        """Drop exact type-and-span duplicates while preserving overlaps."""
         ordered = sorted(
             candidates,
             key=lambda item: (
@@ -163,14 +153,21 @@ class PiiScanner:
                 -item.confidence,
                 item.span[0],
                 -(item.span[1] - item.span[0]),
+                item.pii_type,
             ),
         )
         kept: list[PiiCandidate] = []
+        seen: set[tuple[str, tuple[int, int]]] = set()
         for candidate in ordered:
-            if any(_should_drop_overlapping(candidate, existing) for existing in kept):
+            identity = (candidate.pii_type, candidate.span)
+            if identity in seen:
                 continue
+            seen.add(identity)
             kept.append(candidate)
-        return sorted(kept, key=lambda item: item.span[0])
+        return sorted(
+            kept,
+            key=lambda item: (item.span[0], item.span[1], item.pii_type),
+        )
 
     def _build_findings(
         self,
@@ -196,7 +193,11 @@ class PiiScanner:
                     category=candidate.category,
                     severity=candidate.severity,
                     confidence=candidate.confidence,
-                    evidence_redacted=redact_value(candidate.value, candidate.pii_type),
+                    evidence_redacted=redact_value(
+                        candidate.value,
+                        candidate.pii_type,
+                        category=candidate.category,
+                    ),
                     span=candidate.span,
                     metadata=metadata,
                     raw_evidence=candidate.value if raw_evidence else None,

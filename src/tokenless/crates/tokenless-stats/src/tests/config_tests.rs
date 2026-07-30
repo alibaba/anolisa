@@ -216,7 +216,7 @@ fn test_serde_round_trip() {
     };
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: TokenlessConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.stats_enabled, false);
-    assert_eq!(deserialized.sls_enabled, false);
-    assert_eq!(deserialized.compression_enabled, true);
+    assert!(!deserialized.stats_enabled);
+    assert!(!deserialized.sls_enabled);
+    assert!(deserialized.compression_enabled);
 }

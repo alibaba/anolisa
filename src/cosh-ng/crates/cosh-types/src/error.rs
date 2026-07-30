@@ -26,11 +26,16 @@ pub enum ErrorCode {
     CheckpointCreateFailed = 301,
     CheckpointRestoreFailed = 302,
     CheckpointNotFound = 303,
+    CheckpointProtocolError = 304,
     // Audit (4xx)
     AuditDenied = 400,
     AuditPolicyError = 401,
     AuditLogError = 402,
     AuditActionMalformed = 403,
+    AuditUnavailable = 404,
+    AuditCorrupt = 405,
+    AuditCursorInvalid = 406,
+    AuditExportError = 407,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,5 +116,14 @@ mod tests {
         assert!(s.contains("svc"));
         assert!(s.contains("202"));
         assert!(s.contains("exit code 1"));
+    }
+
+    #[test]
+    fn test_checkpoint_protocol_error_contract() {
+        assert_eq!(ErrorCode::CheckpointProtocolError as u32, 304);
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::CheckpointProtocolError).unwrap(),
+            "\"CheckpointProtocolError\""
+        );
     }
 }

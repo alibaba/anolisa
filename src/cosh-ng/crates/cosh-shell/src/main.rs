@@ -18,6 +18,8 @@ mod hooks;
 mod i18n;
 #[allow(dead_code, unused_imports)]
 mod input;
+#[allow(dead_code)]
+mod insight;
 #[allow(dead_code, unused_imports)]
 mod journal;
 #[allow(dead_code, unused_imports)]
@@ -83,6 +85,9 @@ fn main() {
         print_usage_help();
         std::process::exit(0);
     }
+    if args.get(1).map(String::as_str) == Some("diagnostics") {
+        std::process::exit(diagnostics::bundle::run_cli(&args[2..]));
+    }
 
     runtime::terminal::install_terminal_recovery();
 
@@ -93,7 +98,15 @@ fn main() {
 
     let has_subcommand = matches!(
         args.get(1).map(String::as_str),
-        Some("demo" | "host-demo" | "raw" | "interactive" | "interactive-demo" | "adapter-demo")
+        Some(
+            "demo"
+                | "doctor"
+                | "host-demo"
+                | "raw"
+                | "interactive"
+                | "interactive-demo"
+                | "adapter-demo"
+        )
     );
     if let Some(status) = passthrough_raw_non_interactive(&args) {
         std::process::exit(status);
@@ -103,18 +116,19 @@ fn main() {
             std::process::exit(status);
         }
         if should_start_default_raw(&args[1..]) {
-            let (adapter_name, shell_kind) = configured_raw_invocation(&args[1..]);
-            let status = runtime::controller::run_raw(&adapter_name, shell_kind);
+            let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[1..]);
+            let status = runtime::controller::run_raw(&adapter_name, shell_kind, launch_options);
             std::process::exit(status);
         }
     }
 
     let status = match args.get(1).map(String::as_str) {
         Some("demo") => runtime::controller::run_demo(),
+        Some("doctor") => runtime::doctor::run_doctor(),
         Some("host-demo") => runtime::controller::run_host_demo(),
         Some("raw") => {
-            let (adapter_name, shell_kind) = configured_raw_invocation(&args[2..]);
-            runtime::controller::run_raw(&adapter_name, shell_kind)
+            let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[2..]);
+            runtime::controller::run_raw(&adapter_name, shell_kind, launch_options)
         }
         Some("interactive") => {
             runtime::controller::run_interactive(args.get(2).map(String::as_str).unwrap_or("fake"))
@@ -127,7 +141,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|co|qwen|cosh-core] [--shell bash|zsh]>"
+                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|co|qwen|cosh-core] [--shell bash|zsh] [--resume [session-id]]>"
             );
             2
         }

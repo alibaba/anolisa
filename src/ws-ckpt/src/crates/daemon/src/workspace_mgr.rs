@@ -296,6 +296,22 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
 
     let abs_path_str = abs_path.to_string_lossy().to_string();
 
+    // Every backend's init moves the original directory aside as a backup, and
+    // rename(2) returns EBUSY for a directory that is itself a mount point. Any
+    // filesystem qualifies (an in-place SkillFS over-mount is the common case).
+    // Reject here so the operator gets an actionable message instead of the raw
+    // "failed to rename original directory to backup: Device or resource busy".
+    if crate::util::is_mounted(&abs_path_str).await? {
+        return Ok(error_resp(
+            ErrorCode::InvalidPath,
+            format!(
+                "workspace root is an active mount point: {}; initialize a \
+                 subdirectory of the mount instead, or unmount it first and re-run",
+                abs_path.display()
+            ),
+        ));
+    }
+
     if let Some(resp) = crate::util::guard_cwd_occupants(&abs_path_str).await {
         return Ok(resp);
     }

@@ -40,9 +40,12 @@ pub struct TokenRecord {
 }
 
 impl TokenRecord {
-    /// Total tokens (input + output)
+    /// Total tokens (input + output + cache)
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens.unwrap_or(0)
+            + self.cache_read_tokens.unwrap_or(0)
     }
 
     /// Create a new record with current timestamp
@@ -183,7 +186,7 @@ mod tests {
         assert_eq!(back.provider, "anthropic");
         assert_eq!(back.input_tokens, 500);
         assert_eq!(back.output_tokens, 200);
-        assert_eq!(back.total_tokens(), 700);
+        assert_eq!(back.total_tokens(), 850);
         assert_eq!(back.agent, Some("Claude Code".to_string()));
         assert_eq!(back.model, Some("claude-3".to_string()));
     }

@@ -196,6 +196,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
+    env: Record<string, string> = process.env as Record<string, string>,
   ): Promise<ShellExecutionHandle> {
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
@@ -211,6 +212,7 @@ export class ShellExecutionService {
             abortSignal,
             shellExecutionConfig,
             ptyInfo,
+            env,
           );
         } catch (_e) {
           console.warn(
@@ -231,6 +233,7 @@ export class ShellExecutionService {
       onOutputEvent,
       abortSignal,
       shouldUseNodePty,
+      env,
     );
   }
 
@@ -240,6 +243,7 @@ export class ShellExecutionService {
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
     requestedPty: boolean = false,
+    env: Record<string, string> = process.env as Record<string, string>,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -273,7 +277,7 @@ export class ShellExecutionService {
         detached: needsStdin ? false : !isWindows,
         windowsHide: isWindows,
         env: {
-          ...process.env,
+          ...env,
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: 'cat',
@@ -447,6 +451,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shellExecutionConfig: ShellExecutionConfig,
     ptyInfo: PtyImplementation,
+    env: Record<string, string> = process.env as Record<string, string>,
   ): ShellExecutionHandle {
     if (!ptyInfo) {
       // This should not happen, but as a safeguard...
@@ -467,7 +472,7 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...process.env,
+          ...env,
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: shellExecutionConfig.pager ?? 'cat',

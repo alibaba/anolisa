@@ -20,10 +20,18 @@ pub struct PkgRemoveResult {
 }
 
 /// A single entry in package search results.
+///
+/// # Backward Compatibility (v0.12.0+)
+///
+/// `version` is `Option<String>` and omitted from JSON when `None`.
+/// Previous versions always serialized this field as an empty string.
+/// Consumers should use `entry.version.as_deref()` or equivalent
+/// optional-aware accessors to handle the missing field gracefully.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PkgSearchEntry {
     pub name: String,
-    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub summary: String,
     pub installed: bool,
 }

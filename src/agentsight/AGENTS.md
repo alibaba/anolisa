@@ -30,6 +30,10 @@
 - 禁止修改 BPF 程序而不验证 kernel >= 5.8 兼容性
 - BPF 变更必须在真实内核上测试，仅编译通过不够
 
+### 配置文件
+- 修改 `agentsight.json` 结构（新增/删除/重命名字段、改变语义）时，必须同步 bump `schema_version` 并更新 `config.rs` 中的 `CURRENT_SCHEMA_VERSION` 常量
+- 纯新增可选字段且旧配置完全兼容时，不需要 bump `schema_version`
+
 ## 1. Quick Start
 
 ```bash
@@ -87,11 +91,15 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Discovery** | `src/discovery/` | Agent 进程发现 | `AgentScanner`, `AgentMatcher`, `known_agents` |
 | **Health** | `src/health/` | Agent 健康检查 | `HealthChecker`, `HealthStore` |
 | **Tokenizer** | `src/tokenizer/` | LLM Token 计数 | `LlmTokenizer`, `MultiModelTokenizer` |
-| **ATIF** | `src/atif/` | 轨迹格式导出 | `AtifDocument`, `convert_trace_to_atif` |
+| **ATIF** | `src/atif/` | 轨迹格式导出（转换逻辑；数据模型来自 `agentsight-atif`） | `convert_trace_to_atif`, `convert_session_to_atif` |
 | **Server** | `src/server/` | HTTP API + 嵌入式前端 | `AppState`, `run_server` |
 | **Container** | `src/container.rs` | 容器 ID 提取（/proc/pid/cgroup） | `extract_container_id`, `parse_container_id_from_cgroup` |
 | **Config** | `src/config.rs` | 统一配置 | `AgentsightConfig` |
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
+| **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
+| **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
+| **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate，唯一的 ATIF 数据模型（采集链路 + 主 crate 导出链路共用） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
+| **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
 ## 5. Critical Code Paths
 
@@ -221,6 +229,13 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/auth/login` | POST | Dashboard 登录（Body: `{"token":"..."}` ），成功设置 httpOnly cookie |
 | `/api/auth/status` | GET | 返回 `{"auth_enabled": bool}`（免认证，供前端判断是否需登录）|
 | `/api/auth/verify` | GET | 校验当前 session cookie/token 是否有效，返回 `{"authenticated": bool}` |
+| `/api/optimize/sessions/{id}/{dim}` | POST | 运行单维度优化分析，`dim` ∈ `perf` / `perf-issues` / `cost` / `cost-waste` / `accuracy` / `summary`（后四者需 LLM 配置，10–60s；`summary` 为单次调用叙事摘要） |
+| `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
+| `/api/optimize/results` | GET | 分析历史列表（`start_ns`, `end_ns`, `limit` ≤ 200；默认最近 30 天，仅返回各维度存在标记，不含 payload） |
+| `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
+| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
+| `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
+| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤端点则降级为空 + 200） |
 
 ## 9. Frontend
 
@@ -236,6 +251,19 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 **重要：用户配置文件会完全替换（replace）内嵌的默认规则，而非追加（extend）。** 如果配置文件中缺少某个 Agent 的规则（如 `*claude*`），该 Agent 将不会被发现。修改配置前请确保包含所有需要监控的 Agent 规则。
 
+### schema_version 配置升级机制
+
+`agentsight.json` 顶层包含 `schema_version` 字段，标记当前配置格式的版本。程序启动时通过 `ensure_default_agents_config` 检查磁盘上配置文件的 `schema_version`：
+
+- **版本缺失或过旧**（如从 0.6 升级到 0.7）：自动备份旧文件为 `.json.bak`，用内嵌默认配置覆盖
+- **版本一致**：保留用户自定义配置不动
+- **RPM 安装**：使用 `%config(noreplace)`，RPM 升级不覆盖磁盘文件，由程序自身的 schema_version 检查处理升级
+
+**修改 `agentsight.json` 时的检查清单**：
+1. 是否新增/删除/重命名了字段？→ bump `schema_version` + 更新 `CURRENT_SCHEMA_VERSION`
+2. 是否改变了字段语义（如默认值翻转）？→ bump `schema_version` + 更新 `CURRENT_SCHEMA_VERSION`
+3. 是否纯新增可选字段（旧配置完全兼容）？→ 无需 bump
+
 ### 功能开关（`features`）
 
 通过 `agentsight.json` 的 `features` 区块独立控制各可选功能的启停。关闭后对应模块不实例化（`Storage::noop()` / `InterruptionDetector::disabled()` / `ResponseSessionMapper::disabled()`），减少内存和 I/O 开销。
@@ -250,6 +278,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 | 审计 | `features.audit` | `true` | LLM 调用审计持久化 |
 | Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
 | SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
+| 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描 Qoder/QoderWork 会话目录，JSONL 转 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描目录） |
 
 ### 运行时资源上限（`runtime_limits`）
 

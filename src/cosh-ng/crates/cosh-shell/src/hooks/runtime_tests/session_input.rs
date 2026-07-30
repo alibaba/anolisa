@@ -53,7 +53,7 @@ fn continued_user_input_does_not_downgrade_failed_command_consultation() {
 }
 
 #[test]
-fn records_blocks_followed_by_plain_input_but_not_card_actions() {
+fn records_blocks_followed_by_any_intercepted_input() {
     let block = block_with_command("free -m");
     let mut card_action = ShellEvent::user_input_intercepted("session", "card-action");
     card_action.component = Some("card".to_string());
@@ -77,7 +77,9 @@ fn records_blocks_followed_by_plain_input_but_not_card_actions() {
         &mut state,
     );
 
-    assert!(!state.hooks.blocks_followed_by_user_input.contains("cmd-1"));
+    assert!(state.hooks.blocks_followed_by_user_input.contains("cmd-1"));
+
+    state.hooks.blocks_followed_by_user_input.clear();
 
     let events = vec![
         ShellEvent::command_started("session", "cmd-1", "free -m", "/tmp", 10),

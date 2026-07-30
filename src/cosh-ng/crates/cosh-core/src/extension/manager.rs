@@ -1,142 +1,410 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+//! Extension catalog discovery and selected runtime contribution projection.
 
-use super::config::{flatten_hook_groups, ExtensionConfig, ExtensionHooks};
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use super::config::{flatten_hook_groups, ExtensionHooks};
+use super::manifest::parse_manifest;
+use super::source::{
+    content_digest, ManagedInstallationMetadata, ManagedSourceKind, MANAGED_DIR, PAYLOAD_DIR,
+};
+use super::state::{self, SourceSelection, SourceSelectionRecord, StateOrigin};
 use super::variables::{hydrate_config, VariableContext};
-use super::{Extension, InstallMetadata, EXTENSION_CONFIG_FILENAME, INSTALL_METADATA_FILENAME};
+use super::{
+    Activation, DesiredState, EffectiveState, Extension, ExtensionDiagnostic, ExtensionHealth,
+    ExtensionSourceKind, InstallMetadata, EXTENSION_CONFIG_FILENAME, INSTALL_METADATA_FILENAME,
+    MANAGED_INSTALL_METADATA_FILENAME,
+};
 
-/// Central manager for discovering, loading, and querying extensions.
+/// Discovers extension installations and builds the selected catalog snapshot.
 pub struct ExtensionManager {
     extensions: Vec<Extension>,
+    catalog_diagnostics: Vec<ExtensionDiagnostic>,
     workspace_dir: PathBuf,
-    /// Test-only override for user extensions directory.
     user_dir_override: Option<PathBuf>,
-    /// Test-only override for system extensions directory.
     system_dir_override: Option<PathBuf>,
+    state_dir_override: Option<PathBuf>,
 }
 
 impl ExtensionManager {
-    /// Create a new ExtensionManager.
-    ///
-    /// * `workspace_dir` – current project / workspace root directory (used for
-    ///   `${workspacePath}` variable substitution).
+    /// Creates a manager for the current user and system extension roots.
     pub fn new(workspace_dir: PathBuf) -> Self {
         Self {
             extensions: Vec::new(),
+            catalog_diagnostics: Vec::new(),
             workspace_dir,
             user_dir_override: None,
             system_dir_override: None,
+            state_dir_override: None,
         }
     }
 
-    /// Test constructor that overrides user and system directories.
+    /// Creates an isolated manager that cannot read or write the real user state.
     #[cfg(test)]
     pub fn new_isolated(
         workspace_dir: PathBuf,
         user_dir: Option<PathBuf>,
         system_dir: Option<PathBuf>,
     ) -> Self {
+        let state_dir_override = user_dir
+            .as_ref()
+            .and_then(|directory| directory.parent())
+            .map(|parent| parent.join("states"))
+            .or_else(|| Some(workspace_dir.join(".test-extension-states")));
         Self {
             extensions: Vec::new(),
+            catalog_diagnostics: Vec::new(),
             workspace_dir,
             user_dir_override: user_dir,
             system_dir_override: system_dir,
+            state_dir_override,
         }
     }
 
-    /// Scan system and user extension directories and load all valid extensions.
-    /// User-level extensions override system-level extensions with the same name.
-    pub fn refresh(&mut self) {
-        let mut extensions_map: HashMap<String, Extension> = HashMap::new();
+    /// Creates an isolated manager with an explicit extension state directory.
+    #[cfg(test)]
+    pub fn new_isolated_with_state(
+        workspace_dir: PathBuf,
+        user_dir: Option<PathBuf>,
+        system_dir: Option<PathBuf>,
+        state_dir: PathBuf,
+    ) -> Self {
+        Self {
+            extensions: Vec::new(),
+            catalog_diagnostics: Vec::new(),
+            workspace_dir,
+            user_dir_override: user_dir,
+            system_dir_override: system_dir,
+            state_dir_override: Some(state_dir),
+        }
+    }
 
-        // 1. Scan system-level directory (lower priority)
+    /// Rebuilds the selected catalog and runtime contribution snapshot.
+    pub fn refresh(&mut self) {
+        self.catalog_diagnostics.clear();
+        let mut candidates: BTreeMap<String, Vec<Extension>> = BTreeMap::new();
         let system_dir = self
             .system_dir_override
             .clone()
             .unwrap_or_else(super::system_extensions_dir);
-        self.scan_directory(&system_dir, &mut extensions_map);
-
-        // 2. Scan user-level directory (higher priority, overrides system)
-        let user_dir = self
+        self.scan_directory(&system_dir, ExtensionSourceKind::System, &mut candidates);
+        if let Some(user_dir) = self
             .user_dir_override
             .clone()
-            .or_else(super::user_extensions_dir);
-        if let Some(user_dir) = user_dir {
-            self.scan_directory(&user_dir, &mut extensions_map);
+            .or_else(super::user_extensions_dir)
+        {
+            self.scan_managed_directory(&user_dir.join(MANAGED_DIR), &mut candidates);
+            self.scan_directory(&user_dir, ExtensionSourceKind::Legacy, &mut candidates);
         }
 
-        // Collect into sorted vec
-        let mut exts: Vec<Extension> = extensions_map.into_values().collect();
-        exts.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // Apply disable state from ~/.copilot-shell/states/extensions.json
-        let disabled = crate::state::load_disabled(crate::state::EXTENSIONS_STATE);
-        for ext in &mut exts {
-            if disabled.contains(&ext.name) {
-                ext.is_active = false;
+        let loaded_state = match state::load(self.state_dir_override.as_deref()) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.catalog_diagnostics
+                    .push(ExtensionDiagnostic::new(error.code(), error.to_string()));
+                self.extensions = candidates
+                    .into_values()
+                    .filter_map(|group| group.into_iter().next())
+                    .map(|mut extension| {
+                        extension.desired_state = DesiredState::Disabled;
+                        extension.effective_state = EffectiveState::Disabled;
+                        extension.is_active = false;
+                        extension.health = ExtensionHealth::Broken;
+                        extension.diagnostics.push(ExtensionDiagnostic::new(
+                            error.code(),
+                            "extension activation failed closed because state is unreadable",
+                        ));
+                        extension
+                    })
+                    .collect();
+                return;
+            }
+        };
+        let mut persisted_state = loaded_state.state;
+        let compatibility_selection = loaded_state.origin != StateOrigin::Versioned;
+        if compatibility_selection {
+            for (name, group) in &candidates {
+                if has_source(group, ExtensionSourceKind::Legacy)
+                    && has_source(group, ExtensionSourceKind::System)
+                {
+                    let source_identity = group
+                        .iter()
+                        .find(|extension| extension.source == ExtensionSourceKind::Legacy)
+                        .map(|extension| extension.source_identity.clone())
+                        .unwrap_or_default();
+                    persisted_state.source_selections.insert(
+                        name.clone(),
+                        SourceSelectionRecord {
+                            source: SourceSelection::User,
+                            source_identity,
+                        },
+                    );
+                    self.catalog_diagnostics.push(ExtensionDiagnostic::new(
+                        "legacy_source_selection_migrated",
+                        format!(
+                            "preserved the legacy user-over-system selection for extension {name}"
+                        ),
+                    ));
+                }
+            }
+            if let Err(error) = state::save(&persisted_state, self.state_dir_override.as_deref()) {
+                self.catalog_diagnostics
+                    .push(ExtensionDiagnostic::new(error.code(), error.to_string()));
+                self.extensions = fail_closed_candidates(candidates, error.code());
+                return;
             }
         }
 
-        self.extensions = exts;
+        let mut resolved = Vec::new();
+        for (name, mut group) in candidates {
+            group.sort_by_key(|extension| match extension.source {
+                ExtensionSourceKind::PathCopy
+                | ExtensionSourceKind::Link
+                | ExtensionSourceKind::GitHttps
+                | ExtensionSourceKind::Legacy => 0,
+                ExtensionSourceKind::System => 1,
+                ExtensionSourceKind::Conflict => 2,
+            });
+            let available_sources = group
+                .iter()
+                .map(|extension| extension.source)
+                .collect::<Vec<_>>();
+            let available_source_identities = group
+                .iter()
+                .map(|extension| {
+                    let key = match extension.source {
+                        ExtensionSourceKind::PathCopy
+                        | ExtensionSourceKind::Link
+                        | ExtensionSourceKind::GitHttps
+                        | ExtensionSourceKind::Legacy => "user",
+                        ExtensionSourceKind::System => "system",
+                        ExtensionSourceKind::Conflict => "conflict",
+                    };
+                    (key.to_string(), extension.source_identity.clone())
+                })
+                .collect::<BTreeMap<_, _>>();
+            let selection = persisted_state.source_selections.get(&name);
+            let selected_index = match selection {
+                Some(selection) => group.iter().position(|extension| {
+                    let source_matches = match selection.source {
+                        SourceSelection::User => is_user_source(extension.source),
+                        SourceSelection::System => extension.source == ExtensionSourceKind::System,
+                    };
+                    source_matches && extension.source_identity == selection.source_identity
+                }),
+                None if group.len() == 1 => Some(0),
+                None => None,
+            };
+
+            let mut extension = match selected_index {
+                Some(index) => group.remove(index),
+                None => {
+                    let mut conflict = group.remove(0);
+                    conflict.source = ExtensionSourceKind::Conflict;
+                    conflict.source_identity = format!("conflict:{name}");
+                    conflict.health = ExtensionHealth::Conflict;
+                    conflict.diagnostics.push(ExtensionDiagnostic::new(
+                        "extension_source_conflict",
+                        format!(
+                            "extension {name} has multiple sources; select user or system explicitly"
+                        ),
+                    ));
+                    conflict
+                }
+            };
+            if selection.is_some() && extension.source == ExtensionSourceKind::Conflict {
+                extension.diagnostics.push(ExtensionDiagnostic::new(
+                    "extension_source_selection_stale",
+                    format!("saved source selection for {name} is no longer available"),
+                ));
+            }
+            extension.available_sources = available_sources;
+            extension.available_source_identities = available_source_identities;
+            extension.desired_state = if persisted_state.disabled.contains(&name) {
+                DesiredState::Disabled
+            } else {
+                DesiredState::Enabled
+            };
+            let can_activate = extension.desired_state == DesiredState::Enabled
+                && matches!(
+                    extension.health,
+                    ExtensionHealth::Healthy | ExtensionHealth::Degraded
+                );
+            extension.is_active = can_activate;
+            extension.effective_state = if can_activate {
+                EffectiveState::Enabled
+            } else {
+                EffectiveState::Disabled
+            };
+            extension.activation = Activation::Immediate;
+            resolved.push(extension);
+        }
+        self.extensions = resolved;
     }
 
-    /// Return all active extensions' skill directory absolute paths.
-    /// Each extension may declare multiple skill directories.
+    /// Returns active extension skill directories.
     pub fn skill_dirs(&self) -> Vec<PathBuf> {
-        let mut dirs = Vec::new();
-        for ext in &self.extensions {
-            if !ext.is_active {
-                continue;
-            }
-            for skill_dir in &ext.config.skills.0 {
-                let path = if std::path::Path::new(skill_dir).is_absolute() {
-                    PathBuf::from(skill_dir)
-                } else {
-                    ext.path.join(skill_dir)
-                };
-                dirs.push(path);
-            }
-        }
-        dirs
+        self.extensions
+            .iter()
+            .filter(|extension| extension.is_active)
+            .flat_map(|extension| {
+                extension.config.skills.0.iter().map(|skill_dir| {
+                    if Path::new(skill_dir).is_absolute() {
+                        PathBuf::from(skill_dir)
+                    } else {
+                        extension.path.join(skill_dir)
+                    }
+                })
+            })
+            .collect()
     }
 
-    /// Collect all active extensions' hook definitions into a merged ExtensionHooks.
+    /// Collects active extension hook definitions.
     pub fn hook_definitions(&self) -> ExtensionHooks {
         let mut merged = ExtensionHooks::default();
-        for ext in &self.extensions {
-            if !ext.is_active {
-                continue;
-            }
-            merged.merge(&ext.config.hooks);
+        for extension in self
+            .extensions
+            .iter()
+            .filter(|extension| extension.is_active)
+        {
+            merged.merge(&extension.config.hooks);
         }
         merged
     }
 
-    /// Return the list of loaded extensions.
+    /// Fingerprints the exact package content selected for this runtime snapshot.
+    pub fn runtime_fingerprint(&self) -> Result<String, ExtensionDiagnostic> {
+        let mut projection = Vec::new();
+        for extension in self
+            .extensions
+            .iter()
+            .filter(|extension| extension.is_active)
+        {
+            let digest = content_digest(&extension.path).map_err(|error| {
+                ExtensionDiagnostic::new(
+                    error.code(),
+                    format!(
+                        "failed to fingerprint runtime package {}: {error}",
+                        extension.name
+                    ),
+                )
+            })?;
+            projection.push(serde_json::json!({
+                "capability_fingerprint": extension.capability_fingerprint,
+                "content_digest": digest,
+                "name": extension.name,
+                "source_identity": extension.source_identity,
+            }));
+        }
+        super::identity::fingerprint_projection(serde_json::json!(projection)).map_err(|error| {
+            ExtensionDiagnostic::new(
+                "extension_generation_fingerprint_failed",
+                format!("failed to fingerprint extension runtime generation: {error}"),
+            )
+        })
+    }
+
+    /// Returns the selected catalog entries sorted by package identity.
     pub fn list(&self) -> &[Extension] {
         &self.extensions
     }
 
-    /// Get all hook names defined by a specific extension.
-    /// Used for cleanup when enabling an extension (remove its hooks from hooks.json disabled).
-    pub fn extension_hook_names(&self, ext_name: &str) -> HashSet<String> {
-        let mut names = HashSet::new();
-        let Some(ext) = self.extensions.iter().find(|e| e.name == ext_name) else {
-            return names;
+    /// Returns mutable entries to the runtime snapshot validator.
+    pub(crate) fn list_mut(&mut self) -> &mut [Extension] {
+        &mut self.extensions
+    }
+
+    /// Returns the canonical workspace root used for runtime contributions.
+    pub fn workspace_dir(&self) -> &Path {
+        &self.workspace_dir
+    }
+
+    /// Returns catalog-wide diagnostics, including invalid packages and state migration.
+    pub fn catalog_diagnostics(&self) -> &[ExtensionDiagnostic] {
+        &self.catalog_diagnostics
+    }
+
+    /// Persists desired enabled state and rebuilds the catalog projection.
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<Extension, String> {
+        if !self
+            .extensions
+            .iter()
+            .any(|extension| extension.name == name)
+        {
+            return Err(format!("extension not found: {name}"));
+        }
+        state::set_enabled(name, enabled, self.state_dir_override.as_deref())
+            .map_err(|error| error.to_string())?;
+        self.refresh();
+        self.extensions
+            .iter()
+            .find(|extension| extension.name == name)
+            .cloned()
+            .ok_or_else(|| format!("extension not found after state update: {name}"))
+    }
+
+    /// Persists an explicit source selection and rebuilds the catalog projection.
+    pub fn select_source(
+        &mut self,
+        name: &str,
+        selection: SourceSelection,
+    ) -> Result<Extension, String> {
+        if !self
+            .extensions
+            .iter()
+            .any(|extension| extension.name == name)
+        {
+            return Err(format!("extension not found: {name}"));
+        }
+        let source_key = match selection {
+            SourceSelection::User => "user",
+            SourceSelection::System => "system",
         };
-        let all_groups = [
-            &ext.config.hooks.pre_tool_use,
-            &ext.config.hooks.post_tool_use,
-            &ext.config.hooks.post_tool_use_failure,
-            &ext.config.hooks.user_prompt_submit,
-            &ext.config.hooks.session_start,
-            &ext.config.hooks.stop,
-            &ext.config.hooks.before_model,
-            &ext.config.hooks.after_model,
+        let source_identity = self
+            .extensions
+            .iter()
+            .find(|extension| extension.name == name)
+            .and_then(|extension| extension.available_source_identities.get(source_key))
+            .cloned()
+            .ok_or_else(|| format!("extension source not found: {name}/{source_key}"))?;
+        state::select_source(
+            name,
+            selection,
+            &source_identity,
+            self.state_dir_override.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        self.refresh();
+        self.extensions
+            .iter()
+            .find(|extension| extension.name == name)
+            .cloned()
+            .ok_or_else(|| format!("extension not found after source selection: {name}"))
+    }
+
+    /// Returns hook local names for compatibility cleanup in hook state.
+    pub fn extension_hook_names(&self, extension_name: &str) -> HashSet<String> {
+        let Some(extension) = self
+            .extensions
+            .iter()
+            .find(|extension| extension.name == extension_name)
+        else {
+            return HashSet::new();
+        };
+        let mut names = HashSet::new();
+        let groups = [
+            &extension.config.hooks.pre_tool_use,
+            &extension.config.hooks.post_tool_use,
+            &extension.config.hooks.post_tool_use_failure,
+            &extension.config.hooks.user_prompt_submit,
+            &extension.config.hooks.session_start,
+            &extension.config.hooks.stop,
+            &extension.config.hooks.before_model,
+            &extension.config.hooks.after_model,
         ];
-        for groups in all_groups {
-            for def in flatten_hook_groups(groups) {
-                if let Some(name) = def.name {
+        for group in groups {
+            for definition in flatten_hook_groups(group) {
+                if let Some(name) = definition.name {
                     names.insert(name);
                 }
             }
@@ -144,332 +412,624 @@ impl ExtensionManager {
         names
     }
 
-    // ─── Private helpers ─────────────────────────────────────────────
-
-    fn scan_directory(&self, dir: &PathBuf, map: &mut HashMap<String, Extension>) {
-        let entries = match std::fs::read_dir(dir) {
+    fn scan_directory(
+        &mut self,
+        directory: &Path,
+        source: ExtensionSourceKind,
+        candidates: &mut BTreeMap<String, Vec<Extension>>,
+    ) {
+        let entries = match std::fs::read_dir(directory) {
             Ok(entries) => entries,
-            Err(_) => return, // Directory doesn't exist or not readable
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                self.catalog_diagnostics.push(ExtensionDiagnostic::new(
+                    "extension_source_unreadable",
+                    format!("failed to scan {}: {error}", directory.display()),
+                ));
+                return;
+            }
         };
-
         for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let entry_path = entry.path();
             if !entry_path.is_dir() {
                 continue;
             }
-
-            // Resolve symlinks for the actual path
-            let resolved_path = entry_path
-                .canonicalize()
-                .unwrap_or_else(|_| entry_path.clone());
-
-            let config_file = resolved_path.join(EXTENSION_CONFIG_FILENAME);
-            if !config_file.exists() {
+            let resolved_path = match entry_path.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    self.catalog_diagnostics.push(ExtensionDiagnostic::new(
+                        "extension_path_unreadable",
+                        format!("failed to resolve {}: {error}", entry_path.display()),
+                    ));
+                    continue;
+                }
+            };
+            if !resolved_path.join(EXTENSION_CONFIG_FILENAME).exists() {
                 continue;
             }
+            match self.load_extension(&resolved_path, source) {
+                Ok(extension) => candidates
+                    .entry(extension.name.clone())
+                    .or_default()
+                    .push(extension),
+                Err(diagnostic) => self.catalog_diagnostics.push(diagnostic),
+            }
+        }
+    }
 
-            match self.load_extension(&resolved_path) {
-                Some(ext) => {
-                    map.insert(ext.name.clone(), ext);
-                }
-                None => {
-                    tracing::warn!(
-                        target: "extension",
-                        "Failed to load extension from: {}",
-                        resolved_path.display()
-                    );
+    fn scan_managed_directory(
+        &mut self,
+        directory: &Path,
+        candidates: &mut BTreeMap<String, Vec<Extension>>,
+    ) {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                self.catalog_diagnostics.push(ExtensionDiagnostic::new(
+                    "extension_managed_store_unreadable",
+                    format!("failed to scan {}: {error}", directory.display()),
+                ));
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let installation = entry.path();
+            if !installation.is_dir() {
+                continue;
+            }
+            match self.load_managed_extension(&installation) {
+                Ok(extension) => candidates
+                    .entry(extension.name.clone())
+                    .or_default()
+                    .push(extension),
+                Err(diagnostic) => {
+                    if let Some(extension) =
+                        self.broken_link_extension(&installation, diagnostic.clone())
+                    {
+                        candidates
+                            .entry(extension.name.clone())
+                            .or_default()
+                            .push(extension);
+                    }
+                    self.catalog_diagnostics.push(diagnostic);
                 }
             }
         }
     }
 
-    fn load_extension(&self, ext_dir: &PathBuf) -> Option<Extension> {
-        let config_path = ext_dir.join(EXTENSION_CONFIG_FILENAME);
-        let config_content = match std::fs::read_to_string(&config_path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    target: "extension",
-                    "Failed to read {}: {e}",
-                    config_path.display()
-                );
-                return None;
-            }
-        };
-        let mut config: ExtensionConfig = serde_json::from_str(&config_content)
-            .map_err(|e| {
-                tracing::warn!(
-                    target: "extension",
-                    "Failed to parse {}: {e}",
-                    config_path.display()
-                );
-            })
-            .ok()?;
+    fn broken_link_extension(
+        &self,
+        installation: &Path,
+        diagnostic: ExtensionDiagnostic,
+    ) -> Option<Extension> {
+        let metadata = std::fs::read(installation.join(MANAGED_INSTALL_METADATA_FILENAME))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ManagedInstallationMetadata>(&bytes).ok())?;
+        if metadata.source_kind != ManagedSourceKind::Link {
+            return None;
+        }
+        Some(Extension {
+            name: metadata.name.clone(),
+            version: metadata.version.clone(),
+            path: installation.join(PAYLOAD_DIR),
+            is_active: false,
+            config: super::ExtensionConfig {
+                name: metadata.name.clone(),
+                version: metadata.version.clone(),
+                skills: super::config::SkillsDirs(Vec::new()),
+                hooks: ExtensionHooks::default(),
+            },
+            install_metadata: None,
+            managed_install_metadata: Some(metadata.clone()),
+            schema_version: super::ManifestSchemaVersion::V1,
+            source: ExtensionSourceKind::Link,
+            source_identity: metadata.source_identity,
+            available_sources: Vec::new(),
+            available_source_identities: BTreeMap::new(),
+            desired_state: DesiredState::Enabled,
+            effective_state: EffectiveState::Disabled,
+            activation: Activation::NextSession,
+            health: ExtensionHealth::Broken,
+            capability_fingerprint: metadata.capability_fingerprint,
+            capabilities: Vec::new(),
+            diagnostics: vec![diagnostic],
+            settings: Vec::new(),
+            contexts: Vec::new(),
+            mcp_servers: Vec::new(),
+            agent_directories: Vec::new(),
+        })
+    }
 
-        // Apply variable substitution
-        let ctx = VariableContext {
-            extension_path: ext_dir,
+    fn load_managed_extension(
+        &self,
+        installation: &Path,
+    ) -> Result<Extension, ExtensionDiagnostic> {
+        let metadata_path = installation.join(MANAGED_INSTALL_METADATA_FILENAME);
+        let metadata_content = std::fs::read_to_string(&metadata_path).map_err(|error| {
+            ExtensionDiagnostic::new(
+                "extension_install_metadata_unreadable",
+                format!("failed to read {}: {error}", metadata_path.display()),
+            )
+        })?;
+        let metadata: ManagedInstallationMetadata = serde_json::from_str(&metadata_content)
+            .map_err(|error| {
+                ExtensionDiagnostic::new(
+                    "extension_install_metadata_invalid",
+                    format!("failed to parse {}: {error}", metadata_path.display()),
+                )
+            })?;
+        if metadata.schema_version != 1 {
+            return Err(ExtensionDiagnostic::new(
+                "extension_install_metadata_schema_unsupported",
+                format!(
+                    "unsupported installation metadata schema {} in {}",
+                    metadata.schema_version,
+                    metadata_path.display()
+                ),
+            ));
+        }
+        if installation.file_name().and_then(|name| name.to_str()) != Some(metadata.name.as_str()) {
+            return Err(ExtensionDiagnostic::new(
+                "extension_install_directory_mismatch",
+                format!(
+                    "managed directory {} does not match package identity {}",
+                    installation.display(),
+                    metadata.name
+                ),
+            ));
+        }
+        let payload = installation.join(PAYLOAD_DIR);
+        let payload_type = std::fs::symlink_metadata(&payload).map_err(|error| {
+            ExtensionDiagnostic::new(
+                "extension_managed_payload_unreadable",
+                format!("failed to inspect {}: {error}", payload.display()),
+            )
+        })?;
+        let link_expected = metadata.source_kind == ManagedSourceKind::Link;
+        if payload_type.file_type().is_symlink() != link_expected {
+            return Err(ExtensionDiagnostic::new(
+                "extension_managed_payload_type_mismatch",
+                format!(
+                    "managed payload type does not match {:?} metadata: {}",
+                    metadata.source_kind,
+                    payload.display()
+                ),
+            ));
+        }
+        let resolved_payload = payload.canonicalize().map_err(|error| {
+            ExtensionDiagnostic::new(
+                "extension_managed_payload_unreadable",
+                format!("failed to resolve {}: {error}", payload.display()),
+            )
+        })?;
+        let source = match metadata.source_kind {
+            ManagedSourceKind::PathCopy => ExtensionSourceKind::PathCopy,
+            ManagedSourceKind::Link => ExtensionSourceKind::Link,
+            ManagedSourceKind::GitHttps => ExtensionSourceKind::GitHttps,
+        };
+        let mut extension = self.load_extension(&resolved_payload, source)?;
+        let digest = content_digest(&resolved_payload).map_err(|error| {
+            ExtensionDiagnostic::new(error.code(), format!("{}: {error}", payload.display()))
+        })?;
+        if metadata.source_kind == ManagedSourceKind::Link {
+            if extension.name != metadata.name {
+                extension.health = ExtensionHealth::Broken;
+                extension.diagnostics.push(ExtensionDiagnostic::new(
+                    "extension_link_identity_changed",
+                    "linked package identity no longer matches its installation record",
+                ));
+            } else if extension.capability_fingerprint != metadata.capability_fingerprint {
+                extension.health = ExtensionHealth::Broken;
+                extension.diagnostics.push(ExtensionDiagnostic::new(
+                    "extension_link_consent_stale",
+                    "linked package capability fingerprint changed; reinstall the link to review consent",
+                ));
+            } else if extension.version != metadata.version || digest != metadata.content_digest {
+                extension.health = ExtensionHealth::Degraded;
+                extension.diagnostics.push(ExtensionDiagnostic::new(
+                    "extension_link_stale",
+                    "linked package content changed and requires a safe-point reload",
+                ));
+            }
+        } else if extension.name != metadata.name
+            || extension.version != metadata.version
+            || extension.capability_fingerprint != metadata.capability_fingerprint
+            || digest != metadata.content_digest
+        {
+            extension.health = ExtensionHealth::Broken;
+            extension.diagnostics.push(ExtensionDiagnostic::new(
+                "extension_managed_payload_changed",
+                "managed payload no longer matches its committed installation metadata",
+            ));
+        }
+        extension.source_identity = metadata.source_identity.clone();
+        extension.managed_install_metadata = Some(metadata);
+        Ok(extension)
+    }
+
+    fn load_extension(
+        &self,
+        extension_root: &Path,
+        source: ExtensionSourceKind,
+    ) -> Result<Extension, ExtensionDiagnostic> {
+        let manifest_path = extension_root.join(EXTENSION_CONFIG_FILENAME);
+        let content = std::fs::read_to_string(&manifest_path).map_err(|error| {
+            ExtensionDiagnostic::new(
+                "extension_manifest_unreadable",
+                format!("failed to read {}: {error}", manifest_path.display()),
+            )
+        })?;
+        let parsed = parse_manifest(&content, extension_root).map_err(|error| {
+            ExtensionDiagnostic::new(
+                error.code(),
+                format!("{}: {error}", manifest_path.display()),
+            )
+        })?;
+        let mut config = parsed.config;
+        let context = VariableContext {
+            extension_path: extension_root,
             workspace_path: &self.workspace_dir,
         };
-        hydrate_config(&mut config, &ctx);
+        hydrate_config(&mut config, &context);
 
-        // Load optional install metadata
-        let metadata_path = ext_dir.join(INSTALL_METADATA_FILENAME);
+        let metadata_path = extension_root.join(INSTALL_METADATA_FILENAME);
         let install_metadata = if metadata_path.exists() {
-            match std::fs::read_to_string(&metadata_path) {
-                Ok(s) => match serde_json::from_str::<InstallMetadata>(&s) {
-                    Ok(m) => Some(m),
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "extension",
-                            "Failed to parse {}: {e}",
-                            metadata_path.display()
-                        );
-                        None
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        target: "extension",
-                        "Failed to read {}: {e}",
-                        metadata_path.display()
-                    );
-                    None
-                }
-            }
+            let metadata = std::fs::read_to_string(&metadata_path).map_err(|error| {
+                ExtensionDiagnostic::new(
+                    "extension_install_metadata_unreadable",
+                    format!("failed to read {}: {error}", metadata_path.display()),
+                )
+            })?;
+            Some(
+                serde_json::from_str::<InstallMetadata>(&metadata).map_err(|error| {
+                    ExtensionDiagnostic::new(
+                        "extension_install_metadata_invalid",
+                        format!("failed to parse {}: {error}", metadata_path.display()),
+                    )
+                })?,
+            )
         } else {
             None
         };
-
-        Some(Extension {
+        let health = if parsed.diagnostics.is_empty() {
+            ExtensionHealth::Healthy
+        } else {
+            ExtensionHealth::Degraded
+        };
+        Ok(Extension {
             name: config.name.clone(),
             version: config.version.clone(),
-            path: ext_dir.clone(),
-            is_active: true,
+            path: extension_root.to_path_buf(),
+            is_active: false,
             config,
             install_metadata,
+            managed_install_metadata: None,
+            schema_version: parsed.schema_version,
+            source,
+            source_identity: extension_root.to_string_lossy().into_owned(),
+            available_sources: vec![source],
+            available_source_identities: BTreeMap::new(),
+            desired_state: DesiredState::Enabled,
+            effective_state: EffectiveState::Disabled,
+            activation: Activation::Immediate,
+            health,
+            capability_fingerprint: parsed.capability_fingerprint,
+            capabilities: parsed.capabilities,
+            diagnostics: parsed.diagnostics,
+            settings: parsed.settings,
+            contexts: parsed.contexts,
+            mcp_servers: parsed.mcp_servers,
+            agent_directories: parsed.agent_directories,
         })
     }
+}
+
+fn has_source(group: &[Extension], source: ExtensionSourceKind) -> bool {
+    group.iter().any(|extension| extension.source == source)
+}
+
+fn is_user_source(source: ExtensionSourceKind) -> bool {
+    matches!(
+        source,
+        ExtensionSourceKind::PathCopy
+            | ExtensionSourceKind::Link
+            | ExtensionSourceKind::GitHttps
+            | ExtensionSourceKind::Legacy
+    )
+}
+
+fn fail_closed_candidates(
+    candidates: BTreeMap<String, Vec<Extension>>,
+    diagnostic_code: &str,
+) -> Vec<Extension> {
+    candidates
+        .into_values()
+        .filter_map(|group| group.into_iter().next())
+        .map(|mut extension| {
+            extension.desired_state = DesiredState::Disabled;
+            extension.effective_state = EffectiveState::Disabled;
+            extension.is_active = false;
+            extension.health = ExtensionHealth::Broken;
+            extension.diagnostics.push(ExtensionDiagnostic::new(
+                diagnostic_code,
+                "extension activation failed closed because state migration could not persist",
+            ));
+            extension
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension::installer::ExtensionInstaller;
     use std::fs;
 
-    fn create_extension_dir(base: &std::path::Path, name: &str, config_json: &str) -> PathBuf {
-        let ext_dir = base.join(name);
-        fs::create_dir_all(&ext_dir).unwrap();
-        fs::write(ext_dir.join(EXTENSION_CONFIG_FILENAME), config_json).unwrap();
-        ext_dir
+    fn create_extension(directory: &Path, entry: &str, manifest: &str) -> PathBuf {
+        let root = directory.join(entry);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(EXTENSION_CONFIG_FILENAME), manifest).unwrap();
+        root
     }
 
-    fn isolated_system_dir(base: &std::path::Path) -> PathBuf {
-        let system_dir = base.join("system-ext");
-        fs::create_dir_all(&system_dir).unwrap();
-        system_dir
+    fn roots() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let temporary = tempfile::tempdir().unwrap();
+        let user = temporary.path().join("user");
+        let system = temporary.path().join("system");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&user).unwrap();
+        fs::create_dir_all(&system).unwrap();
+        (temporary, user, system, states)
     }
 
     #[test]
-    fn test_load_extension_from_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user_dir = tmp.path().join("user-ext");
-        fs::create_dir_all(&user_dir).unwrap();
-
-        create_extension_dir(
-            &user_dir,
+    fn loads_legacy_extension_and_preserves_runtime_projection() {
+        let (_temporary, user, system, states) = roots();
+        create_extension(
+            &user,
             "my-ext",
-            r#"{"name": "my-ext", "version": "1.0.0"}"#,
+            r#"{"name":"my-ext","version":"1.0.0","skills":[]}"#,
         );
-
-        let system_dir = isolated_system_dir(tmp.path());
-        let mut mgr = ExtensionManager::new_isolated(
+        let mut manager = ExtensionManager::new_isolated_with_state(
             PathBuf::from("/workspace"),
-            Some(user_dir),
-            Some(system_dir),
+            Some(user),
+            Some(system),
+            states,
         );
-        mgr.refresh();
-
-        assert_eq!(mgr.list().len(), 1);
-        assert_eq!(mgr.list()[0].name, "my-ext");
-        assert_eq!(mgr.list()[0].version, "1.0.0");
-        assert!(mgr.list()[0].is_active);
+        manager.refresh();
+        assert_eq!(manager.list().len(), 1);
+        assert_eq!(manager.list()[0].name, "my-ext");
+        assert!(manager.list()[0].is_active);
+        assert_eq!(manager.list()[0].health, ExtensionHealth::Degraded);
     }
 
     #[test]
-    fn test_skill_dirs_resolution() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user_dir = tmp.path().join("user-ext");
-        fs::create_dir_all(&user_dir).unwrap();
-
-        create_extension_dir(
-            &user_dir,
-            "ext-a",
-            r#"{"name": "ext-a", "skills": ["${extensionPath}/my-skills", "extra"]}"#,
+    fn migrates_existing_user_over_system_conflict_once() {
+        let (_temporary, user, system, states) = roots();
+        create_extension(
+            &user,
+            "shared",
+            r#"{"name":"shared","version":"2.0.0","skills":[]}"#,
         );
-
-        let mut mgr = ExtensionManager::new_isolated(
+        create_extension(
+            &system,
+            "shared",
+            r#"{"name":"shared","version":"1.0.0","skills":[]}"#,
+        );
+        let expected_user_identity = user
+            .join("shared")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut manager = ExtensionManager::new_isolated_with_state(
             PathBuf::from("/workspace"),
-            Some(user_dir.clone()),
-            Some(isolated_system_dir(tmp.path())),
+            Some(user),
+            Some(system),
+            states.clone(),
         );
-        mgr.refresh();
-
-        let dirs = mgr.skill_dirs();
-        assert_eq!(dirs.len(), 2);
-        // First should be absolute (variable substituted)
-        let ext_path = user_dir.join("ext-a").canonicalize().unwrap();
-        assert_eq!(dirs[0], ext_path.join("my-skills"));
-        // Second is relative, joined with extension path
-        assert_eq!(dirs[1], ext_path.join("extra"));
+        manager.refresh();
+        assert_eq!(manager.list()[0].version, "2.0.0");
+        assert_eq!(manager.list()[0].source, ExtensionSourceKind::Legacy);
+        assert!(manager
+            .catalog_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "legacy_source_selection_migrated"));
+        let loaded = state::load(Some(&states)).unwrap();
+        assert_eq!(loaded.origin, StateOrigin::Versioned);
+        assert_eq!(
+            loaded.state.source_selections.get("shared"),
+            Some(&SourceSelectionRecord {
+                source: SourceSelection::User,
+                source_identity: expected_user_identity,
+            })
+        );
     }
 
     #[test]
-    fn test_hook_definitions_collection() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user_dir = tmp.path().join("user-ext");
-        fs::create_dir_all(&user_dir).unwrap();
-
-        create_extension_dir(
-            &user_dir,
-            "hook-ext",
-            r#"{
-                "name": "hook-ext",
-                "hooks": {
-                    "PreToolUse": [
-                        {"hooks": [{"type": "command", "command": "echo pre", "name": "h1"}]}
-                    ],
-                    "Stop": [
-                        {"hooks": [{"type": "command", "command": "echo stop"}]}
-                    ]
-                }
-            }"#,
+    fn new_conflict_fails_closed_without_selection() {
+        let (_temporary, user, system, states) = roots();
+        state::save(&state::ExtensionState::default(), Some(&states)).unwrap();
+        create_extension(
+            &user,
+            "shared",
+            r#"{"name":"shared","version":"2.0.0","skills":[]}"#,
         );
-
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/ws"),
-            Some(user_dir),
-            Some(isolated_system_dir(tmp.path())),
+        create_extension(
+            &system,
+            "shared",
+            r#"{"name":"shared","version":"1.0.0","skills":[]}"#,
         );
-        mgr.refresh();
-
-        let hooks = mgr.hook_definitions();
-        assert_eq!(hooks.pre_tool_use.len(), 1);
-        assert_eq!(hooks.pre_tool_use[0].hooks[0].command, "echo pre");
-        assert_eq!(hooks.stop.len(), 1);
-        assert!(hooks.post_tool_use.is_empty());
+        let mut manager = ExtensionManager::new_isolated_with_state(
+            PathBuf::from("/workspace"),
+            Some(user),
+            Some(system),
+            states,
+        );
+        manager.refresh();
+        let extension = &manager.list()[0];
+        assert_eq!(extension.health, ExtensionHealth::Conflict);
+        assert_eq!(extension.effective_state, EffectiveState::Disabled);
+        assert!(!extension.is_active);
     }
 
     #[test]
-    fn test_user_overrides_system() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sys_dir = tmp.path().join("system");
-        let user_dir = tmp.path().join("user");
-        fs::create_dir_all(&sys_dir).unwrap();
-        fs::create_dir_all(&user_dir).unwrap();
-
-        create_extension_dir(
-            &sys_dir,
-            "shared-ext",
-            r#"{"name": "shared-ext", "version": "1.0.0"}"#,
+    fn corrupt_state_fails_closed() {
+        let (_temporary, user, system, states) = roots();
+        create_extension(
+            &user,
+            "example",
+            r#"{"name":"example","version":"1.0.0","skills":[]}"#,
         );
-        create_extension_dir(
-            &user_dir,
-            "shared-ext",
-            r#"{"name": "shared-ext", "version": "2.0.0"}"#,
+        fs::create_dir_all(&states).unwrap();
+        fs::write(states.join(crate::state::EXTENSIONS_STATE), "not json").unwrap();
+        let mut manager = ExtensionManager::new_isolated_with_state(
+            PathBuf::from("/workspace"),
+            Some(user),
+            Some(system),
+            states,
         );
-
-        let mut mgr =
-            ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), Some(sys_dir));
-        mgr.refresh();
-
-        assert_eq!(mgr.list().len(), 1);
-        assert_eq!(mgr.list()[0].version, "2.0.0"); // user wins
+        manager.refresh();
+        assert_eq!(manager.list()[0].health, ExtensionHealth::Broken);
+        assert!(!manager.list()[0].is_active);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn test_variable_substitution() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user_dir = tmp.path().join("user-ext");
-        fs::create_dir_all(&user_dir).unwrap();
-
-        create_extension_dir(
-            &user_dir,
-            "var-ext",
-            r#"{
-                "name": "var-ext",
-                "hooks": {
-                    "PreToolUse": [
-                        {"hooks": [{"type": "command", "command": "${extensionPath}/run.sh --ws=${workspacePath}"}]}
-                    ]
-                }
-            }"#,
-        );
-
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/my/workspace"),
-            Some(user_dir.clone()),
-            Some(isolated_system_dir(tmp.path())),
-        );
-        mgr.refresh();
-
-        let hooks = mgr.hook_definitions();
-        let ext_path = user_dir.join("var-ext").canonicalize().unwrap();
-        let expected = format!("{}/run.sh --ws=/my/workspace", ext_path.display());
-        assert_eq!(hooks.pre_tool_use[0].hooks[0].command, expected);
-    }
-
-    #[test]
-    fn test_missing_config_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user_dir = tmp.path().join("user-ext");
-        fs::create_dir_all(&user_dir).unwrap();
-
-        // Create dir WITHOUT cosh-extension.json
-        fs::create_dir_all(user_dir.join("no-config")).unwrap();
-        // Create one WITH config
-        create_extension_dir(&user_dir, "valid-ext", r#"{"name": "valid-ext"}"#);
-
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/ws"),
-            Some(user_dir),
-            Some(isolated_system_dir(tmp.path())),
-        );
-        mgr.refresh();
-
-        assert_eq!(mgr.list().len(), 1);
-        assert_eq!(mgr.list()[0].name, "valid-ext");
-    }
-
-    #[test]
-    fn test_install_metadata_loaded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user_dir = tmp.path().join("user-ext");
-        fs::create_dir_all(&user_dir).unwrap();
-
-        let ext_dir = create_extension_dir(
-            &user_dir,
-            "meta-ext",
-            r#"{"name": "meta-ext", "version": "1.0.0"}"#,
-        );
+    fn linked_content_change_is_stale_but_capability_change_requires_consent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let user = temporary.path().join("extensions");
+        let system = temporary.path().join("system");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&system).unwrap();
         fs::write(
-            ext_dir.join(INSTALL_METADATA_FILENAME),
-            r#"{"source": "/tmp/source", "type": "local", "installed_at": "2025-06-17T00:00:00Z"}"#,
+            source.join(EXTENSION_CONFIG_FILENAME),
+            r#"{
+                "schemaVersion": 1,
+                "name": "example.dev",
+                "version": "1.0.0",
+                "compatibility": {"cosh": ">=0.12.0"}
+            }"#,
         )
         .unwrap();
-
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/ws"),
-            Some(user_dir),
-            Some(isolated_system_dir(tmp.path())),
+        fs::write(source.join("README.md"), "one").unwrap();
+        let installer = ExtensionInstaller::new(user.clone(), states.clone());
+        let preflight = installer.preflight_link(&source).unwrap();
+        installer
+            .commit(&preflight.operation_id, &preflight.capability_fingerprint)
+            .unwrap();
+        let mut manager = ExtensionManager::new_isolated_with_state(
+            temporary.path().join("workspace"),
+            Some(user),
+            Some(system),
+            states,
         );
-        mgr.refresh();
 
-        let ext = &mgr.list()[0];
-        assert!(ext.install_metadata.is_some());
-        let meta = ext.install_metadata.as_ref().unwrap();
-        assert_eq!(meta.source, "/tmp/source");
-        assert_eq!(meta.install_type, "local");
-        assert_eq!(meta.installed_at, "2025-06-17T00:00:00Z");
+        fs::write(source.join("README.md"), "two").unwrap();
+        manager.refresh();
+        let extension = &manager.list()[0];
+        assert_eq!(extension.health, ExtensionHealth::Degraded);
+        assert!(extension.is_active);
+        assert!(extension
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "extension_link_stale"));
+
+        fs::write(
+            source.join(EXTENSION_CONFIG_FILENAME),
+            r#"{
+                "schemaVersion": 1,
+                "name": "example.dev",
+                "version": "1.0.0",
+                "compatibility": {"cosh": ">=0.12.0"},
+                "hooks": {
+                    "BeforeModel": [{
+                        "hooks": [{
+                            "type": "command",
+                            "name": "guard",
+                            "command": "/usr/bin/true"
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+        manager.refresh();
+        let extension = &manager.list()[0];
+        assert_eq!(extension.health, ExtensionHealth::Broken);
+        assert!(!extension.is_active);
+        assert!(extension
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "extension_link_consent_stale"));
+
+        fs::remove_dir_all(&source).unwrap();
+        manager.refresh();
+        let extension = &manager.list()[0];
+        assert_eq!(extension.name, "example.dev");
+        assert_eq!(extension.source, ExtensionSourceKind::Link);
+        assert_eq!(extension.health, ExtensionHealth::Broken);
+        assert!(!extension.is_active);
+        assert!(extension
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "extension_managed_payload_unreadable"));
+    }
+
+    #[test]
+    fn desired_state_round_trip_controls_effective_state() {
+        let (_temporary, user, system, states) = roots();
+        create_extension(
+            &user,
+            "example",
+            r#"{"name":"example","version":"1.0.0","skills":[]}"#,
+        );
+        let mut manager = ExtensionManager::new_isolated_with_state(
+            PathBuf::from("/workspace"),
+            Some(user),
+            Some(system),
+            states,
+        );
+        manager.refresh();
+        let disabled = manager.set_enabled("example", false).unwrap();
+        assert_eq!(disabled.desired_state, DesiredState::Disabled);
+        assert_eq!(disabled.effective_state, EffectiveState::Disabled);
+        let enabled = manager.set_enabled("example", true).unwrap();
+        assert_eq!(enabled.desired_state, DesiredState::Enabled);
+        assert_eq!(enabled.effective_state, EffectiveState::Enabled);
+    }
+
+    #[test]
+    fn v1_mcp_capability_is_healthy_before_runtime_validation() {
+        let (_temporary, user, system, states) = roots();
+        create_extension(
+            &user,
+            "example",
+            r#"{
+                "schemaVersion":1,
+                "name":"example.ops",
+                "version":"1.0.0",
+                "compatibility":{"cosh":">=0.12.0"},
+                "mcpServers":{"inventory":{"transport":"stdio","command":"inventory-mcp"}}
+            }"#,
+        );
+        let mut manager = ExtensionManager::new_isolated_with_state(
+            PathBuf::from("/workspace"),
+            Some(user),
+            Some(system),
+            states,
+        );
+        manager.refresh();
+        let extension = &manager.list()[0];
+        assert_eq!(extension.health, ExtensionHealth::Healthy);
+        assert!(extension.is_active);
+        assert!(extension.diagnostics.is_empty());
+        assert_eq!(extension.mcp_servers.len(), 1);
     }
 }

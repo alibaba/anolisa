@@ -49,7 +49,7 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 例如：面板显示压缩率 60%，若工具响应占总消耗 20%，实际节省率为 60% × 20% = **12%**。这也是为何在总消耗 1500 万 Token 的实验中节省量观感偏小——tokenless 只作用于其中约 300 万 Token 的工具响应部分。
 
 > Stash 使压缩**端到端无损**：可适度收紧截断阈值换取更高 inline 节省，需要原文时经 `<<tokenless:KEY>>` 标记取回，不影响正确性。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。
-> 各策略触发条件与阈值见 [用户手册](docs/tokenless-user-manual-zh.md)。
+> 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
 
 ## 集成路径
 
@@ -68,6 +68,16 @@ make setup
 ```
 
 安装完成后 `tokenless` 命令位于 `~/.local/bin`，RTK/TOON 辅助二进制同目录。
+
+
+## npm 安装
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+自动安装适合您平台的预编译二进制文件（`tokenless`、`rtk`、`toon`）。
+支持 Linux 和 macOS 的 x86_64 和 arm64 架构。
 
 ## 架构
 

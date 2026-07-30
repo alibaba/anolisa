@@ -71,7 +71,8 @@ Each extension directory must contain `cosh-extension.json`:
       "name": "hook-name",
       "command": "execution command",
       "description": "description",
-      "timeout": 5000
+      "timeout": 5000,
+      "env": { "TOKENLESS_AGENT_ID": "cosh-ng" }
     }
   ]
 }
@@ -83,6 +84,26 @@ Each extension directory must contain `cosh-extension.json`:
 | `sequential` | Whether hooks in the group execute sequentially |
 | `hooks[].command` | Shell command the hook executes |
 | `hooks[].timeout` | Timeout in milliseconds |
+| `hooks[].env` | Environment variables for this hook's child process only |
+
+`env` semantics:
+
+- The child inherits the host environment; an `env` entry overrides an
+  inherited value of the same name. The host process is never modified.
+- Names must match the POSIX rule `[A-Za-z_][A-Za-z0-9_]*`. A strict
+  `schemaVersion: 1` manifest is **rejected** with
+  `extension_hook_env_name_invalid`; a legacy manifest drops the offending
+  entry and logs the name (never the value).
+- Variable substitution applies to values only — names are literal.
+- The host injects `COSH_RUNTIME=cosh-ng` and `COSH_NG_VERSION` after `env`, so
+  they take precedence over a declared entry of the same name. This is a
+  cooperative attribution signal only — a manifest also controls `command` and
+  can reassign these in its own shell.
+- `env` is executable capability and is part of the capability fingerprint:
+  declaring or changing it requires the user to re-consent. Hooks with no `env`
+  keep their existing fingerprint.
+
+See [hooks.md](hooks.md) for the full hook protocol.
 
 ## Variable Substitution
 

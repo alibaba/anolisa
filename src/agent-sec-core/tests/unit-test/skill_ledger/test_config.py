@@ -26,6 +26,7 @@ from agent_sec_cli.skill_ledger.config import (
     deprecated_skill_dir_entries,
     effective_skill_dir_entries,
     is_covered,
+    is_managed_covered,
     load_config,
     remember_skill_dir,
     resolve_activation_policy,
@@ -38,14 +39,16 @@ ACTIVATION_POLICY_PASS_WARN_ONLY = "pass_warn_only"
 
 
 class TestDefaultConfig(unittest.TestCase):
-    """Default config must include the three well-known skill directories."""
+    """Default config must include the well-known skill directories."""
 
     def test_default_skill_dirs_present(self):
         dirs = DEFAULT_SKILL_DIRS
         self.assertIn("~/.openclaw/skills/*", dirs)
         self.assertIn("~/.copilot-shell/skills/*", dirs)
         self.assertIn("~/.hermes/skills/**", dirs)
+        self.assertIn("~/.qoder/skills/*", dirs)
         self.assertIn("/usr/share/anolisa/skills/*", dirs)
+        self.assertNotIn(".qoder/skills/*", dirs)
         self.assertTrue(_DEFAULT_CONFIG["enableDefaultSkillDirs"])
         self.assertEqual(_DEFAULT_CONFIG["managedSkillDirs"], [])
 
@@ -110,6 +113,15 @@ class TestConfigMerge(unittest.TestCase):
         user = {"managedSkillDirs": ["/opt/new/*", "/opt/new/*"]}
         merged = _deep_merge_config(defaults, user)
         self.assertEqual(merged["managedSkillDirs"], ["/opt/new/*"])
+
+    def test_managed_dirs_reject_multiple_leading_separators(self):
+        for entry in ("//skills/weather", "//skills/*", "//skills/**"):
+            with self.subTest(entry=entry):
+                with self.assertRaisesRegex(ConfigError, "single leading"):
+                    _deep_merge_config(
+                        {"managedSkillDirs": []},
+                        {"managedSkillDirs": [entry]},
+                    )
 
     def test_empty_managed_dirs_are_preserved(self):
         defaults = {"managedSkillDirs": ["a/*"]}
@@ -522,6 +534,16 @@ class TestIsCovered(unittest.TestCase):
         (d / "SKILL.md").write_text("---\nname: test\n---\n")
         config = {"enableDefaultSkillDirs": False, "managedSkillDirs": []}
         self.assertFalse(is_covered(d, config))
+
+    def test_hidden_nested_path_is_covered_by_recursive_managed_entry(self):
+        hidden = self.parent / "apple" / "apple-notes"
+        config = {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(self.parent) + "/**"],
+        }
+
+        self.assertFalse(hidden.exists())
+        self.assertTrue(is_managed_covered(hidden, config))
 
 
 if __name__ == "__main__":

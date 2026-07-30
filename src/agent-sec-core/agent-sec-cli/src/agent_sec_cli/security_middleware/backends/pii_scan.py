@@ -105,12 +105,16 @@ class PiiScanBackend(BaseBackend):
         """Convert scanner output to middleware ActionResult."""
         data = result.to_dict()
         is_error = result.verdict == Verdict.ERROR.value
+        error_type = result.summary.get("error_type", "") if is_error else ""
+        if not isinstance(error_type, str):
+            error_type = "PiiScanError"
         return ActionResult(
             success=not is_error,
             data=data,
             stdout=json.dumps(data, indent=2, ensure_ascii=False),
             error="" if not is_error else str(result.summary.get("error", "")),
             exit_code=1 if is_error else 0,
+            error_type=error_type,
         )
 
     def build_event_details(

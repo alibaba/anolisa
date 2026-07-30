@@ -1,7 +1,7 @@
 //! A6/B1: Ledger Backing Root integration tests.
 //!
-//! Verifies that daemon-facing operations use the backing root path:
-//! - Notify `skillDir` uses the daemon root, not the FUSE source path.
+//! Verifies canonical/live root separation with a backing root:
+//! - Notify v2 uses canonical paths, never the live backing root.
 //! - Activation bootstrap reads from the daemon root.
 //! - Activation reload reads from the daemon root.
 //! - In-place hidden skill is invisible through FUSE but the source
@@ -68,22 +68,19 @@ const SNAPSHOT_ACTIVATION: &str =
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn notify_skilldir_uses_daemon_root() {
-    // When a backing root is configured, the NotifyController should
-    // construct skillDir from the daemon root, not the FUSE source path.
-    let source = tempfile::tempdir().unwrap();
-    let daemon_root = tempfile::tempdir().unwrap();
-    make_skill(source.path(), "alpha");
-    make_skill(daemon_root.path(), "alpha"); // daemon root mirrors source
+fn notify_v2_uses_canonical_root_with_backing_root() {
+    let canonical_root = tempfile::tempdir().unwrap();
+    let live_root = tempfile::tempdir().unwrap();
+    make_skill(canonical_root.path(), "alpha");
+    make_skill(live_root.path(), "alpha");
 
     let client = Arc::new(InMemoryNotifyClient::new());
     let writer = Arc::new(InMemoryProtocolEventWriter::new());
 
-    // Simulate what the CLI does: pass daemon_root as the source_root
-    // to NotifyController.
     let ctrl = NotifyController::new_with_protocol_writer(
         client.clone(),
-        daemon_root.path().to_path_buf(),
+        canonical_root.path().to_path_buf(),
+        live_root.path().to_path_buf(),
         Duration::from_millis(50),
         5000,
         writer.clone(),
@@ -107,18 +104,68 @@ fn notify_skilldir_uses_daemon_root() {
 
     let events = client.events();
     assert!(!events.is_empty(), "expected at least one notify event");
-    let skill_dir = &events[0].skill_dir;
-    assert!(
-        skill_dir.starts_with(daemon_root.path().to_string_lossy().as_ref()),
-        "skillDir '{}' should start with daemon root '{}'",
-        skill_dir,
-        daemon_root.path().display()
+    let canonical_skill_dir = &events[0].canonical_skill_dir;
+    assert_eq!(events[0].schema_version, 2);
+    assert_eq!(events[0].skill_id, "alpha");
+    assert_eq!(
+        canonical_skill_dir,
+        &canonical_root
+            .path()
+            .join("alpha")
+            .to_string_lossy()
+            .to_string()
     );
     assert!(
-        !skill_dir.starts_with(source.path().to_string_lossy().as_ref()),
-        "skillDir '{}' must NOT start with source path '{}'",
-        skill_dir,
-        source.path().display()
+        !canonical_skill_dir.starts_with(live_root.path().to_string_lossy().as_ref()),
+        "canonicalSkillDir '{}' must not expose live root '{}'",
+        canonical_skill_dir,
+        live_root.path().display()
+    );
+
+    let protocol_events = writer.events();
+    assert_eq!(protocol_events[0].schema_version, 1);
+    assert_eq!(protocol_events[0].skill_name, "alpha");
+    assert_eq!(
+        protocol_events[0].skill_dir,
+        live_root.path().join("alpha").to_string_lossy().to_string()
+    );
+    assert!(
+        !protocol_events[0]
+            .skill_dir
+            .starts_with(canonical_root.path().to_string_lossy().as_ref()),
+        "protocol event skillDir '{}' must not use canonical root '{}'",
+        protocol_events[0].skill_dir,
+        canonical_root.path().display()
+    );
+
+    let count = ctrl.emit_startup_reconcile(&["alpha".to_string()]);
+    assert_eq!(count, 1);
+
+    let notify_events = client.events();
+    let reconcile_notify = notify_events
+        .iter()
+        .find(|event| event.event_kind == "reconcile")
+        .expect("startup reconcile notify event");
+    assert_eq!(reconcile_notify.schema_version, 2);
+    assert_eq!(reconcile_notify.skill_id, "alpha");
+    assert_eq!(
+        reconcile_notify.canonical_skill_dir,
+        canonical_root
+            .path()
+            .join("alpha")
+            .to_string_lossy()
+            .to_string()
+    );
+
+    let protocol_events = writer.events();
+    let reconcile_protocol = protocol_events
+        .iter()
+        .find(|event| event.event_kind == "reconcile")
+        .expect("startup reconcile protocol event");
+    assert_eq!(reconcile_protocol.schema_version, 1);
+    assert_eq!(
+        reconcile_protocol.skill_dir,
+        live_root.path().join("alpha").to_string_lossy().to_string()
     );
 }
 
@@ -725,7 +772,7 @@ backing_root = "{}"
 }
 
 #[test]
-fn normal_mount_notify_uses_source_as_skilldir() {
+fn normal_mount_notify_uses_source_as_canonical_skill_dir() {
     let source = tempfile::tempdir().unwrap();
     make_skill(source.path(), "alpha");
 
@@ -744,8 +791,8 @@ fn normal_mount_notify_uses_source_as_skilldir() {
     assert_eq!(events.len(), 1);
     let expected_dir = source.path().join("alpha").to_string_lossy().to_string();
     assert_eq!(
-        events[0].skill_dir, expected_dir,
-        "normal mount (no backing root) must use source dir as skillDir"
+        events[0].canonical_skill_dir, expected_dir,
+        "normal mount must use source dir as canonicalSkillDir"
     );
     ctrl.shutdown();
 }

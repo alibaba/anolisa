@@ -11,27 +11,26 @@
 #      $STAGING_ROOT/bin/anolisa and $STAGING_ROOT/share/anolisa/... by either
 #      copying from --from-local / auto-checkout, OR by curl + tar from URLs
 #      into the staging root (never the final prefix).
-#   4. Verify SHAs of bin/bundle/index against env-provided values when set;
+#   4. Verify SHAs of bin/bundle against env-provided values when set;
 #      refuse under --strict if any are unset (URL-fetch only).
-#   5. Audit the staged distribution-index for `sha256 = ""` rows.
-#   6. If --dry-run: print "would promote $STAGING_ROOT → $PREFIX", list
+#   5. If --dry-run: print "would promote $STAGING_ROOT → $PREFIX", list
 #      planned files, exit 0 WITHOUT touching $PREFIX.
-#   7. Otherwise: promote $STAGING_ROOT into $PREFIX via `cp -a` (merging
+#   6. Otherwise: promote $STAGING_ROOT into $PREFIX via `cp -a` (merging
 #      into any existing prefix). On copy error, leave the partial state
-#      visible for the operator (rare — audit already passed).
+#      visible for the operator (rare — staging already validated).
 #
-# Nothing is written to $PREFIX until step 7. Failures in steps 2-5 (including
-# `--strict` checksum or audit failure) exit non-zero leaving $PREFIX
-# completely untouched.
+# Nothing is written to $PREFIX until step 6. Failures in steps 2-4 (including
+# `--strict` checksum failure) exit non-zero leaving $PREFIX completely
+# untouched.
 #
 # Dry-run details (see also `--help`):
 #
 #   * URL-fetch + --dry-run is PLAN-ONLY. It prints the resolved URLs and
-#     planned operations, then exits 0 WITHOUT downloading, extracting, or
-#     auditing anything. Use a `--from-local` / auto-checkout dry-run if you
-#     want the audit to run end-to-end against real bundle contents.
-#   * from-local / auto-checkout + --dry-run does the FULL staging + audit
-#     against the local source tree, then prints "would promote" and exits 0
+#     planned operations, then exits 0 WITHOUT downloading or extracting
+#     anything. Use a `--from-local` / auto-checkout dry-run to validate
+#     real bundle contents.
+#   * from-local / auto-checkout + --dry-run does the FULL staging against
+#     the local source tree, then prints "would promote" and exits 0
 #     without touching $PREFIX.
 #
 # Three install modes (chosen in this order):
@@ -44,17 +43,19 @@
 #                               behave as `--from-local <that path>`. Prints
 #                               one INFO line so the user knows.
 #   3. URL fetch                When neither of the above applies. Requires
-#                               `ANOLISA_BIN_URL`, `ANOLISA_MANIFEST_BUNDLE_URL`,
-#                               and `ANOLISA_INDEX_URL` to be set, or to be
-#                               resolvable from the `ANOLISA_MIRROR` /
+#                               `ANOLISA_BIN_URL` and
+#                               `ANOLISA_MANIFEST_BUNDLE_URL` to be set, or
+#                               to be resolvable from the `ANOLISA_MIRROR` /
 #                               `ANOLISA_CHANNEL` defaults. Refuses with a
 #                               clear error if any are missing.
 #
 # Lays out a self-contained ANOLISA install under ${ANOLISA_PREFIX}:
 #
-#   ${ANOLISA_PREFIX}/bin/anolisa                                   (binary)
-#   ${ANOLISA_PREFIX}/share/anolisa/manifests/                      (osbase, runtime)
-#   ${ANOLISA_PREFIX}/share/anolisa/manifests/distribution-index/   (OSS-targeted index)
+#   ${ANOLISA_PREFIX}/bin/anolisa                       (binary)
+#   ${ANOLISA_PREFIX}/share/anolisa/manifests/          (osbase)
+#
+# The distribution index is NOT staged: the CLI downloads and caches it from
+# the configured mirror at runtime, so a datadir copy would never be read.
 #
 # After install, `anolisa env / list / install <component> --dry-run`
 # work without the source tree, without overlays, and without any DEMO_ROOT env.
@@ -65,30 +66,16 @@
 #   ANOLISA_MANIFEST_BUNDLE_URL  manifest tarball URL (.tar.gz with
 #                                manifests/ and templates/ at the top level
 #                                or under a single wrapping directory)
-#   ANOLISA_INDEX_URL            distribution-index.toml URL
 #
 # Optional checksum envs (verified with `sha256sum`):
 #
 #   ANOLISA_BIN_SHA256
 #   ANOLISA_MANIFEST_BUNDLE_SHA256
-#   ANOLISA_INDEX_SHA256
 #
 # What --strict enforces:
 #
-#   * Every `ANOLISA_*_SHA256` env above must be set (hard error otherwise).
-#   * After staging, scans the staged distribution-index for any
-#     `sha256 = ""` row and refuses to finish with a non-zero exit if any
-#     are found, listing the offending rows. Because the audit runs on the
-#     STAGED file, the final $PREFIX is never written when --strict fails.
-#
-# Without --strict the script emits prominent WARN lines for missing
-# checksums (capped to first 5 missing-sha256 rows), with a hint that
-# `install <component>` against this index will fail with `MissingChecksum`
-# until real artifacts are uploaded and their checksums populated.
-#
-# Where OSS artifact upload + sha256 population is tracked: P1-J operations
-# work (see `manifests/distribution-index/index.oss.toml` for the inline
-# P1-J release-ops notes).
+#   * Every `ANOLISA_*_SHA256` env above must be set in URL-fetch mode
+#     (hard error otherwise).
 #
 # Pipe-safe:
 #   The script never reads from stdin (no interactive prompts), so
@@ -131,9 +118,9 @@ Usage: install-anolisa.sh [OPTIONS]
 
 Stage the anolisa CLI binary + packaged datadir under \${ANOLISA_PREFIX}.
 
-ALL downloads, extractions, and audits happen in a temp staging directory.
+ALL downloads and extractions happen in a temp staging directory.
 Nothing is written to \${ANOLISA_PREFIX} until staging + validation pass; a
-failure (including --strict checksum / audit failure) leaves \${ANOLISA_PREFIX}
+failure (including --strict checksum failure) leaves \${ANOLISA_PREFIX}
 completely untouched.
 
 Three install modes (selected in this order):
@@ -147,20 +134,14 @@ Options:
                         manifests/ and templates/).
   --dry-run             Do not write to \${ANOLISA_PREFIX}. Behavior depends on
                         the install mode:
-                          * --from-local / auto-checkout: full staging + audit
-                            into a tempdir, then prints "would promote" and
-                            exits 0.
+                          * --from-local / auto-checkout: full staging into a
+                            tempdir, then prints "would promote" and exits 0.
                           * URL-fetch: PLAN-ONLY. Prints resolved URLs and the
-                            planned operations, then exits 0 WITHOUT curl,
-                            tar, or audit (use a local-mode dry-run for that).
-  --strict              Refuse to finish if checksums are missing. Specifically:
-                        * any unset ANOLISA_*_SHA256 env in URL-fetch mode is
-                          a hard error (binary / manifest bundle / index);
-                        * after staging, the script scans the STAGED
-                          distribution-index/index.toml for sha256 = "" rows
-                          and exits non-zero listing each offending row. Since
-                          the audit runs on the staged file, \${ANOLISA_PREFIX}
-                          stays untouched on --strict failure.
+                            planned operations, then exits 0 WITHOUT curl or
+                            tar (use a local-mode dry-run for that).
+  --strict              Refuse to finish if checksums are missing: any unset
+                        ANOLISA_*_SHA256 env in URL-fetch mode is a hard
+                        error (binary / manifest bundle).
   -h, --help            Show this help text and exit.
 
 Environment overrides:
@@ -173,22 +154,15 @@ Environment overrides:
                                   (default: \${ANOLISA_MIRROR}/releases/\${ANOLISA_CHANNEL}/anolisa-<arch>-<os>)
   ANOLISA_MANIFEST_BUNDLE_URL     explicit manifest bundle URL (.tar.gz)
                                   (default: \${ANOLISA_MIRROR}/releases/\${ANOLISA_CHANNEL}/manifests-latest.tar.gz)
-  ANOLISA_INDEX_URL               explicit distribution index URL
-                                  (default: \${ANOLISA_MIRROR}/releases/\${ANOLISA_CHANNEL}/distribution-index.toml)
   ANOLISA_BIN_SHA256              optional sha256 to verify the fetched binary against
   ANOLISA_MANIFEST_BUNDLE_SHA256  optional sha256 for the manifest bundle
-  ANOLISA_INDEX_SHA256            optional sha256 for the distribution index
   ANOLISA_DATA_DIR                read at runtime to override the packaged datadir
 
 URL-fetch mode notes:
   * The default manifest bundle path uses manifests-latest.tar.gz. Pin to a
     specific release by setting ANOLISA_MANIFEST_BUNDLE_URL explicitly.
-  * The OSS-published distribution-index currently has empty sha256 fields
-    (see manifests/distribution-index/index.oss.toml). Real "anolisa install"
-    against such an index will fail with MissingChecksum. Uploading the real
-    artifacts and populating their sha256s is tracked under P1-J operations
-    work. Pass --strict if you want this installer to refuse to finish until
-    those rows are filled in.
+  * The distribution index is not staged: the CLI downloads and caches it
+    from the configured mirror at runtime.
 
 Examples:
   # Auto-detected install from a checkout (running this file from scripts/).
@@ -310,20 +284,13 @@ default_manifest_bundle_url() {
   echo "$ANOLISA_MIRROR/releases/$ANOLISA_CHANNEL/manifests-latest.tar.gz"
 }
 
-default_index_url() {
-  echo "$ANOLISA_MIRROR/releases/$ANOLISA_CHANNEL/distribution-index.toml"
-}
-
 ANOLISA_BIN_URL_EXPLICIT=0
 ANOLISA_MANIFEST_BUNDLE_URL_EXPLICIT=0
-ANOLISA_INDEX_URL_EXPLICIT=0
 [ -n "${ANOLISA_BIN_URL:-}" ] && ANOLISA_BIN_URL_EXPLICIT=1
 [ -n "${ANOLISA_MANIFEST_BUNDLE_URL:-}" ] && ANOLISA_MANIFEST_BUNDLE_URL_EXPLICIT=1
-[ -n "${ANOLISA_INDEX_URL:-}" ] && ANOLISA_INDEX_URL_EXPLICIT=1
 
 ANOLISA_BIN_URL="${ANOLISA_BIN_URL:-$(default_bin_url)}"
 ANOLISA_MANIFEST_BUNDLE_URL="${ANOLISA_MANIFEST_BUNDLE_URL:-$(default_manifest_bundle_url)}"
-ANOLISA_INDEX_URL="${ANOLISA_INDEX_URL:-$(default_index_url)}"
 
 # In strict mode we require checksum envs *for whichever fetches we will
 # actually perform*. In from-local / auto-checkout modes nothing is fetched
@@ -332,7 +299,6 @@ if [ "$STRICT" -eq 1 ] && [ "$MODE" = "url-fetch" ]; then
   missing=()
   [ -z "${ANOLISA_BIN_SHA256:-}" ] && missing+=("ANOLISA_BIN_SHA256")
   [ -z "${ANOLISA_MANIFEST_BUNDLE_SHA256:-}" ] && missing+=("ANOLISA_MANIFEST_BUNDLE_SHA256")
-  [ -z "${ANOLISA_INDEX_SHA256:-}" ] && missing+=("ANOLISA_INDEX_SHA256")
   if [ "${#missing[@]}" -gt 0 ]; then
     err "--strict mode requires checksum envs to be set:"
     for v in "${missing[@]}"; do
@@ -342,11 +308,10 @@ if [ "$STRICT" -eq 1 ] && [ "$MODE" = "url-fetch" ]; then
   fi
 fi
 
-# ---- Final install targets (where step 7 promotion lands) ------------------
+# ---- Final install targets (where step 6 promotion lands) ------------------
 FINAL_BIN_DIR="$ANOLISA_PREFIX/bin"
 FINAL_DATADIR="$ANOLISA_PREFIX/share/anolisa"
 FINAL_MANIFESTS_DIR="$FINAL_DATADIR/manifests"
-FINAL_INDEX_DIR="$FINAL_MANIFESTS_DIR/distribution-index"
 FINAL_BIN_DEST="$FINAL_BIN_DIR/anolisa"
 
 log "mode            : $MODE"
@@ -361,28 +326,25 @@ log "packaged datadir: $FINAL_DATADIR"
 if [ "$MODE" = "url-fetch" ]; then
   log "binary URL      : $ANOLISA_BIN_URL"
   log "manifest bundle : $ANOLISA_MANIFEST_BUNDLE_URL"
-  log "index URL       : $ANOLISA_INDEX_URL"
 else
   log "source tree     : $FROM_LOCAL"
 fi
 
 # ---- URL-fetch + dry-run short-circuit -------------------------------------
 #
-# Per the redesign: dry-run for URL-fetch is plan-only. We do NOT curl, do
-# NOT tar, do NOT audit. If you want the full extraction + audit dry-run,
-# use --from-local / auto-checkout (where the bundle contents already exist
-# locally and can be validated without network).
+# Per the redesign: dry-run for URL-fetch is plan-only. We do NOT curl and do
+# NOT tar. If you want the full extraction dry-run, use --from-local /
+# auto-checkout (where the bundle contents already exist locally and can be
+# validated without network).
 if [ "$MODE" = "url-fetch" ] && [ "$DRY_RUN" -eq 1 ]; then
-  log "INFO: URL-fetch + --dry-run is plan-only (no curl, no tar, no audit)."
+  log "INFO: URL-fetch + --dry-run is plan-only (no curl, no tar)."
   log "      use --from-local for a dry-run that validates bundle contents."
   log "would fetch binary  : $ANOLISA_BIN_URL"
   log "would fetch bundle  : $ANOLISA_MANIFEST_BUNDLE_URL"
-  log "would fetch index   : $ANOLISA_INDEX_URL"
   log "would stage under   : <mktemp staging dir> (auto-removed on exit)"
   log "would write to prefix:"
   log "  $FINAL_BIN_DEST"
-  log "  $FINAL_MANIFESTS_DIR/{osbase,runtime}/"
-  log "  $FINAL_INDEX_DIR/index.toml"
+  log "  $FINAL_MANIFESTS_DIR/osbase/"
   exit 0
 fi
 
@@ -402,18 +364,17 @@ trap cleanup_staging EXIT INT TERM HUP
 STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/anolisa-stage.XXXXXX")"
 log "staging root    : $STAGING_ROOT"
 
-# Staging targets (mirror the final layout under STAGING_ROOT). All steps 3-5
-# read/write through these; only step 7 (promotion) touches FINAL_*.
+# Staging targets (mirror the final layout under STAGING_ROOT). All steps 3-4
+# read/write through these; only step 6 (promotion) touches FINAL_*.
 BIN_DIR="$STAGING_ROOT/bin"
 DATADIR="$STAGING_ROOT/share/anolisa"
 MANIFESTS_DIR="$DATADIR/manifests"
-INDEX_DIR="$MANIFESTS_DIR/distribution-index"
 BIN_DEST="$BIN_DIR/anolisa"
 
 # Download workspace lives under the staging root so cleanup is unified.
 DOWNLOAD_DIR="$STAGING_ROOT/.download"
 
-mkdir -p "$BIN_DIR" "$MANIFESTS_DIR" "$INDEX_DIR" "$DOWNLOAD_DIR"
+mkdir -p "$BIN_DIR" "$MANIFESTS_DIR" "$DOWNLOAD_DIR"
 
 # ---- sha256 verification helper --------------------------------------------
 #
@@ -452,8 +413,8 @@ verify_sha256() {
 #
 # We are about to extract an attacker-influenceable tarball into the staging
 # tree, then copy parts of it into the staged datadir we promote to $PREFIX.
-# Even though staging lives in `mktemp -d` and the index-row audit runs
-# downstream, layered defense matters: a malicious or corrupt bundle could
+# Even though staging lives in `mktemp -d`, layered defense matters: a
+# malicious or corrupt bundle could
 # try absolute-path entries (`/etc/passwd`), `..` traversal
 # (`../../etc/something`), or symlinks / hardlinks / device / fifo / socket
 # entries. We refuse such bundles BEFORE invoking `tar -xz`. After
@@ -620,18 +581,20 @@ realpath_inside() {
   return 1
 }
 
-# ---- Step 3: staging (manifests + templates + distribution-index) ----------
+# ---- Step 3: staging (manifests + templates) --------------------------------
 #
 # Both stage_from_local and stage_from_url write into $STAGING_ROOT. They
 # always execute (no DRY_RUN gating) — the staging tree is a tempdir, so the
-# operations are safe, and the audit step needs real files to inspect.
+# operations are safe.
+#
+# Only osbase manifests are staged. The dev-tree runtime/ manifests and the
+# distribution-index/ directory were retired: component manifests are
+# downloaded from the distribution backend at install time, and the CLI
+# fetches + caches the distribution index from the mirror at runtime, so a
+# datadir copy of either would never be read.
 
 stage_from_local() {
-  # Copy osbase / runtime manifests verbatim. We do NOT copy the dev-tree
-  # distribution-index/index.toml — that file is intentionally empty; we
-  # lay down the OSS-targeted variant from manifests/distribution-index/
-  # below instead.
-  for subdir in osbase runtime; do
+  for subdir in osbase; do
     local src="$FROM_LOCAL/manifests/$subdir"
     if [ ! -d "$src" ]; then
       warn "$src missing; skipping"
@@ -654,31 +617,6 @@ stage_from_local() {
     cp "$FROM_LOCAL/manifests/SPEC.md" "$MANIFESTS_DIR/SPEC.md"
     chmod 0644 "$MANIFESTS_DIR/SPEC.md"
   fi
-
-  # Distribution index: prefer the OSS-targeted variant (index.oss.toml)
-  # when present so the packaged install ships URLs pointing at the
-  # configured mirror. Falls back to the dev-tree index.toml, which may
-  # contain reviewed release entries for local development.
-  local oracle_index="$FROM_LOCAL/manifests/distribution-index/index.oss.toml"
-  local default_index="$FROM_LOCAL/manifests/distribution-index/index.toml"
-  local index_dest="$INDEX_DIR/index.toml"
-  if [ -f "$oracle_index" ]; then
-    log "interpolating distribution index with ANOLISA_MIRROR=$ANOLISA_MIRROR / ANOLISA_CHANNEL=$ANOLISA_CHANNEL"
-    # Use bash parameter expansion for safe interpolation — no sed
-    # metacharacter issues (&, \, |e flag injection).
-    local _idx_content
-    _idx_content=$(<"$oracle_index")
-    _idx_content="${_idx_content//@ANOLISA_MIRROR@/$ANOLISA_MIRROR}"
-    _idx_content="${_idx_content//@ANOLISA_CHANNEL@/$ANOLISA_CHANNEL}"
-    printf '%s\n' "$_idx_content" >"$index_dest"
-  elif [ -f "$default_index" ]; then
-    log "OSS-targeted index not found at $oracle_index; using empty dev-tree index"
-    cp "$default_index" "$index_dest"
-  else
-    err "no distribution-index source found under $FROM_LOCAL/manifests/distribution-index/"
-    exit 2
-  fi
-  chmod 0644 "$index_dest"
 }
 
 stage_from_url() {
@@ -805,7 +743,7 @@ stage_from_url() {
   fi
 
   # Copy manifests subdirs verbatim from the extracted bundle.
-  for subdir in osbase runtime; do
+  for subdir in osbase; do
     local src="$bundle_stage/manifests/$subdir"
     if [ ! -d "$src" ]; then
       warn "$src missing in manifest bundle; skipping"
@@ -821,20 +759,6 @@ stage_from_url() {
   if [ -f "$bundle_stage/manifests/SPEC.md" ]; then
     cp "$bundle_stage/manifests/SPEC.md" "$MANIFESTS_DIR/SPEC.md"
   fi
-
-  # ---- distribution index ----
-  local index_dest="$INDEX_DIR/index.toml"
-  log "fetching distribution index: $ANOLISA_INDEX_URL"
-  local index_tmp="$DOWNLOAD_DIR/distribution-index.toml"
-  curl --fail --location --silent --show-error \
-    --output "$index_tmp" \
-    "$ANOLISA_INDEX_URL"
-  if [ -n "${ANOLISA_INDEX_SHA256:-}" ]; then
-    verify_sha256 "$index_tmp" "$ANOLISA_INDEX_SHA256" "distribution index" || exit 1
-  else
-    warn "ANOLISA_INDEX_SHA256 not set; skipping index checksum (pass --strict to refuse)"
-  fi
-  install -m 0644 "$index_tmp" "$index_dest"
 }
 
 if [ "$MODE" = "url-fetch" ]; then
@@ -897,64 +821,13 @@ case "$MODE" in
     ;;
 esac
 
-# ---- Step 5: distribution-index sha256 audit (against STAGED file) ---------
-#
-# Always runs on the staged index. Strict-failure here exits non-zero with
-# $ANOLISA_PREFIX untouched (we have not promoted yet).
-audit_index_sha256() {
-  local index="$INDEX_DIR/index.toml"
-  if [ ! -f "$index" ]; then
-    warn "distribution index missing at $index; skipping audit"
-    return 0
-  fi
-  # Collect line numbers of empty sha256 rows. The grep pattern matches
-  # `sha256 = ""` with optional whitespace and is line-anchored to skip
-  # commented-out variants like `# sha256 = "..."`.
-  local empty_rows
-  empty_rows="$(grep -nE '^[[:space:]]*sha256[[:space:]]*=[[:space:]]*"[[:space:]]*"' "$index" || true)"
-  if [ -z "$empty_rows" ]; then
-    log "distribution-index sha256 audit: ok (no empty rows)"
-    return 0
-  fi
-  local total
-  total="$(echo "$empty_rows" | wc -l | awk '{print $1}')"
-  if [ "$STRICT" -eq 1 ]; then
-    err "--strict: distribution-index has $total row(s) with empty sha256 = \"\":"
-    echo "$empty_rows" | while IFS= read -r line; do
-      err "  $index:$line"
-    done
-    err "Refusing to finish. \$ANOLISA_PREFIX has not been written to."
-    err "Fix by either populating sha256 in"
-    err "  $index"
-    err "or upgrade to a release index whose OSS artifacts have been published"
-    err "(tracked under P1-J operations work; see manifests/distribution-index/index.oss.toml)."
-    return 1
-  fi
-  warn "distribution-index has $total row(s) with empty sha256 = \"\":"
-  local shown=0
-  echo "$empty_rows" | while IFS= read -r line; do
-    if [ "$shown" -ge 5 ]; then
-      warn "  ... (and more; --strict to see all and refuse)"
-      break
-    fi
-    warn "  $index:$line"
-    shown=$((shown + 1))
-  done
-  warn "Real \`anolisa install <component>\` against this index will fail with MissingChecksum"
-  warn "until artifacts are uploaded to OSS and their sha256s populated (P1-J)."
-}
-
-if ! audit_index_sha256; then
-  exit 1
-fi
-
-# ---- Step 6: dry-run gate (local/auto-checkout dry-run stops here) ---------
+# ---- Step 5: dry-run gate (local/auto-checkout dry-run stops here) ---------
 #
 # URL-fetch + dry-run already exited above; reaching here in dry-run mode
 # implies we have a fully-staged tree from a local source. Print the
 # promotion plan and exit 0 without touching $ANOLISA_PREFIX.
 if [ "$DRY_RUN" -eq 1 ]; then
-  log "dry-run: staging complete + audit passed. would promote:"
+  log "dry-run: staging complete. would promote:"
   log "  $STAGING_ROOT/  →  $ANOLISA_PREFIX/"
   if command -v find >/dev/null 2>&1; then
     # List staged files (relative to staging root) so the operator sees
@@ -967,13 +840,13 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-# ---- Step 7: promote staging → $ANOLISA_PREFIX -----------------------------
+# ---- Step 6: promote staging → $ANOLISA_PREFIX -----------------------------
 #
 # Tradeoff note: we use `cp -a` (not `mv`) because $STAGING_ROOT lives under
 # TMPDIR and may be on a different filesystem from $ANOLISA_PREFIX. `cp -a`
 # is non-atomic per-file but works across filesystems and merges cleanly
 # into a pre-existing prefix. If a copy fails partway, we leave the partial
-# state visible (the audit already passed, so this is rare) so the operator
+# state visible (staging already validated, so this is rare) so the operator
 # can inspect and clean up.
 promote_to_prefix() {
   log "promoting staging → $ANOLISA_PREFIX"
@@ -990,7 +863,7 @@ promote_to_prefix() {
     mkdir -p "$ANOLISA_PREFIX/$entry"
     if ! cp -a "$src/." "$ANOLISA_PREFIX/$entry/"; then
       err "promotion failed while copying $src → $ANOLISA_PREFIX/$entry"
-      err "audit had already passed, so partial state in $ANOLISA_PREFIX may need"
+      err "staging had already validated, so partial state in $ANOLISA_PREFIX may need"
       err "manual cleanup. Staging tree preserved for inspection: $STAGING_ROOT"
       # Disable the cleanup trap so the operator can inspect the staging tree.
       trap - EXIT INT TERM HUP

@@ -1,28 +1,40 @@
+use crate::question::answer::{resolve_pending_question_answer, QuestionAnswerResolution};
 use crate::question::choices::{
     question_choice_count, question_custom_answer_index, toggle_question_option,
 };
+use crate::question::ingress::{
+    core_question_store_decision, reject_core_question_store, CoreQuestionStoreDecision,
+    IncomingQuestion,
+};
 use crate::runtime::prelude::*;
+use crate::runtime::question_terminal::clear_active_question_panel;
+use crate::ui::QuestionInputFeedback;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeUserQuestion {
-    id: String,
-    question: String,
-    options: Vec<String>,
-    selected_option: usize,
-    selected_options: Vec<usize>,
-    custom_answer: String,
-    allow_free_text: bool,
-    selection_mode: QuestionSelectionMode,
-    provider_request_id: Option<String>,
-    answer: Option<String>,
+    pub(crate) id: String,
+    pub(crate) question: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) selected_option: usize,
+    pub(crate) selected_options: Vec<usize>,
+    pub(crate) custom_answer: String,
+    pub(crate) allow_free_text: bool,
+    pub(crate) selection_mode: QuestionSelectionMode,
+    pub(crate) input_feedback: QuestionInputFeedback,
+    pub(crate) provider_request_id: Option<String>,
+    pub(crate) provider_owner_request_id: Option<String>,
+    pub(crate) origin: AgentRunOrigin,
+    pub(crate) answer: Option<String>,
 }
 
 pub(crate) struct QuestionAnswerRun {
-    question_id: String,
-    question: String,
-    answer: String,
-    provider_request_id: Option<String>,
+    pub(crate) question_id: String,
+    pub(crate) question: String,
+    pub(crate) answer: String,
+    pub(crate) provider_request_id: Option<String>,
+    pub(crate) provider_owner_request_id: Option<String>,
     pub(crate) request: AgentRequest,
+    pub(crate) origin: AgentRunOrigin,
 }
 
 pub(crate) fn pending_question_capture(state: &InlineState) -> Option<RawInputCapture> {
@@ -38,6 +50,7 @@ pub(crate) fn pending_question_capture(state: &InlineState) -> Option<RawInputCa
                 option_count: question.options.len(),
                 allow_free_text: question.allow_free_text,
                 multiple: question.selection_mode == QuestionSelectionMode::Multiple,
+                secret: false,
             });
         }
     }
@@ -72,32 +85,83 @@ pub(crate) fn render_question_answer_actions<W: Write>(
             continue;
         }
 
-        let Some(answer_run) =
-            agent_request_from_pending_question_answer(event, event_index, state)
-        else {
-            let i18n = state.i18n();
-            RatatuiInlineRenderer::for_terminal()
-                .with_language(state.language)
-                .write_notice_panel(
-                    output,
-                    NoticePanelModel {
-                        title: i18n.t(MessageId::QuestionNoPendingTitle),
-                        body: vec![i18n.t(MessageId::QuestionNoPendingBody).to_string()],
-                        footer: None,
-                    },
-                )?;
-            output.flush()?;
-            continue;
-        };
-
-        render_question_answer_notice(state, &answer_run, output)?;
-        if respond_question_answer_to_provider(state, &answer_run) {
+        // Reserve a control-queue slot BEFORE consuming the pending question,
+        // but only when answering would actually enqueue a fallback Agent
+        // continuation. Direct delivery to the active provider owner (and
+        // paths that stop the run and start immediately) must never be gated
+        // on queue capacity: the provider is waiting for exactly this answer,
+        // and rejecting it would deadlock until the provider times out.
+        if question_answer_needs_queue_slot(state) && !control_queue_has_capacity(state) {
+            crate::slash::session::render_control_queue_full_notice(state, output)?;
             output.flush()?;
             continue;
         }
-        stop_active_agent_run_without_rendering(state, output)?;
-        start_agent_run(
+
+        let answer_run = match resolve_pending_question_answer(event, event_index, state) {
+            QuestionAnswerResolution::Accepted(answer_run) => answer_run,
+            QuestionAnswerResolution::NoPending => {
+                let i18n = state.i18n();
+                RatatuiInlineRenderer::for_terminal()
+                    .with_language(state.language)
+                    .write_notice_panel(
+                        output,
+                        NoticePanelModel {
+                            title: i18n.t(MessageId::QuestionNoPendingTitle),
+                            body: vec![i18n.t(MessageId::QuestionNoPendingBody).to_string()],
+                            footer: None,
+                        },
+                    )?;
+                output.flush()?;
+                continue;
+            }
+            QuestionAnswerResolution::Ignored => continue,
+            QuestionAnswerResolution::EmptyAnswer
+            | QuestionAnswerResolution::SelectionRequired
+            | QuestionAnswerResolution::InvalidAnswer => {
+                let feedback = resolve_pending_question_answer_kind(event, state);
+                apply_question_feedback(state, feedback);
+                redraw_current_question(state, output)?;
+                output.flush()?;
+                continue;
+            }
+            QuestionAnswerResolution::RequestBuildFailed => {
+                clear_active_question_panel(state, output)?;
+                let i18n = state.i18n();
+                RatatuiInlineRenderer::for_terminal()
+                    .with_language(state.language)
+                    .write_notice_panel(
+                        output,
+                        NoticePanelModel {
+                            title: i18n.t(MessageId::QuestionAnswerNotSentTitle),
+                            body: vec![i18n.t(MessageId::QuestionAnswerNotSentBody).to_string()],
+                            footer: None,
+                        },
+                    )?;
+                redraw_current_question(state, output)?;
+                output.flush()?;
+                continue;
+            }
+        };
+
+        render_question_answer_notice(state, &answer_run, output)?;
+        match respond_question_answer_to_provider(state, &answer_run) {
+            ProviderQuestionResponse::Responded => {
+                output.flush()?;
+                continue;
+            }
+            ProviderQuestionResponse::OwnerUnavailable => {}
+            ProviderQuestionResponse::NotProviderBacked
+            | ProviderQuestionResponse::DeliveryFailed => {
+                stop_active_agent_run_without_rendering(state, output)?;
+            }
+        }
+        // The pending question was already consumed above (answer set, panel
+        // cleared); a queue-full rejection here would strand a response the
+        // user can no longer re-issue, so this control-protocol continuation is
+        // guaranteed a queue slot.
+        start_agent_run_control_response(
             &answer_run.request,
+            answer_run.origin,
             adapter,
             state,
             output,
@@ -109,19 +173,70 @@ pub(crate) fn render_question_answer_actions<W: Write>(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderQuestionResponse {
+    NotProviderBacked,
+    Responded,
+    OwnerUnavailable,
+    DeliveryFailed,
+}
+
+/// Whether answering the pending question would consume a control-queue slot.
+///
+/// Mirrors the delivery plan in [`render_question_answer_actions`]: a pending
+/// or running compaction holds every continuation in the queue; with no
+/// active run the continuation starts immediately; a provider-backed question
+/// owned by the active run is answered directly through the owner's handle
+/// (a delivery failure stops that run, so its fallback also starts
+/// immediately), and a non-provider question stops the run before continuing.
+/// Only an owner mismatch / missing owner keeps the active run alive and
+/// forces the continuation into the queue.
+fn question_answer_needs_queue_slot(state: &InlineState) -> bool {
+    if crate::slash::session::compaction_pending_or_active(state) {
+        return true;
+    }
+    let Some(active_run) = state.agent_run.active.as_ref() else {
+        return false;
+    };
+    let Some(question_id) = state.questions.pending_id.as_ref() else {
+        return false;
+    };
+    let Some(question) = state
+        .questions
+        .items
+        .iter()
+        .find(|question| question.id == *question_id && question.answer.is_none())
+    else {
+        return false;
+    };
+    if question.provider_request_id.is_none() {
+        // NotProviderBacked stops the active run before continuing.
+        return false;
+    }
+    // Provider-backed: direct delivery needs the active run to own the
+    // question; anything else ends OwnerUnavailable with the run kept alive.
+    question.provider_owner_request_id.as_deref() != Some(active_run.request.id.as_str())
+}
+
 fn respond_question_answer_to_provider(
     state: &InlineState,
     answer_run: &QuestionAnswerRun,
-) -> bool {
+) -> ProviderQuestionResponse {
     let Some(request_id) = answer_run.provider_request_id.as_ref() else {
-        return false;
+        return ProviderQuestionResponse::NotProviderBacked;
+    };
+    let Some(owner_request_id) = answer_run.provider_owner_request_id.as_ref() else {
+        return ProviderQuestionResponse::OwnerUnavailable;
     };
     let Some(active_run) = state.agent_run.active.as_ref() else {
-        return true;
+        return ProviderQuestionResponse::OwnerUnavailable;
     };
-    active_run
+    if active_run.request.id != *owner_request_id {
+        return ProviderQuestionResponse::OwnerUnavailable;
+    };
+    if active_run
         .handle
-        .respond_approval(ApprovalResponse {
+        .respond_question_answer(ApprovalResponse {
             request_id: request_id.clone(),
             tool_use_id: None,
             tool_input: None,
@@ -130,6 +245,11 @@ fn respond_question_answer_to_provider(
             },
         })
         .is_ok()
+    {
+        ProviderQuestionResponse::Responded
+    } else {
+        ProviderQuestionResponse::DeliveryFailed
+    }
 }
 
 pub(crate) fn render_question_cancel_actions<W: Write>(
@@ -157,6 +277,16 @@ pub(crate) fn render_question_cancel_actions<W: Write>(
         else {
             continue;
         };
+        let active_run_owns_question = state.questions.items[question_index]
+            .provider_owner_request_id
+            .as_ref()
+            .is_some_and(|owner_request_id| {
+                state
+                    .agent_run
+                    .active
+                    .as_ref()
+                    .is_some_and(|run| run.request.id == *owner_request_id)
+            });
 
         clear_active_question_panel(state, output)?;
         state.questions.items[question_index].answer = Some(String::new());
@@ -165,7 +295,11 @@ pub(crate) fn render_question_cancel_actions<W: Write>(
         }
         state.questions.active_panel_id = None;
         state.questions.active_panel_height = 0;
-        stop_active_agent_run_without_rendering(state, output)?;
+        state.questions.active_panel_cursor_row = None;
+        state.questions.active_panel_width = None;
+        if active_run_owns_question {
+            stop_active_agent_run_without_rendering(state, output)?;
+        }
         state.agent_run.needs_prompt_after_run = true;
         output.flush()?;
     }
@@ -204,6 +338,10 @@ pub(crate) fn render_question_focus_actions<W: Write>(
             continue;
         }
         question.selected_option = selected_option.min(choice_count - 1);
+        let custom = question_custom_answer_index(question.options.len(), question.allow_free_text);
+        if custom != Some(question.selected_option) {
+            question.input_feedback = QuestionInputFeedback::None;
+        }
         redraw_current_question(state, output)?;
         output.flush()?;
     }
@@ -243,6 +381,7 @@ pub(crate) fn render_question_toggle_actions<W: Write>(
             continue;
         }
         toggle_question_option(&mut question.selected_options, selected_option);
+        question.input_feedback = QuestionInputFeedback::None;
         redraw_current_question(state, output)?;
         output.flush()?;
     }
@@ -279,6 +418,9 @@ pub(crate) fn render_question_input_actions<W: Write>(
             continue;
         }
         question.custom_answer = text;
+        if !question.custom_answer.trim().is_empty() {
+            question.input_feedback = QuestionInputFeedback::None;
+        }
         if let Some(custom_idx) =
             question_custom_answer_index(question.options.len(), question.allow_free_text)
         {
@@ -289,6 +431,49 @@ pub(crate) fn render_question_input_actions<W: Write>(
     }
 
     Ok(())
+}
+
+fn resolve_pending_question_answer_kind(
+    event: &ShellEvent,
+    state: &InlineState,
+) -> QuestionInputFeedback {
+    let Some(question_id) = state.questions.pending_id.as_ref() else {
+        return QuestionInputFeedback::None;
+    };
+    let Some(question) = state
+        .questions
+        .items
+        .iter()
+        .find(|question| question.id == *question_id && question.answer.is_none())
+    else {
+        return QuestionInputFeedback::None;
+    };
+    let submitted = if event.message.as_deref() == Some("question_submit_empty") {
+        ""
+    } else {
+        event.input.as_deref().unwrap_or_default()
+    };
+    if question.selection_mode == QuestionSelectionMode::Multiple && submitted.trim().is_empty() {
+        QuestionInputFeedback::SelectionRequired
+    } else if submitted.trim().is_empty() {
+        QuestionInputFeedback::Required
+    } else {
+        QuestionInputFeedback::Invalid
+    }
+}
+
+fn apply_question_feedback(state: &mut InlineState, feedback: QuestionInputFeedback) {
+    let Some(question_id) = state.questions.pending_id.as_ref() else {
+        return;
+    };
+    if let Some(question) = state
+        .questions
+        .items
+        .iter_mut()
+        .find(|question| question.id == *question_id && question.answer.is_none())
+    {
+        question.input_feedback = feedback;
+    }
 }
 
 fn question_focus_from_event(event: &ShellEvent) -> Option<(String, usize)> {
@@ -311,10 +496,15 @@ fn question_input_from_event(event: &ShellEvent) -> Option<(String, String)> {
     Some((id.trim().to_string(), text.to_string()))
 }
 
+/// A single-step question has nothing to step back through, so ESC (`question_cancel`) and Ctrl+C
+/// (`question_abort`) both abandon it.
 fn question_cancel_from_event(event: &ShellEvent) -> Option<String> {
     if event.kind != ShellEventKind::UserInputIntercepted
         || event.component.as_deref() != Some("card")
-        || event.message.as_deref() != Some("question_cancel")
+        || !matches!(
+            event.message.as_deref(),
+            Some("question_cancel") | Some("question_abort")
+        )
     {
         return None;
     }
@@ -345,134 +535,14 @@ fn redraw_current_question<W: Write>(
     render_user_questions(state, &[question_id], output)
 }
 
-fn clear_active_question_panel<W: Write>(
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    let height = state.questions.active_panel_height;
-    if height == 0 {
-        state.questions.active_panel_id = None;
-        return Ok(());
-    }
-
-    write!(output, "\x1b[{height}A")?;
-    for row in 0..height {
-        write!(output, "\r\x1b[2K")?;
-        if row + 1 < height {
-            write!(output, "\x1b[1B")?;
-        }
-    }
-    if height > 1 {
-        write!(output, "\x1b[{}A", height - 1)?;
-    }
-    write!(output, "\r")?;
-    state.questions.active_panel_id = None;
-    state.questions.active_panel_height = 0;
-    Ok(())
-}
-
 pub(crate) fn agent_request_from_pending_question_answer(
     event: &ShellEvent,
     sequence: usize,
     state: &mut InlineState,
 ) -> Option<QuestionAnswerRun> {
-    let question_id = state.questions.pending_id.clone()?;
-    let question_index = state
-        .questions
-        .items
-        .iter()
-        .position(|question| question.id == question_id && question.answer.is_none())?;
-    let raw_answer = question_answer_text_from_event(event)?;
-    let answer = resolve_question_answer(&state.questions.items[question_index], &raw_answer)?;
-    let question = state.questions.items[question_index].question.clone();
-    let mut request = agent_request_from_intercepted_input(event, sequence, true)?;
-    let user_input = format!("Answer to pending Agent question: {question}\nUser answer: {answer}");
-    request.id = format!("agent-answer-{question_id}-{sequence}");
-    request.command_block.id = format!("answer-{question_id}-{sequence}");
-    request.command_block.command = user_input.clone();
-    request.user_input = Some(user_input);
-    state.questions.items[question_index].answer = Some(answer.clone());
-    state.questions.pending_id = None;
-    state.questions.active_panel_id = None;
-    state.questions.active_panel_height = 0;
-
-    Some(QuestionAnswerRun {
-        question_id,
-        question,
-        answer,
-        provider_request_id: state.questions.items[question_index]
-            .provider_request_id
-            .clone(),
-        request,
-    })
-}
-
-fn question_answer_text_from_event(event: &ShellEvent) -> Option<String> {
-    let input = event.input.as_deref()?.trim();
-    if input.is_empty() {
-        return None;
-    }
-
-    if event.component.as_deref() == Some("card") && event.message.as_deref() == Some("answer") {
-        return Some(input.to_string());
-    }
-
-    None
-}
-
-fn resolve_question_answer(question: &RuntimeUserQuestion, raw_answer: &str) -> Option<String> {
-    if question.selection_mode == QuestionSelectionMode::Multiple {
-        if let Some(answer) = resolve_multi_question_answer(question, raw_answer) {
-            return Some(answer);
-        }
-    }
-
-    if let Ok(index) = raw_answer.trim().parse::<usize>() {
-        return question.options.get(index.saturating_sub(1)).cloned();
-    }
-
-    if let Some(option) = question
-        .options
-        .iter()
-        .find(|option| option.eq_ignore_ascii_case(raw_answer.trim()))
-    {
-        return Some(option.clone());
-    }
-
-    if question.allow_free_text {
-        Some(raw_answer.trim().to_string())
-    } else {
-        None
-    }
-}
-
-fn resolve_multi_question_answer(
-    question: &RuntimeUserQuestion,
-    raw_answer: &str,
-) -> Option<String> {
-    let (indices_text, custom_answer) = raw_answer
-        .split_once('\n')
-        .map(|(indices, custom)| (indices.trim(), custom.trim()))
-        .unwrap_or((raw_answer.trim(), ""));
-    let indices = indices_text
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::parse::<usize>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-
-    let mut answers = indices
-        .into_iter()
-        .filter_map(|index| question.options.get(index.saturating_sub(1)).cloned())
-        .collect::<Vec<_>>();
-    if !custom_answer.is_empty() && question.allow_free_text {
-        answers.push(custom_answer.to_string());
-    }
-    if answers.is_empty() {
-        None
-    } else {
-        Some(answers.join(", "))
+    match resolve_pending_question_answer(event, sequence, state) {
+        QuestionAnswerResolution::Accepted(answer_run) => Some(*answer_run),
+        _ => None,
     }
 }
 
@@ -498,7 +568,10 @@ pub(crate) fn render_question_answer_notice<W: Write>(
 
 fn is_question_answer_card_event(event: &ShellEvent) -> bool {
     if event.component.as_deref() == Some("card") {
-        return event.message.as_deref() == Some("answer");
+        return matches!(
+            event.message.as_deref(),
+            Some("answer" | "question_submit_empty")
+        );
     }
     false
 }
@@ -506,9 +579,12 @@ fn is_question_answer_card_event(event: &ShellEvent) -> bool {
 pub(crate) fn record_user_questions(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
-) -> Vec<String> {
+    origin: AgentRunOrigin,
+    provider_owner_request_id: Option<&str>,
+) -> (Vec<String>, Option<(&'static str, usize, bool)>) {
     let mut ids = Vec::new();
-    for event in governed_events {
+    let mut rejection = None;
+    for (event_index, event) in governed_events.iter().enumerate() {
         let AgentEvent::UserQuestion {
             run_id: _,
             provider_request_id,
@@ -520,6 +596,23 @@ pub(crate) fn record_user_questions(
         else {
             continue;
         };
+        match core_question_store_decision(
+            state,
+            IncomingQuestion {
+                provider_request_id: provider_request_id.as_deref(),
+                question,
+                options,
+                allow_free_text: *allow_free_text,
+                selection_mode: *selection_mode,
+            },
+        ) {
+            CoreQuestionStoreDecision::Accept => {}
+            CoreQuestionStoreDecision::Duplicate => continue,
+            CoreQuestionStoreDecision::Reject(reason) => {
+                rejection = Some((reason, event_index, reject_core_question_store(state)));
+                break;
+            }
+        }
         let id = next_question_id(state);
         let question = display_question_text(state, question);
         state.questions.items.push(RuntimeUserQuestion {
@@ -531,13 +624,16 @@ pub(crate) fn record_user_questions(
             custom_answer: String::new(),
             allow_free_text: *allow_free_text,
             selection_mode: *selection_mode,
+            input_feedback: QuestionInputFeedback::None,
             provider_request_id: provider_request_id.clone(),
+            provider_owner_request_id: provider_owner_request_id.map(ToString::to_string),
+            origin,
             answer: None,
         });
         state.questions.pending_id = Some(id.clone());
         ids.push(id);
     }
-    ids
+    (ids, rejection)
 }
 
 fn display_question_text(state: &InlineState, question: &str) -> String {
@@ -568,61 +664,30 @@ pub(crate) fn render_user_questions<W: Write>(
             continue;
         };
 
-        let height = RatatuiInlineRenderer::for_terminal()
-            .with_language(state.language)
-            .write_question_panel(
-                output,
-                QuestionPanelModel {
-                    id: &question.id,
-                    question: &question.question,
-                    options: &question.options,
-                    selected_option: question.selected_option,
-                    selected_options: &question.selected_options,
-                    custom_answer: &question.custom_answer,
-                    allow_free_text: question.allow_free_text,
-                    selection_mode: question.selection_mode,
-                },
-            )?;
+        let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+        let model = QuestionPanelModel {
+            id: &question.id,
+            question: &question.question,
+            options: &question.options,
+            selected_option: question.selected_option,
+            selected_options: &question.selected_options,
+            custom_answer: &question.custom_answer,
+            allow_free_text: question.allow_free_text,
+            selection_mode: question.selection_mode,
+            input_feedback: question.input_feedback,
+        };
+        let cursor_row = renderer
+            .active_question_cursor_placement(&model)
+            .map(|placement| placement.row);
+        let height = renderer.write_question_panel(output, model)?;
         state.questions.active_panel_id = Some(question.id.clone());
         state.questions.active_panel_height = height;
+        state.questions.active_panel_cursor_row = cursor_row;
+        state.questions.active_panel_width = Some(renderer.panel_standard_width());
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_user_questions_localizes_empty_question_fallback() {
-        let mut state = InlineState {
-            language: Language::ZhCn,
-            ..InlineState::default()
-        };
-        let events = vec![GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::DisplayOnly,
-            event: AgentEvent::UserQuestion {
-                run_id: "run-1".to_string(),
-                provider_request_id: None,
-                question: String::new(),
-                options: Vec::new(),
-                allow_free_text: true,
-                selection_mode: QuestionSelectionMode::Single,
-            },
-            reason: "display".to_string(),
-            display_text: String::new(),
-            auto_execute: false,
-        }];
-
-        let ids = record_user_questions(&mut state, &events);
-
-        assert_eq!(ids, vec!["q-1".to_string()]);
-        assert_eq!(state.questions.items[0].question, "Agent 需要你的输入");
-        let mut output = Vec::new();
-        render_user_questions(&mut state, &ids, &mut output).expect("render question");
-        let text = String::from_utf8(output).expect("utf8 question");
-        assert!(text.contains("Agent 需要你的输入"), "{text}");
-        assert!(!text.contains("Agent needs your input"), "{text}");
-    }
-}
+#[path = "tests.rs"]
+mod tests;

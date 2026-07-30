@@ -99,4 +99,4 @@ registered by extensions execute after user-defined hooks in priority:
 
 ## Related Documentation
 
-- [Hook Development Guide](../developers/hooks/index.md) — Learn how extensions register hooks
+- [Hook Development Guide](../../../../developer-guide/en/copilot-shell/hooks/index.md) — Learn how extensions register hooks

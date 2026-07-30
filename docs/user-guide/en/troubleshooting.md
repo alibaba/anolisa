@@ -41,11 +41,11 @@ View component logs:
 # View logs for a specific component
 anolisa logs <component>
 
-# Follow logs in real-time
-anolisa logs <component> --follow
+# Show warning and error records
+anolisa logs <component> --severity warn
 
 # Show last N lines
-anolisa logs <component> --tail 50
+anolisa logs <component> --limit 50
 ```
 
 ---
@@ -93,11 +93,11 @@ ls -la /dev/fuse
 **Solution**:
 
 ```bash
-# Check network connectivity
-anolisa doctor --check network
+# Inspect the detected environment
+anolisa env
 
 # Retry with verbose output
-anolisa install tokenless --verbose
+anolisa --verbose install tokenless
 
 # Alternative: use YUM
 sudo yum install tokenless
@@ -116,8 +116,8 @@ rustup show
 # Update to latest stable
 rustup update stable
 
-# Check for missing system dependencies
-anolisa doctor --check build-deps
+# Inspect the detected build environment
+anolisa env
 ```
 
 ---
@@ -187,6 +187,39 @@ ws-ckpt config set workspace.path /home/user/projects/my-project
 
 ---
 
+**Symptom**: `ws-ckpt checkpoint` or `init` fails with "workspace root is an
+active mount point", or on older versions with "failed to rename original
+directory to backup: Device or resource busy (os error 16)"
+
+**Cause**: Initializing a workspace moves the original directory aside as a
+backup, and `rename(2)` fails with `EBUSY` on a directory that is itself a mount
+point. The usual trigger is mounting SkillFS in-place and then snapshotting the
+same path.
+
+**Solution**: Confirm whether the path is a mount point, unmount it, and retry:
+
+```bash
+# Confirm whether it is a mount point
+findmnt /path/to/workspace
+
+# In-place SkillFS mount
+skillfs stop /path/to/workspace
+
+# Any other FUSE mount
+fusermount3 -u /path/to/workspace
+
+ws-ckpt checkpoint -w /path/to/workspace -s my-snapshot
+```
+
+Only the workspace root itself is rejected. A mount nested inside the workspace
+does not block `init`, but the mount stays attached to the backup directory moved
+aside during initialization while the new workspace only receives a plain copy of
+its contents — unmount nested mounts first, or keep mount points outside the
+workspace tree. Mounting SkillFS after the workspace is already initialized also
+leaves later snapshots working.
+
+---
+
 ### SkillFS Issues
 
 **Symptom**: `skillfs mount` fails with "FUSE not available"
@@ -218,8 +251,9 @@ ls /dev/fuse
 # Check kernel version (>= 5.4 recommended)
 uname -r
 
-# Verify eBPF support
-anolisa doctor --check ebpf
+# Inspect kernel capabilities, then diagnose the installed component
+anolisa env
+sudo anolisa --install-mode system doctor agentsight
 
 # AgentSight requires system mode
 sudo anolisa install agentsight

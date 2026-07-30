@@ -1,6 +1,26 @@
 use crate::runtime::prelude::*;
 use crate::slash::panel::render_notice_panel;
-use crate::slash::parser::{slash_command_hints, RemovedCommand, SlashInfoCommand};
+use crate::slash::parser::{
+    slash_command_hints, RemovedCommand, SlashInfoCommand, SlashParseError,
+};
+
+pub(super) fn render_slash_parse_error<W: Write>(
+    error: SlashParseError,
+    state: &InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let i18n = state.i18n();
+    match error {
+        SlashParseError::QuotedArgumentsUnsupported => render_notice_panel(
+            output,
+            i18n.t(MessageId::SlashInvalidArgumentsTitle),
+            vec![i18n
+                .t(MessageId::SlashQuotedArgumentsUnsupported)
+                .to_string()],
+            None,
+        ),
+    }
+}
 
 pub(super) fn render_removed_command<W: Write>(
     command: RemovedCommand<'_>,
@@ -54,39 +74,48 @@ pub(super) fn render_removed_command<W: Write>(
 }
 
 pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std::io::Result<()> {
-    let mut body = Vec::new();
+    let i18n = state.i18n();
+    let mut groups = Vec::new();
     for (group, label_id) in [
+        ("Prompt", MessageId::HelpGroupPrompt),
+        ("Status", MessageId::HelpGroupStatus),
         ("Config", MessageId::HelpGroupConfig),
+        ("Health", MessageId::HelpGroupHealth),
+        ("Sessions", MessageId::HelpGroupSessions),
         ("Modes", MessageId::HelpGroupModes),
         ("Hooks", MessageId::HelpGroupHooks),
         ("Registry", MessageId::HelpGroupRegistry),
     ] {
-        body.push(state.i18n().t(label_id).to_string());
-        body.extend(
-            visible_slash_commands()
-                .filter(|hint| hint.group == Some(group))
-                .map(|hint| {
-                    format!(
-                        "  {} - {} [{}]",
-                        hint.usage,
-                        state.i18n().t(hint.summary_id),
-                        hint.scope
-                    )
-                }),
-        );
+        let entries = visible_slash_commands()
+            .filter(|hint| hint.group == Some(group))
+            .map(|hint| HelpPanelEntry {
+                usage: hint.usage,
+                summary: i18n.t(hint.summary_id),
+                scope: hint.scope,
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            continue;
+        }
+        groups.push(HelpPanelGroup {
+            label: i18n.t(label_id),
+            entries,
+        });
     }
 
-    render_notice_panel(
+    RatatuiInlineRenderer::for_terminal().write_help_panel(
         output,
-        state.i18n().t(MessageId::HelpTitle),
-        body,
-        Some(&state.i18n().format(
-            MessageId::HelpFooter,
-            &[
-                ("mode", state.approval_mode.label()),
-                ("strategy", state.analysis_mode.label()),
-            ],
-        )),
+        HelpPanelModel {
+            title: i18n.t(MessageId::HelpTitle),
+            groups,
+            footer: i18n.format(
+                MessageId::HelpFooter,
+                &[
+                    ("mode", state.approval_mode.label()),
+                    ("strategy", state.analysis_mode.label()),
+                ],
+            ),
+        },
     )
 }
 

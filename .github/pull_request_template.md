@@ -44,6 +44,7 @@ closes #
 - [ ] `memory` (agent-memory)
 - [ ] `anolisa` (anolisa-cli)
 - [ ] `skillfs` (SkillFS)
+- [ ] `blaze` (blaze)
 - [ ] Multiple / Project-wide
 
 ## Checklist

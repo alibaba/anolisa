@@ -191,6 +191,7 @@ describe('HookSystem', () => {
         { command: 'ls' },
         undefined,
         'tool-call-1',
+        undefined,
       );
     });
   });

@@ -1,5 +1,78 @@
 # Changelog
 
+All notable changes to Tokenless will be documented in this file.
+
+Releases from 0.7.2 onward follow
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+## [0.7.3] - 2026-07-28
+
+### Added
+
+- ANOLISA can now install Tokenless on macOS and enable Qwencode as an independent adapter ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
+### Changed
+
+- Adapter hooks now discover `tokenless`, `rtk`, and `toon` across user, `/usr/local`, RPM, and legacy installation layouts ([#1957](https://github.com/alibaba/anolisa/pull/1957)).
+- Hook launchers now prefer resources from the active installation, preventing mixed versions when multiple Tokenless installations coexist ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
+### Fixed
+
+- Tool schema compression now reads the canonical Cosh and Cosh-NG request field, so schemas are compressed instead of silently passing through unchanged ([#1894](https://github.com/alibaba/anolisa/pull/1894)).
+- Cosh-NG compression statistics are now attributed to `cosh-ng` when hook environment variables are present ([#1894](https://github.com/alibaba/anolisa/pull/1894)).
+- Qoder plugin installation now expands cached hook paths, preventing invalid `/rewrite_hook.py` commands from blocking tool calls; the user manual includes recovery steps for affected upgrades ([#1924](https://github.com/alibaba/anolisa/pull/1924)).
+- ANOLISA packages now include the shared hook resources required by Tokenless adapters ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
+## [0.7.2] - 2026-07-27
+
+### Added
+
+- Tokenless now compresses Cosh-NG tool responses by replacing the original model-visible content ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Tokenless now rewrites supported Cosh-NG shell commands for more compact output ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+
+### Changed
+
+- Shell environment checks now report only recommended tools referenced by the current command ([#1598](https://github.com/alibaba/anolisa/pull/1598)).
+- `tokenless env-check --fix` now installs required dependencies only, leaving optional recommendations untouched ([#1598](https://github.com/alibaba/anolisa/pull/1598)).
+- Automatic dependency fixes now fail quickly with actionable authentication, network, or permission messages instead of prompting for sudo ([#1598](https://github.com/alibaba/anolisa/pull/1598)).
+- Cosh-NG compression statistics are now recorded under the `cosh-ng` agent ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Cosh-NG compression now excludes display-only content from model context ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Cosh-NG runs with undetectable versions now keep original tool responses unchanged ([#1669](https://github.com/alibaba/anolisa/pull/1669)).
+- Compression now leaves tool results unchanged when the compressed output is not smaller ([#1674](https://github.com/alibaba/anolisa/pull/1674)).
+- Tokenless user manuals now live in the central ANOLISA guide instead of the RPM package ([#1586](https://github.com/alibaba/anolisa/pull/1586)).
+
+### Fixed
+
+- Claude Code 2.1.121+ now replaces original tool results with compressed versions, preventing duplicate context ([#1674](https://github.com/alibaba/anolisa/pull/1674), [#1686](https://github.com/alibaba/anolisa/pull/1686)).
+- Older or undetectable Claude Code versions now pass tool results through unchanged instead of duplicating compressed context ([#1674](https://github.com/alibaba/anolisa/pull/1674), [#1686](https://github.com/alibaba/anolisa/pull/1686)).
+- Claude Code replacements now preserve built-in tool result formats, including empty fields ([#1674](https://github.com/alibaba/anolisa/pull/1674), [#1686](https://github.com/alibaba/anolisa/pull/1686)).
+- ANOLISA now recognizes the packaged Tokenless version correctly ([#1587](https://github.com/alibaba/anolisa/pull/1587)).
+
+## 0.7.1
+
+- fix RPM tarball to exclude generated `.anolisa/component.toml`, ensuring rpmbuild always regenerates the adapter contract from the authoritative `.toml.in` template — previously stale checked-in copies shipped outdated contracts missing claude-code, codex, and cosh adapter declarations (closes #1470)
+- synchronize adapter contracts: declare every shipped driver (qoder, claude-code, codex, cosh, qwencode) in `component.toml.in` and add CI check (`check-component-contract`) to keep them in sync
+- raise test coverage from 75% to 90%: ~170 new unit tests across all four crates covering compression edge cases, stash round-trip, schema migration, SLS writer, and CLI dispatch
+- harden test isolation: replace unsafe env-var mutations with RAII `TempDbGuard` / `EnvGuard` to prevent tests from touching real `~/.tokenless` state; enforce `--test-threads=1` in Makefile (Rust 2024 `set_var` is unsafe)
+
+
+## 0.7.0
+
+- add MCP `tokenless_retrieve` stdio server (`tokenless mcp serve`) so MCP-connected agents can recover truncated payloads on demand — the MCP analogue of the `tokenless retrieve` CLI, closing the stash MCP gap vs Headroom CCR's `headroom_retrieve`
+- complete reversible-compression (stash / CCR) coverage across the remaining lossy paths: `ResponseCompressor` string truncation, `ResponseCompressor` depth truncation, and `SchemaCompressor` description truncation are now stash-backed with `<<tokenless:KEY>>` markers; fit-check before stash prevents orphan entries; shared `stash_suffix()` helpers keep marker budget consistent
+- add `--no-stash` / `--stash-db` flags to `compress-schema` (mirroring `compress-response`); dry-run (`compression_on=false`) skips the stash so markers never reach the LLM without a retrievable entry
+- add lazy TTL purge to `SqliteStore`: expired rows are physically deleted before retrieve lookups so the stash db does not grow unbounded
+- add actual-savings-rate display: `StatsSummary::actual_savings_percent(session_total_tokens)`; `format_summary()` / `format_summary_json()` accept optional session total and emit an "Overall Savings vs Total Consumption" section plus new JSON fields (`session_total_tokens`, `actual_savings_tokens`, `actual_savings_percent`) — backward-compatible when absent
+- add stash write/size counters to compression stats (`record_compression_stats` extended); retrieve-side hits/misses deferred pending a stats use case
+- add qoder framework driver (qodercli install + settings.json merge/prune, `AdapterOps::read_file`, symlink-safe atomic `write_file`); gate qoder to `adapter_type=plugin`; fail closed on forged receipts and require all managed hooks
+- raise test coverage from 59% to 75%: 100+ new unit tests plus 18 CLI integration tests across all four crates, test code moved to `src/tests/` via `include!()` for cleaner separation
+- add reversible-compression user manual (`docs/stash-reversible-compression.md`) plus README updates: architecture tree entry for `tokenless-ccr`, retrieve subsection documenting hash/marker input and `--no-stash`/`--stash-db`, scenario-mapping rewrite of the "Applicable Scenarios & Expected Effects" chapter
+- rename tokenless docs `*_CN.md` to `*_zh.md`, add bidirectional bilingual links, create `README.md` + `README_zh.md`
+- address adapter review findings: trust packaged datadir roots for Codex symlink targets, scope Claude Code marketplaces per component and fail closed, reject framework/adapter type mismatches before enable
+- silence clippy warnings surfaced by rustc 1.94 stable in existing tests (`field_reassign_with_default` in tokenless-cli, `bool_assert_comparison` and `default_constructed_unit_structs` in tokenless-stats)
+
 ## 0.6.1
 
 - bundle tool_categories.json into dist for npm installs
@@ -129,3 +202,7 @@
 ## 0.1.0
 
 - introduce tokenless into ANOLISA (#199)
+
+[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...HEAD
+[0.7.3]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...tokenless/v0.7.3
+[0.7.2]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.1...tokenless/v0.7.2

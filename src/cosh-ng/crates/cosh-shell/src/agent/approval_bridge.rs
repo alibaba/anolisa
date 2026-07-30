@@ -5,6 +5,7 @@ use crate::approval::broker::{
     provider_deny_response, ApprovalExecutionMetadata, ApprovalOutcome, ApprovalOutcomeInput,
     ProviderApprovalStatus, ProviderResponseInput,
 };
+use crate::approval::journal::approval_audit_input;
 use crate::approval::provider::mark_provider_approval_resolved;
 use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::prelude::*;
@@ -13,6 +14,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
     run_request: Option<&AgentRequest>,
+    origin: AgentRunOrigin,
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<bool> {
@@ -20,6 +22,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
         return Ok(false);
     }
 
+    let mut blocked_approval_ids = Vec::new();
     for event in governed_events {
         let provider_tool_call_fallback = adapter.capabilities().control_protocol
             && matches!(event.event, AgentEvent::ToolCall { .. });
@@ -27,6 +30,7 @@ pub(crate) fn render_trusted_tool<W: Write>(
             state,
             event,
             run_request,
+            origin,
             adapter.capabilities().control_protocol && !provider_tool_call_fallback,
         ) else {
             continue;
@@ -57,10 +61,22 @@ pub(crate) fn render_trusted_tool<W: Write>(
         }
         if !provider_tool_call_fallback && defer_fallback_bash_tool(state, request.clone(), output)?
         {
+            render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
         if handle_shell_request_policy(state, run_request, &request) {
+            render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
+        }
+        if trust_mode_blocks_shell_request(&mut request, AssessmentSource::ProviderShellTool) {
+            blocked_approval_ids.extend(record_approval_requests(
+                state,
+                std::slice::from_ref(event),
+                run_request,
+                origin,
+                false,
+            ));
+            continue;
         }
         let mut request = record_auto_approved_request(state, request);
         if apply_auto_approved_request_outcome(
@@ -70,17 +86,28 @@ pub(crate) fn render_trusted_tool<W: Write>(
             output,
         )? == AutoApprovalFlow::Handled
         {
+            render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
     }
 
+    render_approval_requests(state, &blocked_approval_ids, output)?;
     Ok(false)
+}
+
+fn trust_mode_blocks_shell_request(
+    request: &mut RuntimeApprovalRequest,
+    source: AssessmentSource,
+) -> bool {
+    refresh_shell_request_assessment(request, AssessmentPolicy::ask(source))
+        .is_some_and(|assessment| assessment.execution == ExecutionDecision::Block)
 }
 
 pub(crate) fn render_auto_approved_tool<W: Write>(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
     run_request: Option<&AgentRequest>,
+    origin: AgentRunOrigin,
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<bool> {
@@ -95,6 +122,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             state,
             event,
             run_request,
+            origin,
             adapter.capabilities().control_protocol && !provider_tool_call_fallback,
         ) else {
             continue;
@@ -146,7 +174,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             .unwrap_or(&request.preview);
 
         if request_is_executable_bash_tool(&request)
-            && command_matches_trust_key(raw_cmd, state.control.session_trusted_commands())
+            && command_matches_trust_key(raw_cmd, state.control.trust.session_trusted_commands())
         {
             if defer_fallback_bash_tool(state, request.clone(), output)? {
                 return Ok(true);
@@ -209,10 +237,11 @@ fn provider_native_shell_result_already_visible(
     request: &RuntimeApprovalRequest,
 ) -> bool {
     !request.provider_shell_request_kind.is_control_permission()
-        && request
-            .tool_use_id
-            .as_deref()
-            .is_some_and(|tool_id| state.control.provider_shell_transcript_output_seen(tool_id))
+        && request.tool_use_id.as_deref().is_some_and(|tool_id| {
+            state
+                .control
+                .provider_shell_transcript_output_seen(&request.run_id, tool_id)
+        })
 }
 
 fn provider_native_shell_covered_by_foreground(
@@ -231,7 +260,9 @@ fn mark_provider_native_shell_request_transcript_seen(
     request: &RuntimeApprovalRequest,
 ) {
     if let Some(tool_id) = request.tool_use_id.as_deref() {
-        state.control.mark_provider_shell_transcript_seen(tool_id);
+        state
+            .control
+            .mark_provider_shell_transcript_seen(&request.run_id, tool_id);
     }
 }
 
@@ -337,9 +368,11 @@ fn duplicate_host_executed_shell_result_delivered(
     let Some(request_id) = request.request_id.as_deref() else {
         return false;
     };
-    state
-        .control
-        .provider_host_executed_shell_result_delivered(request_id, request.tool_use_id.as_deref())
+    state.control.provider_host_executed_shell_result_delivered(
+        &request.run_id,
+        request_id,
+        request.tool_use_id.as_deref(),
+    )
 }
 
 fn run_already_approved_shell_tool(state: &InlineState, run_id: &str) -> bool {
@@ -356,6 +389,15 @@ fn apply_auto_approved_request_outcome<W: Write>(
     title: MessageId,
     output: &mut W,
 ) -> std::io::Result<AutoApprovalFlow> {
+    if request.status != ApprovalRequestStatus::Approved {
+        render_approval_resolution(
+            state,
+            request,
+            MessageId::ApprovalResolutionBlockedTitle,
+            output,
+        )?;
+        return Ok(AutoApprovalFlow::Handled);
+    }
     // DR-6: When hooks had something to say but the tool is auto-approved,
     // render an independent hook notice panel before the tool call header
     // so that the user is aware of the hook's intervention.
@@ -379,6 +421,24 @@ fn apply_auto_approved_request_outcome<W: Write>(
         )?;
     }
     let outcome = approval_outcome_for_auto_request(request);
+    if outcome == ApprovalOutcome::ForegroundShellHandoff {
+        let authorized = state
+            .audit
+            .as_mut()
+            .map(|audit| audit.authorize_host_execution(approval_audit_input(request)))
+            .transpose();
+        if authorized.is_err() {
+            request.status = ApprovalRequestStatus::Blocked;
+            request.execution_path = Some("blocked_audit_required");
+            render_approval_resolution(
+                state,
+                request,
+                MessageId::ApprovalResolutionBlockedTitle,
+                output,
+            )?;
+            return Ok(AutoApprovalFlow::Handled);
+        }
+    }
     if outcome == ApprovalOutcome::ProviderNativeShellFallback {
         mark_provider_native_shell_execution(state, request);
     }
@@ -585,6 +645,8 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
+                audit_identity: None,
             },
             context_blocks: Vec::new(),
             context_hints: vec![
@@ -625,6 +687,7 @@ mod tests {
             &mut state,
             &[governed],
             Some(&analysis_only_request()),
+            AgentRunOrigin::Standard,
             &mut output,
             &adapter,
         )
@@ -636,12 +699,137 @@ mod tests {
     }
 
     #[test]
+    fn trust_mode_routes_blocked_shell_request_batch_to_approval() {
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Trust,
+            ..InlineState::default()
+        };
+        let governed = ["run-1", "run-2"].map(|run_id| GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+            event: AgentEvent::ToolCall {
+                run_id: run_id.to_string(),
+                tool_id: None,
+                name: "Bash".to_string(),
+                input: "printf blocked\0binding".to_string(),
+            },
+            reason: "blocked shell binding".to_string(),
+            display_text: "blocked shell binding".to_string(),
+            auto_execute: false,
+        });
+        let mut output = Vec::new();
+
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &governed,
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render trusted approval");
+
+        assert_eq!(state.approvals.requests.len(), 2);
+        assert!(state.approvals.requests.iter().all(|request| {
+            request.status == ApprovalRequestStatus::Pending
+                && request
+                    .assessment
+                    .as_ref()
+                    .is_some_and(|assessment| assessment.execution == "block")
+        }));
+        assert_eq!(state.approvals.active_panel_id.as_deref(), Some("req-1"));
+        assert!(state.approvals.active_panel_height > 0);
+    }
+
+    #[test]
+    fn trust_mode_surfaces_hook_followup_approval_after_auto_approved_tool() {
+        // #1920 regression: after the trust path auto-approves the shell
+        // tool call, the sandbox-bypass follow-up approval reuses the same
+        // tool_use_id via the control protocol with hook_requires_approval
+        // set; it must surface as a pending card instead of being dropped.
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Trust,
+            ..InlineState::default()
+        };
+        let tool_call = GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+            event: AgentEvent::ToolCall {
+                run_id: "run-1".to_string(),
+                tool_id: Some("toolu-1".to_string()),
+                name: "Bash".to_string(),
+                input: r#"{"command":"echo ok"}"#.to_string(),
+            },
+            reason: "provider tool call".to_string(),
+            display_text: "provider tool call".to_string(),
+            auto_execute: false,
+        };
+        let mut output = Vec::new();
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &[tool_call],
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render trusted tool call");
+        assert_eq!(state.approvals.requests.len(), 1);
+        assert_eq!(
+            state.approvals.requests[0].status,
+            ApprovalRequestStatus::Approved
+        );
+
+        let followup = GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+            event: AgentEvent::ToolPermissionRequest {
+                run_id: "run-1".to_string(),
+                request_id: "ctrl-2".to_string(),
+                tool_name: "Bash".to_string(),
+                tool_input: serde_json::json!({ "command": "echo ok" }),
+                tool_use_id: "toolu-1".to_string(),
+                hook_requires_approval: true,
+                audit_ref: None,
+            },
+            reason: "sandbox bypass approval".to_string(),
+            display_text: "sandbox bypass approval".to_string(),
+            auto_execute: false,
+        };
+        crate::agent::events::render_agent_structured_events(
+            &mut state,
+            &[followup],
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render hook follow-up approval");
+
+        let pending = state
+            .approvals
+            .requests
+            .iter()
+            .find(|request| request.request_id.as_deref() == Some("ctrl-2"))
+            .expect("hook follow-up approval must be recorded");
+        assert_eq!(pending.status, ApprovalRequestStatus::Pending);
+        assert!(pending.hook_requires_approval);
+        assert_eq!(pending.tool_use_id.as_deref(), Some("toolu-1"));
+        assert_eq!(
+            state.approvals.active_panel_id.as_deref(),
+            Some(pending.id.as_str())
+        );
+    }
+
+    #[test]
     fn shell_request_policy_denies_duplicate_host_executed_request() {
         let mut state = InlineState::default();
         state
             .control
             .provider_tool_mut()
-            .claim_host_executed_shell_result("ctrl-1", Some("toolu-1"))
+            .claim_host_executed_shell_result("run-1", "ctrl-1", Some("toolu-1"))
             .expect("claim host result");
         let request = shell_request(
             ProviderShellRequestKind::ControlPermission,
@@ -652,6 +840,13 @@ mod tests {
         assert_eq!(
             shell_request_policy_decision(&state, None, &request),
             ShellRequestPolicyDecision::DenyDuplicateHostExecuted
+        );
+
+        let mut next_run_request = request;
+        next_run_request.run_id = "run-2".to_string();
+        assert_eq!(
+            shell_request_policy_decision(&state, None, &next_run_request),
+            ShellRequestPolicyDecision::Continue
         );
     }
 
@@ -693,7 +888,9 @@ mod tests {
     ) -> RuntimeApprovalRequest {
         RuntimeApprovalRequest {
             id: "req-1".to_string(),
+            audit_ref: None,
             run_id: "run-1".to_string(),
+            origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),
             cwd: "/tmp".to_string(),
             source: "test",

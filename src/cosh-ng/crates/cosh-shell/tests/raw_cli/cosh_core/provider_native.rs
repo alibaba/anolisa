@@ -55,7 +55,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (b"\n".to_vec(), Duration::from_millis(2_000)),
             (b"/debug session\n".to_vec(), Duration::from_millis(6_000)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -344,10 +344,10 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     assert!(stdout_pos < post_tool_text_pos, "{output}");
     assert!(stdout_pos < final_pos, "{output}");
     assert!(
-        output
-            .contains("auto-approved by provider: $ echo COSH_CORE_STREAM_NATIVE_SHELL; [Details]"),
+        output.contains("auto-approved by provider: $ echo COSH_CORE_STREAM_NATIVE_SHELL"),
         "{output}"
     );
+    assert!(!output.contains("[Details] tool-"), "{output}");
     assert!(
         output.contains("provider_native_shell_bypassed_control_protocol"),
         "{output}"

@@ -31,6 +31,18 @@ pub enum InterruptionType {
     /// Agent stuck in a logical loop: repeated tool sequences or similar LLM outputs
     /// without meaningful progress (no errors, just looping behavior)
     DeadLoop,
+    /// Tool/function execution failed (ToolUse.success == false)
+    ToolFailure,
+    /// LLM returned HTTP 200 but produced no output messages and no error
+    EmptyResponse,
+    /// API quota or billing limit exhausted (distinct from per-minute rate limiting)
+    ResourceExhaustion,
+    /// LLM call succeeded but response time exceeded threshold
+    SlowResponse,
+    /// Agent protocol or state-machine error (malformed response, invalid transition)
+    StateMachineError,
+    /// Tool attempted an operation denied by permission system or sandbox
+    UnauthorizedAction,
 }
 
 impl InterruptionType {
@@ -49,6 +61,12 @@ impl InterruptionType {
             Self::LlmError => "llm_error",
             Self::RetryStorm => "retry_storm",
             Self::DeadLoop => "dead_loop",
+            Self::ToolFailure => "tool_failure",
+            Self::EmptyResponse => "empty_response",
+            Self::ResourceExhaustion => "resource_exhaustion",
+            Self::SlowResponse => "slow_response",
+            Self::StateMachineError => "state_machine_error",
+            Self::UnauthorizedAction => "unauthorized_action",
         }
     }
 
@@ -67,6 +85,12 @@ impl InterruptionType {
             "llm_error" => Some(Self::LlmError),
             "retry_storm" => Some(Self::RetryStorm),
             "dead_loop" => Some(Self::DeadLoop),
+            "tool_failure" => Some(Self::ToolFailure),
+            "empty_response" => Some(Self::EmptyResponse),
+            "resource_exhaustion" => Some(Self::ResourceExhaustion),
+            "slow_response" => Some(Self::SlowResponse),
+            "state_machine_error" => Some(Self::StateMachineError),
+            "unauthorized_action" => Some(Self::UnauthorizedAction),
             _ => None,
         }
     }
@@ -86,6 +110,12 @@ impl InterruptionType {
             Self::LlmError => Severity::High,
             Self::RetryStorm => Severity::Critical,
             Self::DeadLoop => Severity::Critical,
+            Self::ToolFailure => Severity::Medium,
+            Self::EmptyResponse => Severity::High,
+            Self::ResourceExhaustion => Severity::High,
+            Self::SlowResponse => Severity::Medium,
+            Self::StateMachineError => Severity::High,
+            Self::UnauthorizedAction => Severity::Medium,
         }
     }
 }
@@ -201,6 +231,21 @@ mod tests {
         assert_eq!(InterruptionType::LlmError.as_str(), "llm_error");
         assert_eq!(InterruptionType::RetryStorm.as_str(), "retry_storm");
         assert_eq!(InterruptionType::DeadLoop.as_str(), "dead_loop");
+        assert_eq!(InterruptionType::ToolFailure.as_str(), "tool_failure");
+        assert_eq!(InterruptionType::EmptyResponse.as_str(), "empty_response");
+        assert_eq!(
+            InterruptionType::ResourceExhaustion.as_str(),
+            "resource_exhaustion"
+        );
+        assert_eq!(InterruptionType::SlowResponse.as_str(), "slow_response");
+        assert_eq!(
+            InterruptionType::StateMachineError.as_str(),
+            "state_machine_error"
+        );
+        assert_eq!(
+            InterruptionType::UnauthorizedAction.as_str(),
+            "unauthorized_action"
+        );
     }
 
     #[test]
@@ -252,6 +297,30 @@ mod tests {
         assert_eq!(
             InterruptionType::from_str("dead_loop"),
             Some(InterruptionType::DeadLoop)
+        );
+        assert_eq!(
+            InterruptionType::from_str("tool_failure"),
+            Some(InterruptionType::ToolFailure)
+        );
+        assert_eq!(
+            InterruptionType::from_str("empty_response"),
+            Some(InterruptionType::EmptyResponse)
+        );
+        assert_eq!(
+            InterruptionType::from_str("resource_exhaustion"),
+            Some(InterruptionType::ResourceExhaustion)
+        );
+        assert_eq!(
+            InterruptionType::from_str("slow_response"),
+            Some(InterruptionType::SlowResponse)
+        );
+        assert_eq!(
+            InterruptionType::from_str("state_machine_error"),
+            Some(InterruptionType::StateMachineError)
+        );
+        assert_eq!(
+            InterruptionType::from_str("unauthorized_action"),
+            Some(InterruptionType::UnauthorizedAction)
         );
         assert_eq!(InterruptionType::from_str("unknown"), None);
         assert_eq!(InterruptionType::from_str(""), None);
@@ -306,6 +375,30 @@ mod tests {
         assert_eq!(
             InterruptionType::DeadLoop.default_severity(),
             Severity::Critical
+        );
+        assert_eq!(
+            InterruptionType::ToolFailure.default_severity(),
+            Severity::Medium
+        );
+        assert_eq!(
+            InterruptionType::EmptyResponse.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::ResourceExhaustion.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::SlowResponse.default_severity(),
+            Severity::Medium
+        );
+        assert_eq!(
+            InterruptionType::StateMachineError.default_severity(),
+            Severity::High
+        );
+        assert_eq!(
+            InterruptionType::UnauthorizedAction.default_severity(),
+            Severity::Medium
         );
     }
 
@@ -404,6 +497,12 @@ mod tests {
             InterruptionType::LlmError,
             InterruptionType::RetryStorm,
             InterruptionType::DeadLoop,
+            InterruptionType::ToolFailure,
+            InterruptionType::EmptyResponse,
+            InterruptionType::ResourceExhaustion,
+            InterruptionType::SlowResponse,
+            InterruptionType::StateMachineError,
+            InterruptionType::UnauthorizedAction,
         ];
         for t in types {
             let json = serde_json::to_string(&t).unwrap();

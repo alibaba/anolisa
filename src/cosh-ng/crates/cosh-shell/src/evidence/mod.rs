@@ -14,4 +14,7 @@ pub(crate) use context_window::{
     terminal_output_id, ContextEntry, ContextWindowConfig, ProviderCommandFacts,
     RelatedHistoryConfig, ShellEvidenceAccess,
 };
+pub(crate) use model::{evidence_capture_status_for_block, EvidenceCaptureStatus};
 pub(crate) use output_policy::output_excerpt_status_for_block;
+pub(crate) use output_text::{clean_terminal_control_sequences, redact_sensitive_output};
+pub(crate) use redaction::redact_sensitive_text;

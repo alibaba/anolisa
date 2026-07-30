@@ -904,6 +904,7 @@ describe('ShellExecutionService execution method selection', () => {
 
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
     const abortController = new AbortController();
+    const childProcessEnv = { COSH_SESSION_ID: 'launcher-correlation' };
     const handle = await ShellExecutionService.execute(
       'test command',
       '/test/dir',
@@ -911,6 +912,7 @@ describe('ShellExecutionService execution method selection', () => {
       abortController.signal,
       true, // shouldUseNodePty
       shellExecutionConfig,
+      childProcessEnv,
     );
 
     // Simulate exit to allow promise to resolve
@@ -918,13 +920,20 @@ describe('ShellExecutionService execution method selection', () => {
     const result = await handle.result;
 
     expect(mockGetPty).toHaveBeenCalled();
-    expect(mockPtySpawn).toHaveBeenCalled();
+    expect(mockPtySpawn).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'test command'],
+      expect.objectContaining({
+        env: expect.objectContaining(childProcessEnv),
+      }),
+    );
     expect(mockCpSpawn).not.toHaveBeenCalled();
     expect(result.executionMethod).toBe('mock-pty');
   });
 
   it('should use child_process when shouldUseNodePty is false', async () => {
     const abortController = new AbortController();
+    const childProcessEnv = { COSH_SESSION_ID: 'launcher-correlation' };
     const handle = await ShellExecutionService.execute(
       'test command',
       '/test/dir',
@@ -932,6 +941,7 @@ describe('ShellExecutionService execution method selection', () => {
       abortController.signal,
       false, // shouldUseNodePty
       {},
+      childProcessEnv,
     );
 
     // Simulate exit to allow promise to resolve
@@ -940,7 +950,13 @@ describe('ShellExecutionService execution method selection', () => {
 
     expect(mockGetPty).not.toHaveBeenCalled();
     expect(mockPtySpawn).not.toHaveBeenCalled();
-    expect(mockCpSpawn).toHaveBeenCalled();
+    expect(mockCpSpawn).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'test command'],
+      expect.objectContaining({
+        env: expect.objectContaining(childProcessEnv),
+      }),
+    );
     expect(result.executionMethod).toBe('child_process');
   });
 

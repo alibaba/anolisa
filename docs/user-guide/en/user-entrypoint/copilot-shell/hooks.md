@@ -160,6 +160,6 @@ Allow execution with modified parameters:
 
 ## Related Documentation
 
-- [Hook Development Guide](../developers/hooks/index.md)
-- [Hook API Reference](../developers/hooks/reference.md)
-- [Writing Custom Hooks](../developers/hooks/writing-hooks.md)
+- [Hook Development Guide](../../../../developer-guide/en/copilot-shell/hooks/index.md)
+- [Hook API Reference](../../../../developer-guide/en/copilot-shell/hooks/reference.md)
+- [Writing Custom Hooks](../../../../developer-guide/en/copilot-shell/hooks/writing-hooks.md)

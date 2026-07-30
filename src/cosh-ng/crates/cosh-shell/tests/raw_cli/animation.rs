@@ -42,7 +42,7 @@ fn raw_cli_animation_mode_uses_transient_agent_status() {
 
 #[test]
 fn raw_cli_animation_stops_heartbeat_after_visible_agent_text() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
         &[],
         &[
@@ -50,9 +50,10 @@ fn raw_cli_animation_stops_heartbeat_after_visible_agent_text() {
             ("COSH_SHELL_ANIMATION", "always"),
             ("TERM", "xterm-256color"),
         ],
-        vec![
-            (b"?? slow text then wait\n".to_vec(), Duration::ZERO),
-            (b"exit\n".to_vec(), Duration::from_millis(7_500)),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"?? slow text then wait\n"),
+            ("Slow fake response for: ?? slow text then wait", b"exit\n"),
         ],
     );
 

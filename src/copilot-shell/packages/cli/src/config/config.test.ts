@@ -606,6 +606,10 @@ describe('loadCliConfig', () => {
     // Discriminating: without the env-adopt block, sessionId stays undefined and
     // Config mints a random uuid, so this exact-match assertion fails.
     expect(config.getSessionId()).toBe('sight-corr-abc-123');
+    expect(config.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      'sight-corr-abc-123',
+    );
+    expect(process.env['COSH_SESSION_ID']).toBe('sight-corr-abc-123');
   });
 
   it('ignores an empty COSH_SESSION_ID and mints a fresh id', async () => {
@@ -617,6 +621,30 @@ describe('loadCliConfig', () => {
     // Empty value must be treated as absent (guards the `.length > 0` check).
     expect(config.getSessionId()).not.toBe('');
     expect(config.getSessionId().length).toBeGreaterThan(0);
+    expect(config.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      config.getSessionId(),
+    );
+    expect(process.env['COSH_SESSION_ID']).toBe('');
+  });
+
+  it('keeps ACP chat sessions distinct from launcher correlation', async () => {
+    vi.stubEnv('COSH_SESSION_ID', 'launcher-correlation');
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+
+    const firstConfig = await loadCliConfig({}, argv);
+    const secondConfig = await loadCliConfig({}, argv);
+
+    expect(firstConfig.getSessionId()).not.toBe('launcher-correlation');
+    expect(secondConfig.getSessionId()).not.toBe('launcher-correlation');
+    expect(firstConfig.getSessionId()).not.toBe(secondConfig.getSessionId());
+    expect(firstConfig.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      'launcher-correlation',
+    );
+    expect(secondConfig.getChildProcessEnv()['COSH_SESSION_ID']).toBe(
+      'launcher-correlation',
+    );
+    expect(process.env['COSH_SESSION_ID']).toBe('launcher-correlation');
   });
 
   describe('Proxy configuration', () => {
@@ -1526,6 +1554,78 @@ describe('loadCliConfig deprecated/unknown authType handling', () => {
       AuthType.USE_OPENAI,
     );
     expect(configWarnings).toHaveLength(0);
+  });
+});
+
+describe('loadCliConfig cosh-ng fallback precedence', () => {
+  const originalArgv = process.argv;
+
+  // Shape produced by loadCoshNgProviderFallback() and merged as the
+  // lowest-precedence settings layer.
+  const coshNgFallbackSettings = {
+    security: {
+      auth: {
+        selectedType: 'openai',
+        apiKey: 'sk-from-cosh-ng',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        openaiModel: 'model-from-cosh-ng',
+      },
+    },
+    model: { name: 'model-from-cosh-ng' },
+  } as unknown as Settings;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('lets --auth-type override the inherited auth type', async () => {
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    process.argv = ['node', 'script.js', '--auth-type', 'gemini'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_GEMINI,
+    );
+  });
+
+  it('lets --model override the inherited model', async () => {
+    process.argv = ['node', 'script.js', '--model', 'model-from-cli'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getModel()).toBe('model-from-cli');
+  });
+
+  it('lets OPENAI_MODEL override the inherited model', async () => {
+    vi.stubEnv('OPENAI_MODEL', 'model-from-env');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getModel()).toBe('model-from-env');
+  });
+
+  it('uses the inherited model when nothing overrides it', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig(coshNgFallbackSettings, argv, undefined);
+
+    expect(config.getModelsConfig().getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI,
+    );
+    expect(config.getModelsConfig().getModel()).toBe('model-from-cosh-ng');
   });
 });
 

@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Codex hook for PII (Personal Identifiable Information) detection.
 
-Supports TWO hook points via a single script (routed by hook_event_name):
+Supports THREE hook points via a single script (routed by hook_event_name):
   - UserPromptSubmit: scans user prompt before it reaches the model.
+  - PreToolUse: scans tool input before the tool executes.
   - PostToolUse: scans tool output before it enters model context.
 
-Protection direction: prevent PII from flowing INTO the LLM provider.
-The user already knows their own PII — the goal is to stop it from being
-sent to a third-party model service or leaking via model responses.
+Protection direction:
+  - UserPromptSubmit / PostToolUse: detect PII flowing INTO the LLM provider
+    (user prompt / tool output → model) before applying the configured policy.
+  - PreToolUse: detect PII flowing OUT via a tool call (exfiltration), e.g.
+    curl-ing a phone number to an external endpoint or writing PII to a file.
+    This is the only point to enforce PII policy before the tool executes.
 
 Modes (controlled by PII_CHECKER_MODE env var, default: observe):
   - observe: silent pass-through, only audit trail via agent-sec-cli events.
              Even if PII is detected, content will NOT be blocked.
-  - deny: block when PII is detected.
-          UserPromptSubmit: reject the prompt (user must rephrase).
-          PostToolUse: replace tool output with reason text (model won't see PII).
+  - deny: surface scanner "warn" verdicts through systemMessage and continue;
+          block scanner "deny" verdicts at all three hook points.
 
-Protocol note: Codex hook protocol is binary (allow/block). There is NO
-"redact and pass" capability — the protocol does not support modifying
-content before forwarding. So we can only block entirely or allow entirely.
+Protocol note: Codex supports non-blocking systemMessage warnings but does not
+support "redact and pass" for these hook points. A warning therefore forwards
+the original payload unchanged, while a deny verdict blocks the payload.
 
 Usage::
 
@@ -70,18 +73,10 @@ def _shorten(value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
 # -- output helpers --------------------------------------------------------
 
 
-def _format_block_reason(
-    findings: list[dict], hook_event: str, source_desc: str
-) -> str:
-    """Build a human-readable block reason from structured PII findings.
-
-    The reason is shown to the user (UserPromptSubmit) or replaces tool
-    output visible to the model (PostToolUse). It contains only PII types
-    and redacted evidence — never the raw PII content itself.
-    """
+def _format_finding_details(findings: list[dict]) -> tuple[int, list[str]]:
+    """Build shared, audit-safe detail lines from structured PII findings."""
     typed_findings = [item for item in findings if isinstance(item, dict)]
     count = len(typed_findings)
-
     pii_types = sorted(
         {
             finding_type
@@ -104,21 +99,51 @@ def _format_block_reason(
         if len(redacted_evidence) >= _MAX_EVIDENCE_ITEMS:
             break
 
-    lines = [
-        f"[pii-checker] 🔒 安全拦截：{source_desc}中检测到 {count} 项个人敏感信息",
-        f"  类型      : {', '.join(pii_types) if pii_types else 'unknown'}",
-    ]
+    lines = [f"  类型      : {', '.join(pii_types) if pii_types else 'unknown'}"]
     if severities:
         lines.append(f"  严重级别  : {', '.join(severities)}")
     if redacted_evidence:
         lines.append(f"  脱敏示例  : {', '.join(redacted_evidence)}")
+    return count, lines
+
+
+def _format_block_reason(
+    findings: list[dict], hook_event: str, source_desc: str
+) -> str:
+    """Build a human-readable block reason from structured PII findings.
+
+    The reason is shown to the user (UserPromptSubmit) or replaces tool
+    output visible to the model (PostToolUse). It contains only PII types
+    and redacted evidence — never the raw PII content itself.
+    """
+    count, details = _format_finding_details(findings)
+    lines = [
+        f"[pii-checker] 🔒 安全拦截：{source_desc}中检测到 {count} 项个人敏感信息",
+        *details,
+    ]
     lines.append(f"  拦截环节  : {hook_event}")
 
     if hook_event == "UserPromptSubmit":
         lines.append("请移除敏感信息后重新提交。")
+    elif hook_event == "PreToolUse":
+        lines.append("该工具调用已被阻止，敏感信息不会外发。")
     else:
         lines.append("工具输出已被拦截，原始内容不会进入模型上下文。")
 
+    return "\n".join(lines)
+
+
+def _format_warning_message(
+    findings: list[dict], hook_event: str, source_desc: str
+) -> str:
+    """Build a non-blocking warning using only redacted finding evidence."""
+    count, details = _format_finding_details(findings)
+    lines = [
+        f"[pii-checker] ⚠️ 隐私告警：{source_desc}中检测到 {count} 项个人敏感信息",
+        *details,
+        f"  告警环节  : {hook_event}",
+        "检测结果为 warn，执行将继续。",
+    ]
     return "\n".join(lines)
 
 
@@ -126,6 +151,12 @@ def _block(findings: list[dict], hook_event: str, source_desc: str) -> None:
     """Output block decision JSON to stdout."""
     reason = _format_block_reason(findings, hook_event, source_desc)
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
+
+
+def _warn(findings: list[dict], hook_event: str, source_desc: str) -> None:
+    """Output a user-visible warning without changing execution control."""
+    message = _format_warning_message(findings, hook_event, source_desc)
+    print(json.dumps({"systemMessage": message}, ensure_ascii=False))
 
 
 # -- text extraction -------------------------------------------------------
@@ -142,6 +173,24 @@ def _extract_scan_text(input_data: dict, hook_event: str) -> str | None:
             return text
         return None
 
+    if hook_event == "PreToolUse":
+        tool_input = input_data.get("tool_input")
+        if tool_input is None:
+            return None
+        # tool_input is a serde_json::Value — could be string, object, array
+        if isinstance(tool_input, str):
+            return tool_input if tool_input.strip() else None
+        # For non-string types, serialize to text for scanning
+        try:
+            text = json.dumps(tool_input, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return None
+        # Empty containers serialize to non-empty strings ("{}", "[]",
+        # "null") but carry no PII — skip to avoid a wasted scan-pii call.
+        if not text.strip() or text in ("{}", "[]", "null"):
+            return None
+        return text
+
     if hook_event == "PostToolUse":
         tool_response = input_data.get("tool_response")
         if tool_response is None:
@@ -152,22 +201,30 @@ def _extract_scan_text(input_data: dict, hook_event: str) -> str | None:
         # For non-string types, serialize to text for scanning
         try:
             text = json.dumps(tool_response, ensure_ascii=False)
-            return text if text.strip() else None
         except (TypeError, ValueError):
             return None
+        # Empty containers serialize to non-empty strings ("{}", "[]",
+        # "null") but carry no PII — skip to avoid a wasted scan-pii call.
+        if not text.strip() or text in ("{}", "[]", "null"):
+            return None
+        return text
 
     return None
 
 
 def _source_for_event(hook_event: str) -> str:
     """Return the --source argument value for agent-sec-cli."""
+    if hook_event == "PreToolUse":
+        return "tool_input"
     if hook_event == "PostToolUse":
         return "tool_output"
     return "user_input"
 
 
 def _source_desc_for_event(hook_event: str) -> str:
-    """Return human-readable source description for block reason."""
+    """Return a human-readable source description for a PII notice."""
+    if hook_event == "PreToolUse":
+        return "工具输入"
     if hook_event == "PostToolUse":
         return "工具输出"
     return "用户输入"
@@ -185,7 +242,7 @@ def main() -> None:
 
     # 2. Determine which hook event we're handling
     hook_event = input_data.get("hook_event_name", "")
-    if hook_event not in ("UserPromptSubmit", "PostToolUse"):
+    if hook_event not in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
         return  # unknown event, fail-open
 
     # 3. Extract text to scan
@@ -235,14 +292,16 @@ def main() -> None:
     if verdict == "pass" or not findings:
         return  # no PII detected, allow
 
-    # verdict is "warn" or "deny" — PII detected
     if MODE == "observe":
         return  # observe mode: don't block, audit only via CLI events
     elif MODE == "deny":
-        # Both "warn" and "deny" verdicts trigger block in deny mode,
-        # because Codex protocol has no "warn" transparency — only block or allow.
         source_desc = _source_desc_for_event(hook_event)
-        _block(findings, hook_event, source_desc)
+        if verdict == "warn":
+            # systemMessage is supported by all three hook points and remains non-blocking.
+            _warn(findings, hook_event, source_desc)
+        else:
+            # Preserve the existing fail-safe for deny or unexpected non-pass verdicts.
+            _block(findings, hook_event, source_desc)
     # else: unknown mode, fail-open
 
 

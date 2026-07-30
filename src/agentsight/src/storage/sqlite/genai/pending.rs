@@ -92,7 +92,7 @@ impl GenAISqliteStore {
     /// the full response arrives, or marked 'interrupted' by the stale-scan thread
     /// if the agent crashes before the response is received.
     pub fn insert_pending(&self, info: &PendingCallInfo) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let instance = crate::genai::instance_id::get_instance_id();
         conn.execute(
             "INSERT INTO genai_events (
@@ -146,7 +146,7 @@ impl GenAISqliteStore {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let GenAISemanticEvent::LLMCall(call) = event {
             {
-                let conn = self.conn.lock().unwrap();
+                let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
                 let event_json = serde_json::to_string(event)?;
 
                 let (input_tokens, output_tokens, total_tokens) = call
@@ -447,7 +447,7 @@ impl GenAISqliteStore {
         &self,
         timeout_secs: u64,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let cutoff_ns = {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -477,7 +477,7 @@ impl GenAISqliteStore {
         call_id: &str,
         itype: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE genai_events SET interruption_type = ?1 WHERE call_id = ?2",
             params![itype, call_id],
@@ -490,7 +490,7 @@ impl GenAISqliteStore {
         conversation_id: &str,
         itype: &str,
     ) -> u32 {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT COUNT(*) FROM genai_events WHERE conversation_id = ?1 AND interruption_type = ?2",
             params![conversation_id, itype],
@@ -508,7 +508,7 @@ impl GenAISqliteStore {
         conversation_id: &str,
         limit: usize,
     ) -> Vec<crate::interruption::RecentCallSummary> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // Subquery fetches latest N rows desc, outer query reverses to asc order
         let sql = "SELECT call_id, output_messages, COALESCE(input_tokens, 0), COALESCE(output_tokens, 0) \
                    FROM (SELECT call_id, output_messages, input_tokens, output_tokens, start_timestamp_ns \
@@ -561,7 +561,7 @@ impl GenAISqliteStore {
         Vec<(String, Option<String>, Option<String>, Option<String>)>,
         Box<dyn std::error::Error>,
     > {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT call_id, session_id, trace_id, conversation_id
              FROM genai_events
@@ -593,7 +593,7 @@ impl GenAISqliteStore {
         pid: i32,
         itype: &str,
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let updated = conn.execute(
             "UPDATE genai_events
              SET status = 'interrupted', interruption_type = ?1
@@ -620,7 +620,7 @@ impl GenAISqliteStore {
         if pids.is_empty() {
             return Ok(vec![]);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let placeholders: String = pids
             .iter()
             .enumerate()
@@ -663,7 +663,7 @@ impl GenAISqliteStore {
         call_id: &str,
         enrichment: &SseEnrichment,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE genai_events SET
                 model            = COALESCE(?2, model),

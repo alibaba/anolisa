@@ -1,5 +1,37 @@
 # Changelog
 
+[中文版](CHANGELOG_zh.md)
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.5] - 2026-07-27
+
+### Fixed
+
+- **agent-memory**: Updated to v0.2.5, derives focused recall queries from long English and CJK prompts and combines their results, agents can recall relevant memories from verbose prompts without silently dropping topics (#1574)
+
+## 0.2.4
+
+- fix(memory): auto-recall returns empty results after observe — synchronously reindex after memory_observe so before_prompt_build hook finds new content (#1520)
+- fix(memory): install.sh sets allowConversationAccess for hooks (#1521)
+
+## 0.2.3
+
+- fix(memory): normalize OpenClaw content blocks from array of content blocks `[{type:"text", text:"..."}]` to string before trigger matching and hashing, so auto-capture actually fires instead of coercing to `"[object Object]"`
+- fix(memory): add BM25 OR fallback — when implicit-AND FTS5 query returns 0 rows and there are multiple tokens, retry with `'\"token1\" OR \"token2\" OR ...'` so partial matches still surface instead of silent failures
+- fix(memory): sanitize audit_log by replacing `format!("{:.120}", query)` with `format!("bm25:len={}", query.len())` to prevent user query content from leaking into log paths
+
+
+## 0.2.2
+
+- fix memory_observe hint sanitization so YAML-escaped hints round-trip through the hand-rolled frontmatter reader (which does not interpret YAML escapes): replace `yaml_escape_hint()` with `sanitize_hint()` that only substitutes newlines and ASCII control chars with spaces; add 8 unit tests plus a real-parser round-trip test covering Windows paths with backslashes
+- add `max_hint_bytes` (default 512) to `MemoryConfig` with `MEMORY_MAX_HINT_BYTES` env override; thread `&MemoryConfig` through `memory_observe`, the `MemoryService` facade, and the MCP server
+- fix `make install INSTALL_PROFILE=user PREFIX=$HOME/.local` failing with Permission denied at install-adapter-resources: honor `INSTALL_PROFILE` and derive `DATADIR`/`SHARE_DIR` from `$(PREFIX)` so all writable paths follow the profile (system mode unchanged); aligns with the tokenless/ws-ckpt install contract
+- add `safe_fs` security-boundary unit tests (path escape, symlink traversal, sandbox root violations) plus formatting/import-order fixes exposed by `cargo fmt --all --check`
+
 ## 0.2.1
 
 - fix vector/hybrid search panic and empty index when an embedding provider is configured: the index worker ran on a std::thread with no tokio Handle so embeddings were never produced, and memory_search mode=vector|hybrid called Handle::block_on from a worker thread; the runtime handle is now captured at spawn and threaded through to the worker, and the search path uses block_in_place

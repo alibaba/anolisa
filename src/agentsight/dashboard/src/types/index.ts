@@ -194,6 +194,10 @@ export interface AgentHealthResponse {
 }
 
 
+// ─── ATIF (shared v1.7 schema) ───────────────────────────────────────────────
+// Mirrors the `agentsight-atif` crate, which both the eBPF export
+// (/api/export/atif/*) and the collector store (/api/trajectories/*) emit.
+
 export interface AtifToolCall {
   tool_call_id: string;
   function_name: string;
@@ -202,11 +206,20 @@ export interface AtifToolCall {
 
 export interface AtifObservationResult {
   source_call_id?: string;
-  content?: string;
+  /** Any JSON per the schema — AgentSight's exporter flattens it to a string. */
+  content?: unknown;
+  subagent_trajectory_ref?: SubagentTrajectoryRef[];
+}
+
+export interface SubagentTrajectoryRef {
+  trajectory_id?: string;
+  trajectory_path?: string;
+  session_id?: string;
+  extra?: any;
 }
 
 export interface AtifObservation {
-  results: AtifObservationResult[];
+  results?: AtifObservationResult[];
 }
 
 export interface AtifStepMetrics {
@@ -247,9 +260,14 @@ export interface AtifFinalMetrics {
 
 export interface AtifDocument {
   schema_version: string;
-  session_id: string;
-  agent: AtifAgent;
-  steps: AtifStep[];
+  /** Optional in the schema; both AgentSight producers always set it. */
+  session_id?: string;
+  trajectory_id?: string;
+  /** Free-form description, e.g. the opt run root's target session. */
+  notes?: string;
+  agent?: AtifAgent;
+  steps?: AtifStep[];
   final_metrics?: AtifFinalMetrics;
+  subagent_trajectories?: AtifDocument[];
   extra?: any;
 }

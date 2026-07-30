@@ -383,7 +383,7 @@ pub(crate) fn resolve_rpm_component_name(
 
 /// In-memory alias resolution only — no rpmdb/dnf queries.
 ///
-/// Used by [`common::lookup_component_name`](crate::commands::common::lookup_component_name)
+/// Used by [`common::lookup_component_name_in_store`](crate::commands::common::lookup_component_name_in_store)
 /// for commands that address existing state. Checks the component index for
 /// component-name, backend-package, and alias matches across both RPM and Raw
 /// backends. Returns `None` when no match is found or the match is ambiguous
@@ -866,6 +866,33 @@ name = "copilot-shell"
             ResolutionSet::Unique(target) => {
                 assert_eq!(target.component, "sec-core");
                 assert_eq!(target.package, "agent-sec-core");
+                assert_eq!(target.source, ResolutionSource::ComponentIndex);
+            }
+            other => panic!("expected unique, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repository_component_index_maps_cosh_ng_rpm_to_cosh_ng() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let idx = ComponentIndex::load(&index_path).expect("component index template must parse");
+        let query = FakeQuery::default();
+        let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
+
+        let got = resolver
+            .resolve(
+                "cosh-ng",
+                BackendKind::Rpm,
+                ResolutionUse::Install,
+                ResolveOptions::default(),
+            )
+            .expect("resolve cosh-ng");
+
+        match got {
+            ResolutionSet::Unique(target) => {
+                assert_eq!(target.component, "cosh-ng");
+                assert_eq!(target.package, "cosh-ng");
                 assert_eq!(target.source, ResolutionSource::ComponentIndex);
             }
             other => panic!("expected unique, got {other:?}"),

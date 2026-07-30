@@ -76,11 +76,7 @@ pub(super) fn memory_pressure_finding(metrics: Option<&MemoryMetrics>) -> Option
     } else {
         None
     };
-    let swap_severity = match swap_ratio {
-        Some(ratio) if ratio >= 0.20 => Some(FindingSeverity::Info),
-        _ => None,
-    };
-    let severity = max_severity(memory_severity, swap_severity)?;
+    let severity = memory_severity?;
     let swap_note = swap_ratio
         .map(|ratio| format!(", swap used {:.1}%", ratio * 100.0))
         .unwrap_or_default();
@@ -90,19 +86,11 @@ pub(super) fn memory_pressure_finding(metrics: Option<&MemoryMetrics>) -> Option
         ""
     };
 
-    let title = if memory_severity.is_some() {
-        format!(
-            "Available memory is low: {} MiB / {} MiB",
-            round_mib(metrics.available_mib),
-            round_mib(metrics.total_mib)
-        )
-    } else {
-        format!(
-            "Swap usage is high while available memory is healthy: {} MiB / {} MiB",
-            round_mib(metrics.available_mib),
-            round_mib(metrics.total_mib)
-        )
-    };
+    let title = format!(
+        "Available memory is low: {} MiB / {} MiB",
+        round_mib(metrics.available_mib),
+        round_mib(metrics.total_mib)
+    );
 
     Some(HookFinding {
         hook_id: "memory-pressure".into(),

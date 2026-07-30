@@ -48,18 +48,13 @@ fn transparent_bash_preserves_user_stty_modes() {
 
     let ledger = ledger_from_output(&output);
     let command_output = ledger_output_refs_text(&ledger);
-    assert!(command_output.contains("__ECHO_OFF__"), "{command_output}");
-    assert!(!command_output.contains("__ECHO_ON__"), "{command_output}");
-    assert!(command_output.contains("__ISIG_OFF__"), "{command_output}");
-    assert!(!command_output.contains("__ISIG_ON__"), "{command_output}");
-    assert!(
-        command_output.contains("__ICANON_OFF__"),
-        "{command_output}"
-    );
-    assert!(
-        !command_output.contains("__ICANON_ON__"),
-        "{command_output}"
-    );
+    let output_lines = command_output.lines().map(str::trim).collect::<Vec<_>>();
+    assert!(output_lines.contains(&"__ECHO_OFF__"), "{command_output}");
+    assert!(!output_lines.contains(&"__ECHO_ON__"), "{command_output}");
+    assert!(output_lines.contains(&"__ISIG_OFF__"), "{command_output}");
+    assert!(!output_lines.contains(&"__ISIG_ON__"), "{command_output}");
+    assert!(output_lines.contains(&"__ICANON_OFF__"), "{command_output}");
+    assert!(!output_lines.contains(&"__ICANON_ON__"), "{command_output}");
     assert!(ledger
         .blocks
         .iter()
@@ -177,6 +172,34 @@ fn transparent_ctrl_backslash_is_not_synthesized_from_ctrl_c() {
         .blocks
         .iter()
         .any(|block| block.command.contains("__AFTER_QUIT__") && block.exit_code == 0));
+}
+
+#[test]
+fn raw_relay_action_watchdog_turns_swallowed_exit_into_timeout_error() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-watchdog-timeout-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("watchdog-timeout-test", &work_dir);
+    config.raw_action_watchdog = Duration::from_secs(5);
+    let mut rendered = Vec::new();
+    let err = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line(
+                "bash -c 'trap \"\" INT QUIT TERM; while IFS= read -r _; do :; done'",
+            ),
+            RawRelayAction::wait(Duration::from_millis(300)),
+        ],
+        &mut rendered,
+    )
+    .expect_err("watchdog must turn a swallowed trailing exit into an error");
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
 }
 
 #[test]

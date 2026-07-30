@@ -3,10 +3,10 @@
 import io
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 _COSH_HOOK = str(
     Path(__file__).resolve().parents[2]
@@ -16,9 +16,11 @@ _COSH_HOOK = str(
     / "pii_checker_hook.py"
 )
 
-sys.path.insert(0, str(Path(_COSH_HOOK).parent))
-import pii_checker_hook  # noqa: E402
-from pii_checker_hook import _format_cosh  # noqa: E402
+pii_checker_hook = load_standalone_hook(
+    "cosh_pii_checker_hook",
+    Path(_COSH_HOOK),
+)
+_format_cosh = pii_checker_hook._format_cosh
 
 
 class TestFormatCosh:

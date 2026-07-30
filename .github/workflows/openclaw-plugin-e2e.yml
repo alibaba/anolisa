@@ -13,6 +13,7 @@ on:
       - "src/agent-sec-core/openclaw-plugin/package.json"
       - "src/agent-sec-core/openclaw-plugin/package-lock.json"
       - "src/agent-sec-core/openclaw-plugin/tsconfig.json"
+      - "src/agent-sec-core/scripts/ci/run-openclaw-plugin-e2e.sh"
   push:
     branches:
       - main
@@ -25,6 +26,7 @@ on:
       - "src/agent-sec-core/openclaw-plugin/package.json"
       - "src/agent-sec-core/openclaw-plugin/package-lock.json"
       - "src/agent-sec-core/openclaw-plugin/tsconfig.json"
+      - "src/agent-sec-core/scripts/ci/run-openclaw-plugin-e2e.sh"
   workflow_dispatch:
 
 permissions:

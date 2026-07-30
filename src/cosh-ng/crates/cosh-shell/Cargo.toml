@@ -14,13 +14,20 @@ name = "cosh-shell"
 path = "src/main.rs"
 
 [dependencies]
-nix = { workspace = true, features = ["term"] }
+chrono = { workspace = true, features = ["clock", "serde"] }
+nix = { workspace = true, features = ["dir", "fs", "signal", "term"] }
 ratatui = "0.28"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 toml.workspace = true
-wait-timeout = "0.2"
+uuid.workspace = true
+wait-timeout.workspace = true
 qrcode = { version = "0.14", default-features = false }
+# Display-column accounting for native candidate echo (#1721); already in
+# the dependency graph via ratatui, pinned to the resolved 0.1.x line.
+unicode-width = "0.1"
+regex.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn raw_cli_shell_handoff_continuation_denies_second_shell_tool() {
-    let output = run_qwen_continuation_deny("qwen-continuation-deny", &[]);
+    let (output, _prompt) = run_qwen_continuation_deny("qwen-continuation-deny", &[]);
 
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
@@ -16,8 +16,34 @@ fn raw_cli_shell_handoff_continuation_denies_second_shell_tool() {
 }
 
 #[test]
+fn raw_cli_shell_handoff_continuation_prompt_keeps_user_mode() {
+    let (output, prompt) = run_qwen_continuation_deny("qwen-continuation-prompt", &[]);
+
+    assert!(
+        output.contains("Continuation summarized existing shell evidence in plan mode."),
+        "{output}"
+    );
+    assert!(
+        prompt.contains("analysis-only continuation after a foreground shell handoff"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("approval mode is auto and has not changed"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("applies only to this turn"), "{prompt}");
+    assert!(!prompt.contains("recommend mode"), "{prompt}");
+    assert!(!prompt.contains("mode: RecommendOnly"), "{prompt}");
+    assert!(prompt.contains("ShellCommandCompleted"), "{prompt}");
+    assert!(
+        prompt.contains("analysis-only continuation after foreground shell handoff"),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn raw_cli_zh_shell_handoff_continuation_denies_second_shell_tool() {
-    let output =
+    let (output, _prompt) =
         run_qwen_continuation_deny("qwen-continuation-deny-zh", &[("COSH_SHELL_LANG", "zh-CN")]);
 
     assert!(output.contains("已批准 req-1"), "{output}");
@@ -34,7 +60,7 @@ fn raw_cli_zh_shell_handoff_continuation_denies_second_shell_tool() {
     assert!(!output.contains("Bash tool sent to shell"), "{output}");
 }
 
-fn run_qwen_continuation_deny(label: &str, extra_env: &[(&str, &str)]) -> String {
+fn run_qwen_continuation_deny(label: &str, extra_env: &[(&str, &str)]) -> (String, String) {
     let home = temp_shell_home(label);
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
@@ -45,6 +71,7 @@ fn run_qwen_continuation_deny(label: &str, extra_env: &[(&str, &str)]) -> String
 session="sess-cosh-continuation-deny"
 case "$*" in
   *ShellCommandCompleted*)
+    printf '%s' "$*" >"$HOME/continuation-prompt.txt"
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-continuation-deny","model":"qwen-test"}'
     printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-continuation-deny","message":{"content":[{"type":"text","text":"Continuation summarized existing shell evidence in plan mode."}]}}'
     printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-continuation-deny","is_error":false,"result":"done"}'
@@ -101,7 +128,9 @@ exit 0
             (b"exit 0\n".to_vec(), Duration::from_millis(4_000)),
         ],
     );
+    let continuation_prompt =
+        fs::read_to_string(home.join("continuation-prompt.txt")).unwrap_or_default();
     let _ = fs::remove_dir_all(&home);
 
-    output
+    (output, continuation_prompt)
 }

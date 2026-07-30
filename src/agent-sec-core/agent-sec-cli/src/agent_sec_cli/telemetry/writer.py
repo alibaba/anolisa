@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from agent_sec_cli.security_events.schema import SecurityEvent
-from agent_sec_cli.telemetry.config import get_telemetry_log_path
+from agent_sec_cli.telemetry.config import (
+    get_telemetry_log_path,
+    is_l1_telemetry_allowed,
+)
 from agent_sec_cli.telemetry.schema import (
     TelemetryContext,
     build_telemetry_security_event,
@@ -52,8 +55,6 @@ def _log_telemetry_write_skipped(
                 "data": {
                     "reason": reason,
                     "path": str(path),
-                    "event_id": record.get("seccore.event_id")
-                    or record.get("baseline.event_id"),
                     "event_type": record.get("seccore.event_type"),
                     "category": record.get("seccore.category"),
                     "agent_name": record.get("component.agent_name"),
@@ -160,6 +161,8 @@ def record_security_event_telemetry(
 ) -> None:
     """Best-effort write of telemetry mapped from a SecurityEvent."""
     try:
+        if not is_l1_telemetry_allowed():
+            return
         writer = get_writer()
         if not writer.exists():
             return

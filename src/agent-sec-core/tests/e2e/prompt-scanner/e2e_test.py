@@ -18,6 +18,8 @@ CLI resolution: prefers the installed ``agent-sec-cli`` binary; falls back
 to ``python -m agent_sec_cli.cli`` when the binary is not on PATH.
 """
 
+# ruff: noqa: I001
+
 import json
 import os
 import shutil
@@ -31,12 +33,16 @@ from typing import List, Tuple
 
 import pytest
 from agent_sec_cli.daemon.env import DAEMON_DISABLED_ENV, SOCKET_ENV
+from agent_sec_cli.telemetry.config import is_l1_telemetry_allowed
 
 _HELPERS_DIR = Path(__file__).resolve().parents[1] / "_helpers"
 if str(_HELPERS_DIR) not in sys.path:
     sys.path.insert(0, str(_HELPERS_DIR))
 
-from telemetry_jsonl import wait_for_telemetry_record  # noqa: E402
+from telemetry_jsonl import (  # noqa: E402
+    telemetry_file_offset,
+    wait_for_telemetry_record,
+)
 
 # ---------------------------------------------------------------------------
 # CLI resolution — supports both installed and dev-mode environments
@@ -117,6 +123,7 @@ def _run_events(trace_id: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         capture_output=True,
+        check=False,
         text=True,
         timeout=30,
         env=os.environ.copy(),
@@ -333,15 +340,18 @@ class TestTraceContextPropagation:
     ) -> None:
         if prompt_scan_execution_path.execution_path != "daemon":
             pytest.skip("daemon telemetry assertion runs on the daemon-backed path")
+        if not is_l1_telemetry_allowed():
+            pytest.skip("system telemetry is disabled or its sentinel is unreadable")
 
-        trace_id = f"e2e-daemon-telemetry-{time.time_ns()}"
+        start_offset = telemetry_file_offset(prompt_scan_execution_path.telemetry_path)
+        canary = f"CUSTOMER-CANARY-PROMPT-{time.time_ns()}"
         trace_context = {
-            "trace_id": trace_id,
-            "agent_name": "cosh",
+            "trace_id": f"trace-{canary}",
+            "agent_name": "qwencode",
         }
 
         proc = _run_scan(
-            "Hello daemon telemetry",
+            f"Hello daemon telemetry {canary}",
             mode="fast",
             fmt="json",
             top_level_args=["--trace-context", json.dumps(trace_context)],
@@ -352,17 +362,23 @@ class TestTraceContextPropagation:
 
         telemetry = wait_for_telemetry_record(
             prompt_scan_execution_path.telemetry_path,
-            trace_id=trace_id,
             event_type="prompt_scan",
+            start_offset=start_offset,
         )
-        assert telemetry["component.name"] == "agent-sec-core"
-        assert telemetry["component.agent_name"] == "cosh"
-        assert telemetry["seccore.category"] == "prompt_scan"
-        assert telemetry["seccore.request"] == {
-            "text": "Hello daemon telemetry",
-            "mode": "fast",
-            "source": "e2e_daemon_telemetry",
+        assert set(telemetry) == {
+            "component.name",
+            "component.version",
+            "component.agent_name",
+            "seccore.event_type",
+            "seccore.category",
+            "seccore.result",
+            "seccore.timestamp",
+            "seccore.verdict",
+            "seccore.elapsed_ms",
         }
+        assert telemetry["component.agent_name"] == "qwencode"
+        assert telemetry["seccore.category"] == "prompt_scan"
+        assert canary not in json.dumps(telemetry, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

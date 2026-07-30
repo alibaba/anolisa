@@ -7,6 +7,7 @@ pub mod auth;
 mod containment;
 mod enforcement;
 mod handlers;
+pub mod optimize;
 mod startup;
 mod token_savings;
 
@@ -24,6 +25,7 @@ use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
 use crate::security::{ContainmentCoordinator, SecurityCoordinator, SecurityStore};
 use crate::storage::sqlite::InterruptionStore;
+use agentsight_trajectory_collector::TrajectoryStore;
 
 use self::auth::{AuthMiddleware, DashboardAuth};
 
@@ -67,6 +69,62 @@ pub struct AppState {
     pub security_observability: SecurityObservabilityConfig,
     /// Dashboard authentication state
     pub auth: Arc<DashboardAuth>,
+    /// Optimization analysis state (LLM config + result store)
+    pub optimize: Option<Arc<optimize::OptimizeState>>,
+    /// Read-only store over collected trajectories (`trajectories.db`)
+    ///
+    /// Wrapped in `RwLock` so `trajectory_store()` can memoize lazy opens
+    /// (write once when the DB first appears, read on every subsequent call).
+    pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
+}
+
+impl AppState {
+    /// Return a trajectory store if collection has produced `trajectories.db`.
+    ///
+    /// `serve` is commonly started before `trace`; in that case the DB does not
+    /// exist at server startup. Re-checking on demand lets the UI show newly
+    /// collected log sessions without requiring a server restart.
+    pub fn trajectory_store(&self) -> Option<Arc<TrajectoryStore>> {
+        // Fast path: already opened
+        {
+            let guard = self
+                .trajectory_store
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(store) = guard.as_ref() {
+                return Some(Arc::clone(store));
+            }
+        }
+
+        // Check if DB exists
+        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        if !db_path.exists() {
+            return None;
+        }
+
+        // Try to open; upgrade to write lock to memoize
+        match TrajectoryStore::new_with_path(&db_path) {
+            Ok(store) => {
+                let mut guard = self
+                    .trajectory_store
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                // Double-check: another thread may have opened it while we waited
+                if let Some(existing) = guard.as_ref() {
+                    Some(Arc::clone(existing))
+                } else {
+                    let arc = Arc::new(store);
+                    *guard = Some(Arc::clone(&arc));
+                    log::info!("Trajectory store opened lazily at {db_path:?}");
+                    Some(arc)
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to lazily open trajectory store: {e}");
+                None
+            }
+        }
+    }
 }
 
 // ─── Static file handler ─────────────────────────────────────────────────────
@@ -213,6 +271,16 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::skill_metrics_usage_ratio)
                 .service(handlers::skill_metrics_distribution)
                 .service(handlers::skill_metrics_hotness)
+                // Optimization analysis API routes
+                .service(optimize::run_optimization)
+                .service(optimize::get_optimization_results)
+                .service(optimize::list_optimization_history)
+                .service(optimize::get_optimize_config)
+                .service(optimize::update_optimize_config)
+                // Trajectory collection API routes (filters before the dynamic segment)
+                .service(handlers::list_trajectories)
+                .service(handlers::trajectory_filters)
+                .service(handlers::get_trajectory_detail)
                 .default_service(web::route().to(api_not_found)),
         )
         // Health scope with not-found fallback
@@ -346,11 +414,7 @@ pub async fn run_server(
 
     // Initialize interruption store
     let interruption_store: Option<Arc<InterruptionStore>> = {
-        use crate::storage::sqlite::GenAISqliteStore;
-        let db_path = GenAISqliteStore::default_path()
-            .parent()
-            .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-            .join("interruption_events.db");
+        let db_path = crate::storage::sqlite::sibling_db_path("interruption_events.db");
         match InterruptionStore::new_with_path(&db_path) {
             Ok(store) => {
                 log::info!("Interruption store initialized at {db_path:?}");
@@ -374,6 +438,33 @@ pub async fn run_server(
     }
     checker.start();
 
+    // Initialize read-only trajectory store (collector writes it in `trace` mode;
+    // serve only consumes). Path is derived via the shared sibling_db_path helper
+    // so reader and writer always resolve the same file. A missing DB simply
+    // yields an empty table → empty API results (graceful degradation).
+    // Only open when the file already exists to avoid creating an empty DB as a
+    // persistent side-effect in serve mode when collection was never enabled.
+    let trajectory_store: Option<Arc<TrajectoryStore>> = {
+        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        if !db_path.exists() {
+            log::debug!("Trajectory store not found at {db_path:?}; endpoints degrade to empty");
+            None
+        } else {
+            match TrajectoryStore::new_with_path(&db_path) {
+                Ok(store) => {
+                    log::info!("Trajectory store initialized at {db_path:?}");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    log::warn!("Failed to open trajectory store: {e}");
+                    None
+                }
+            }
+        }
+    };
+
+    let optimize_state = optimize::OptimizeState::init(storage_base);
+
     let data = web::Data::new(AppState {
         storage_path,
         start_time: Instant::now(),
@@ -385,6 +476,8 @@ pub async fn run_server(
         security_store,
         security_observability,
         auth: dashboard_auth.clone(),
+        optimize: Some(optimize_state),
+        trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
@@ -421,6 +514,15 @@ pub async fn run_server(
             return Err(error);
         }
     };
+
+    // Guide users toward the `dashboard` subcommand when listening on all interfaces.
+    if host == "0.0.0.0" || host == "::" {
+        eprintln!();
+        eprintln!("提示：远程访问需要安全组放行 TCP {port}。");
+        eprintln!("运行 'agentsight dashboard' 可自动检测并生成配置命令。");
+        eprintln!();
+    }
+
     let server_result = server.run().await;
 
     containment::stop_reconciler(&containment, containment_reconciler);
@@ -464,7 +566,7 @@ mod tests {
 
     use super::auth::DashboardAuth;
     use super::{
-        AppState, SecurityObservabilityConfig, configure_routes, serve_frontend,
+        AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes, serve_frontend,
         serve_frontend_root,
     };
     use crate::config::ServerAuthConfig;
@@ -474,6 +576,26 @@ mod tests {
         let config = SecurityObservabilityConfig::default();
 
         assert_eq!(config.timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn trajectory_store_returns_some_when_already_set() {
+        let store = TrajectoryStore::new_with_path(std::path::Path::new(":memory:")).unwrap();
+        let state = test_app_state_with_trajectory_store(store);
+
+        assert!(state.trajectory_store().is_some());
+    }
+
+    #[test]
+    fn trajectory_store_returns_none_when_not_set_and_db_missing() {
+        let state = test_app_state(0);
+        // The default db path (/var/log/sysak/.agentsight/trajectories.db)
+        // should not exist in CI, so lazy loading returns None.
+        if crate::storage::sqlite::sibling_db_path("trajectories.db").exists() {
+            return; // db exists, can't test the "missing" path
+        }
+
+        assert!(state.trajectory_store().is_none());
     }
 
     #[actix_web::test]
@@ -560,6 +682,32 @@ mod tests {
             security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    fn test_app_state_with_trajectory_store(store: TrajectoryStore) -> web::Data<AppState> {
+        let auth_config = ServerAuthConfig { enabled: false };
+        let auth = Arc::new(DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            security_observability: SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
     }
 }

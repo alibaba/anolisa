@@ -40,8 +40,8 @@ pub fn classify_exit(exit_code: i32, command: &str) -> ExitCodeCategory {
         127 => ExitCodeCategory::CommandNotFound,
         130 | 143 => ExitCodeCategory::UserInterrupt,
         141 => ExitCodeCategory::PipelineNormal,
-        134 | 136 | 137 | 139 => ExitCodeCategory::AbnormalSignal,
-        c if c > 128 => ExitCodeCategory::UserInterrupt,
+        132 | 134 | 135 | 136 | 137 | 139 => ExitCodeCategory::AbnormalSignal,
+        c if c > 128 => ExitCodeCategory::GenericError,
         1 if is_normal_exit_one(command) => ExitCodeCategory::CommandSpecificNormal,
         _ => ExitCodeCategory::GenericError,
     }
@@ -70,6 +70,7 @@ pub fn classify_shell_handoff_command_outcome(
 pub fn first_program_token(command: &str) -> &str {
     let mut rest = command;
     let mut after_sudo = false;
+    let mut after_env = false;
     let mut skip_next_sudo_arg = false;
     loop {
         let token = match rest.split_whitespace().next() {
@@ -90,11 +91,18 @@ pub fn first_program_token(command: &str) -> &str {
             after_sudo = true;
             continue;
         }
+        if basename == "env" {
+            after_env = true;
+            continue;
+        }
         if skip_next_sudo_arg {
             skip_next_sudo_arg = false;
             continue;
         }
         if after_sudo && is_sudo_option_token(token, &mut skip_next_sudo_arg) {
+            continue;
+        }
+        if after_env && token == "--" {
             continue;
         }
         // Strip path: /usr/bin/grep → grep
@@ -141,10 +149,9 @@ fn is_sudo_option_token(token: &str, skip_next_arg: &mut bool) -> bool {
             *skip_next_arg = true;
             return true;
         }
-        "--askpass" | "--background" | "--edit" | "--help" | "--login" | "--non-interactive"
-        | "--preserve-env" | "--reset-timestamp" | "--remove-timestamp" | "--shell" | "--stdin"
-        | "--validate" | "--version" | "-A" | "-b" | "-E" | "-e" | "-H" | "-K" | "-k" | "-l"
-        | "-n" | "-P" | "-S" | "-s" | "-V" | "-v" => return true,
+        "--non-interactive" | "--preserve-env" | "--set-home" | "-E" | "-H" | "-n" => {
+            return true;
+        }
         _ => {}
     }
     if token.starts_with("--user=")
@@ -163,7 +170,7 @@ fn is_sudo_option_token(token: &str, skip_next_arg: &mut bool) -> bool {
     token
         .strip_prefix('-')
         .filter(|opts| !opts.starts_with('-') && !opts.is_empty())
-        .is_some_and(|opts| opts.chars().all(|ch| "AbEeHKklnPSsVv".contains(ch)))
+        .is_some_and(|opts| opts.chars().all(|ch| "EHn".contains(ch)))
 }
 
 #[cfg(test)]
@@ -234,6 +241,10 @@ mod tests {
             classify_exit(143, "tail -f /var/log/syslog"),
             ExitCodeCategory::UserInterrupt
         );
+        assert_eq!(
+            classify_executed_command_outcome(143, "tail -f /var/log/syslog"),
+            CommandOutcome::Interrupted
+        );
     }
 
     #[test]
@@ -277,14 +288,29 @@ mod tests {
     }
 
     #[test]
+    fn fatal_signal_matrix_is_explicit() {
+        for exit_code in [132, 134, 135, 136, 137, 139] {
+            assert_eq!(
+                classify_exit(exit_code, "crashed"),
+                ExitCodeCategory::AbnormalSignal,
+                "exit {exit_code}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_signal_conservative() {
         assert_eq!(
             classify_exit(142, "something"),
-            ExitCodeCategory::UserInterrupt
+            ExitCodeCategory::GenericError
         );
         assert_eq!(
             classify_exit(200, "something"),
-            ExitCodeCategory::UserInterrupt
+            ExitCodeCategory::GenericError
+        );
+        assert_eq!(
+            classify_executed_command_outcome(200, "something"),
+            CommandOutcome::Failed
         );
     }
 

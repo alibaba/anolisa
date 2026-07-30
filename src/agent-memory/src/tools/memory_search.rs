@@ -81,7 +81,7 @@ pub fn memory_search(
                 .sum();
             svc.audit_log(
                 AuditEntry::new(TOOL)
-                    .path(format!("bm25:{:.120}", query))
+                    .path(format!("bm25:len={}", query.len()))
                     .bytes(hits.len() as u64)
                     .tokens(tokens),
             );
@@ -119,7 +119,7 @@ pub fn memory_search(
                     let hits = index.search_scoped(query, top_k.max(1), scope_ref)?;
                     svc.audit_log(
                         AuditEntry::new(TOOL)
-                            .path(format!("bm25(fallback from {mode}):{:.120}", query))
+                            .path(format!("bm25(fallback from {mode}):len={}", query.len()))
                             .bytes(hits.len() as u64),
                     );
                     return Ok(hits);
@@ -147,7 +147,7 @@ pub fn memory_search(
             .map_err(|e| {
                 svc.audit_log(
                     AuditEntry::new(TOOL)
-                        .path(format!("embed:{:.120}", query))
+                        .path(format!("embed:len={}", query.len()))
                         .error(e.to_string()),
                 );
                 MemoryError::Other(format!("embedding failed: {e}"))
@@ -166,7 +166,7 @@ pub fn memory_search(
 
             svc.audit_log(
                 AuditEntry::new(TOOL)
-                    .path(format!("{mode}:{:.120}", query))
+                    .path(format!("{mode}:len={}", query.len()))
                     .bytes(hits.len() as u64)
                     .tokens(tokens),
             );

@@ -1,10 +1,58 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use nix::libc;
 use nix::pty::Winsize;
 
 use crate::input::InputClassifier;
-use crate::types::ShellEvent;
+use crate::types::{ShellEnvironmentSnapshot, ShellEvent};
+
+#[derive(Clone)]
+pub(super) struct ShellEnvironmentObserver(
+    Arc<dyn Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static>,
+);
+
+impl std::fmt::Debug for ShellEnvironmentObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ShellEnvironmentObserver")
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ShellHistoryFileObserver(Arc<dyn Fn(PathBuf) + Send + Sync + 'static>);
+
+impl std::fmt::Debug for ShellHistoryFileObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ShellHistoryFileObserver")
+    }
+}
+
+impl ShellHistoryFileObserver {
+    pub(super) fn new<F>(observer: F) -> Self
+    where
+        F: Fn(PathBuf) + Send + Sync + 'static,
+    {
+        Self(Arc::new(observer))
+    }
+
+    pub(super) fn observe(&self, path: PathBuf) {
+        (self.0)(path);
+    }
+}
+
+impl ShellEnvironmentObserver {
+    pub(super) fn new<F>(observer: F) -> Self
+    where
+        F: Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static,
+    {
+        Self(Arc::new(observer))
+    }
+
+    pub(super) fn observe(&self, snapshot: ShellEnvironmentSnapshot) {
+        (self.0)(snapshot);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ShellHostConfig {
@@ -17,7 +65,16 @@ pub struct ShellHostConfig {
     pub input_classifier: InputClassifier,
     pub native_mode: bool,
     pub login_shell: bool,
+    /// Routes exact slash-control submissions through bash so they enter
+    /// native history (issue #1718). Defaults from `COSH_SLASH_VIA_SHELL`
+    /// (on unless "0"); disabling restores the pre-#1718 Rust intercept
+    /// path end to end. Only bash runners consult it; zsh has no extdebug
+    /// return-suppression equivalent and always keeps the Rust path.
+    pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
+    pub raw_action_watchdog: Duration,
+    pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
+    pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
 }
 
 impl ShellHostConfig {
@@ -33,7 +90,11 @@ impl ShellHostConfig {
             input_classifier: InputClassifier::default(),
             native_mode: true,
             login_shell: false,
+            slash_via_shell: slash_via_shell_default(),
             env_overrides: Vec::new(),
+            raw_action_watchdog: Duration::from_secs(120),
+            shell_environment_observer: None,
+            shell_history_file_observer: None,
         }
     }
 
@@ -41,6 +102,41 @@ impl ShellHostConfig {
         self.env_overrides.push((key.into(), value.into()));
         self
     }
+
+    pub fn with_ai_enabled(mut self, enabled: bool) -> Self {
+        self.input_classifier = self.input_classifier.with_ai_enabled(enabled);
+        self
+    }
+
+    pub(crate) fn set_shell_environment_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static,
+    {
+        self.shell_environment_observer = Some(ShellEnvironmentObserver::new(observer));
+    }
+
+    pub(crate) fn clear_shell_environment_observer(&mut self) {
+        self.shell_environment_observer = None;
+    }
+
+    pub(crate) fn set_shell_history_file_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(PathBuf) + Send + Sync + 'static,
+    {
+        self.shell_history_file_observer = Some(ShellHistoryFileObserver::new(observer));
+    }
+
+    pub(crate) fn clear_shell_history_file_observer(&mut self) {
+        self.shell_history_file_observer = None;
+    }
+}
+
+/// `COSH_SLASH_VIA_SHELL` gates the shell routing of exact slash
+/// submissions; any value other than "0" (including unset) keeps it on.
+fn slash_via_shell_default() -> bool {
+    std::env::var("COSH_SLASH_VIA_SHELL")
+        .map(|value| value != "0")
+        .unwrap_or(true)
 }
 
 fn default_winsize() -> Winsize {

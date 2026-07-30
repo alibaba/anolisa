@@ -27,6 +27,7 @@ class PiiCategory(StrEnum):
 
     PERSONAL_DATA = "personal_data"
     CREDENTIAL = "credential"
+    CUSTOM = "custom"
 
 
 class PiiFinding(BaseModel):

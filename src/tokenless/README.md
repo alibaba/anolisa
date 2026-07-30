@@ -73,7 +73,7 @@ tokenless only removes redundancy from **tool call responses** before they enter
 Example: dashboard shows 60% compression rate, but if tool responses account for 20% of total consumption, the actual savings rate is 60% × 20% = **12%**. This is why savings feel "lighter than a feather" in experiments consuming 15 million tokens — tokenless only optimizes the ~3 million tokens of tool responses.
 
 > Stash makes compression **end-to-end lossless**: you can tighten truncation thresholds for higher inline savings and recover the original via the `<<tokenless:KEY>>` marker when needed, with no correctness impact. Use `TOKENLESS_COMPRESSION_ENABLED=0/1` dual runs to compare real savings.
-> See [user manual](docs/tokenless-user-manual-en.md) for per-strategy trigger conditions.
+> See [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md) for per-strategy trigger conditions.
 
 ## Architecture
 
@@ -364,6 +364,16 @@ The plugin registers hooks at four Codex events, covering four strategies:
 ```bash
 make codex-install
 ```
+
+
+## npm Install
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+This automatically installs the correct prebuilt binaries (`tokenless`, `rtk`, `toon`) for your platform.
+Supports Linux and macOS on x86_64 and arm64.
 
 ## Build
 

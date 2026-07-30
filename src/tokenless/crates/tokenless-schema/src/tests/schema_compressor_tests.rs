@@ -444,3 +444,65 @@ fn char_index_multibyte() {
     assert_eq!(char_index(text, 0), 0);
     assert_eq!(char_index(text, 2), 6); // 2 CJK chars = 6 bytes
 }
+
+#[test]
+fn test_description_truncation_with_stash() {
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = SchemaCompressor::new()
+        .with_func_desc_max_len(100)
+        .with_stash_store(store.clone());
+    let long_desc = "A".repeat(300);
+    let schema = json!({
+        "function": {
+            "name": "test",
+            "description": long_desc,
+            "parameters": {"type": "object", "properties": {}}
+        }
+    });
+    let result = compressor.compress(&schema);
+    let desc = result["function"]["description"].as_str().unwrap();
+    assert!(desc.chars().count() <= 100);
+    assert!(desc.contains("tokenless:"));
+    let hash = extract_hash(desc).unwrap();
+    let retrieved = store.retrieve(hash).unwrap().unwrap();
+    assert_eq!(retrieved, long_desc);
+}
+
+#[test]
+fn test_compress_parameters_with_nested_schema() {
+    let compressor = SchemaCompressor::new();
+    let schema = json!({
+        "function": {
+            "name": "test",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "title": "Config Title",
+                        "examples": ["ex1"],
+                        "properties": {
+                            "nested": {
+                                "type": "string",
+                                "title": "Nested Title",
+                                "description": "B".repeat(200)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let result = compressor.compress(&schema);
+    let props = &result["function"]["parameters"]["properties"];
+    assert!(props["config"].get("title").is_none());
+    assert!(props["config"].get("examples").is_none());
+    assert!(props["config"]["properties"]["nested"].get("title").is_none());
+    let nested_desc = props["config"]["properties"]["nested"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(nested_desc.chars().count() <= 160);
+}

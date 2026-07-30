@@ -103,7 +103,7 @@ fn qwen_auto_uses_control_approval_channel() {
 #[test]
 fn cosh_core_auto_uses_control_approval_channel() {
     let adapter = make_cosh_core_adapter("mock_qwen_control_cli.sh");
-    let session_state = Arc::clone(&adapter.session_id);
+    let session_state = Arc::clone(&adapter.session);
     let request = make_request("cosh-core-test-auto-stream");
     let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
 
@@ -144,7 +144,7 @@ fn cosh_core_auto_uses_control_approval_channel() {
         "expected cosh-core control completion, got: {remaining:?}"
     );
     assert!(
-        wait_for_session_id(&session_state, "mock-qwen-control", Duration::from_secs(1)),
+        wait_for_cosh_core_session(&session_state, "mock-qwen-control", Duration::from_secs(1)),
         "session_id should be committed after cosh-core control completion"
     );
 }

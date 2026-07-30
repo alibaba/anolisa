@@ -129,6 +129,7 @@ class HardeningBackend(BaseBackend):
                 success=False,
                 exit_code=127,
                 error=_MISSING_LOONGSHIELD_ERROR,
+                error_type="FileNotFoundError",
                 data=data,
             )
 
@@ -158,6 +159,7 @@ class HardeningBackend(BaseBackend):
                 success=False,
                 exit_code=exit_code,
                 error=f"Failed to execute `loongshield seharden`: {exc}",
+                error_type=type(exc).__name__,
                 data=data,
             )
 
@@ -169,6 +171,7 @@ class HardeningBackend(BaseBackend):
             success=(proc.returncode == 0),
             stdout=clean_output,
             exit_code=proc.returncode,
+            error_type="SubprocessError" if proc.returncode != 0 else "",
             data=data,
         )
 

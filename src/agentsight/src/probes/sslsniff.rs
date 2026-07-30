@@ -297,7 +297,7 @@ impl SslSniff {
     /// Attach SSL probes to a running process by reading its `/proc/<pid>/maps`.
     ///
     /// Detects which SSL libraries the process has mapped (OpenSSL, GnuTLS, NSS,
-    /// or BoringSSL embedded in a binary), attaches uprobes, and skips any
+    /// or statically-linked SSL — BoringSSL/OpenSSL), attaches uprobes, and skips any
     /// library whose inode has already been traced (dedup via `traced_files`).
     pub fn attach_process(&mut self, pid: i32) -> Result<()> {
         let libs = ssl_libs_from_maps(pid)?;
@@ -321,8 +321,8 @@ impl SslSniff {
             // Uprobes are attached globally (pid=-1), and the kernel's
             // uprobe_mmap mechanism automatically installs breakpoints for
             // new processes that map an already-registered inode, so each
-            // library only needs to be attached once — including BoringSSL
-            // static binaries (codex, node, etc).
+            // library only needs to be attached once — including statically-linked
+            // SSL binaries (codex, node, etc).
             if !self.traced_files.insert(inode) {
                 log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
                 // Still record the pid→inode association so detach_process
@@ -338,53 +338,59 @@ impl SslSniff {
                 SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, -1),
                 SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
                 SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
-                SslLibKind::Boring => match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
-                    Ok(ls) => Ok(ls),
-                    Err(sym_err) => {
-                        log::debug!(
-                            "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
-                        );
-                        match find_boringssl_offsets(&path) {
-                            Some(off) => {
-                                attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
-                            }
-                            None => {
-                                // Tier 3: codex offset table lookup (for static-pie binaries
-                                // like Codex CLI that embed aws-lc/BoringSSL without symbols)
-                                if let Some(ref table) = *CODEX_OFFSET_TABLE {
-                                    if let Some(off) = table.lookup(&path) {
-                                        log::info!(
-                                            "[attach_process] pid={pid}: codex offset table matched for {path} \
+                SslLibKind::Static => {
+                    match attach_static_ssl_by_symbol(&mut self.skel, &path, -1) {
+                        Ok(ls) => Ok(ls),
+                        Err(sym_err) => {
+                            log::debug!(
+                                "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                            );
+                            match find_static_ssl_offsets(&path) {
+                                Some(off) => attach_static_ssl_by_offset(
+                                    &mut self.skel,
+                                    &path,
+                                    &off,
+                                    false,
+                                    -1,
+                                ),
+                                None => {
+                                    // Tier 3: codex offset table lookup (for static-pie binaries
+                                    // like Codex CLI that statically link OpenSSL/BoringSSL without symbols)
+                                    if let Some(ref table) = *CODEX_OFFSET_TABLE {
+                                        if let Some(off) = table.lookup(&path) {
+                                            log::info!(
+                                                "[attach_process] pid={pid}: codex offset table matched for {path} \
                                              (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
-                                            off.ssl_write,
-                                            off.ssl_read,
-                                            off.ssl_do_handshake
-                                        );
-                                        attach_boringssl_by_offset(
-                                            &mut self.skel,
-                                            &path,
-                                            &off,
-                                            true,
-                                            -1,
-                                        )
+                                                off.ssl_write,
+                                                off.ssl_read,
+                                                off.ssl_do_handshake
+                                            );
+                                            attach_static_ssl_by_offset(
+                                                &mut self.skel,
+                                                &path,
+                                                &off,
+                                                true,
+                                                -1,
+                                            )
+                                        } else {
+                                            log::warn!(
+                                                "[attach_process] pid={pid}: SSL detection failed for {path} \
+                                             (no SSL_* in .dynsym, no byte-pattern match, and not in codex offset table), skipping"
+                                            );
+                                            continue;
+                                        }
                                     } else {
                                         log::warn!(
-                                            "[attach_process] pid={pid}: BoringSSL detection failed for {path} \
-                                             (no SSL_* in .dynsym, no byte-pattern match, and not in codex offset table), skipping"
+                                            "[attach_process] pid={pid}: SSL detection failed for {path} \
+                                         (no SSL_* in .dynsym and no byte-pattern match), skipping"
                                         );
                                         continue;
                                     }
-                                } else {
-                                    log::warn!(
-                                        "[attach_process] pid={pid}: BoringSSL detection failed for {path} \
-                                         (no SSL_* in .dynsym and no byte-pattern match), skipping"
-                                    );
-                                    continue;
                                 }
                             }
                         }
                     }
-                },
+                }
             };
 
             match result {
@@ -535,16 +541,16 @@ impl Drop for SslPoller {
     }
 }
 
-// ─── BoringSSL pattern detection ─────────────────────────────────────────────
+// ─── Static SSL pattern detection ────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub(super) struct BoringSslOffsets {
+pub(super) struct StaticSslOffsets {
     pub ssl_write: usize,
     pub ssl_read: usize,
     pub ssl_do_handshake: usize,
     /// True when `ssl_write` points to `SSL_write_ex` (returns 0/1 + *written),
-    /// rather than `SSL_write` (returns byte count). Required for aws-lc where
-    /// only the _ex variant is exported.
+    /// rather than `SSL_write` (returns byte count). Required for OpenSSL 3.x
+    /// where the `_ex` variant is preferred by native-tls / openssl-sys.
     pub write_is_ex: bool,
     /// True when `ssl_read` points to `SSL_read_ex` rather than `SSL_read`.
     pub read_is_ex: bool,
@@ -575,8 +581,8 @@ fn find_all_patterns(haystack: &[u8], pattern: &[u8]) -> Vec<usize> {
     results
 }
 
-fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
-    // BoringSSL function prologue byte patterns (x86_64).
+fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
+    // SSL function prologue byte patterns (x86_64).
     // These are stable across versions because they represent the fixed
     // parameter-saving and state-setup logic of the POSIX SSL API.
     const HANDSHAKE_PAT: &[u8] = &[
@@ -601,7 +607,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
     let read_matches = find_all_patterns(&data, READ_PAT);
     if read_matches.is_empty() {
         if verbose {
-            eprintln!("BoringSSL: SSL_read pattern not found in {path}");
+            eprintln!("Static SSL: SSL_read pattern not found in {path}");
         }
         return None;
     }
@@ -610,7 +616,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
     } else {
         if verbose {
             eprintln!(
-                "BoringSSL: SSL_read pattern has {} matches, expected 1",
+                "Static SSL: SSL_read pattern has {} matches, expected 1",
                 read_matches.len()
             );
         }
@@ -621,7 +627,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
     let hs_matches = find_all_patterns(&data, HANDSHAKE_PAT);
     if hs_matches.is_empty() {
         if verbose {
-            eprintln!("BoringSSL: SSL_do_handshake pattern not found in {path}");
+            eprintln!("Static SSL: SSL_do_handshake pattern not found in {path}");
         }
         return None;
     }
@@ -635,7 +641,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
             None => {
                 if verbose {
                     eprintln!(
-                        "BoringSSL: SSL_do_handshake has {} matches, none before SSL_read",
+                        "Static SSL: SSL_do_handshake has {} matches, none before SSL_read",
                         hs_matches.len()
                     );
                 }
@@ -648,7 +654,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
     let write_matches = find_all_patterns(&data, WRITE_PAT);
     if write_matches.is_empty() {
         if verbose {
-            eprintln!("BoringSSL: SSL_write pattern not found in {path}");
+            eprintln!("Static SSL: SSL_write pattern not found in {path}");
         }
         return None;
     }
@@ -661,7 +667,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
         .or_else(|| {
             if verbose {
                 eprintln!(
-                    "BoringSSL: SSL_write has {} matches but none within {}B after SSL_read ({:#x})",
+                    "Static SSL: SSL_write has {} matches but none within {}B after SSL_read ({:#x})",
                     write_matches.len(),
                     ADJACENCY_THRESHOLD,
                     read_off
@@ -670,12 +676,12 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
             None
         })?;
 
-    log::debug!("BoringSSL detected in {path}:");
+    log::debug!("Static SSL detected in {path}:");
     log::debug!("  SSL_do_handshake: {hs_off:#x}");
     log::debug!("  SSL_read:         {read_off:#x}");
     log::debug!("  SSL_write:        {wr_off:#x}");
 
-    Some(BoringSslOffsets {
+    Some(StaticSslOffsets {
         ssl_write: wr_off,
         ssl_read: read_off,
         ssl_do_handshake: hs_off,
@@ -695,8 +701,8 @@ enum SslLibKind {
     GnuTls,
     /// libnspr4.so (NSS / Firefox)
     Nss,
-    /// BoringSSL / aws-lc embedded in binary (e.g. Node.js, Chrome, Codex CLI)
-    Boring,
+    /// Statically-linked SSL (BoringSSL or OpenSSL, e.g. Node.js, Chrome, Codex CLI)
+    Static,
 }
 
 /// Classify a mapped file path into an `SslLibKind`, if it is an SSL library.
@@ -714,8 +720,8 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
     if name.starts_with("libnspr4.so") || name.starts_with("libnspr4-") {
         return Some(SslLibKind::Nss);
     }
-    // BoringSSL is typically linked statically into a binary (node, chrome, etc.).
-    // Detect common binary names that are known to embed BoringSSL.
+    // Statically-linked SSL (BoringSSL in node/chrome, OpenSSL in codex).
+    // Detect common binary names that are known to statically link SSL.
     if matches!(
         name.as_ref(),
         "node"
@@ -726,13 +732,14 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
             | "chromium"
             | "google-chrome"
             | "google-chrome-stable"
+            | "claude"
             | "claude.exe"
     ) {
-        return Some(SslLibKind::Boring);
+        return Some(SslLibKind::Static);
     }
-    // Codex CLI statically links aws-lc (BoringSSL-compatible TLS library).
+    // Codex CLI statically links OpenSSL 3.x (via openssl-sys / native-tls).
     if name.starts_with("codex") && !name.contains('.') {
-        return Some(SslLibKind::Boring);
+        return Some(SslLibKind::Static);
     }
     // uv Python statically links OpenSSL into the binary. The ELF .symtab contains
     // SSL_write/SSL_read/SSL_do_handshake as LOCAL symbols, so attach_openssl()
@@ -784,8 +791,8 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
             // both host and container processes.
             let path_str = if path_str.ends_with(" (deleted)") {
                 format!("/proc/{pid}/exe")
-            } else if matches!(kind, SslLibKind::Boring) {
-                // BoringSSL is typically a static binary (codex, node, etc).
+            } else if matches!(kind, SslLibKind::Static) {
+                // Statically-linked SSL binary (codex, node, etc).
                 // /proc/<pid>/exe is a kernel-maintained symlink that stays
                 // valid even when the backing file has been replaced or
                 // unlinked, which is common for npm-installed binaries that
@@ -937,7 +944,7 @@ fn attach_nss(skel: &mut SslsniffSkel<'_>, lib: &str, pid: i32) -> Result<Vec<Li
     ])
 }
 
-fn attach_boringssl_by_symbol(
+fn attach_static_ssl_by_symbol(
     skel: &mut SslsniffSkel<'_>,
     lib: &str,
     pid: i32,
@@ -967,10 +974,10 @@ fn attach_boringssl_by_symbol(
     ])
 }
 
-fn attach_boringssl_by_offset(
+fn attach_static_ssl_by_offset(
     skel: &mut SslsniffSkel<'_>,
     lib: &str,
-    off: &BoringSslOffsets,
+    off: &StaticSslOffsets,
     handshake: bool,
     pid: i32,
 ) -> Result<Vec<Link>> {

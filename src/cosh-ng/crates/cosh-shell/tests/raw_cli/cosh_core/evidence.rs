@@ -54,7 +54,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? cosh-core-evidence-tool-contract\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (
                 b"/details evidence-1\n/details evidence-2\n".to_vec(),
@@ -435,7 +435,7 @@ output_id=${output_tail%%\\n*}
 printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"home-path-read\",\"request\":{\"subtype\":\"shell_evidence\",\"tool_use_id\":\"toolu-home-path-read\",\"action\":\"read_output\",\"output_id\":\"$output_id\",\"direction\":\"tail\",\"lines\":5}}"
 IFS= read -r response2 || exit 2
 case "$response2" in
-  *'"behavior":"shell_evidence"'*'ShellEvidenceExcerpt'*'excerpt_status: available'*'redaction_status: excerpt_included'*'~/Applications/Codex.app/Contents/MacOS/Codex'*)
+  *'"behavior":"shell_evidence"'*'ShellEvidenceExcerpt'*'excerpt_status: available'*'redaction_status: excerpt_redacted'*'~/Applications/Codex.app/Contents/MacOS/Codex'*)
     case "$response2" in
       *redacted_confirmation_required*) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-home-path-redaction","is_error":true,"result":"home path redaction blocked shell evidence"}'; exit 1 ;;
     esac
@@ -890,7 +890,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? \xe4\xb8\xba\xe4\xbb\x80\xe4\xb9\x88\xe5\xa4\xb1\xe8\xb4\xa5 evidence-failed-diagnostic\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(1_200),
             ),
             (
                 b"/details evidence-1\n/details evidence-2\n".to_vec(),
@@ -963,7 +963,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             (b"printf 'list-only-output\\n'\n".to_vec(), Duration::ZERO),
             (
                 b"?? \xe5\x88\x97\xe4\xb8\x80\xe4\xb8\x8b\xe6\x9c\x80\xe8\xbf\x91\xe5\x91\xbd\xe4\xbb\xa4 evidence-list-only\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"/details evidence-1\n".to_vec(), Duration::from_millis(3_000)),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
@@ -1025,7 +1025,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? \xe6\x9c\x80\xe8\xbf\x91\xe5\x9c\xa8\xe5\xb9\xb2\xe5\x98\x9b evidence-activity-recap\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"/details evidence-1\n".to_vec(), Duration::from_millis(5_000)),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
@@ -1098,7 +1098,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? \xe5\x88\x86\xe6\x9e\x90\xe6\x9c\x80\xe8\xbf\x91\xe7\x8a\xb6\xe6\x80\x81 evidence-status-analysis\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (
                 b"/details evidence-1\n/details evidence-2\n".to_vec(),
@@ -1206,11 +1206,14 @@ fn raw_cli_cosh_core_recommend_mode_suppresses_shell_evidence_instructions() {
     write_executable(
         &cosh_core_path,
         r#"#!/bin/sh
-prompt="$*"
-case "$prompt" in
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-shell-evidence-recommend","model":"cosh-core-test"}'
+read -r user_message
+case "$user_message" in
   *cosh_shell_evidence*|*'```cosh-request'*) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-shell-evidence-recommend","is_error":true,"result":"recommend prompt exposed shell evidence request instructions"}'; exit 1 ;;
 esac
-case "$prompt" in
+case "$user_message" in
   *'say when shell evidence is needed instead of requesting it automatically'*) ;;
   *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-shell-evidence-recommend","is_error":true,"result":"recommend prompt missing evidence limitation"}'; exit 1 ;;
 esac

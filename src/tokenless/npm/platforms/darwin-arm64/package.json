@@ -1,0 +1,23 @@
+{
+  "name": "@anolisa/tokenless-darwin-arm64",
+  "version": "0.7.3",
+  "private": true,
+  "description": "Token-Less native binaries for macOS aarch64 (Apple Silicon)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alibaba/anolisa",
+    "directory": "src/tokenless"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "bin": {
+    "tokenless": "bin/tokenless",
+    "rtk": "bin/rtk",
+    "toon": "bin/toon"
+  },
+  "files": [
+    "bin/"
+  ],
+  "preferUnplugged": true
+}

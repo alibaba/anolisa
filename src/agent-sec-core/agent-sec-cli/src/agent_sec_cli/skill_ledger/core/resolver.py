@@ -29,13 +29,18 @@ from agent_sec_cli.skill_ledger.core.exposure import (
     is_pending_decision_target,
     pending_decision_target,
 )
-from agent_sec_cli.skill_ledger.core.live_root import require_live_skill_dir
+from agent_sec_cli.skill_ledger.core.live_root import (
+    ResolvedSkillRoot,
+    SkillRootInput,
+    canonical_skill_operation,
+    resolve_skill_root,
+    validate_resolved_skill_root,
+)
 from agent_sec_cli.skill_ledger.core.version_chain import (
     SKILL_META_DIR,
     ensure_skill_meta,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
-from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
 SCHEMA_VERSION = 1
 ACTIVATION_JSON = "activation.json"
@@ -98,8 +103,9 @@ def cleanup_pending_decision_stub(skill_dir: str | Path) -> None:
         shutil.rmtree(stub_dir)
 
 
+@canonical_skill_operation
 def resolve_activation(
-    skill_dir: str,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     *,
     policy: str = DEFAULT_ACTIVATION_POLICY,
@@ -113,12 +119,12 @@ def resolve_activation(
     """
     policy = validate_activation_policy(policy)
 
-    skill_dir = str(require_live_skill_dir(skill_dir, backend))
-    validate_skill_dir(skill_dir)
-    skill_name = Path(skill_dir).name
-    status_result = check(skill_dir, backend)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
+    status_result = check(root, backend)
     summary = build_exposure_summary(
-        skill_dir,
+        root,
         backend,
         status_result=status_result,
     )
@@ -133,15 +139,17 @@ def resolve_activation(
     )
     if write_activation:
         if is_pending_decision_target(target):
-            ensure_pending_decision_stub(skill_dir)
-            activation_xattr = write_activation_contract(skill_dir, activation)
+            ensure_pending_decision_stub(io_skill_dir)
+            activation_xattr = write_activation_contract(io_skill_dir, activation)
         else:
-            activation_xattr = write_activation_contract(skill_dir, activation)
-            cleanup_pending_decision_stub(skill_dir)
+            activation_xattr = write_activation_contract(io_skill_dir, activation)
+            cleanup_pending_decision_stub(io_skill_dir)
+    activation_xattr = _canonicalize_activation_xattr(root, activation_xattr)
 
     return {
         "schemaVersion": SCHEMA_VERSION,
-        "skillName": skill_name,
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "target": target,
         "activeVersionId": active_version,
         "status": summary["latestStatus"],
@@ -151,13 +159,14 @@ def resolve_activation(
         "userDecision": summary["userDecision"],
         "reasonCode": summary["reasonCode"],
         "message": summary["message"],
-        "activationPath": str(activation_json_path(skill_dir)),
+        "activationPath": str(activation_json_path(root.canonical_dir)),
         "activationXattr": activation_xattr,
     }
 
 
+@canonical_skill_operation
 def find_latest_pass_snapshot(
-    skill_dir: str | Path,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
 ) -> tuple[str, str] | None:
     """Compatibility shim for the ``pass_only`` activation policy."""
@@ -168,18 +177,20 @@ def find_latest_pass_snapshot(
     )
 
 
+@canonical_skill_operation
 def find_latest_activation_snapshot(
-    skill_dir: str | Path,
+    skill_dir: SkillRootInput,
     backend: SigningBackend,
     *,
     policy: str,
 ) -> tuple[str, str] | None:
     """Return ``(version_id, target)`` for the current exposure summary."""
     validate_activation_policy(policy)
-    live_skill_dir = require_live_skill_dir(skill_dir, backend)
-    status_result = check(str(live_skill_dir), backend)
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    status_result = check(root, backend)
     summary = build_exposure_summary(
-        str(live_skill_dir),
+        root,
         backend,
         status_result=status_result,
     )
@@ -259,6 +270,16 @@ def _activation_xattr_status(
     if skipped:
         status["skipped"] = True
     return status
+
+
+def _canonicalize_activation_xattr(
+    root: ResolvedSkillRoot,
+    status: dict[str, Any],
+) -> dict[str, Any]:
+    error = status.get("error")
+    if not isinstance(error, str):
+        return status
+    return {**status, "error": root.canonicalize_message(error)}
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:

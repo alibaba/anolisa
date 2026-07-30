@@ -58,6 +58,12 @@ impl SkillFs {
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(self.source_base()) {
                     for entry in dir_iter.flatten() {
+                        if entry
+                            .file_type()
+                            .is_ok_and(|file_type| file_type.is_symlink())
+                        {
+                            continue;
+                        }
                         let name = entry.file_name().to_string_lossy().to_string();
                         let kind = dir_entry_file_type(&entry);
                         let entry_path = self.skill_inode_path(&name);
@@ -457,6 +463,12 @@ impl SkillFs {
                 ];
                 if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                     for entry in dir_iter.flatten() {
+                        if entry
+                            .file_type()
+                            .is_ok_and(|file_type| file_type.is_symlink())
+                        {
+                            continue;
+                        }
                         let name = entry.file_name().to_string_lossy().to_string();
                         let is_dir = entry.path().is_dir();
                         // Activation gating applies only to real nested
@@ -473,7 +485,9 @@ impl SkillFs {
                             if self.is_pending_install(&nested_id) {
                                 continue;
                             }
-                            if has_resolver && entry.path().join("SKILL.md").exists() {
+                            if has_resolver
+                                && skillfs_core::store::has_regular_skill_md(&entry.path())
+                            {
                                 let resolution = self.resolve_hermes_nested_read(category, &name);
                                 if matches!(resolution, ReadResolution::Hidden) {
                                     continue;
@@ -681,6 +695,12 @@ impl SkillFs {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
                         for entry in phys_entries {
+                            if entry
+                                .file_type()
+                                .is_ok_and(|file_type| file_type.is_symlink())
+                            {
+                                continue;
+                            }
                             let name = entry.file_name().to_string_lossy().to_string();
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = self.skill_inode_path(&name);
@@ -1116,6 +1136,12 @@ impl SkillFs {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
                         for entry in phys_entries {
+                            if entry
+                                .file_type()
+                                .is_ok_and(|file_type| file_type.is_symlink())
+                            {
+                                continue;
+                            }
                             let name = entry.file_name().to_string_lossy().to_string();
                             // H3: staging roots inside category hidden from listing.
                             if entry.path().is_dir() && self.is_staging_skill_root(&name) {
@@ -1126,7 +1152,8 @@ impl SkillFs {
                                 continue;
                             }
                             if has_resolver && entry.path().is_dir() {
-                                let is_skill_leaf = entry.path().join("SKILL.md").exists();
+                                let is_skill_leaf =
+                                    skillfs_core::store::has_regular_skill_md(&entry.path());
                                 if is_skill_leaf {
                                     let resolution =
                                         self.resolve_hermes_nested_read(category, &name);

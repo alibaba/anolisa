@@ -18,7 +18,13 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
 )
-from agent_sec_cli.skill_ledger.core.live_root import require_live_skill_dir
+from agent_sec_cli.skill_ledger.core.live_root import (
+    ResolvedSkillRoot,
+    SkillRootInput,
+    canonical_skill_operation,
+    resolve_skill_root,
+    validate_resolved_skill_root,
+)
 from agent_sec_cli.skill_ledger.core.manifest_helpers import (
     snapshot_matches_manifest,
 )
@@ -35,11 +41,16 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
 from agent_sec_cli.skill_ledger.models.manifest import (
     SignedManifest,
 )
+from agent_sec_cli.skill_ledger.path_identity import (
+    normalize_canonical_skill_dir,
+)
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
-from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
 
-def _manifest_metadata(manifest: SignedManifest, skill_dir: str) -> dict[str, Any]:
+def _manifest_metadata(
+    manifest: SignedManifest,
+    root: ResolvedSkillRoot,
+) -> dict[str, Any]:
     """Return standard metadata fields extracted from a loaded manifest.
 
     These fields are included in every ``check`` / ``check --all`` return dict
@@ -47,7 +58,8 @@ def _manifest_metadata(manifest: SignedManifest, skill_dir: str) -> dict[str, An
     ``.skill-meta/latest.json`` directly.
     """
     return {
-        "skillName": Path(skill_dir).name,
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
         "versionId": manifest.versionId,
         "createdAt": manifest.createdAt,
         "updatedAt": manifest.updatedAt,
@@ -61,7 +73,8 @@ def _manifest_metadata(manifest: SignedManifest, skill_dir: str) -> dict[str, An
     }
 
 
-def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
+@canonical_skill_operation
+def check(skill_dir: SkillRootInput, backend: SigningBackend) -> dict[str, Any]:
     """Execute the full check state machine.
 
     Returns a JSON-serialisable dict with at minimum ``{"status": "<status>"}``.
@@ -69,21 +82,22 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
     ``skillName``, ``versionId``, ``createdAt``, ``updatedAt``, ``fileCount``,
     ``manifestHash``.
     """
-    # Step 0: Validate skill directory and avoid SkillFS runtime views.
-    skill_dir = str(require_live_skill_dir(skill_dir, backend))
-    validate_skill_dir(skill_dir)
-    skill_name = Path(skill_dir).name
+    # Step 0: Resolve once, then keep identity separate from filesystem I/O.
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
 
     # Step 1: Load latest.json
     # If the file exists but is malformed/corrupted, treat as tampered.
     try:
-        manifest = load_latest_manifest(skill_dir)
+        manifest = load_latest_manifest(io_skill_dir)
     except (json.JSONDecodeError, ValueError) as exc:
         # File exists but cannot be parsed — corrupted or tampered metadata
-        if latest_json_path(skill_dir).is_file():
+        if latest_json_path(io_skill_dir).is_file():
             return {
                 "status": "tampered",
-                "skillName": skill_name,
+                "canonicalSkillDir": str(root.canonical_dir),
+                "skillName": root.skill_name,
                 "versionId": None,
                 "createdAt": None,
                 "updatedAt": None,
@@ -99,7 +113,8 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
     if manifest is None:
         return {
             "status": "none",
-            "skillName": skill_name,
+            "canonicalSkillDir": str(root.canonical_dir),
+            "skillName": root.skill_name,
             "versionId": None,
             "createdAt": None,
             "updatedAt": None,
@@ -108,10 +123,10 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
         }
 
     # Step 3: Compute current file hashes
-    current_hashes = compute_file_hashes(skill_dir)
+    current_hashes = compute_file_hashes(io_skill_dir)
 
     # Manifest loaded — compute standard metadata for all subsequent returns
-    meta = _manifest_metadata(manifest, skill_dir)
+    meta = _manifest_metadata(manifest, root)
 
     # Step 4: Compare fileHashes (takes priority over signature verification)
     diff = diff_file_hashes(manifest.fileHashes, current_hashes)
@@ -166,17 +181,23 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
     return {**meta, "status": "pass"}
 
 
-def manifest_only_status(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
+@canonical_skill_operation
+def manifest_only_status(
+    skill_dir: SkillRootInput,
+    backend: SigningBackend,
+) -> dict[str, Any]:
     """Return latest trusted manifest status without hashing root files."""
-    validate_skill_dir(skill_dir)
-    skill_name = Path(skill_dir).name
+    root = resolve_skill_root(skill_dir)
+    validate_resolved_skill_root(root)
+    io_skill_dir = str(root.io_dir)
     try:
-        manifest = load_latest_manifest(skill_dir)
+        manifest = load_latest_manifest(io_skill_dir)
     except (json.JSONDecodeError, ValueError) as exc:
-        if latest_json_path(skill_dir).is_file():
+        if latest_json_path(io_skill_dir).is_file():
             return {
                 "status": "tampered",
-                "skillName": skill_name,
+                "canonicalSkillDir": str(root.canonical_dir),
+                "skillName": root.skill_name,
                 "versionId": None,
                 "createdAt": None,
                 "updatedAt": None,
@@ -188,7 +209,8 @@ def manifest_only_status(skill_dir: str, backend: SigningBackend) -> dict[str, A
     if manifest is None:
         return {
             "status": "none",
-            "skillName": skill_name,
+            "canonicalSkillDir": str(root.canonical_dir),
+            "skillName": root.skill_name,
             "versionId": None,
             "createdAt": None,
             "updatedAt": None,
@@ -196,7 +218,7 @@ def manifest_only_status(skill_dir: str, backend: SigningBackend) -> dict[str, A
             "manifestHash": None,
         }
 
-    meta = _manifest_metadata(manifest, skill_dir)
+    meta = _manifest_metadata(manifest, root)
     hash_error = manifest_hash_error(manifest)
     if hash_error is not None:
         return {**meta, "status": "tampered", "reason": hash_error}
@@ -212,7 +234,7 @@ def manifest_only_status(skill_dir: str, backend: SigningBackend) -> dict[str, A
         return {**meta, "status": "tampered", "reason": signature_error}
 
     if not snapshot_matches_manifest(
-        snapshot_dir_path(skill_dir, manifest.versionId),
+        snapshot_dir_path(io_skill_dir, manifest.versionId),
         manifest,
     ):
         return {
@@ -253,9 +275,11 @@ def check_batch(
             result = check(str(skill_dir), backend)
             results.append(result)
         except Exception as exc:
+            canonical_dir = normalize_canonical_skill_dir(skill_dir)
             results.append(
                 {
-                    "skillName": skill_dir.name,
+                    "canonicalSkillDir": str(canonical_dir),
+                    "skillName": canonical_dir.name,
                     "status": "error",
                     "error": str(exc),
                 }

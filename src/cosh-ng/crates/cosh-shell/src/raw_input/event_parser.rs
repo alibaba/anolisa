@@ -1,32 +1,141 @@
 use crate::input::InputClassifier;
 
+use super::soft_newline::{
+    soft_newline_sequence_len, soft_newline_suffix_len, CANONICAL_SOFT_NEWLINE,
+};
 use super::{CTRL_C, CTRL_U};
 
-const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
-const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+pub(super) const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+pub(super) const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Debug, Default)]
 pub(super) struct CandidateLineBuffer {
     pub(super) bytes: Vec<u8>,
     pub(super) relayed_len: usize,
     pub(super) force_agent_intercept: bool,
+    pub(super) forced_agent_suggestion_id: Option<String>,
+    /// Whether soft-newline shortcuts are normalized on push. Enabled only on
+    /// the escape-mode intercept path; the native path keeps pre-#1721 byte
+    /// semantics (fail-closed default: disabled).
+    pub(super) soft_newline_enabled: bool,
+    /// Tracks whether the cursor is inside a bracketed-paste region so pasted
+    /// newlines can be kept soft instead of submitting the prompt (#1721).
+    in_paste: bool,
+    /// True once any bracketed-paste opener was consumed into this draft.
+    saw_paste: bool,
+    /// Trailing bytes that form a proper prefix of a paste delimiter,
+    /// held until the next chunk resolves them (#1721).
+    pending_partial: Vec<u8>,
+    /// A pasted CR ended the previous chunk; a leading LF in the next
+    /// chunk folds into the same soft newline (#1721).
+    pending_pasted_cr: bool,
+}
+
+impl CandidateLineBuffer {
+    /// A bracketed paste is still streaming in: hold off routing decisions
+    /// (card upgrade) until the closer arrives (#1721 D13).
+    pub(super) fn in_paste(&self) -> bool {
+        self.in_paste
+    }
+
+    /// Any part of the draft arrived via bracketed paste: when the line
+    /// flushes back to bash the paste wrapper must be replayed so readline
+    /// inserts the bytes instead of executing embedded newlines (#1721).
+    pub(super) fn saw_paste(&self) -> bool {
+        self.saw_paste
+    }
 }
 
 impl CandidateLineBuffer {
     pub(super) fn is_active(&self) -> bool {
-        !self.bytes.is_empty()
+        // An isolated bracketed-paste opener strips to zero bytes but must
+        // keep the candidate open so the payload chunk stays routed here
+        // instead of leaking to the PTY (#1721); the same holds
+        // for a held partial delimiter awaiting its second half.
+        !self.bytes.is_empty() || self.in_paste || !self.pending_partial.is_empty()
+    }
+
+    /// Bytes held from a split delimiter, exposed so route decisions can
+    /// evaluate the joined draft (#1721).
+    pub(super) fn pending_partial_bytes(&self) -> &[u8] {
+        &self.pending_partial
+    }
+
+    /// Drains held partial-delimiter bytes at end of input (#1721):
+    /// they never got a routing verdict, so the relay forwards them to the
+    /// PTY byte-identically instead of dropping them.
+    pub(super) fn take_pending_partial(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_partial)
     }
 
     pub(super) fn push(&mut self, bytes: &[u8]) {
+        // Re-join any held partial paste delimiter from the previous chunk
+        // (#1721): PTY reads may split `\x1b[200~` / `\x1b[201~` at any
+        // byte, and a half delimiter must never become draft content.
+        let joined: Vec<u8>;
+        let bytes: &[u8] = if self.pending_partial.is_empty() {
+            bytes
+        } else {
+            let mut buffer = std::mem::take(&mut self.pending_partial);
+            buffer.extend_from_slice(bytes);
+            joined = buffer;
+            &joined
+        };
         let mut idx = 0;
         while idx < bytes.len() {
+            // Fold a pasted CRLF split across reads into one newline
+            // (#1721): the CR already emitted a canonical soft newline.
+            if self.pending_pasted_cr {
+                self.pending_pasted_cr = false;
+                if self.in_paste && self.soft_newline_enabled && bytes[idx] == b'\n' {
+                    idx += 1;
+                    continue;
+                }
+            }
             if bytes[idx..].starts_with(BRACKETED_PASTE_START) {
+                self.in_paste = true;
+                self.saw_paste = true;
                 idx += BRACKETED_PASTE_START.len();
                 continue;
             }
             if bytes[idx..].starts_with(BRACKETED_PASTE_END) {
+                self.in_paste = false;
                 idx += BRACKETED_PASTE_END.len();
                 continue;
+            }
+            if is_partial_paste_delimiter(&bytes[idx..]) {
+                // The whole tail is a proper prefix of a paste delimiter:
+                // hold it for the next chunk (re-scanned on arrival; if it
+                // turns out not to be a delimiter it is processed normally).
+                self.pending_partial = bytes[idx..].to_vec();
+                return;
+            }
+            if self.soft_newline_enabled {
+                if self.in_paste && matches!(bytes[idx], b'\r' | b'\n') {
+                    // Pasted newlines stay soft: rewrite to a whitelisted
+                    // sequence so the first pasted line never auto-submits.
+                    self.bytes.extend_from_slice(CANONICAL_SOFT_NEWLINE);
+                    if bytes[idx] == b'\r' && idx + 1 == bytes.len() {
+                        self.pending_pasted_cr = true;
+                    }
+                    idx += if bytes[idx..].starts_with(b"\r\n") {
+                        2
+                    } else {
+                        1
+                    };
+                    continue;
+                }
+                if !self.in_paste {
+                    if let Some(len) = soft_newline_sequence_len(&bytes[idx..]) {
+                        // Keep the raw whitelisted bytes: the status scanner
+                        // recognizes every whitelisted sequence in place, so
+                        // sequences split across chunks normalize identically.
+                        let sequence = &bytes[idx..idx + len];
+                        self.bytes.extend_from_slice(sequence);
+                        idx += len;
+                        continue;
+                    }
+                }
             }
             match bytes[idx] {
                 CTRL_U => {
@@ -56,34 +165,42 @@ impl CandidateLineBuffer {
         self.bytes.clear();
         self.relayed_len = 0;
         self.force_agent_intercept = false;
+        self.forced_agent_suggestion_id = None;
+        self.in_paste = false;
+        self.saw_paste = false;
+        self.pending_partial.clear();
+        self.pending_pasted_cr = false;
     }
 
     pub(super) fn take(&mut self) -> Vec<u8> {
         self.relayed_len = 0;
         self.force_agent_intercept = false;
-        std::mem::take(&mut self.bytes)
+        self.forced_agent_suggestion_id = None;
+        self.in_paste = false;
+        self.saw_paste = false;
+        self.pending_pasted_cr = false;
+        let mut bytes = std::mem::take(&mut self.bytes);
+        // A held partial delimiter is plain user bytes if the draft flushes
+        // before the rest arrives: keep them byte-identical.
+        bytes.extend_from_slice(&std::mem::take(&mut self.pending_partial));
+        bytes
     }
 
     pub(super) fn visible_line_bytes(&self) -> &[u8] {
-        let end = self
-            .bytes
-            .iter()
-            .position(|byte| matches!(byte, b'\n' | b'\r'))
-            .unwrap_or(self.bytes.len());
-        &self.bytes[..end]
+        &self.bytes[..visible_line_end(&self.bytes, self.soft_newline_enabled)]
     }
 
     fn pop_visible_char(&mut self) {
-        let Some(end) = self
-            .bytes
-            .iter()
-            .position(|byte| matches!(byte, b'\n' | b'\r'))
-            .or(Some(self.bytes.len()))
-        else {
-            return;
-        };
+        let end = visible_line_end(&self.bytes, self.soft_newline_enabled);
         if end == 0 {
             return;
+        }
+        if self.soft_newline_enabled {
+            if let Some(len) = soft_newline_suffix_len(&self.bytes[..end]) {
+                // A soft newline counts as one visible character.
+                self.bytes.drain(end - len..end);
+                return;
+            }
         }
         let mut start = end - 1;
         while start > 0 && (self.bytes[start] & 0b1100_0000) == 0b1000_0000 {
@@ -91,6 +208,27 @@ impl CandidateLineBuffer {
         }
         self.bytes.drain(start..end);
     }
+}
+
+/// Length of the visible prefix: everything up to the first bare newline.
+/// When soft newlines are enabled, whitelisted sequences are part of the
+/// visible line and skipped whole so their CR/LF bytes are never mistaken
+/// for a submit newline.
+fn visible_line_end(bytes: &[u8], allow_soft_newline: bool) -> usize {
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if allow_soft_newline {
+            if let Some(len) = soft_newline_sequence_len(&bytes[idx..]) {
+                idx += len;
+                continue;
+            }
+        }
+        if matches!(bytes[idx], b'\n' | b'\r') {
+            return idx;
+        }
+        idx += 1;
+    }
+    bytes.len()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,6 +241,14 @@ pub(super) enum CandidateLineStatus {
 #[derive(Debug, Default)]
 pub(super) struct NativeLineState {
     visible: Vec<u8>,
+    /// The mirror no longer matches readline's buffer: Tab completion or
+    /// cursor-moving sequences edit the line where we cannot see (#1932).
+    /// Reset together with the line (CR / Ctrl-C / Ctrl-U).
+    dirty: bool,
+    /// Inside a bracketed paste (the wrapper can span read chunks): pasted
+    /// newlines stay in readline's buffer without submitting, which the
+    /// single-line mirror cannot express, so they poison it (#1932).
+    in_paste: bool,
 }
 
 impl NativeLineState {
@@ -110,15 +256,45 @@ impl NativeLineState {
         self.visible.is_empty()
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.visible.is_empty()
+    }
+
+    /// The observed prompt-line bytes, only while the mirror is trusted
+    /// (#1932 F6): `None` once an unobservable edit poisoned it.
+    pub(super) fn clean_visible_line(&self) -> Option<&[u8]> {
+        if self.dirty {
+            None
+        } else {
+            Some(&self.visible)
+        }
+    }
+
     pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {
         let mut idx = 0;
         while idx < bytes.len() {
             if bytes[idx..].starts_with(BRACKETED_PASTE_START) {
+                self.in_paste = true;
                 idx += BRACKETED_PASTE_START.len();
                 continue;
             }
             if bytes[idx..].starts_with(BRACKETED_PASTE_END) {
+                self.in_paste = false;
                 idx += BRACKETED_PASTE_END.len();
+                continue;
+            }
+            if self.in_paste {
+                // Paste payload is inserted verbatim by readline. A pasted
+                // newline keeps composing inside readline's buffer, which
+                // this single-line mirror cannot express: poison it instead
+                // of collapsing the buffer to its last line (#1932).
+                match bytes[idx] {
+                    b'\n' | b'\r' => self.dirty = true,
+                    b'\t' => self.visible.push(b'\t'),
+                    byte if byte < 0x20 || byte == 0x7f => self.dirty = true,
+                    byte => self.visible.push(byte),
+                }
+                idx += 1;
                 continue;
             }
             match bytes[idx] {
@@ -134,13 +310,18 @@ impl NativeLineState {
                     && bytes.get(idx + 2) == Some(&b'3')
                     && bytes.get(idx + 3) == Some(&b'~') =>
                 {
-                    self.pop_visible_char();
+                    // Delete removes the char under the cursor. While the
+                    // mirror is clean the cursor sits at the end of the
+                    // line (any cursor movement poisons it), so Delete is
+                    // a readline no-op and the mirror must not shrink.
                     idx += 4;
                 }
                 b'\t' => {
+                    self.dirty = true;
                     idx += 1;
                 }
                 byte if byte < 0x20 || byte == 0x1b => {
+                    self.dirty = true;
                     idx += 1;
                 }
                 byte => {
@@ -156,6 +337,8 @@ impl NativeLineState {
 
     pub(super) fn clear(&mut self) {
         self.visible.clear();
+        self.dirty = false;
+        self.in_paste = false;
     }
 
     fn pop_visible_char(&mut self) {
@@ -184,25 +367,139 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
             Some("approval [recommend|auto|trust] | analysis [smart|auto|manual]".to_string())
         }
         "/details" if parts.next().is_none() => Some("<id>".to_string()),
-        "/aut" => Some("/auth".to_string()),
         _ => crate::slash::registry::visible_slash_commands()
             .find(|spec| spec.name.starts_with(token) && spec.name != token)
             .map(|spec| spec.usage.to_string()),
     }
 }
 
+pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
+    let mut tokens = Vec::with_capacity(6);
+    let mut index = 0;
+    while index < input.len() && tokens.len() < 6 {
+        while index < input.len() && input[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index == input.len() {
+            break;
+        }
+        let start = index;
+        while index < input.len() && !input[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        tokens.push((start, index));
+    }
+
+    if tokens.len() < 6
+        || &input[tokens[0].0..tokens[0].1] != b"/extensions"
+        || &input[tokens[1].0..tokens[1].1] != b"settings"
+        || &input[tokens[2].0..tokens[2].1] != b"set"
+    {
+        return input.to_vec();
+    }
+
+    let value_start = tokens[5].0;
+    let mut redacted = input.to_vec();
+    for byte in &mut redacted[value_start..] {
+        if !byte.is_ascii_whitespace() {
+            *byte = b'*';
+        }
+    }
+    redacted
+}
+
 pub(super) fn starts_intercept_candidate(bytes: &[u8]) -> bool {
     let first = first_visible_input_byte(bytes);
-    matches!(first, Some(b'/' | b'?')) || first.is_some_and(|byte| byte >= 0x80)
+    matches!(first, Some(b'/' | b'?'))
+        || first.is_some_and(|byte| byte >= 0x80)
+        // A split paste opener (`\x1b[2`, #1721) must be held so the
+        // payload decides the route; joined non-openers re-scan normally.
+        || (bytes.len() >= 2
+            && bytes.len() < BRACKETED_PASTE_START.len()
+            && BRACKETED_PASTE_START.starts_with(bytes))
 }
 
 pub(super) fn starts_native_intercept_candidate(
     bytes: &[u8],
     native_line_state: &NativeLineState,
 ) -> bool {
+    // Line-start gate for the always-on native candidates: `/` (slash) and
+    // `??` (agent marker). CJK line starts are handled separately because
+    // they additionally require the main-prompt gate (#1721 D16).
+    if !native_line_state.is_at_line_start() {
+        return false;
+    }
+    if first_visible_input_byte(bytes) == Some(b'/') {
+        return true;
+    }
+    let visible = first_visible_input_bytes(bytes);
+    // A lone `?` may be the first half of a `??` marker typed key by key
+    // (#1932): own the line now so the follow-up decides the route; any
+    // non-`??` continuation flushes back to bash byte-identically.
+    visible.starts_with(b"??") || visible == b"?"
+}
+
+/// The whole slice is a proper prefix of `\x1b[200~` / `\x1b[201~`
+/// (#1721): PTY reads may split the delimiter itself at any byte.
+fn is_partial_paste_delimiter(suffix: &[u8]) -> bool {
+    !suffix.is_empty()
+        && suffix.len() < BRACKETED_PASTE_START.len()
+        && (BRACKETED_PASTE_START.starts_with(suffix) || BRACKETED_PASTE_END.starts_with(suffix))
+}
+
+/// Whether bytes start a CJK natural-language candidate at the beginning of
+/// a shell line (#1721 G9). Callers must additionally hold the main-prompt
+/// gate so PS2/heredoc continuations stay bash-owned (D16).
+pub(super) fn starts_native_cjk_candidate(
+    bytes: &[u8],
+    native_line_state: &NativeLineState,
+) -> bool {
     native_line_state.is_at_line_start()
-        && (first_visible_input_byte(bytes) == Some(b'/')
-            || first_visible_input_bytes(bytes).starts_with(b"??"))
+        && first_visible_input_byte(bytes).is_some_and(|byte| byte >= 0x80)
+}
+
+/// A bracketed-paste opener arriving as its own chunk at line start: hold it
+/// in the candidate buffer so the paste payload decides the route (#1721).
+/// Without this the opener leaks to bash and a CJK paste scatters (D13).
+pub(super) fn starts_native_paste_opener(
+    bytes: &[u8],
+    native_line_state: &NativeLineState,
+) -> bool {
+    native_line_state.is_at_line_start()
+        && bytes.starts_with(BRACKETED_PASTE_START)
+        && first_visible_input_bytes(bytes).is_empty()
+}
+
+/// PTY reads may split the opener itself at line start (#1721):
+/// `\x1b[2` alone must be held rather than leak to bash; the joined bytes
+/// re-scan as normal input if they turn out not to be an opener. A bare
+/// ESC is excluded: the spawn-level delay-escape path owns that case.
+pub(super) fn starts_native_partial_paste_opener(
+    bytes: &[u8],
+    native_line_state: &NativeLineState,
+) -> bool {
+    native_line_state.is_at_line_start()
+        && bytes.len() >= 2
+        && bytes.len() < BRACKETED_PASTE_START.len()
+        && BRACKETED_PASTE_START.starts_with(bytes)
+}
+
+/// Whether a native candidate may compose soft newlines: `??` agent drafts
+/// and CJK natural-language drafts may; slash commands may not (#1721 D10).
+pub(super) fn native_candidate_allows_soft_newline(bytes: &[u8]) -> bool {
+    match first_visible_input_byte(bytes) {
+        Some(b'/') => false,
+        Some(b'?') => first_visible_input_bytes(bytes).starts_with(b"??"),
+        Some(byte) => byte >= 0x80,
+        None => false,
+    }
+}
+
+/// Escape-path variant: slash commands keep pre-#1721 byte semantics
+/// (pasted newlines submit, never compose); every other candidate
+/// (`?` agent prefix, CJK) may compose (#1721 D10 fail-closed).
+pub(super) fn escape_candidate_allows_soft_newline(bytes: &[u8]) -> bool {
+    !matches!(first_visible_input_byte(bytes), Some(b'/') | None)
 }
 
 fn first_visible_input_byte(bytes: &[u8]) -> Option<u8> {
@@ -238,35 +535,75 @@ pub(super) fn native_candidate_should_return_to_shell(
     token.starts_with('/') && !input_classifier.is_slash_control_candidate(token)
 }
 
-pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
+pub(super) fn candidate_line_status(bytes: &[u8], allow_soft_newline: bool) -> CandidateLineStatus {
     if bytes.len() > 4096 {
         return CandidateLineStatus::Unsafe;
     }
 
-    let Some(newline_idx) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) else {
-        if bytes
-            .iter()
-            .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\t')))
-        {
+    let mut idx = 0;
+    while idx < bytes.len() {
+        // Whitelisted soft-newline sequences are legal in-line content: skip
+        // them whole so their CR/LF bytes never complete or poison the line
+        // (#1721). The native path keeps them illegal (fail-closed,
+        // pre-#1721 semantics).
+        if allow_soft_newline {
+            if let Some(len) = soft_newline_sequence_len(&bytes[idx..]) {
+                idx += len;
+                continue;
+            }
+        }
+        let byte = bytes[idx];
+        if byte == 0x1b {
+            return if incomplete_escape_suffix(&bytes[idx..]) {
+                CandidateLineStatus::Pending
+            } else {
+                CandidateLineStatus::Unsafe
+            };
+        }
+        if matches!(byte, b'\n' | b'\r') {
+            let line_len = idx + 1;
+            let Some(line) = normalized_candidate_text(&bytes[..idx], allow_soft_newline) else {
+                return CandidateLineStatus::Unsafe;
+            };
+            return CandidateLineStatus::Complete { line, line_len };
+        }
+        if byte < 0x20 && byte != b'\t' {
             return CandidateLineStatus::Unsafe;
         }
-        return CandidateLineStatus::Pending;
-    };
-
-    let line_len = newline_idx + 1;
-    let line_bytes = &bytes[..line_len];
-    if line_bytes
-        .iter()
-        .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))
-    {
-        return CandidateLineStatus::Unsafe;
+        idx += 1;
     }
+    CandidateLineStatus::Pending
+}
 
-    let Some(line) = std::str::from_utf8(line_bytes).ok() else {
-        return CandidateLineStatus::Unsafe;
-    };
-    CandidateLineStatus::Complete {
-        line: line.trim_end_matches(['\r', '\n']).to_string(),
-        line_len,
+/// Renders buffer bytes as the submitted text: canonical soft newlines become
+/// real newlines; any other control byte or invalid UTF-8 disqualifies the
+/// line (mirrors the pre-#1721 fail-closed checks).
+fn normalized_candidate_text(bytes: &[u8], allow_soft_newline: bool) -> Option<String> {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if allow_soft_newline {
+            if let Some(len) = soft_newline_sequence_len(&bytes[idx..]) {
+                normalized.push(b'\n');
+                idx += len;
+                continue;
+            }
+        }
+        let byte = bytes[idx];
+        if byte == 0x1b || (byte < 0x20 && !matches!(byte, b'\t')) {
+            return None;
+        }
+        normalized.push(byte);
+        idx += 1;
+    }
+    String::from_utf8(normalized).ok()
+}
+
+fn incomplete_escape_suffix(bytes: &[u8]) -> bool {
+    match bytes {
+        [0x1b] => true,
+        [0x1b, b'[', parameters @ ..] => parameters.iter().all(|byte| matches!(byte, 0x20..=0x3f)),
+        [0x1b, b'O'] => true,
+        _ => false,
     }
 }

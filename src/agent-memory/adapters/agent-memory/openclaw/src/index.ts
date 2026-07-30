@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { McpStdioClient } from "./mcp-client.js";
 import { resolveConfig, type AgentMemoryConfig } from "./config.js";
 import { looksLikePromptInjection, wrapMemoryResultsForPrompt } from "./safety.js";
+import { buildRecallQueries, MAX_RESULTS, RRF_K } from "./keyword-extract.js";
 
 // Module-scoped singleton client. OpenClaw may call register() again
 // during a plugin hot-reload without firing gateway_stop for the old
@@ -91,26 +92,106 @@ export default definePluginEntry({
           const userMessage = event.prompt;
           if (!userMessage || userMessage.trim().length < 3) return;
 
-          const rawText = await client.callTool("memory_search", {
-            query: userMessage,
-            top_k: 5,
-            mode: "hybrid",
-          });
+          // BM25 keyword search performs poorly on long natural-language
+          // prompts: stopwords dilute TF-IDF signal so no document reaches
+          // the relevance threshold (regression of #1462). Build
+          // progressively shorter query candidates, execute every
+          // candidate, and merge the results so that no topic is
+          // silently dropped by an early-break optimisation.  See
+          // keyword-extract.ts for the extraction logic.
+          const queryCandidates = buildRecallQueries(userMessage);
 
-          // Parse to verify we have hits; skip injection on empty results.
-          let hits: Array<Record<string, unknown>> = [];
-          try {
-            hits = JSON.parse(rawText);
-          } catch {
+          // Reciprocal-rank fusion (RRF) across all candidates.
+          //
+          // Raw BM25 scores from different queries are NOT comparable
+          // (different IDF, term counts, corpus coverage).  Instead we
+          // assign each hit an RRF score: sum of 1/(RRF_K + rank) where
+          // rank is the hit's 1-based position within its own candidate
+          // result set.  This makes scores comparable across candidates.
+          //
+          // Deduplication is by memory path (stable identity).  A single
+          // failing candidate (e.g. query > 1024 bytes) does NOT discard
+          // previously merged results.  Final result count is capped at
+          // MAX_RESULTS (5).
+          interface RrfEntry {
+            hit: Record<string, unknown>;
+            rrfScore: number;
+            bestContribution: number;
+          }
+          const pathToEntry = new Map<string, RrfEntry>();
+
+          for (const query of queryCandidates) {
+            let rawText: string;
+            try {
+              rawText = await client.callTool("memory_search", {
+                query,
+                top_k: 5,
+                mode: "bm25",
+              });
+            } catch (candidateErr) {
+              // Per-candidate error (e.g. query too long).  Log and
+              // continue — do NOT discard previously merged hits.
+              api.logger.warn?.(
+                `agent-memory: auto-recall candidate failed (query len=${query.length}, err=${candidateErr instanceof Error ? candidateErr.message : String(candidateErr)})`,
+              );
+              continue;
+            }
+            let batch: unknown;
+            try {
+              batch = JSON.parse(rawText);
+            } catch {
+              api.logger.warn?.(
+                `agent-memory: auto-recall memory_search returned non-JSON response (len=${rawText.length})`,
+              );
+              continue;
+            }
+            if (!Array.isArray(batch)) continue;
+            // Within this candidate, hits are already sorted by BM25
+            // score.  Assign RRF score based on rank (0-based index,
+            // so rank 0 → contribution 1/(k+1), rank 1 → 1/(k+2), etc).
+            for (let rank = 0; rank < batch.length; rank++) {
+              const hit = batch[rank] as Record<string, unknown>;
+              const rrfContribution = 1 / (RRF_K + rank + 1);
+              const hitPath = String(hit.path ?? "");
+              const key = hitPath || JSON.stringify(hit);
+              const existing = pathToEntry.get(key);
+              if (existing) {
+                existing.rrfScore += rrfContribution;
+                // Keep the hit from the candidate where it ranked
+                // highest (largest contribution = lowest rank).
+                if (rrfContribution > existing.bestContribution) {
+                  existing.hit = hit;
+                  existing.bestContribution = rrfContribution;
+                }
+              } else {
+                pathToEntry.set(key, {
+                  hit,
+                  rrfScore: rrfContribution,
+                  bestContribution: rrfContribution,
+                });
+              }
+            }
+          }
+
+          // Sort by RRF score descending and limit to MAX_RESULTS.
+          const finalHits = Array.from(pathToEntry.values())
+            .sort((a, b) => b.rrfScore - a.rrfScore)
+            .slice(0, MAX_RESULTS)
+            .map((entry) => entry.hit);
+
+          if (finalHits.length === 0) {
+            api.logger.info?.(
+              `agent-memory: auto-recall found 0 results for prompt (query len=${userMessage.length})`,
+            );
             return;
           }
-          if (!Array.isArray(hits) || hits.length === 0) return;
 
-          const wrapped = wrapMemoryResultsForPrompt(rawText);
+          const finalRawText = JSON.stringify(finalHits);
+          const wrapped = wrapMemoryResultsForPrompt(finalRawText);
           if (!wrapped) return;
 
           api.logger.info?.(
-            `agent-memory: auto-recall injected ${hits.length} memory result(s) for prompt`,
+            `agent-memory: auto-recall injected ${finalHits.length} memory result(s) for prompt`,
           );
           // Dynamic content per turn → use prependContext (NOT prependSystemContext).
           return { prependContext: wrapped };
@@ -333,11 +414,11 @@ export default definePluginEntry({
     api.on(
       "agent_end",
       async (
-        event: { messages?: Array<{ role: string; content: string }> },
+        event: { messages?: unknown[] },
         _ctx: Record<string, unknown>,
       ) => {
         try {
-          const messages = event.messages;
+          const messages = event.messages as Array<{ role: string; content: unknown }>;
           if (!messages || messages.length === 0) return;
 
           // Find the last assistant message.
@@ -346,9 +427,25 @@ export default definePluginEntry({
             .find((m) => m.role === "assistant");
           if (!lastAsst?.content) return;
 
+          // Normalize content: OpenClaw sends content as an array of
+          // content blocks ({type:"text", text:"..."}), but the trigger
+          // regexes expect a string. Without normalization,
+          // re.test(lastAsst.content) coerces the array to
+          // "[object Object]" and no trigger ever matches.
+          const rawContent = lastAsst.content;
+          const contentStr = typeof rawContent === "string"
+            ? rawContent
+            : Array.isArray(rawContent)
+              ? rawContent
+                  .map((b: Record<string, unknown>) =>
+                    typeof b === "string" ? b : (b?.text as string ?? ""))
+                  .join("\n")
+              : String(rawContent);
+          if (!contentStr) return;
+
           // Dedup by content hash to avoid re-capturing across turns.
           const hash = createHash("sha256")
-            .update(lastAsst.content)
+            .update(contentStr)
             .digest("hex")
             .slice(0, 16);
           if (hash === lastCaptureHash) return;
@@ -363,9 +460,9 @@ export default definePluginEntry({
             /\b(important|critical|key|notable|significant)\b/i,
             /\b(I should note|I should remember|notable observation)\b/i,
           ];
-          if (!triggers.some((re) => re.test(lastAsst.content))) return;
+          if (!triggers.some((re) => re.test(contentStr))) return;
 
-          const content = lastAsst.content.slice(0, 2000);
+          const content = contentStr.slice(0, 2000);
 
           // Refuse to persist content that looks like a prompt injection —
           // an attacker could coerce the agent into emitting a message

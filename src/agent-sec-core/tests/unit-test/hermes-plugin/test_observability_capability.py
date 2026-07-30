@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import inspect
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
-_HERMES_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "hermes-plugin"
-sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
-
-from src.capabilities import ALL_CAPABILITIES  # noqa: E402
-from src.capabilities.observability import ObservabilityCapability  # noqa: E402
-from src.cli_runner import CliResult  # noqa: E402
-from src.pii_text import text_sha256  # noqa: E402
+from hermes_plugin_src.capabilities import ALL_CAPABILITIES
+from hermes_plugin_src.capabilities.observability import ObservabilityCapability
+from hermes_plugin_src.cli_runner import CliResult
+from hermes_plugin_src.pii_text import text_sha256
 
 
 class InlineThread:
@@ -94,13 +89,16 @@ def test_hook_handlers_use_explicit_contracts():
 def test_pre_llm_call_records_observability_payload_without_blocking_on_result():
     cap = _make_capability()
 
-    with patch(
-        "src.capabilities.observability.threading.Thread",
-        InlineThread,
-    ), patch(
-        "src.capabilities.observability.record_hermes_observability",
-        return_value=CliResult(stdout="", stderr="", exit_code=0),
-    ) as mock_record:
+    with (
+        patch(
+            "hermes_plugin_src.capabilities.observability.threading.Thread",
+            InlineThread,
+        ),
+        patch(
+            "hermes_plugin_src.capabilities.observability.record_hermes_observability",
+            return_value=CliResult(stdout="", stderr="", exit_code=0),
+        ) as mock_record,
+    ):
         result = cap._on_pre_llm_call(
             session_id="session-1",
             user_message="hello",
@@ -121,13 +119,16 @@ def test_pre_llm_call_records_observability_payload_without_blocking_on_result()
 def test_pre_llm_call_accepts_positional_messages():
     cap = _make_capability()
 
-    with patch(
-        "src.capabilities.observability.threading.Thread",
-        InlineThread,
-    ), patch(
-        "src.capabilities.observability.record_hermes_observability",
-        return_value=CliResult(stdout="", stderr="", exit_code=0),
-    ) as mock_record:
+    with (
+        patch(
+            "hermes_plugin_src.capabilities.observability.threading.Thread",
+            InlineThread,
+        ),
+        patch(
+            "hermes_plugin_src.capabilities.observability.record_hermes_observability",
+            return_value=CliResult(stdout="", stderr="", exit_code=0),
+        ) as mock_record,
+    ):
         result = cap._on_pre_llm_call(
             [{"role": "user", "content": "hello"}],
             session_id="session-1",
@@ -150,13 +151,16 @@ def test_pre_llm_call_accepts_positional_messages():
 def test_post_llm_call_accepts_positional_response():
     cap = _make_capability()
 
-    with patch(
-        "src.capabilities.observability.threading.Thread",
-        InlineThread,
-    ), patch(
-        "src.capabilities.observability.record_hermes_observability",
-        return_value=CliResult(stdout="", stderr="", exit_code=0),
-    ) as mock_record:
+    with (
+        patch(
+            "hermes_plugin_src.capabilities.observability.threading.Thread",
+            InlineThread,
+        ),
+        patch(
+            "hermes_plugin_src.capabilities.observability.record_hermes_observability",
+            return_value=CliResult(stdout="", stderr="", exit_code=0),
+        ) as mock_record,
+    ):
         result = cap._on_post_llm_call(
             [{"role": "assistant", "content": "done"}],
             "done",
@@ -177,12 +181,15 @@ def test_post_llm_call_accepts_positional_response():
 def test_skips_cli_call_when_record_cannot_be_built():
     cap = _make_capability()
 
-    with patch(
-        "src.capabilities.observability.threading.Thread",
-        InlineThread,
-    ), patch(
-        "src.capabilities.observability.record_hermes_observability"
-    ) as mock_record:
+    with (
+        patch(
+            "hermes_plugin_src.capabilities.observability.threading.Thread",
+            InlineThread,
+        ),
+        patch(
+            "hermes_plugin_src.capabilities.observability.record_hermes_observability"
+        ) as mock_record,
+    ):
         result = cap._on_pre_tool_call(
             tool_name="terminal",
             args={"command": "ls"},
@@ -195,13 +202,16 @@ def test_skips_cli_call_when_record_cannot_be_built():
 def test_capability_handlers_emit_all_registered_hook_types():
     cap = _make_capability()
 
-    with patch(
-        "src.capabilities.observability.threading.Thread",
-        InlineThread,
-    ), patch(
-        "src.capabilities.observability.record_hermes_observability",
-        return_value=CliResult(stdout="", stderr="", exit_code=0),
-    ) as mock_record:
+    with (
+        patch(
+            "hermes_plugin_src.capabilities.observability.threading.Thread",
+            InlineThread,
+        ),
+        patch(
+            "hermes_plugin_src.capabilities.observability.record_hermes_observability",
+            return_value=CliResult(stdout="", stderr="", exit_code=0),
+        ) as mock_record,
+    ):
         cap._on_pre_llm_call(session_id="session-1", user_message="hello")
         cap._on_pre_api_request(
             session_id="session-1",
@@ -251,13 +261,16 @@ def test_capability_handlers_emit_all_registered_hook_types():
 def test_post_tool_call_preserves_explicit_none_result():
     cap = _make_capability()
 
-    with patch(
-        "src.capabilities.observability.threading.Thread",
-        InlineThread,
-    ), patch(
-        "src.capabilities.observability.record_hermes_observability",
-        return_value=CliResult(stdout="", stderr="", exit_code=0),
-    ) as mock_record:
+    with (
+        patch(
+            "hermes_plugin_src.capabilities.observability.threading.Thread",
+            InlineThread,
+        ),
+        patch(
+            "hermes_plugin_src.capabilities.observability.record_hermes_observability",
+            return_value=CliResult(stdout="", stderr="", exit_code=0),
+        ) as mock_record,
+    ):
         result = cap._on_post_tool_call(
             tool_name="terminal",
             args={"command": "true"},
@@ -294,7 +307,7 @@ def test_record_logs_cli_failure_details(caplog):
     }
 
     with patch(
-        "src.capabilities.observability.record_hermes_observability",
+        "hermes_plugin_src.capabilities.observability.record_hermes_observability",
         return_value=CliResult(
             stdout="validation details",
             stderr="schema validation failed",
@@ -323,7 +336,7 @@ def test_record_logs_unexpected_cli_exception(caplog):
     }
 
     with patch(
-        "src.capabilities.observability.record_hermes_observability",
+        "hermes_plugin_src.capabilities.observability.record_hermes_observability",
         side_effect=RuntimeError("spawn failed"),
     ):
         with caplog.at_level("WARNING", logger="agent-sec-core"):

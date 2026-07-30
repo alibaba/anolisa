@@ -327,7 +327,7 @@ fn flush(
     // mutex only here, so concurrent `search` callers see at most one
     // small batch of upserts/removes per debounce window instead of the
     // entire walk+extract pass.
-    let mut store = store.lock().expect("index store poisoned");
+    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
     let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
     for rel in to_remove {
         if let Err(e) = store.remove(&rel) {
@@ -357,7 +357,7 @@ fn full_scan(
     use walkdir::WalkDir;
 
     {
-        let mut store = store.lock().expect("index store poisoned");
+        let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen: HashSet<String> = HashSet::new();
         let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
 
@@ -442,7 +442,7 @@ fn backfill_vectors(
     }
     // Phase 1 (locked, brief): which indexed paths lack a vector?
     let missing: Vec<String> = {
-        let store = store.lock().expect("index store poisoned");
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
         store.paths_without_vec()?
     };
     if missing.is_empty() {
@@ -465,7 +465,7 @@ fn backfill_vectors(
 
     // Phase 3 (locked): write vectors.
     if !to_upsert.is_empty() {
-        let mut store = store.lock().expect("index store poisoned");
+        let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
         for (rel, v) in to_upsert {
             if let Err(e) = store.upsert_vec(&rel, &v) {
                 tracing::warn!("index full-scan vec upsert failed for {rel}: {e}");

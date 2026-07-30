@@ -43,7 +43,7 @@ fn raw_cli_cosh_request_history_auto_sends_history_index() {
 }
 
 #[test]
-fn raw_cli_cosh_request_history_redaction_requires_confirmation() {
+fn raw_cli_cosh_request_history_omits_secret_without_confirmation() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -57,13 +57,9 @@ fn raw_cli_cosh_request_history_redaction_requires_confirmation() {
         ],
     );
 
-    assert!(output.contains("Agent Requested Evidence"), "{output}");
+    assert!(!output.contains("Agent Requested Evidence"), "{output}");
     assert!(
-        output.contains("Agent wants to inspect the recent shell command index."),
-        "{output}"
-    );
-    assert!(
-        output.contains("Redacted history index received by fake adapter."),
+        output.contains("Evidence history index received by fake adapter."),
         "{output}"
     );
     assert!(output.contains("token=super-secret"), "{output}");
@@ -82,7 +78,7 @@ fn raw_cli_cosh_request_output_card_sends_bounded_excerpt() {
             ),
             (
                 b"?? request captured output evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(800),
             ),
             (b"\n".to_vec(), Duration::from_millis(1_500)),
             (b"exit\n".to_vec(), Duration::from_millis(600)),
@@ -128,7 +124,7 @@ fn raw_cli_cosh_request_card_ignore_keeps_shell_usable() {
             ),
             (
                 b"?? request captured output evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"i\n".to_vec(), Duration::from_millis(1_500)),
             (
@@ -163,9 +159,9 @@ fn raw_cli_cosh_request_card_ctrl_c_cancels_only_evidence_request() {
             ),
             (
                 b"?? request captured output evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
-            (vec![0x03], Duration::from_millis(1_500)),
+            (vec![0x03], Duration::from_millis(2_000)),
             (
                 b"echo after-evidence-cancel\nexit\n".to_vec(),
                 Duration::from_millis(500),
@@ -195,7 +191,7 @@ fn raw_cli_terminal_output_read_misroute_records_details_audit() {
             (b"printf 'misroute-output\\n'\n".to_vec(), Duration::ZERO),
             (
                 b"?? misroute terminal output read\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_secs(1),
             ),
             (b"/details tool-1\n".to_vec(), Duration::from_millis(1_200)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
