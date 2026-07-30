@@ -1,0 +1,72 @@
+name: AgentSight Runner Pool Smoke
+
+on:
+  push:
+    branches:
+      - chore/agentsight-runner-pools
+
+permissions:
+  contents: read
+
+jobs:
+  high-memory:
+    name: High-memory runner
+    runs-on: anolisa-agentsight-ci-x64
+    timeout-minutes: 30
+    steps:
+      - name: Verify isolated high-memory runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          grep MemTotal /proc/meminfo
+
+          expected_bytes=$((24 * 1024 * 1024 * 1024))
+          if [ -f /sys/fs/cgroup/memory.max ]; then
+            actual_bytes=$(cat /sys/fs/cgroup/memory.max)
+          else
+            actual_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+          fi
+          test "$actual_bytes" = "$expected_bytes"
+
+          test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token
+          echo "Runner memory limit: ${actual_bytes} bytes"
+
+  kernel:
+    name: Kernel ${{ matrix.kernel }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: "5.10"
+            runner: anolisa-agentsight-kernel510-x64
+          - kernel: "5.15"
+            runner: anolisa-agentsight-kernel515-x64
+          - kernel: "6.6"
+            runner: anolisa-agentsight-kernel66-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Verify host kernel and eBPF prerequisites
+        shell: bash
+        env:
+          EXPECTED_PREFIX: ${{ matrix.kernel }}
+        run: |
+          set -euo pipefail
+          actual_kernel=$(uname -r)
+          case "$actual_kernel" in
+            "$EXPECTED_PREFIX".*) ;;
+            *)
+              echo "Expected kernel ${EXPECTED_PREFIX}.x, got ${actual_kernel}" >&2
+              exit 1
+              ;;
+          esac
+
+          sudo -n true
+          sudo test -r /sys/kernel/btf/vmlinux
+          cap_eff=$(sudo awk '/^CapEff:/ { print $2 }' /proc/self/status)
+          test "$cap_eff" != "0000000000000000"
+          test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token
+
+          echo "Kernel: $actual_kernel"
+          echo "Root CapEff: $cap_eff"
