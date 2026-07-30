@@ -10,6 +10,23 @@ use tokio::sync::Semaphore;
 use super::recorder::{RecordParams, TrajectoryRecorder};
 use super::types::*;
 
+/// One raw completion: the visible answer, the hidden reasoning some models
+/// return on a separate field, and the usage counters. Reasoning is billed
+/// inside `output_tokens`, so it has to travel with them to keep a recorded
+/// step's message and its token metric explainable against each other.
+struct RawCompletion {
+    text: String,
+    reasoning: Option<String>,
+    input_tokens: u32,
+    output_tokens: u32,
+    /// Input tokens served from the provider's prompt cache.
+    cached_tokens: u32,
+    /// The share of `output_tokens` the provider attributes to reasoning.
+    /// Recorded even when the reasoning text itself is withheld, so the gap
+    /// between a short answer and a large `output_tokens` stays explainable.
+    reasoning_tokens: u32,
+}
+
 pub struct LlmClient {
     base_url: String,
     api_key: String,
@@ -250,7 +267,6 @@ impl LlmClient {
         let client = self.build_rig_client()?;
         let rig_messages = Self::to_rig_messages(&messages);
         let tag = label.unwrap_or("llm");
-        let start_ts = chrono::Utc::now().to_rfc3339();
 
         let mut last_err = None;
         for attempt in 0..=self.max_retries {
@@ -270,11 +286,23 @@ impl LlmClient {
                 Some(16384u64 * attempt as u64)
             };
 
+            // Per attempt, so a recorded step's duration covers only its own
+            // request rather than every preceding failed one.
+            let start_ts = chrono::Utc::now().to_rfc3339();
             match self
                 .do_request(&client, &rig_messages, json_mode, max_tokens, tag)
                 .await
             {
-                Ok((text, _, _)) if text.trim().is_empty() => {
+                Ok(raw) => {
+                    let empty = raw.text.trim().is_empty();
+                    // Record before deciding whether to retry: a discarded
+                    // attempt still burned (and is billed for) its tokens, and
+                    // an empty answer means it spent all of them on reasoning —
+                    // exactly the case a trajectory has to be able to explain.
+                    self.record_attempt(&messages, &raw, &start_ts, label, tag);
+                    if !empty {
+                        return Ok(raw.text);
+                    }
                     tracing::warn!(
                         "[{tag}] LLM returned empty content (attempt {attempt}/{}), will retry with max_tokens",
                         self.max_retries
@@ -282,27 +310,6 @@ impl LlmClient {
                     last_err = Some(anyhow::anyhow!(
                         "LLM returned empty content (reasoning model token exhaustion suspected)"
                     ));
-                }
-                Ok((text, input_tokens, output_tokens)) => {
-                    // Record successful call if recorder is attached.
-                    if let Some(ref recorder) = self.recorder {
-                        let end_ts = chrono::Utc::now().to_rfc3339();
-                        recorder.record(RecordParams {
-                            messages: &messages,
-                            response: &text,
-                            model: &self.model,
-                            input_tokens,
-                            output_tokens,
-                            start_ts: &start_ts,
-                            end_ts: &end_ts,
-                            label,
-                        });
-                        tracing::debug!(
-                            "[{tag}] Recorded LLM call ({} calls total)",
-                            recorder.len()
-                        );
-                    }
-                    return Ok(text);
                 }
                 Err(e) => {
                     tracing::warn!("[{tag}] LLM call attempt {attempt} failed: {e}");
@@ -314,7 +321,34 @@ impl LlmClient {
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("LLM call failed with no recorded error")))
     }
 
-    /// Returns (text, input_tokens, output_tokens) on success.
+    /// Append one attempt — successful or discarded — to the trajectory.
+    fn record_attempt(
+        &self,
+        messages: &[ChatMessage],
+        raw: &RawCompletion,
+        start_ts: &str,
+        label: Option<&str>,
+        tag: &str,
+    ) {
+        let Some(ref recorder) = self.recorder else {
+            return;
+        };
+        recorder.record(RecordParams {
+            messages,
+            response: &raw.text,
+            reasoning: raw.reasoning.as_deref(),
+            model: &self.model,
+            input_tokens: raw.input_tokens,
+            output_tokens: raw.output_tokens,
+            cached_tokens: raw.cached_tokens,
+            reasoning_tokens: raw.reasoning_tokens,
+            start_ts,
+            end_ts: &chrono::Utc::now().to_rfc3339(),
+            label,
+        });
+        tracing::debug!("[{tag}] Recorded LLM call ({} calls total)", recorder.len());
+    }
+
     async fn do_request(
         &self,
         client: &openai::CompletionsClient,
@@ -322,7 +356,7 @@ impl LlmClient {
         json_mode: bool,
         max_tokens: Option<u64>,
         tag: &str,
-    ) -> Result<(String, u32, u32)> {
+    ) -> Result<RawCompletion> {
         let model = client.completion_model(&self.model);
 
         // Split messages: system → preamble, rest → chat_history, last → prompt
@@ -361,12 +395,16 @@ impl LlmClient {
 
         let input_tokens = response.usage.input_tokens as u32;
         let output_tokens = response.usage.output_tokens as u32;
+        let cached_tokens = response.usage.cached_input_tokens as u32;
+        let reasoning_tokens = response.usage.reasoning_tokens as u32;
 
         // Log token usage
         tracing::debug!(
-            "[{tag}] Tokens: input={} output={} total={}",
+            "[{tag}] Tokens: input={} (cached {}) output={} (reasoning {}) total={}",
             input_tokens,
+            cached_tokens,
             output_tokens,
+            reasoning_tokens,
             response.usage.total_tokens
         );
 
@@ -381,22 +419,32 @@ impl LlmClient {
             .collect::<Vec<_>>()
             .join("");
 
-        // Log reasoning content if present
-        for c in response.choice.iter() {
-            if let AssistantContent::Reasoning(r) = c {
-                let full_text = r.display_text();
-                let reasoning_chars = full_text.chars().count();
-                if reasoning_chars > 0 {
-                    tracing::debug!(
-                        "[{tag}] Reasoning ({} chars):\n{}",
-                        reasoning_chars,
-                        full_text
-                    );
-                }
-            }
+        // Hidden reasoning, if the provider exposes it. Kept (not just logged)
+        // because it is what the gap between `text` and `output_tokens` is
+        // spent on — dropping it makes recorded trajectories unexplainable.
+        let reasoning_parts: Vec<String> = response
+            .choice
+            .iter()
+            .filter_map(|c| match c {
+                AssistantContent::Reasoning(r) => Some(r.display_text()),
+                _ => None,
+            })
+            .filter(|t| !t.is_empty())
+            .collect();
+        let reasoning = (!reasoning_parts.is_empty()).then(|| reasoning_parts.join("\n"));
+
+        if let Some(ref r) = reasoning {
+            tracing::debug!("[{tag}] Reasoning ({} chars):\n{}", r.chars().count(), r);
         }
 
-        Ok((text, input_tokens, output_tokens))
+        Ok(RawCompletion {
+            text,
+            reasoning,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            reasoning_tokens,
+        })
     }
 
     /// Split messages into (preamble, history, prompt).

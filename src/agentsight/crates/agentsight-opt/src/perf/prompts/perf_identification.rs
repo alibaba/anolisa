@@ -26,6 +26,11 @@ pub const STRATEGIES: &[StrategyDef] = &[
         applies_signal: "工具调用慢且频次多；出现 grep、find、cat 等 Unix 工具；单次搜索/查找耗时 >2s",
         method: "用 ripgrep (rg) 替代 grep（快 5-10x）；用 fd 替代 find（快 3-5x）；避免 cat 大文件，用 head/tail 或 rg 定向提取",
     },
+    // TODO(#opt-experience-dedup): overlaps the cost dimension's detour
+    // candidate (`cost/prompts/detour.rs`), which judges the same pitfalls
+    // against a full turn ledger and emits the reusable lesson. Until this is
+    // converged, one pitfall can surface on both the perf and the cost page.
+    // Same overlap applies to `accuracy::strategies::experience_library`.
     StrategyDef {
         id: "experience_library",
         name: "经验库沉淀",
