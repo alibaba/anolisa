@@ -63,6 +63,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'
+          components: rustfmt
 
       - name: Install eBPF build dependencies
         run: |
