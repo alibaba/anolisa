@@ -5,11 +5,12 @@
 
 use std::time::Instant;
 
-use clap::{Parser, Subcommand};
+use clap::{error::ErrorKind, Parser, Subcommand};
 
 mod cmd;
 
 use cosh_platform::detect::Distro;
+use cosh_types::error::{CoshError, ErrorCode};
 use cosh_types::output::{CoshResponse, ResponseMeta};
 
 #[derive(Parser)]
@@ -61,9 +62,36 @@ fn main() {
         .with_target(true)
         .try_init();
 
-    let cli = Cli::parse();
-    let distro = Distro::detect();
     let start = Instant::now();
+    let distro = Distro::detect();
+
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // --help and --version print to stdout and exit 0 — keep clap's
+            // native behaviour for these, do not wrap in the JSON envelope.
+            if matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                e.exit();
+            }
+            // All other clap errors (missing args, unknown subcommand, etc.)
+            // must honour the unified JSON envelope contract: emit the envelope
+            // on STDOUT and exit 1 instead of clap's default (STDERR text, exit 2).
+            let error = CoshError::new(ErrorCode::InvalidInput, e.to_string(), "cli")
+                .with_details(serde_json::json!({"kind": "clap"}));
+            let meta = ResponseMeta {
+                subsystem: "cli".to_string(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                distro: Some(distro.id_str().to_string()),
+                dry_run: false,
+                warning: None,
+            };
+            let exit_code = print_failure(error, meta);
+            std::process::exit(exit_code);
+        }
+    };
 
     let exit_code = match cli.command {
         Commands::Pkg { action } => cmd::pkg::run(action, &distro, start),

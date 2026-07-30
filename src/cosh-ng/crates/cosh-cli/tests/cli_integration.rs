@@ -1722,16 +1722,50 @@ fn test_pkg_remove_rejects_shell_metachar() {
 // --- No subcommand ---
 
 /// When cosh-cli is invoked with no arguments, clap reports missing subcommand.
+/// The error must honour the unified JSON envelope contract: STDOUT contains a
+/// valid `{"ok":false,...}` envelope and the exit code is 1 (not clap's default 2).
 #[test]
 fn test_no_subcommand_fails() {
     let output = cosh_bin().output().unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+    assert_eq!(json["error"]["subsystem"], "cli");
+    assert_eq!(json["error"]["details"]["kind"], "clap");
+    assert_eq!(json["meta"]["subsystem"], "cli");
+    assert_eq!(json["meta"]["dry_run"], false);
 }
 
 #[test]
 fn test_invalid_subcommand_fails() {
     let output = cosh_bin().arg("foobar").output().unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+    assert_eq!(json["error"]["subsystem"], "cli");
+    assert_eq!(json["error"]["details"]["kind"], "clap");
+    assert_eq!(json["meta"]["subsystem"], "cli");
+}
+
+/// Missing required positional argument (e.g. `pkg install` without <PACKAGE>)
+/// must also produce the JSON envelope on STDOUT with exit 1.
+#[test]
+fn test_missing_required_arg_fails_with_envelope() {
+    let output = cosh_bin().args(["pkg", "install"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+    assert_eq!(json["error"]["details"]["kind"], "clap");
+    assert_eq!(json["meta"]["subsystem"], "cli");
 }
 
 // --- Regression: issue #1551 compound command contract ---
