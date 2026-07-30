@@ -1247,7 +1247,7 @@ mod linux {
         assert!(matches!(
             fixture.contain_as(
                 Some(900),
-                &[stale.clone()],
+                std::slice::from_ref(&stale),
                 "principal:test-operator",
             ),
             Err(ContainmentError::RootProcessStale(pid)) if pid == stale.root_pid
@@ -1431,7 +1431,7 @@ mod linux {
             .coordinator
             .plan(fixture.case_id, vec![candidate.clone(), stale])
             .expect("plan should load");
-        assert_eq!(plan.candidates, [candidate.clone()]);
+        assert_eq!(plan.candidates.as_slice(), std::slice::from_ref(&candidate));
         assert!(!plan.original_target_valid);
 
         assert!(matches!(
@@ -1460,7 +1460,7 @@ mod linux {
             "principal:\noperator".into(),
         ] {
             assert!(matches!(
-                fixture.contain_as(Some(900), &[candidate.clone()], &requested_by),
+                fixture.contain_as(Some(900), std::slice::from_ref(&candidate), &requested_by,),
                 Err(ContainmentError::InvalidRequestedBy)
             ));
         }
