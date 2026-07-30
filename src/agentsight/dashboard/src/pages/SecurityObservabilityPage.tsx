@@ -42,7 +42,7 @@ import {
 } from './security/utils';
 
 function isSecurityAvailableState(state: string | null | undefined): boolean {
-  return state === 'local_ready' || state === 'daemon_reachable';
+  return state === 'daemon_reachable';
 }
 
 export const SecurityObservabilityPage: React.FC = () => {
@@ -369,7 +369,7 @@ export const SecurityObservabilityPage: React.FC = () => {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">安全可观测</h1>
-          <p className="mt-1 text-sm text-gray-500">原始安全事实、进程行为与系统事件</p>
+          <p className="mt-1 text-sm text-gray-500">Security Observability / agent-sec daemon</p>
         </div>
         <div className="flex items-center gap-2">
           {status && <StatePill state={status.state} />}
