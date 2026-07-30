@@ -57,6 +57,7 @@ use crate::commands::tier1::install::RawTeardownOps;
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
+use crate::progress::{self, Activity, ProgressReporter};
 use crate::response::{CliError, render_json};
 
 const COMMAND: &str = "uninstall";
@@ -103,10 +104,27 @@ pub(crate) fn handle_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> Result<(), CliError> {
+    let mut activity = Activity::start(
+        progress::feedback_for_stderr(ctx.json, ctx.quiet),
+        &format!("Preparing to uninstall {}...", args.component),
+    );
+    handle_with_deps_and_progress(args, ctx, query, txn, is_root, &mut activity)
+}
+
+fn handle_with_deps_and_progress(
+    args: UninstallArgs,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+    reporter: &mut dyn ProgressReporter,
+) -> Result<(), CliError> {
+    reporter.report(&format!("Preparing to uninstall {}...", args.component));
     if args.purge {
+        reporter.finish();
         return handle_purge(&args, ctx);
     }
-    uninstall_component(&args, ctx, query, txn, is_root)
+    uninstall_component(&args, ctx, query, txn, is_root, reporter)
 }
 
 /// The plain-uninstall pipeline: observe, plan (rows X1–X6), execute through
@@ -117,6 +135,7 @@ fn uninstall_component(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<(), CliError> {
     let input = args.component.as_str();
     let command = format!("{COMMAND} {input}");
@@ -134,6 +153,7 @@ fn uninstall_component(
     let (resolved, view) = common::resolve_mutation_target(input, ctx, &scope_command)?;
     let store = view.writable.state;
     let target = resolved.as_str();
+    reporter.report(&format!("Resolving {target}..."));
 
     if store.find(ObjectKind::Component, target).is_none() {
         // A name that only matched a legacy `kind = "capability"` row was
@@ -154,7 +174,9 @@ fn uninstall_component(
     // `--force` is a wire stub; surface it on real runs so users do not
     // assume it changes behavior. Dry-run stays quiet.
     if args.force && !ctx.dry_run {
-        eprintln!("warning: --force is a spec stub today and has no behavioral effect yet");
+        progress::suspend_output(|| {
+            eprintln!("warning: --force is a spec stub today and has no behavioral effect yet");
+        });
     }
 
     // `--remove-system-package` only governs delegated records. Flag it on
@@ -168,9 +190,11 @@ fn uninstall_component(
             Some(ProviderBinding::Owned { .. })
         )
     {
-        eprintln!(
-            "warning: --remove-system-package has no effect for raw component '{target}' (there is no system RPM to remove)"
-        );
+        progress::suspend_output(|| {
+            eprintln!(
+                "warning: --remove-system-package has no effect for raw component '{target}' (there is no system RPM to remove)"
+            );
+        });
     }
 
     // The probe target comes from the record; uninstall never resolves a
@@ -264,6 +288,7 @@ fn uninstall_component(
         Ok(Plan::NoOp { .. }) => {
             // The uninstall table has no NoOp rows today; render an honest
             // "nothing to do" if the planner ever grows one.
+            reporter.finish();
             return render_result(
                 ctx,
                 target,
@@ -281,6 +306,7 @@ fn uninstall_component(
     let disposition = disposition_for(&steps, &notes);
 
     if ctx.dry_run {
+        reporter.finish();
         return render_result(
             ctx,
             target,
@@ -305,6 +331,7 @@ fn uninstall_component(
         )
     });
     if !is_delegated_plan {
+        reporter.report(&format!("Uninstalling {target}..."));
         return uninstall_owned(
             target,
             ctx,
@@ -315,6 +342,7 @@ fn uninstall_component(
             &now,
             &intent,
             &command,
+            reporter,
         );
     }
 
@@ -337,6 +365,7 @@ fn uninstall_component(
             ),
         });
     }
+    reporter.report(&format!("Uninstalling {target}..."));
 
     // Real run under the install lock, with state re-read and the adapter
     // guard re-checked inside it — a concurrent `adapter enable` must not
@@ -550,16 +579,17 @@ fn uninstall_component(
             ),
         },
     })?;
+    reporter.report(&format!("Finalizing {target} uninstall..."));
 
     // The manifest snapshot travels with the record. Best-effort: the
     // record drop is already committed.
     if let Err(err) = remove_component_manifest_snapshot(&layout, target, &command) {
-        eprintln!("warning: {err}");
+        progress::suspend_output(|| eprintln!("warning: {err}"));
     }
     if let Some(dir) = legacy_manifest_dir
         && let Err(err) = remove_manifest_snapshot_dir(&dir, &command)
     {
-        eprintln!("warning: {err}");
+        progress::suspend_output(|| eprintln!("warning: {err}"));
     }
 
     // Operation history is best-effort bookkeeping on top of the committed
@@ -573,16 +603,20 @@ fn uninstall_component(
         parent_operation_id: None,
     });
     if let Err(err) = store.save(&state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
+        progress::suspend_output(|| {
+            eprintln!("warning: failed to record operation history: {err}");
+        });
     }
 
     if matches!(disposition, UninstallDisposition::AlreadyAbsent) && !ctx.json && !ctx.quiet {
         let color = Palette::new(ctx.no_color);
-        eprintln!(
-            "{} RPM package '{}' is not present in rpmdb (already removed by a manual `rpm -e`); dropping ANOLISA state only",
-            color.warn("warning:"),
-            native_package.as_deref().unwrap_or(target),
-        );
+        progress::suspend_output(|| {
+            eprintln!(
+                "{} RPM package '{}' is not present in rpmdb (already removed by a manual `rpm -e`); dropping ANOLISA state only",
+                color.warn("warning:"),
+                native_package.as_deref().unwrap_or(target),
+            );
+        });
     }
 
     append_uninstall_log(
@@ -595,6 +629,7 @@ fn uninstall_component(
         &disposition,
         native_package.as_deref(),
     );
+    reporter.finish();
 
     render_result(
         ctx,
@@ -619,6 +654,7 @@ fn uninstall_owned(
     now: &str,
     intent: &Intent,
     command: &str,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<(), CliError> {
     // No root pre-check for owned teardown: `--prefix` may point at a
     // user-writable tree, and a genuine permission problem fails the exact
@@ -741,6 +777,7 @@ fn uninstall_owned(
         execute_owned_steps(&steps, &mut ops, &mut journal)
     }
     .map_err(|err| owned_teardown_error_to_cli(err, target, scope, command))?;
+    reporter.report(&format!("Finalizing {target} uninstall..."));
 
     store.operations.push(OperationRecord {
         id: operation_id.clone(),
@@ -751,13 +788,15 @@ fn uninstall_owned(
         parent_operation_id: None,
     });
     if let Err(err) = store.save(state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
+        progress::suspend_output(|| {
+            eprintln!("warning: failed to record operation history: {err}");
+        });
     }
 
     if !ctx.json && !ctx.quiet {
         let color = Palette::new(ctx.no_color);
         for warning in &outcome.warnings {
-            eprintln!("{} {warning}", color.warn("warning:"));
+            progress::suspend_output(|| eprintln!("{} {warning}", color.warn("warning:")));
         }
     }
 
@@ -771,6 +810,7 @@ fn uninstall_owned(
         &disposition,
         None,
     );
+    reporter.finish();
 
     render_result(
         ctx,
@@ -1146,7 +1186,7 @@ fn append_uninstall_log(
         details: serde_json::Value::Null,
     };
     if let Err(err) = log.append(&record) {
-        eprintln!("warning: failed to write central log: {err}");
+        progress::suspend_output(|| eprintln!("warning: failed to write central log: {err}"));
     }
 }
 
@@ -1377,6 +1417,22 @@ mod tests {
     use anolisa_platform::fs_layout::{FsLayout, InstallMode as LayoutInstallMode};
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
+
+    #[derive(Default)]
+    struct RecordingProgress {
+        messages: RefCell<Vec<String>>,
+        finished: bool,
+    }
+
+    impl ProgressReporter for RecordingProgress {
+        fn report(&self, message: &str) {
+            self.messages.borrow_mut().push(message.to_string());
+        }
+
+        fn finish(&mut self) {
+            self.finished = true;
+        }
+    }
 
     fn ctx_with_prefix(
         json: bool,
@@ -2202,6 +2258,49 @@ mod tests {
         is_root: bool,
     ) -> Result<(), CliError> {
         handle_with_deps(args, ctx, rpm, rpm, is_root)
+    }
+
+    #[test]
+    fn uninstall_reports_resolve_remove_and_finalize_phases() {
+        let tmp = tempdir().expect("tmpdir");
+        let ctx = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                Ownership::RpmObserved,
+            )],
+            Vec::new(),
+        );
+        let rpm = FakeRpm::present("copilot-shell");
+        let mut progress = RecordingProgress::default();
+
+        handle_with_deps_and_progress(
+            args_rm("copilot-shell"),
+            &ctx,
+            &rpm,
+            &rpm,
+            true,
+            &mut progress,
+        )
+        .expect("uninstall");
+
+        assert_eq!(
+            progress.messages.into_inner(),
+            [
+                "Preparing to uninstall copilot-shell...",
+                "Resolving copilot-shell...",
+                "Uninstalling copilot-shell...",
+                "Finalizing copilot-shell uninstall...",
+            ]
+        );
+        assert!(progress.finished, "progress must stop before result output");
     }
 
     /// The new `--remove-system-package` flag parses to the positional + flag.

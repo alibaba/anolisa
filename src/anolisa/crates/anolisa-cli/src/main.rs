@@ -63,7 +63,7 @@ fn finish(exit_code: ExitCode) -> ExitCode {
 fn finish_with_error(exit_code: ExitCode, error: Option<io::Error>) -> ExitCode {
     match error {
         Some(error) => {
-            eprintln!("error[EXECUTION_FAILED]: failed writing to stdout: {error}");
+            eprintln!("error: failed writing to stdout: {error}");
             ExitCode::from(1)
         }
         None => exit_code,

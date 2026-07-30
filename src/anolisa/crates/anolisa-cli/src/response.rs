@@ -344,18 +344,14 @@ pub fn render_error(ctx: &CliContext, err: &CliError) -> ExitCode {
         };
         if let Err(serialize_err) = write_json(&response) {
             eprintln!(
-                "internal: failed to serialize error envelope: {serialize_err}; original error[{}]: {}",
-                err.code(),
-                err.reason()
+                "internal: failed to serialize error envelope: {serialize_err}; original error: {} (code: {})",
+                err.reason(),
+                err.code()
             );
         }
     } else {
         let color = Palette::new(ctx.no_color);
-        eprintln!(
-            "{} {}",
-            color.err(format!("error[{}]:", err.code())),
-            err.reason()
-        );
+        eprintln!("{} {}", color.err("error:"), err.reason());
         if let Some(hint) = err.hint() {
             eprintln!("{} {}", color.warn("hint:"), hint);
         }

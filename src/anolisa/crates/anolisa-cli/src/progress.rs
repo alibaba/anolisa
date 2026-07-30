@@ -1,17 +1,17 @@
 //! Transient interactive activity feedback for long-running human-readable
 //! commands (issue #1452).
 //!
-//! Repository queries, upgrade planning, and `dnf` transactions can each block
-//! for a long time with no visible output, so a healthy run is
-//! indistinguishable from a hung process. This module provides an injectable
-//! [`ProgressReporter`] plus an [`Activity`] guard that renders feedback in one
-//! of two ways, chosen by [`feedback_mode`], without ever touching the
-//! structured stdout/JSON contract:
+//! Repository queries, install/upgrade planning, artifact preparation, and
+//! `dnf` transactions can each block for a long time with no visible output,
+//! so a healthy run is indistinguishable from a hung process. This module
+//! provides an injectable [`ProgressReporter`] plus an [`Activity`] guard that
+//! renders feedback in one of two ways, chosen by [`feedback_mode`], without
+//! ever touching the structured stdout/JSON contract:
 //!
 //! - **Animated** (interactive, ANSI-capable terminal): a background spinner on
 //!   stderr, repainted in place.
 //! - **Static** (interactive terminal that cannot animate — `TERM=dumb`, an
-//!   unknown/zero width, or a spinner thread that failed to spawn): a single
+//!   unknown/zero width, or an animation thread that failed to spawn): a single
 //!   plain stderr line per phase, no ANSI and no repaint. This keeps a feedback
 //!   channel for users the animated path cannot serve, instead of going silent
 //!   and reintroducing the "looks hung" problem.
@@ -24,7 +24,7 @@
 //!   is known and the frame fits one physical line ([`fit_line`]); otherwise the
 //!   painter falls back to a one-time static line for that message, so a frame
 //!   `clear_line` could not fully erase is never emitted.
-//! - **No competing output**: while an animated spinner is live, occasional
+//! - **No competing output**: while animated feedback is live, occasional
 //!   persistent lines (repo-config deprecation, provisioning result,
 //!   central-log warning) go through [`suspend_output`], which parks the painter
 //!   and clears the frame so the two never interleave.
@@ -51,7 +51,7 @@ use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, SigmaskHow, Signa
 /// runs on ANSI-capable terminals anyway).
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// Interval between spinner frames.
+/// Interval between animation frames.
 const TICK: Duration = Duration::from_millis(100);
 
 /// Granularity at which the painter polls the stop flags while waiting out a
@@ -66,10 +66,10 @@ const STOP_POLL: Duration = Duration::from_millis(10);
 /// last frame, which no design could safely erase while that write is stuck.
 const SIGINT_SPIN_LIMIT: u32 = 20_000_000;
 
-/// The active animated spinner's shared state, published while it is live so
+/// The active animation's shared state, published while it is live so
 /// [`suspend_output`] can coordinate with the painter from another call path.
-/// At most one spinner is live at a time in this CLI (never nested).
-static ACTIVE: Mutex<Option<Arc<SpinnerState>>> = Mutex::new(None);
+/// At most one animation is live at a time in this CLI (never nested).
+static ACTIVE: Mutex<Option<Arc<AnimationState>>> = Mutex::new(None);
 
 /// Set by the SIGINT handler to tell the painter to stop. Global (not a field)
 /// because the async-signal-safe handler cannot reach the `Arc` state.
@@ -87,6 +87,12 @@ static SIG_DONE: AtomicBool = AtomicBool::new(false);
 pub(crate) trait ProgressReporter {
     /// Replace the currently displayed activity message.
     fn report(&self, message: &str);
+
+    /// Stop transient feedback before persistent command output is rendered.
+    ///
+    /// Recording and no-op reporters do not own terminal state, so the default
+    /// implementation is intentionally empty.
+    fn finish(&mut self) {}
 }
 
 /// A [`ProgressReporter`] that discards every message.
@@ -107,7 +113,7 @@ impl ProgressReporter for NoopReporter {
 pub(crate) enum FeedbackMode {
     /// No feedback: `--json`, `--quiet`, or a non-interactive stderr.
     Disabled,
-    /// In-place stderr spinner on an ANSI-capable interactive terminal.
+    /// In-place stderr animation on an ANSI-capable interactive terminal.
     Animated,
     /// One plain stderr line per phase when the terminal cannot animate.
     Static,
@@ -155,9 +161,9 @@ fn ansi_capable_for(term: Option<&str>) -> bool {
     matches!(term, Some(t) if !t.is_empty() && t != "dumb")
 }
 
-/// Run `f`, parking the active animated spinner (if any) and clearing its frame
+/// Run `f`, parking active animated feedback (if any) and clearing its frame
 /// for the duration so a persistent line written by `f` cannot interleave with,
-/// or be erased by, spinner repaints. A no-op wrapper when no animated spinner
+/// or be erased by, animation repaints. A no-op wrapper when no animation
 /// is live (including static mode), so it is safe to route every occasional CLI
 /// line through it unconditionally.
 pub(crate) fn suspend_output<T>(f: impl FnOnce() -> T) -> T {
@@ -185,7 +191,7 @@ fn emit_static_line(message: &str) {
 ///
 /// Construct with [`Activity::start`]; the mode decides whether it animates,
 /// prints static lines, or does nothing. Dropping it tears down the animated
-/// spinner (join the worker, restore SIGINT); the other modes need no cleanup.
+/// worker (join the thread, restore SIGINT); the other modes need no cleanup.
 pub(crate) struct Activity {
     inner: ActivityInner,
 }
@@ -193,7 +199,7 @@ pub(crate) struct Activity {
 enum ActivityInner {
     Disabled,
     Static(StaticHint),
-    Animated(AnimatedSpinner),
+    Animated(AnimatedFeedback),
 }
 
 impl Activity {
@@ -206,8 +212,8 @@ impl Activity {
         let inner = match mode {
             FeedbackMode::Disabled => ActivityInner::Disabled,
             FeedbackMode::Static => ActivityInner::Static(StaticHint::new(message)),
-            FeedbackMode::Animated => match AnimatedSpinner::start(message) {
-                Some(spinner) => ActivityInner::Animated(spinner),
+            FeedbackMode::Animated => match AnimatedFeedback::start(message) {
+                Some(animation) => ActivityInner::Animated(animation),
                 None => ActivityInner::Static(StaticHint::new(message)),
             },
         };
@@ -219,19 +225,32 @@ impl Activity {
         match &self.inner {
             ActivityInner::Disabled => {}
             ActivityInner::Static(hint) => hint.report(message),
-            ActivityInner::Animated(spinner) => {
+            ActivityInner::Animated(animation) => {
                 // Avoid pausing this thread in the handler while it owns the
                 // message lock the painter may need before its final clear.
                 let _sigint_block = ScopedSigintBlock::block().ok();
-                set_shared_message(&spinner.state.message, message);
+                set_shared_message(&animation.state.message, message);
             }
         }
+    }
+
+    /// Stop feedback and clear any animated frame.
+    ///
+    /// Keeping the guard usable after this call lets command pipelines finish
+    /// it through a borrowed [`ProgressReporter`] before printing their final
+    /// result. Dropping the guard later is then a no-op.
+    pub(crate) fn finish(&mut self) {
+        self.inner = ActivityInner::Disabled;
     }
 }
 
 impl ProgressReporter for Activity {
     fn report(&self, message: &str) {
         self.set_message(message);
+    }
+
+    fn finish(&mut self) {
+        Activity::finish(self);
     }
 }
 
@@ -262,15 +281,15 @@ impl StaticHint {
 }
 
 /// Animated feedback: a background worker repaints frames on stderr.
-struct AnimatedSpinner {
-    state: Arc<SpinnerState>,
+struct AnimatedFeedback {
+    state: Arc<AnimationState>,
     handle: Option<JoinHandle<()>>,
     /// SIGINT disposition to restore on drop; `None` when the scoped handler
     /// could not be installed.
     prev_sigint: Option<SigAction>,
 }
 
-impl AnimatedSpinner {
+impl AnimatedFeedback {
     /// Spawn the painter, or `None` if the worker thread cannot be created.
     fn start(message: &str) -> Option<Self> {
         // Block before installing the handler and spawning. The painter inherits
@@ -278,11 +297,11 @@ impl AnimatedSpinner {
         // wait for its own `SIG_DONE`. Failure degrades to static feedback.
         let sigint_block = ScopedSigintBlock::block().ok()?;
 
-        // Fresh interrupt-handshake state for this spinner.
+        // Fresh interrupt-handshake state for this animation.
         SIG_STOP.store(false, Ordering::Release);
         SIG_DONE.store(false, Ordering::Release);
 
-        let state = Arc::new(SpinnerState {
+        let state = Arc::new(AnimationState {
             message: Mutex::new(message.to_string()),
             stop: AtomicBool::new(false),
             paint: Mutex::new(()),
@@ -293,7 +312,7 @@ impl AnimatedSpinner {
         let worker_state = Arc::clone(&state);
         match thread::Builder::new()
             .name("anolisa-activity".to_string())
-            .spawn(move || run_spinner(&worker_state))
+            .spawn(move || run_animation(&worker_state))
         {
             Ok(handle) => {
                 // The worker now exists with SIGINT blocked, so a pending signal
@@ -317,7 +336,7 @@ impl AnimatedSpinner {
     }
 }
 
-impl Drop for AnimatedSpinner {
+impl Drop for AnimatedFeedback {
     fn drop(&mut self) {
         self.state.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
@@ -333,16 +352,16 @@ impl Drop for AnimatedSpinner {
     }
 }
 
-/// Shared spinner state driven by the worker thread and updated by
+/// Shared animation state driven by the worker thread and updated by
 /// [`Activity::set_message`].
-struct SpinnerState {
+struct AnimationState {
     message: Mutex<String>,
     stop: AtomicBool,
     /// Serializes terminal repaints against [`suspend_output`].
     paint: Mutex<()>,
 }
 
-impl SpinnerState {
+impl AnimationState {
     fn lock_paint(&self) -> MutexGuard<'_, ()> {
         self.paint
             .lock()
@@ -356,13 +375,13 @@ impl SpinnerState {
     }
 }
 
-/// Worker loop: repaint the spinner until a stop flag is set, then perform the
+/// Worker loop: repaint the animation until a stop flag is set, then perform the
 /// one and only final clear.
 ///
 /// The painter is the *sole* terminal writer, which is what lets the SIGINT
 /// handler stay write-free: the last thing written here is always the final
 /// clear, after which [`SIG_DONE`] is published and the thread exits.
-fn run_spinner(state: &SpinnerState) {
+fn run_animation(state: &AnimationState) {
     let term = Term::stderr();
     let mut frame = 0usize;
     let mut render_state = RenderState::default();
@@ -372,10 +391,7 @@ fn run_spinner(state: &SpinnerState) {
             let _paint = state.lock_paint();
             if !state.should_stop() {
                 let message = read_shared_message(&state.message);
-                match fit_to_width(
-                    &term,
-                    &format!("{} {message}", FRAMES[frame % FRAMES.len()]),
-                ) {
+                match spinner_line(&term, frame, &message) {
                     Some(line) => {
                         // Best-effort paint: a transient stderr write error must
                         // not abort the whole command.
@@ -461,7 +477,7 @@ impl RenderState {
 
 /// Sleep out one [`TICK`], waking early (within [`STOP_POLL`]) when a stop flag
 /// is set so shutdown latency stays low.
-fn sleep_until_stop(state: &SpinnerState) {
+fn sleep_until_stop(state: &AnimationState) {
     let mut elapsed = Duration::ZERO;
     while elapsed < TICK {
         if state.should_stop() {
@@ -478,6 +494,10 @@ fn sleep_until_stop(state: &SpinnerState) {
 /// pure decision to [`fit_line`] so it is testable without a terminal.
 fn fit_to_width(term: &Term, line: &str) -> Option<String> {
     fit_line(term.size_checked().map(|(_rows, cols)| cols), line)
+}
+
+fn spinner_line(term: &Term, frame: usize, message: &str) -> Option<String> {
+    fit_to_width(term, &format!("{} {message}", FRAMES[frame % FRAMES.len()]))
 }
 
 /// Pure width-fitting: `Some(truncated)` when `cols` is known and greater than
@@ -513,16 +533,16 @@ fn truncate_to_width(s: &str, max: usize) -> String {
     out
 }
 
-// ── global active-spinner registry ───────────────────────────────────────────
+// ── global active-animation registry ─────────────────────────────────────────
 
-fn active_state() -> Option<Arc<SpinnerState>> {
+fn active_state() -> Option<Arc<AnimationState>> {
     match ACTIVE.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 
-fn set_active(state: Option<Arc<SpinnerState>>) {
+fn set_active(state: Option<Arc<AnimationState>>) {
     match ACTIVE.lock() {
         Ok(mut guard) => *guard = state,
         Err(poisoned) => *poisoned.into_inner() = state,
@@ -576,7 +596,7 @@ extern "C" fn on_sigint(_sig: libc::c_int) {
 
 /// Install the scoped SIGINT cleanup handler, returning the previous
 /// disposition to restore later. Best-effort: a failure yields `None` and the
-/// spinner simply falls back to "leftover frame on Ctrl+C".
+/// animation simply falls back to "leftover frame on Ctrl+C".
 fn install_sigint_cleanup() -> Option<SigAction> {
     let action = SigAction::new(
         SigHandler::Handler(on_sigint),
@@ -715,7 +735,7 @@ mod tests {
     }
 
     /// A disabled activity does nothing: it never registers as the active
-    /// spinner, and `report` is a no-op.
+    /// animation, and `report` is a no-op.
     #[test]
     fn disabled_activity_is_inert() {
         let activity = Activity::start(FeedbackMode::Disabled, "Checking for updates...");
@@ -724,10 +744,10 @@ mod tests {
         activity.report("still inert");
     }
 
-    /// With no active animated spinner, `suspend_output` is a transparent
+    /// With no active animation, `suspend_output` is a transparent
     /// passthrough that runs the closure exactly once and returns its value.
     #[test]
-    fn suspend_output_without_spinner_is_passthrough() {
+    fn suspend_output_without_animation_is_passthrough() {
         let ran = RefCell::new(0);
         let value = suspend_output(|| {
             *ran.borrow_mut() += 1;

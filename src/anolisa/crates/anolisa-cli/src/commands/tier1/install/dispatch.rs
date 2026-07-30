@@ -40,6 +40,7 @@ use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
+use crate::progress::{self, Activity, ProgressReporter};
 use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url,
 };
@@ -67,8 +68,18 @@ pub(crate) fn handle_one(
     args: InstallArgs,
     ctx: &CliContext,
 ) -> Result<InstallOutcome, CliError> {
+    let mut activity = install_activity(&component, ctx);
     let (query, txn) = host_backends(&component, &args, ctx)?;
-    install_component_with_deps(&component, &args, ctx, &query, &txn, privilege::is_root())
+    install_component_with_deps_and_planned(
+        &component,
+        &args,
+        ctx,
+        &query,
+        &txn,
+        privilege::is_root(),
+        &HashSet::new(),
+        &mut activity,
+    )
 }
 
 /// Dispatch one batch member while treating earlier successful dry-run
@@ -79,6 +90,7 @@ pub(crate) fn handle_one_with_planned_components(
     ctx: &CliContext,
     planned_components: &HashSet<String>,
 ) -> Result<InstallOutcome, CliError> {
+    let mut activity = install_activity(&component, ctx);
     let (query, txn) = host_backends(&component, &args, ctx)?;
     install_component_with_deps_and_planned(
         &component,
@@ -88,6 +100,14 @@ pub(crate) fn handle_one_with_planned_components(
         &txn,
         privilege::is_root(),
         planned_components,
+        &mut activity,
+    )
+}
+
+fn install_activity(component: &str, ctx: &CliContext) -> Activity {
+    Activity::start(
+        progress::feedback_for_stderr(ctx.json, ctx.quiet),
+        &format!("Preparing to install {component}..."),
     )
 }
 
@@ -262,6 +282,7 @@ impl PlannedRoute {
 
 /// Core of [`handle_one`] with the package backends injected so tests drive
 /// every branch without a live rpmdb/dnf or real privileges.
+#[cfg(test)]
 pub(crate) fn install_component_with_deps(
     input: &str,
     args: &InstallArgs,
@@ -270,9 +291,22 @@ pub(crate) fn install_component_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> Result<InstallOutcome, CliError> {
-    install_component_with_deps_and_planned(input, args, ctx, query, txn, is_root, &HashSet::new())
+    let mut activity = install_activity(input, ctx);
+    install_component_with_deps_and_planned(
+        input,
+        args,
+        ctx,
+        query,
+        txn,
+        is_root,
+        &HashSet::new(),
+        &mut activity,
+    )
 }
 
+// Tests vary each execution dependency independently; keeping them explicit
+// makes the host boundary visible instead of hiding it in an opaque test bag.
+#[expect(clippy::too_many_arguments)]
 fn install_component_with_deps_and_planned(
     input: &str,
     args: &InstallArgs,
@@ -281,9 +315,19 @@ fn install_component_with_deps_and_planned(
     txn: &dyn PackageTransaction,
     is_root: bool,
     planned_components: &HashSet<String>,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
     let planned = plan_component(input, args, ctx, query, txn)?;
-    execute_planned(planned, args, ctx, query, txn, is_root, planned_components)
+    execute_planned(
+        planned,
+        args,
+        ctx,
+        query,
+        txn,
+        is_root,
+        planned_components,
+        reporter,
+    )
 }
 
 /// Planning prefix of an install: resolve the component and its provider
@@ -319,7 +363,7 @@ pub(crate) fn plan_component(
     if let Some(explicit) = args.backend.as_deref()
         && let Some(warning) = RepoConfig::backend_name_deprecation_warning(explicit)
     {
-        eprintln!("warning: {warning}");
+        progress::suspend_output(|| eprintln!("warning: {warning}"));
     }
 
     let family = install_family(args, &store, &component, &repo_config);
@@ -520,9 +564,12 @@ pub(crate) fn plan_component(
     })
 }
 
-/// Execution half of [`install_component_with_deps`]: render the idempotent
+/// Execution half of [`handle_one`]: render the idempotent
 /// NoOp, place a resolved owned artifact, or run the delegated native
 /// transaction. Dry-run renders the plan and stops before any side effect.
+// Mirrors the explicit planner/executor dependency boundary above, with the
+// reporter added so terminal lifecycle remains injectable in tests.
+#[expect(clippy::too_many_arguments)]
 fn execute_planned(
     planned: PlannedComponent,
     args: &InstallArgs,
@@ -531,6 +578,7 @@ fn execute_planned(
     txn: &dyn PackageTransaction,
     is_root: bool,
     planned_components: &HashSet<String>,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
     let PlannedComponent {
         command,
@@ -554,6 +602,7 @@ fn execute_planned(
     // planning refusal is independent of the raw repo being reachable.
     let (steps, resolution) = match route {
         PlannedRoute::AlreadyInstalled { version } => {
+            reporter.finish();
             render_result(
                 ctx,
                 &InstallResultPayload {
@@ -575,6 +624,7 @@ fn execute_planned(
         }
         PlannedRoute::Delegated { steps } => (steps, None),
         PlannedRoute::Owned { steps } => {
+            reporter.report(&format!("Resolving {component}..."));
             let resolution = resolve_owned_artifact(
                 args,
                 ctx,
@@ -602,6 +652,7 @@ fn execute_planned(
     };
 
     if ctx.dry_run {
+        reporter.finish();
         for warning in resolution.iter().flat_map(|r| r.warnings.iter()) {
             eprintln!("warning: {warning}");
         }
@@ -653,11 +704,13 @@ fn execute_planned(
     }
 
     if let Some(resolution) = resolution {
+        reporter.report(&format!("Downloading and verifying {component}..."));
         // Download, digest check, and contract validation run before the
         // lock: they are side-effect free outside the download cache, and a
         // contract refusal (mode mismatch, component conflict, malformed
         // hooks) is an argument error, not a failed transaction.
         let validated = validate_owned_install(ctx, &layout, &store, resolution, &command)?;
+        reporter.report(&format!("Installing {component}..."));
         let provider = DelegatedProvider::new(query, txn);
         return install_owned(
             &component,
@@ -674,9 +727,11 @@ fn execute_planned(
             native_package.as_deref(),
             &provider,
             &command,
+            reporter,
         );
     }
 
+    reporter.report(&format!("Installing {component}..."));
     let provider = DelegatedProvider::new(query, txn);
     let package = native_package.unwrap_or_else(|| component.clone());
     install_delegated(
@@ -695,6 +750,7 @@ fn execute_planned(
         &repo_config,
         is_root,
         &command,
+        reporter,
     )
 }
 
@@ -1004,6 +1060,7 @@ fn install_owned(
     native_package: Option<&str>,
     provider: &DelegatedProvider,
     command: &str,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
     // No root pre-check for an owned install: `--prefix` may point at a
     // user-writable tree, and a genuine permission problem fails the exact
@@ -1058,6 +1115,8 @@ fn install_owned(
     let outcome =
         result.map_err(|err| owned_error_to_cli(err, target, scope, command, &retained_note))?;
 
+    reporter.report(&format!("Finalizing {target} installation..."));
+
     // Operation history is best-effort bookkeeping on top of the committed
     // record: the install already succeeded, so a history-write failure
     // degrades to a warning instead of unwinding anything.
@@ -1070,13 +1129,16 @@ fn install_owned(
         parent_operation_id: None,
     });
     if let Err(err) = store.save(state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
+        progress::suspend_output(|| {
+            eprintln!("warning: failed to record operation history: {err}")
+        });
     }
 
     for warning in resolve_warnings.iter().chain(outcome.warnings.iter()) {
-        eprintln!("warning: {warning}");
+        progress::suspend_output(|| eprintln!("warning: {warning}"));
     }
 
+    reporter.finish();
     render_result(ctx, &{
         let mut payload = InstallResultPayload {
             component: target.to_string(),
@@ -1119,6 +1181,7 @@ fn install_delegated(
     repo_config: &RepoConfig,
     is_root: bool,
     command: &str,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
     // A fresh delegated install pulls from the configured ANOLISA RPM
     // repository; without one, dnf would resolve against arbitrary host
@@ -1188,6 +1251,8 @@ fn install_delegated(
         ),
     })?;
 
+    reporter.report(&format!("Finalizing {target} installation..."));
+
     // Operation history is best-effort bookkeeping on top of the committed
     // record, exactly like the owned path.
     store.operations.push(OperationRecord {
@@ -1199,7 +1264,9 @@ fn install_delegated(
         parent_operation_id: None,
     });
     if let Err(err) = store.save(state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
+        progress::suspend_output(|| {
+            eprintln!("warning: failed to record operation history: {err}")
+        });
     }
 
     // Best-effort: snapshot the datadir component contract so adapter
@@ -1211,7 +1278,7 @@ fn install_delegated(
         command,
         ctx.packaged_data_probe(),
     ) {
-        eprintln!("warning: {warning}");
+        progress::suspend_output(|| eprintln!("warning: {warning}"));
     }
 
     let version = outcome.observation.as_ref().map(|o| o.version.clone());
@@ -1232,6 +1299,7 @@ fn install_delegated(
     if let Some(pin) = delegated_pin {
         payload = payload.with_pin(pin);
     }
+    reporter.finish();
     render_result(ctx, &payload)?;
     Ok(InstallOutcome::Installed)
 }
@@ -1662,7 +1730,63 @@ mod tests {
     use super::*;
     use crate::repo_config::RepoConfig;
     use anolisa_platform::fs_layout::FsLayout;
+    use std::cell::{Cell, RefCell};
     use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct RecordingProgress {
+        messages: RefCell<Vec<String>>,
+        finished: Cell<bool>,
+    }
+
+    impl ProgressReporter for RecordingProgress {
+        fn report(&self, message: &str) {
+            self.messages.borrow_mut().push(message.to_string());
+        }
+
+        fn finish(&mut self) {
+            self.finished.set(true);
+        }
+    }
+
+    #[test]
+    fn delegated_install_reports_execution_and_finalization() {
+        let (_tmp, mut ctx) = system_ctx_with_configured_rpm_repo(false);
+        ctx.quiet = true;
+        let fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .with_origin("anolisa");
+        let mut install_args = args("copilot-shell");
+        install_args.backend = Some("rpm".to_string());
+        let mut reporter = RecordingProgress::default();
+
+        let outcome = install_component_with_deps_and_planned(
+            "copilot-shell",
+            &install_args,
+            &ctx,
+            &fake,
+            &fake,
+            true,
+            &HashSet::new(),
+            &mut reporter,
+        )
+        .expect("delegated install");
+
+        assert_eq!(outcome, InstallOutcome::Installed);
+        assert_eq!(
+            reporter.messages.borrow().as_slice(),
+            [
+                "Installing copilot-shell...",
+                "Finalizing copilot-shell installation...",
+            ]
+        );
+        assert!(
+            reporter.finished.get(),
+            "progress must stop before the final result is rendered"
+        );
+    }
 
     #[test]
     fn pinned_payload_json_exposes_requested_resolved_repo_and_artifact() {

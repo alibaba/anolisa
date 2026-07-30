@@ -403,7 +403,7 @@ fn snapshot_datadir_contract_with_missing_policy(
         datadir_root: contract.datadir_root,
     };
     if let Err(msg) = publish_contract_pair(&dest, &contract.content, &provenance) {
-        eprintln!("warning: {msg}");
+        crate::progress::suspend_output(|| eprintln!("warning: {msg}"));
         warnings.push(msg);
         return ContractRefreshOutcome {
             state: ContractRefreshState::Failed,

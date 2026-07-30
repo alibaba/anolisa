@@ -988,8 +988,8 @@ fn update_check_motd_text_lists_upgrades_and_installs() {
     assert!(text.contains("ANOLISA toolchain update is available."));
     assert!(text.contains("1 component can be upgraded"));
     assert!(text.contains("1 new default component can be installed"));
-    assert!(text.contains("Run: sudo anolisa upgrade to apply"));
-    assert!(text.contains("anolisa update --check for details"));
+    assert!(text.contains("Run: \"sudo anolisa upgrade\" to apply"));
+    assert!(text.contains("\"anolisa update --check\" for details"));
 }
 
 #[test]
