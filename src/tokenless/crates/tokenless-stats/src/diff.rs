@@ -5,7 +5,7 @@
 //! final output without counting intermediate inputs more than once.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use chrono::{DateTime, Local};
@@ -27,6 +27,55 @@ pub enum DiffSort {
     /// Most recently started chain first.
     Time,
 }
+
+/// Records and verified adjacency metadata used to build diff chains.
+///
+/// Recorder queries can provide database-side link decisions without loading
+/// stored payloads. Manually constructed sets fall back to comparing content
+/// in memory.
+#[derive(Debug)]
+pub struct DiffRecords {
+    records: Vec<StatsRecord>,
+    linked_to_previous: Option<HashSet<i64>>,
+}
+
+impl DiffRecords {
+    /// Wraps records whose links should be inferred from their loaded content.
+    pub fn from_records(records: Vec<StatsRecord>) -> Self {
+        Self {
+            records,
+            linked_to_previous: None,
+        }
+    }
+
+    /// Returns the records in this diff input.
+    pub fn as_slice(&self) -> &[StatsRecord] {
+        &self.records
+    }
+
+    /// Returns whether the diff input contains no records.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub(crate) fn from_prelinked(
+        records: Vec<StatsRecord>,
+        linked_to_previous: HashSet<i64>,
+    ) -> Self {
+        Self {
+            records,
+            linked_to_previous: Some(linked_to_previous),
+        }
+    }
+
+    fn links(&self, previous: &StatsRecord, next: &StatsRecord) -> bool {
+        self.linked_to_previous.as_ref().map_or_else(
+            || records_link(previous, next),
+            |ids| ids.contains(&next.id),
+        )
+    }
+}
+
 
 /// Serializable report for a record, session, or tool-use diff.
 #[derive(Debug, Serialize)]
@@ -194,7 +243,7 @@ pub fn record_report(record: &StatsRecord, context: usize) -> DiffReport {
 
 /// Builds a metrics-only session overview and applies the requested chain limit.
 pub fn session_report(
-    records: &[StatsRecord],
+    records: &DiffRecords,
     session_id: &str,
     limit: usize,
     sort: DiffSort,
@@ -219,7 +268,7 @@ pub fn session_report(
 
 /// Builds detailed reports for every independently linked chain of one tool use.
 pub fn tool_use_report(
-    records: &[StatsRecord],
+    records: &DiffRecords,
     session_id: &str,
     tool_use_id: &str,
     context: usize,
@@ -257,15 +306,15 @@ pub fn format_diff_report(report: &DiffReport, color: bool) -> String {
             let _ = writeln!(
                 output,
                 "Session: {}",
-                report.scope.session_id.as_deref().unwrap_or("-")
+                escape_terminal_controls(report.scope.session_id.as_deref().unwrap_or("-"))
             );
         }
         DiffScopeKind::ToolUse => {
             let _ = writeln!(
                 output,
                 "Session: {}\nTool:    {}",
-                report.scope.session_id.as_deref().unwrap_or("-"),
-                report.scope.tool_use_id.as_deref().unwrap_or("-")
+                escape_terminal_controls(report.scope.session_id.as_deref().unwrap_or("-")),
+                escape_terminal_controls(report.scope.tool_use_id.as_deref().unwrap_or("-"))
             );
         }
     }
@@ -283,7 +332,8 @@ pub fn format_diff_report(report: &DiffReport, color: bool) -> String {
             let label = chain
                 .tool_use_id
                 .as_deref()
-                .map(|tool| truncate_label(tool, 28))
+                .map(escape_terminal_controls)
+                .map(|tool| truncate_label(&tool, 28))
                 .unwrap_or_else(|| format!("record:{}", chain.stages[0].record_id));
             let _ = writeln!(
                 output,
@@ -335,9 +385,9 @@ fn format_chain(output: &mut String, chain: &DiffChain, color: bool) {
     let _ = writeln!(
         output,
         "\nAgent: {}\nSession: {}\nTool: {}\nMode: {}\nStatus: {}\n{}: {} -> {}\nEmitted tokens: {}\n{}: {} ({:.1}%)\nBytes: {} -> {}",
-        chain.agent_id,
-        chain.session_id.as_deref().unwrap_or("-"),
-        chain.tool_use_id.as_deref().unwrap_or("-"),
+        escape_terminal_controls(&chain.agent_id),
+        escape_terminal_controls(chain.session_id.as_deref().unwrap_or("-")),
+        escape_terminal_controls(chain.tool_use_id.as_deref().unwrap_or("-")),
         chain.mode,
         chain.status.as_str(),
         label,
@@ -418,11 +468,11 @@ fn format_chain(output: &mut String, chain: &DiffChain, color: bool) {
 }
 
 fn build_chains(
-    records: &[StatsRecord],
+    records: &DiffRecords,
     include_content: bool,
     context: usize,
 ) -> (Vec<DiffChain>, bool) {
-    let mut ordered: Vec<&StatsRecord> = records.iter().collect();
+    let mut ordered: Vec<&StatsRecord> = records.records.iter().collect();
     ordered.sort_by(|left, right| {
         left.timestamp
             .cmp(&right.timestamp)
@@ -440,12 +490,12 @@ fn build_chains(
     }
 
     let mut chains = standalone;
-    for records in groups.values() {
+    for grouped_records in groups.values() {
         let mut current: Vec<&StatsRecord> = Vec::new();
-        for record in records {
+        for record in grouped_records {
             if current
                 .last()
-                .is_some_and(|previous| records_link(previous, record))
+                .is_some_and(|previous| records.links(previous, record))
             {
                 current.push(record);
             } else {

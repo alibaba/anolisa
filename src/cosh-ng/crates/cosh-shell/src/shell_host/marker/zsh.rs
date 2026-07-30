@@ -171,6 +171,14 @@ _cosh_is_slash_control_candidate() {
   return 1
 }
 _COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '
+# Transport-only prefix for agent handoffs whose implicit pagers are disabled.
+# Must stay byte-identical to NON_INTERACTIVE_PAGER_PREFIX in
+# src/types/shell_handoff.rs, or the original command text would leak into
+# markers, history and evidence.
+_COSH_HANDOFF_PAGER_PREFIX='PAGER=cat GIT_PAGER=cat MANPAGER=cat SYSTEMD_PAGER=cat '
+# Only the bypass prefix marks a transport line: handoff_pty_bytes always emits
+# it first, so a line that merely starts with the pager assignments is an
+# ordinary user command and must keep its full text.
 _cosh_is_handoff_wrapper() {
   case "$1" in
     "$_COSH_HANDOFF_PREFIX"*)
@@ -180,8 +188,8 @@ _cosh_is_handoff_wrapper() {
   return 1
 }
 _cosh_unwrap_handoff_command() {
-  local command="$1"
-  printf '%s' "${command#$_COSH_HANDOFF_PREFIX}"
+  local command="${1#$_COSH_HANDOFF_PREFIX}"
+  printf '%s' "${command#$_COSH_HANDOFF_PAGER_PREFIX}"
 }
 _cosh_is_pending_handoff_command() {
   local command="$1"
@@ -194,6 +202,110 @@ _cosh_clear_handoff_request() {
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
     rm -f -- "$COSH_HANDOFF_REQUEST_FILE" 2>/dev/null || true
   fi
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
+     && -f "${COSH_HANDOFF_REQUEST_FILE}.no-pager" ]]; then
+    rm -f -- "${COSH_HANDOFF_REQUEST_FILE}.no-pager" 2>/dev/null || true
+  fi
+}
+# Implicit-pager policy for one approved handoff. The sidecar file is written by
+# the Rust transport before the command reaches the shell; the variable set must
+# stay identical to NON_INTERACTIVE_PAGER_PREFIX in src/types/shell_handoff.rs.
+# Scope is a single command: preexec applies it, precmd restores it, so the
+# user's own commands keep their own pager configuration.
+# Classifies both value visibility and readonly state. An exported readonly
+# pager cannot be assigned, but its export attribute can be removed long enough
+# to keep the inherited value out of the handoff command's environment.
+_cosh_pager_var_state() {
+  local name="$1"
+  local kind="${(Pt)name}"
+  if [[ -z "$kind" ]]; then
+    printf unset
+    return 0
+  fi
+  if [[ "$kind" == *readonly* ]]; then
+    if [[ "$kind" == *export* ]]; then
+      printf readonly_export
+    else
+      printf readonly_shell
+    fi
+    return 0
+  fi
+  if [[ "$kind" == *export* ]]; then
+    printf export
+    return 0
+  fi
+  printf shell
+}
+_cosh_apply_handoff_pager_policy() {
+  if [[ -z "${COSH_HANDOFF_REQUEST_FILE:-}"
+     || ! -f "${COSH_HANDOFF_REQUEST_FILE}.no-pager" ]]; then
+    return 0
+  fi
+  local name state
+  for name in PAGER GIT_PAGER MANPAGER SYSTEMD_PAGER; do
+    state="$(_cosh_pager_var_state "$name")"
+    typeset -g "_COSH_${name}_STATE=$state"
+    typeset -g "_COSH_${name}_SAVED=${(P)name}"
+    case "$state" in
+      readonly_export)
+        typeset +x "$name"
+        ;;
+      readonly_shell)
+        ;;
+      *)
+        export "$name=cat"
+        ;;
+    esac
+  done
+  _COSH_HANDOFF_PAGER_APPLIED=1
+  return 0
+}
+# Undoes an injection only while it is still exactly what cosh left behind: an
+# exported scalar holding `cat`. A handoff command that changed the value
+# (export PAGER=less), removed it (unset GIT_PAGER) or only dropped the export
+# attribute (typeset +x PAGER) keeps its own result, because reverting it would
+# report success while silently discarding the effect.
+_cosh_restore_one_pager_var() {
+  local name="$1"
+  local state_var="_COSH_${name}_STATE" saved_var="_COSH_${name}_SAVED"
+  case "${(P)state_var}" in
+    readonly_export)
+      if [[ "${(P)name}" == "${(P)saved_var}"
+         && "$(_cosh_pager_var_state "$name")" == readonly_shell ]]; then
+        export "$name"
+      fi
+      return 0
+      ;;
+    readonly_shell)
+      return 0
+      ;;
+  esac
+  if [[ "${(P)name}" != cat
+     || "$(_cosh_pager_var_state "$name")" != export ]]; then
+    return 0
+  fi
+  unset "$name"
+  case "${(P)state_var}" in
+    shell)
+      typeset -g "$name=${(P)saved_var}"
+      ;;
+    export)
+      typeset -gx "$name=${(P)saved_var}"
+      ;;
+  esac
+  return 0
+}
+_cosh_restore_handoff_pager_policy() {
+  if [[ "${_COSH_HANDOFF_PAGER_APPLIED:-0}" != 1 ]]; then
+    return 0
+  fi
+  unset _COSH_HANDOFF_PAGER_APPLIED 2>/dev/null || true
+  local name
+  for name in PAGER GIT_PAGER MANPAGER SYSTEMD_PAGER; do
+    _cosh_restore_one_pager_var "$name"
+    unset "_COSH_${name}_STATE" "_COSH_${name}_SAVED" 2>/dev/null || true
+  done
+  return 0
 }
 _cosh_command_has_secret() {
   local lower="${(L)1}"
@@ -373,12 +485,14 @@ _cosh_preexec_marker() {
   if _cosh_is_handoff_wrapper "$command"; then
     display_command="$(_cosh_unwrap_handoff_command "$command")"
     _COSH_HANDOFF_ACTIVE=1
+    _cosh_apply_handoff_pager_policy
     if _cosh_command_has_secret "$display_command"; then
       display_command="<redacted sensitive command>"
     fi
     _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
   elif _cosh_is_pending_handoff_command "$command"; then
     _COSH_HANDOFF_ACTIVE=1
+    _cosh_apply_handoff_pager_policy
   else
     _cosh_clear_handoff_request
     unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
@@ -410,6 +524,7 @@ _cosh_precmd_marker() {
   _cosh_apply_internal_recovery
   _cosh_add_handoff_history
   _cosh_clear_handoff_request
+  _cosh_restore_handoff_pager_policy
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _COSH_ATTEMPT_ACTIVE=0
   _cosh_emit_marker "precmd" "" "$exit_status" false

@@ -483,6 +483,37 @@ fn summary_preview_is_single_line_unicode_safe_and_bounded() {
 }
 
 #[test]
+fn listing_distinguishes_persisted_shell_envelope_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let envelope = |input: &str| {
+        format!(
+            "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
+             Decide based on user intent:\n\
+             Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
+             user_input: {input}\n\n\nruntime_frame:\ncwd: /root\n\n\
+             cosh-shell Agent contract:\n- User modes: recommend and agent."
+        )
+    };
+    let mut older = new_session(&store, &envelope("查看当前目录下的文件"));
+    store.persist(&mut older).unwrap();
+    let mut newer = new_session(&store, &envelope("帮我检查 nginx 服务状态"));
+    newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
+    store.persist(&mut newer).unwrap();
+
+    let (summaries, _) = store.list(10, None).unwrap();
+
+    assert_eq!(
+        summaries[0].first_prompt.as_deref(),
+        Some("帮我检查 nginx 服务状态")
+    );
+    assert_eq!(
+        summaries[1].first_prompt.as_deref(),
+        Some("查看当前目录下的文件")
+    );
+}
+
+#[test]
 fn inspect_reports_invalid_utf8_as_corrupt_summary() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);

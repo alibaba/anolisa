@@ -49,6 +49,7 @@ pub(crate) use crate::slash::registry::{
     active_slash_commands, visible_slash_commands, SlashCommandSpec,
 };
 pub(crate) use crate::tools::apply_readonly_config;
+pub(crate) use crate::tools::classification::agent_implicit_pager_policy;
 pub(crate) use crate::tools::{
     assess_shell_command, blocked_shell_binding_assessment, display::display_for_tool,
     is_readonly_builtin_tool_name, is_shell_tool_name, AssessmentConfidence, AssessmentPolicy,

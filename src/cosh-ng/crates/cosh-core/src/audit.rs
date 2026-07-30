@@ -27,6 +27,15 @@ enum CoreAuditSink {
     Noop,
     #[cfg(test)]
     Failing,
+    /// Captures every event except one type, whose writes fail.
+    ///
+    /// A sink that fails everything aborts a run at its first barrier, which
+    /// cannot reach a later boundary under test.
+    #[cfg(test)]
+    CaptureExcept {
+        events: Vec<AuditEventV1>,
+        failing: KnownAuditEventType,
+    },
 }
 
 /// Independent audit side path for Core semantic lifecycle boundaries.
@@ -367,6 +376,22 @@ impl CoreAuditRecorder {
                 )),
                 false,
             ),
+            #[cfg(test)]
+            CoreAuditSink::CaptureExcept { events, failing } => {
+                if event_type == *failing {
+                    (
+                        Err(cosh_types::error::CoshError::new(
+                            cosh_types::error::ErrorCode::AuditUnavailable,
+                            "injected audit failure",
+                            "audit",
+                        )),
+                        false,
+                    )
+                } else {
+                    events.push(event);
+                    (Ok(()), true)
+                }
+            }
         };
 
         match write_result {
@@ -529,7 +554,7 @@ impl CoreAuditRecorder {
     #[cfg(test)]
     pub(crate) fn captured_tool_event_types(&self, tool_use_id: &str) -> Vec<&str> {
         match &self.sink {
-            CoreAuditSink::Capture(events) => events
+            CoreAuditSink::Capture(events) | CoreAuditSink::CaptureExcept { events, .. } => events
                 .iter()
                 .filter(|event| event.identity.tool_use_id.as_deref() == Some(tool_use_id))
                 .map(|event| event.event_type.as_str())
@@ -538,10 +563,49 @@ impl CoreAuditRecorder {
         }
     }
 
+    /// A required-mode recorder that fails only `failing` writes.
+    ///
+    /// Lets a test drive the second failure that matters at a security
+    /// boundary — the control transport is gone *and* that boundary's terminal
+    /// record cannot be persisted — without aborting the run at an earlier one.
+    #[cfg(test)]
+    pub(crate) fn test_capture_except(session_id: &str, failing: KnownAuditEventType) -> Self {
+        let settings = AuditSettings {
+            mode: AuditMode::Required,
+            ..AuditSettings::default()
+        };
+        Self {
+            sink: CoreAuditSink::CaptureExcept {
+                events: Vec::new(),
+                failing,
+            },
+            state: AuditOperationalState::new(settings.clone()),
+            settings,
+            root: None,
+            session_id: session_id.to_string(),
+            degraded: false,
+            warned: false,
+            pending_terminal_gap: false,
+        }
+    }
+
+    /// Captured events with their payloads.
+    ///
+    /// Lets a test assert what an event says (decision, reason code) and not
+    /// only that its type was emitted.
+    #[cfg(test)]
+    pub(crate) fn captured_events(&self) -> &[AuditEventV1] {
+        match &self.sink {
+            CoreAuditSink::Capture(events) => events,
+            CoreAuditSink::CaptureExcept { events, .. } => events,
+            _ => &[],
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn captured_event_types(&self) -> Vec<&str> {
         match &self.sink {
-            CoreAuditSink::Capture(events) => events
+            CoreAuditSink::Capture(events) | CoreAuditSink::CaptureExcept { events, .. } => events
                 .iter()
                 .map(|event| event.event_type.as_str())
                 .collect(),

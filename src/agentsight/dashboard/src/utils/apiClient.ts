@@ -602,6 +602,31 @@ export async function fetchInterruptionStats(
   );
 }
 
+/**
+ * Fetch interruption events across all sessions within a time range.
+ * Omitted params fall back to server defaults (last 24 h, limit 200).
+ */
+export async function fetchInterruptions(opts?: {
+  startNs?: number;
+  endNs?: number;
+  agentName?: string;
+  interruptionType?: string;
+  severity?: string;
+  resolved?: boolean;
+  limit?: number;
+}): Promise<InterruptionRecord[]> {
+  const params = new URLSearchParams();
+  if (opts?.startNs !== undefined) params.set('start_ns', String(opts.startNs));
+  if (opts?.endNs !== undefined) params.set('end_ns', String(opts.endNs));
+  if (opts?.agentName) params.set('agent_name', opts.agentName);
+  if (opts?.interruptionType) params.set('interruption_type', opts.interruptionType);
+  if (opts?.severity) params.set('severity', opts.severity);
+  if (opts?.resolved !== undefined) params.set('resolved', String(opts.resolved));
+  if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch<InterruptionRecord[]>(`${API_BASE}/api/interruptions${qs}`);
+}
+
 /** Per-(severity, type) detail returned by session/trace-counts endpoints. */
 export interface InterruptionTypeDetail {
   interruption_type: string;

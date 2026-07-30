@@ -931,6 +931,21 @@ fn run_command_stats_diff_nonexistent_scopes() {
     .unwrap_err();
     assert!(session.0.contains("No records found"));
     assert_eq!(session.1, 1);
+
+    let injected = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("missing\u{1b}]0;INJECTED\u{7}".to_string()),
+        tool_use_id: Some("tool\u{1b}]52;c;INJECTED\u{7}".to_string()),
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }))
+    .unwrap_err();
+    assert!(!injected.0.contains('\u{1b}'));
+    assert!(!injected.0.contains('\u{7}'));
+    assert!(injected.0.contains("INJECTED"));
 }
 
 #[test]

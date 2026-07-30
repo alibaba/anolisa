@@ -5,6 +5,38 @@ use serde::{Deserialize, Serialize};
 
 pub const SHELL_HANDOFF_BYPASS_PREFIX: &str = "COSH_SHELL_HANDOFF_BYPASS=1 ";
 
+/// The pager environment a handoff applies when its implicit pagers are
+/// disabled, in shell assignment-prefix form.
+///
+/// This is the single source of truth for *which* variables are neutralized:
+/// the marker scripts export exactly this set around the handoff command, and
+/// [`ShellHandoffRequest::handoff_pty_bytes`] carries it inline for the
+/// bypass-prefixed transport form. It never becomes part of
+/// [`ShellHandoffRequest::command`], so approval previews, history, OSC
+/// markers, audit records and evidence keep the original command text.
+///
+/// `PAGER` is the generic default, `GIT_PAGER` outranks Git's own `core.pager`,
+/// `MANPAGER` outranks an existing man pager, and `SYSTEMD_PAGER` outranks
+/// systemd's. Tool-specific variables (`BAT_PAGER`, `DELTA_PAGER`, …) are
+/// deliberately absent until a reproduction and a test justify them.
+pub const NON_INTERACTIVE_PAGER_PREFIX: &str =
+    "PAGER=cat GIT_PAGER=cat MANPAGER=cat SYSTEMD_PAGER=cat ";
+
+/// Whether a handoff keeps the user's interactive pager configuration or
+/// suppresses the pagers a tool would start implicitly.
+///
+/// Agent forensics commands (`git log`, `systemctl status`) only want text and
+/// must not block on a pager, while commands the agent asked for *because* they
+/// are interactive (`less`, `man`, `top`) keep the user's setup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImplicitPagerPolicy {
+    /// Inherit the user's pager configuration unchanged.
+    #[default]
+    Inherit,
+    /// Neutralize implicit pagers for the duration of this handoff.
+    Disable,
+}
+
 /// Status string for a shell handoff that reached a prompt boundary without
 /// ever being tracked by a preexec marker (see specs/shell-handoff-preexec-loss).
 /// Cross-owner contract consumed by activity, runtime evidence delivery, and ui.
@@ -22,6 +54,11 @@ pub struct ShellHandoffRequest {
     pub tool_use_id: Option<String>,
     pub created_at_ms: u64,
     pub preview_hash: String,
+    /// Implicit-pager handling for the PTY transport only. Defaults to
+    /// [`ImplicitPagerPolicy::Inherit`] so previously persisted requests keep
+    /// their original semantics.
+    #[serde(default)]
+    pub implicit_pager_policy: ImplicitPagerPolicy,
 }
 
 impl ShellHandoffRequest {
@@ -46,6 +83,7 @@ impl ShellHandoffRequest {
             request_id: None,
             tool_use_id: None,
             created_at_ms,
+            implicit_pager_policy: ImplicitPagerPolicy::default(),
         };
         request.validate()?;
         Ok(request)
@@ -83,6 +121,11 @@ impl ShellHandoffRequest {
         Ok(())
     }
 
+    /// Bytes typed into the foreground PTY. These stay byte-identical to the
+    /// original command: the interactive shell echoes whatever is written here,
+    /// so an assignment prefix would be painted on the user's command line even
+    /// though every later surface strips it. The pager policy travels
+    /// out of band instead — see `shell_host::raw_relay::pty_emit`.
     pub fn pty_bytes(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
         let mut bytes = self.command.as_bytes().to_vec();
@@ -90,9 +133,15 @@ impl ShellHandoffRequest {
         Ok(bytes)
     }
 
+    /// Bypass-prefixed transport form, which carries the pager environment
+    /// inline because it is recognized and stripped by the marker wrapper path
+    /// rather than by the pending-request file.
     pub fn handoff_pty_bytes(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
         let mut bytes = SHELL_HANDOFF_BYPASS_PREFIX.as_bytes().to_vec();
+        if self.implicit_pager_policy == ImplicitPagerPolicy::Disable {
+            bytes.extend_from_slice(NON_INTERACTIVE_PAGER_PREFIX.as_bytes());
+        }
         bytes.extend_from_slice(self.command.as_bytes());
         bytes.push(b'\n');
         Ok(bytes)
@@ -113,7 +162,10 @@ fn preview_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShellHandoffRequest, SHELL_HANDOFF_BYPASS_PREFIX};
+    use super::{
+        ImplicitPagerPolicy, ShellHandoffRequest, NON_INTERACTIVE_PAGER_PREFIX,
+        SHELL_HANDOFF_BYPASS_PREFIX,
+    };
 
     fn handoff(command: &str) -> Result<ShellHandoffRequest, String> {
         ShellHandoffRequest::new(
@@ -149,5 +201,74 @@ mod tests {
             format!("{SHELL_HANDOFF_BYPASS_PREFIX}printf\tok\n").as_bytes()
         );
         assert_eq!(request.preview_hash, "fnv1a64:7d74cbb1a6f6fb27");
+    }
+
+    #[test]
+    fn shell_handoff_defaults_to_inheriting_the_user_pager_configuration() {
+        let request = handoff("git log").expect("handoff request");
+
+        assert_eq!(
+            request.implicit_pager_policy,
+            ImplicitPagerPolicy::Inherit,
+            "default must not change persisted request semantics"
+        );
+        assert_eq!(request.pty_bytes().unwrap(), b"git log\n");
+        assert_eq!(
+            request.handoff_pty_bytes().unwrap(),
+            format!("{SHELL_HANDOFF_BYPASS_PREFIX}git log\n").as_bytes()
+        );
+    }
+
+    #[test]
+    fn shell_handoff_disable_policy_keeps_the_typed_line_untouched() {
+        let mut request = handoff("git log --oneline").expect("handoff request");
+        request.implicit_pager_policy = ImplicitPagerPolicy::Disable;
+
+        assert_eq!(request.command, "git log --oneline");
+        assert_eq!(request.exact_preview, "$ git log --oneline");
+        // The shell echoes pty_bytes verbatim, so the policy must not add
+        // anything the user would see on their command line.
+        assert_eq!(request.pty_bytes().unwrap(), b"git log --oneline\n");
+        assert_eq!(
+            request.handoff_pty_bytes().unwrap(),
+            format!(
+                "{SHELL_HANDOFF_BYPASS_PREFIX}{NON_INTERACTIVE_PAGER_PREFIX}git log --oneline\n"
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
+    fn shell_handoff_pager_policy_does_not_bypass_command_validation() {
+        for command in ["", "printf '\0'", "printf one\nprintf two"] {
+            let Ok(mut request) = handoff("printf ok") else {
+                unreachable!("baseline handoff is valid");
+            };
+            request.implicit_pager_policy = ImplicitPagerPolicy::Disable;
+            request.command = command.to_string();
+
+            assert!(request.pty_bytes().is_err(), "{command:?}");
+            assert!(request.handoff_pty_bytes().is_err(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn shell_handoff_missing_pager_policy_deserializes_as_inherit() {
+        let json = r#"{
+            "command": "git log",
+            "exact_preview": "$ git log",
+            "source": "test",
+            "actor": "user",
+            "approval_id": "approval-1",
+            "run_id": "run-1",
+            "request_id": null,
+            "tool_use_id": null,
+            "created_at_ms": 42,
+            "preview_hash": "fnv1a64:0000000000000000"
+        }"#;
+
+        let request: ShellHandoffRequest = serde_json::from_str(json).expect("legacy request");
+
+        assert_eq!(request.implicit_pager_policy, ImplicitPagerPolicy::Inherit);
     }
 }

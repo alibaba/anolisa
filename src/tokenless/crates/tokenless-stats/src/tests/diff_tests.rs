@@ -28,6 +28,11 @@ fn sample_record(
     record
 }
 
+fn diff_records(records: Vec<StatsRecord>) -> DiffRecords {
+    DiffRecords::from_records(records)
+}
+
+
 #[test]
 fn record_report_contains_structured_hunks() {
     let record = sample_record(
@@ -75,11 +80,11 @@ fn record_report_respects_zero_context() {
 #[test]
 fn record_report_truncates_rendered_hunks() {
     let before = (0..600)
-        .map(|index| format!("before-{index}"))
+        .flat_map(|index| [format!("before-{index}"), format!("keep-{index}")])
         .collect::<Vec<_>>()
         .join("\n");
     let after = (0..600)
-        .map(|index| format!("after-{index}"))
+        .flat_map(|index| [format!("after-{index}"), format!("keep-{index}")])
         .collect::<Vec<_>>()
         .join("\n");
     let record = sample_record(
@@ -113,6 +118,12 @@ fn record_report_truncates_rendered_hunks() {
             .count() as u64;
         assert_eq!(hunk["old_len"].as_u64(), Some(old_len));
         assert_eq!(hunk["new_len"].as_u64(), Some(new_len));
+        if let Some(first_old_line) = lines.iter().find_map(|line| line["old_line"].as_u64()) {
+            assert_eq!(hunk["old_start"].as_u64(), Some(first_old_line));
+        }
+        if let Some(first_new_line) = lines.iter().find_map(|line| line["new_line"].as_u64()) {
+            assert_eq!(hunk["new_start"].as_u64(), Some(first_new_line));
+        }
     }
 }
 
@@ -172,6 +183,38 @@ fn terminal_report_escapes_content_control_characters() {
 
     assert!(!formatted.contains('\u{1b}'));
     assert!(formatted.contains("danger"));
+}
+
+#[test]
+fn terminal_report_escapes_persisted_metadata() {
+    let mut record = sample_record(
+        94,
+        OperationType::CompressResponse,
+        "before",
+        "after",
+        (10, 4),
+        Some("tool\u{1b}]0;TOOL\u{7}"),
+        CompressionMode::Active,
+    );
+    record.agent_id = "agent\u{1b}]0;AGENT\u{7}".to_string();
+    record.session_id = Some("session\u{1b}]0;SESSION\u{7}".to_string());
+
+    let detailed = format_diff_report(&record_report(&record, 1), false);
+    let session = format_diff_report(
+        &session_report(
+            &diff_records(vec![record]),
+            "session\u{1b}]0;SESSION\u{7}",
+            20,
+            DiffSort::Saved,
+        ),
+        false,
+    );
+
+    for formatted in [detailed, session] {
+        assert!(!formatted.contains('\u{1b}'));
+        assert!(!formatted.contains('\u{7}'));
+        assert!(formatted.contains("SESSION"));
+    }
 }
 
 #[test]
@@ -235,7 +278,12 @@ fn active_stages_link_without_double_counting_intermediate_tokens() {
         Some("tool-chain"),
         CompressionMode::Active,
     );
-    let report = tool_use_report(&[second, first], "session-1", "tool-chain", 3);
+    let report = tool_use_report(
+        &diff_records(vec![second, first]),
+        "session-1",
+        "tool-chain",
+        3,
+    );
     let json = serde_json::to_value(report).unwrap();
 
     assert_eq!(json["chains"].as_array().unwrap().len(), 1);
@@ -267,7 +315,7 @@ fn disconnected_records_for_same_tool_are_split() {
         CompressionMode::Active,
     );
     let json = serde_json::to_value(tool_use_report(
-        &[first, second],
+        &diff_records(vec![first, second]),
         "session-1",
         "tool-split",
         3,
@@ -298,9 +346,13 @@ fn records_without_tool_ids_remain_standalone() {
         None,
         CompressionMode::Active,
     );
-    let json =
-        serde_json::to_value(session_report(&[first, second], "session-1", 20, DiffSort::Saved))
-            .unwrap();
+    let json = serde_json::to_value(session_report(
+        &diff_records(vec![first, second]),
+        "session-1",
+        20,
+        DiffSort::Saved,
+    ))
+    .unwrap();
 
     assert_eq!(json["chains"].as_array().unwrap().len(), 2);
     assert!(json["chains"]
@@ -331,7 +383,7 @@ fn dry_run_records_do_not_link_and_report_emitted_input() {
         CompressionMode::DryRun,
     );
     let json = serde_json::to_value(tool_use_report(
-        &[first, second],
+        &diff_records(vec![first, second]),
         "session-1",
         "tool-dry",
         3,
@@ -364,7 +416,7 @@ fn mode_changes_split_otherwise_matching_records() {
         CompressionMode::DryRun,
     );
     let json = serde_json::to_value(tool_use_report(
-        &[first, second],
+        &diff_records(vec![first, second]),
         "session-1",
         "tool-mode",
         3,
@@ -441,7 +493,7 @@ fn session_report_sorts_by_savings_and_applies_chain_limit() {
         CompressionMode::Active,
     );
     let json = serde_json::to_value(session_report(
-        &[small, large],
+        &diff_records(vec![small, large]),
         "session-1",
         1,
         DiffSort::Saved,
@@ -474,7 +526,7 @@ fn session_report_can_sort_by_latest_time() {
         CompressionMode::Active,
     );
     let json = serde_json::to_value(session_report(
-        &[older, newer],
+        &diff_records(vec![older, newer]),
         "session-1",
         20,
         DiffSort::Time,

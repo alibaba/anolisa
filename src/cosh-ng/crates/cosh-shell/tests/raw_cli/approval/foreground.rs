@@ -230,6 +230,267 @@ fn raw_cli_approved_pager_tool_receives_q() {
         !output.contains("Tool result for request req-1"),
         "{output}"
     );
+    assert_no_pager_transport_leak(&output);
+}
+
+/// Repository holding exactly one commit, plus the `GIT_DIR`/`GIT_WORK_TREE`
+/// values that point the harness shell at it. The shared raw-CLI git fixture
+/// has no commits, so `git log` needs a repository of its own here.
+struct GitLogFixture {
+    git_dir: String,
+    work_tree: String,
+    head: String,
+}
+
+fn git_log_fixture(home: &Path) -> GitLogFixture {
+    let work_tree = home.join("git-log-repo");
+    fs::create_dir_all(&work_tree).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&work_tree)
+            .args(args)
+            // HOME is a fresh directory, so identity cannot come from a user
+            // gitconfig.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?}: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git output is utf-8")
+    };
+
+    git(&["-c", "init.defaultBranch=main", "init", "--quiet"]);
+    git(&["config", "user.email", "pager-fixture@example.com"]);
+    git(&["config", "user.name", "Pager Fixture"]);
+    git(&[
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "implicit pager fixture commit",
+    ]);
+    let head = git(&["log", "-1", "--format=%h"]).trim().to_string();
+    assert!(!head.is_empty(), "fixture head hash is empty");
+
+    GitLogFixture {
+        git_dir: work_tree.join(".git").to_string_lossy().to_string(),
+        work_tree: work_tree.to_string_lossy().to_string(),
+        head,
+    }
+}
+
+/// No surface a user reads may carry the pager environment cosh applies around
+/// an agent handoff (issue #1988). Matches the assignment form the transport
+/// would use, which is what NON_INTERACTIVE_PAGER_PREFIX pins on the Rust side;
+/// a bare variable name is legitimate in a command that reads it.
+fn assert_no_pager_transport_leak(output: &str) {
+    for marker in [
+        "PAGER=cat",
+        "GIT_PAGER=cat",
+        "MANPAGER=cat",
+        "SYSTEMD_PAGER=cat",
+    ] {
+        assert!(!output.contains(marker), "leaked {marker}: {output}");
+    }
+}
+
+#[test]
+fn raw_cli_approved_git_log_tool_never_waits_for_a_pager() {
+    let home = temp_shell_home("approval-git-implicit-pager");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    // Started only if Git actually resolves a pager; it never exits on its own,
+    // so the run would stall here without the implicit-pager policy.
+    write_executable(
+        &bin_dir.join("fake-pager"),
+        "#!/bin/bash\nprintf 'fake-pager waiting\\n'\nIFS= read -r -n 1 key\nprintf 'fake-pager key:%s\\n' \"$key\"\n",
+    );
+    let fixture = git_log_fixture(&home);
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("PATH", &path),
+            ("GIT_DIR", &fixture.git_dir),
+            ("GIT_WORK_TREE", &fixture.work_tree),
+            // A host that already exports GIT_PAGER=cat would satisfy the
+            // no-pager assertions without the policy under test, and would also
+            // break the restore-to-unset assertion below.
+            ("PAGER", RAW_CLI_UNSET_ENV),
+            ("GIT_PAGER", RAW_CLI_UNSET_ENV),
+            ("MANPAGER", RAW_CLI_UNSET_ENV),
+            ("SYSTEMD_PAGER", RAW_CLI_UNSET_ENV),
+        ],
+        vec![
+            (
+                b"?? stream git pager tool approval\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
+            // Deliberately never sends `q`.
+            (b"echo after-git\n".to_vec(), Duration::from_millis(2_000)),
+            (
+                b"printf 'after=%s/%s/%s/%s\\n' \"${PAGER-unset}\" \"${GIT_PAGER-unset}\" \"${MANPAGER-unset}\" \"${SYSTEMD_PAGER-unset}\"\n"
+                    .to_vec(),
+                Duration::from_millis(600),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
+        ],
+    );
+
+    assert!(
+        output.contains("$ git -c core.pager=fake-pager --paginate log -1 --format=%h"),
+        "{output}"
+    );
+    assert!(output.contains("sent to shell"), "{output}");
+    assert!(!output.contains("fake-pager waiting"), "{output}");
+    // The hash only appears if Git's output actually reached the transcript;
+    // `%h` in the echoed command line cannot satisfy this on its own.
+    assert!(output.contains(&fixture.head), "{output}");
+    assert!(output.contains("after-git"), "{output}");
+    assert!(
+        output.contains("Command result analysis for req-1: foreground shell evidence received"),
+        "{output}"
+    );
+    // Variables the user never had must be unset again, not left as `cat`.
+    assert!(output.contains("after=unset/unset/unset/unset"), "{output}");
+    // A forensics command adds no interactive noise to the receipt.
+    assert!(!output.contains("Press q to leave a pager"), "{output}");
+    assert_no_pager_transport_leak(&output);
+}
+
+#[test]
+fn raw_cli_approved_less_tool_hints_before_taking_the_foreground() {
+    let home = temp_shell_home("approval-explicit-less");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    write_executable(
+        &bin_dir.join("less"),
+        "#!/bin/bash\nprintf 'fake-less waiting\\n'\nIFS= read -r -n 1 key\nprintf 'fake-less key:%s\\n' \"$key\"\n",
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("HOME", &home_str), ("PATH", &path)],
+        vec![
+            (b"?? stream less tool approval\n".to_vec(), Duration::ZERO),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
+            (b"q".to_vec(), Duration::from_millis(700)),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("$ less Cargo.toml"), "{output}");
+    // Fragments are kept short: the receipt panel wraps the hint.
+    assert!(
+        output.contains("This command will run interactively in the foreground"),
+        "{output}"
+    );
+    assert!(output.contains("Press q to leave a pager."), "{output}");
+    // An explicitly interactive command keeps its PTY and its keystrokes.
+    assert!(output.contains("fake-less waiting"), "{output}");
+    assert!(output.contains("fake-less key:q"), "{output}");
+    assert_no_pager_transport_leak(&output);
+}
+
+#[test]
+fn raw_cli_approved_less_tool_hints_in_zh_language_env() {
+    let home = temp_shell_home("approval-explicit-less-zh");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    write_executable(
+        &bin_dir.join("less"),
+        "#!/bin/bash\nprintf 'fake-less waiting\\n'\nIFS= read -r -n 1 key\nprintf 'fake-less key:%s\\n' \"$key\"\n",
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("PATH", &path),
+            ("COSH_SHELL_LANG", "zh-CN"),
+        ],
+        vec![
+            (b"?? stream less tool approval\n".to_vec(), Duration::ZERO),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
+            (b"q".to_vec(), Duration::from_millis(700)),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("$ less Cargo.toml"), "{output}");
+    assert!(output.contains("此命令将在前台交互运行"), "{output}");
+    assert!(output.contains("键盘输入会直接发送给它"), "{output}");
+    assert!(output.contains("通常按 q"), "{output}");
+    assert!(!output.contains("Press q to leave a pager"), "{output}");
+    assert_no_pager_transport_leak(&output);
+}
+
+#[test]
+fn raw_cli_user_typed_git_log_keeps_its_own_pager_configuration() {
+    let home = temp_shell_home("user-native-git-pager");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    // Behaves like a real pager: the paged text arrives on stdin, keystrokes
+    // come from the controlling terminal.
+    write_executable(
+        &bin_dir.join("fake-pager"),
+        "#!/bin/bash\ncat\nprintf 'fake-pager waiting\\n'\nIFS= read -r key < /dev/tty\nprintf 'fake-pager released:%s\\n' \"$key\"\n",
+    );
+    let fixture = git_log_fixture(&home);
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{old_path}", bin_dir.display());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("PATH", &path),
+            ("GIT_DIR", &fixture.git_dir),
+            ("GIT_WORK_TREE", &fixture.work_tree),
+            // A host exporting GIT_PAGER=cat would neutralize the pager this
+            // test needs Git to resolve from `-c core.pager`.
+            ("PAGER", RAW_CLI_UNSET_ENV),
+            ("GIT_PAGER", RAW_CLI_UNSET_ENV),
+            ("MANPAGER", RAW_CLI_UNSET_ENV),
+            ("SYSTEMD_PAGER", RAW_CLI_UNSET_ENV),
+        ],
+        vec![
+            // Wait for the prompt first: input sent before the shell is ready
+            // would be consumed by the pager instead of the command line.
+            (
+                b"git -c core.pager=fake-pager --paginate log -1 --format=%h\n".to_vec(),
+                Duration::from_millis(1_200),
+            ),
+            (b"q\n".to_vec(), Duration::from_millis(2_000)),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
+        ],
+    );
+
+    // The implicit-pager policy is scoped to agent handoffs: a command the user
+    // typed still resolves the pager their Git configuration asked for, and
+    // their keystrokes still reach it.
+    assert!(output.contains("fake-pager waiting"), "{output}");
+    assert!(output.contains("fake-pager released:q"), "{output}");
+    assert_no_pager_transport_leak(&output);
 }
 
 #[test]

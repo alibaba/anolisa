@@ -22,7 +22,8 @@ use cosh_shell::shell_host::{
     LineInteractiveOutput, ScriptedInput, ShellHostConfig, ShellHostOutput,
 };
 use cosh_shell::types::{
-    AgentEvent, GovernanceDecision, Policy, ShellEvent, ShellEventKind, ShellHandoffRequest,
+    AgentEvent, GovernanceDecision, ImplicitPagerPolicy, Policy, ShellEvent, ShellEventKind,
+    ShellHandoffRequest,
 };
 
 #[path = "support/shell_host.rs"]

@@ -27,7 +27,8 @@ pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_fro
 pub use config::TokenlessConfig;
 
 pub use diff::{
-    DiffReport, DiffSort, format_diff_report, record_report, session_report, tool_use_report,
+    DiffRecords, DiffReport, DiffSort, format_diff_report, record_report, session_report,
+    tool_use_report,
 };
 
 pub use home::get_home_dir;

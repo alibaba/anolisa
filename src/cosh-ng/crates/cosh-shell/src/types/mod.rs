@@ -16,8 +16,8 @@ pub use hooks::{
     HookFinding, HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,
 };
 pub use shell_event_metadata::{ShellCaptureLifecycle, ShellCaptureMetadata, ShellRoutingMetadata};
-pub use shell_handoff::ShellHandoffRequest;
-pub(crate) use shell_handoff::SHELL_HANDOFF_UNTRACKED_STATUS;
+pub use shell_handoff::{ImplicitPagerPolicy, ShellHandoffRequest};
+pub(crate) use shell_handoff::{NON_INTERACTIVE_PAGER_PREFIX, SHELL_HANDOFF_UNTRACKED_STATUS};
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;

@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { HashRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { NavBar } from './components/NavBar';
-import { AgentHealthSidebar } from './components/AgentHealthSidebar';
+import { AgentHealthNotifier } from './components/AgentHealthNotifier';
 import { ConversationList } from './pages/ConversationList';
+import { AgentHealthPage } from './pages/AgentHealthPage';
 import { AtifViewerPage } from './pages/AtifViewerPage';
 import { TokenSavingsPage } from './pages/TokenSavingsPage';
 import { SkillMetricsPage } from './pages/SkillMetricsPage';
@@ -41,6 +42,7 @@ function pathAllowed(pathname: string, capabilities: AppCapability[]): boolean {
   if (pathname.startsWith('/security')) return capabilities.includes('security');
   if (pathname.startsWith('/atif')) return capabilities.includes('atif');
   if (pathname.startsWith('/settings')) return capabilities.includes('settings');
+  if (pathname.startsWith('/health')) return capabilities.includes('agent_health');
   return true;
 }
 
@@ -162,10 +164,11 @@ const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) =
             <Route path="/security" element={<SecurityObservabilityPage />} />
             <Route path="/atif" element={<AtifViewerPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/health" element={<AgentHealthPage />} />
             <Route path="*" element={<Navigate to={fallbackPath} replace />} />
           </Routes>
         </main>
-        {capabilities.includes('agent_health') && <AgentHealthSidebar />}
+        {capabilities.includes('agent_health') && <AgentHealthNotifier />}
       </div>
     </div>
   );

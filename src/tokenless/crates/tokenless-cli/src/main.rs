@@ -766,10 +766,8 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                                 .map_err(|e| (format!("Failed to query diff records: {}", e), 1))?;
                             if records.is_empty() {
                                 let scope = tool_use_id.as_deref().map_or_else(
-                                    || format!("session '{}'", session_id),
-                                    |tool| {
-                                        format!("tool use '{}' in session '{}'", tool, session_id)
-                                    },
+                                    || format!("session {session_id:?}"),
+                                    |tool| format!("tool use {tool:?} in session {session_id:?}"),
                                 );
                                 return Err((format!("No records found for {}", scope), 1));
                             }

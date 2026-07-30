@@ -10,6 +10,7 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
+  { path: '/health', label: 'Agent 看板', icon: '🩺', capability: 'agent_health' },
   { path: '/', label: 'Agent 可观测', icon: '📊', capability: 'agent_observability' },
   { path: '/sessions', label: '会话列表', icon: '🗂️', capability: 'sessions' },
   { path: '/savings', label: 'Token 节省', icon: '⚡', capability: 'token_savings' },
