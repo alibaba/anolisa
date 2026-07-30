@@ -173,7 +173,14 @@ pub(super) async fn case_detail(
         Err(_) => return bad_request("case_id must be a UUID"),
     };
     match data.security_store.case_detail(case_id) {
-        Ok(detail) => response(StatusCode::OK, "found", json!(detail)),
+        Ok(detail) => match data.security_store.latest_containment_action(case_id) {
+            Ok(action) => response(
+                StatusCode::OK,
+                "found",
+                super::containment::case_detail_view(json!(detail), action.as_ref()),
+            ),
+            Err(error) => store_error(error),
+        },
         Err(SecurityStoreError::MissingCase(_)) => response(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -278,7 +285,7 @@ fn event_result(event: &SecurityEvent) -> &'static str {
     }
 }
 
-fn response(status: StatusCode, state: &str, data: Value) -> HttpResponse {
+pub(super) fn response(status: StatusCode, state: &str, data: Value) -> HttpResponse {
     HttpResponse::build(status).json(json!({
         "state": state,
         "data": data,
@@ -286,12 +293,31 @@ fn response(status: StatusCode, state: &str, data: Value) -> HttpResponse {
     }))
 }
 
-fn store_error(error: SecurityStoreError) -> HttpResponse {
-    HttpResponse::InternalServerError().json(json!({
+pub(super) fn store_error(error: SecurityStoreError) -> HttpResponse {
+    log::error!("system audit security store failed: {error}");
+    store_unavailable()
+}
+
+pub(super) fn store_unavailable() -> HttpResponse {
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "security_store_unavailable",
+        "security data store is unavailable",
+        true,
+    )
+}
+
+pub(super) fn error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) -> HttpResponse {
+    HttpResponse::build(status).json(json!({
         "error": {
-            "code": "security_store_unavailable",
-            "message": error.to_string(),
-            "retryable": true,
+            "code": code,
+            "message": message,
+            "retryable": retryable,
         }
     }))
 }
@@ -311,9 +337,25 @@ fn now_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use crate::security::{SecuritySession, SecuritySessionPage};
+    use actix_web::body::to_bytes;
 
-    use super::session_page_view;
+    use crate::security::{SecuritySession, SecuritySessionPage, SecurityStoreError};
+
+    use super::{session_page_view, store_error};
+
+    #[actix_web::test]
+    async fn store_errors_do_not_expose_internal_paths() {
+        let response = store_error(SecurityStoreError::InvalidData(
+            "database /private/db is corrupt".into(),
+        ));
+        let body = to_bytes(response.into_body())
+            .await
+            .expect("error body should render");
+        let rendered = String::from_utf8_lossy(&body);
+        assert!(rendered.contains("security_store_unavailable"));
+        assert!(rendered.contains("security data store is unavailable"));
+        assert!(!rendered.contains("/private/db"));
+    }
 
     #[test]
     fn session_api_preserves_grouped_total_and_pagination() {
