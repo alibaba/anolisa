@@ -318,6 +318,15 @@ pub(crate) fn apply_auth_credentials(
         response.values.get("security_token").cloned()
     };
 
+    // Preserve explicit_cache across auth refresh so a 401/403
+    // re-auth does not silently reset the user's explicit cache preference
+    // to None (which persist_config_to_dir would then omit).
+    let existing_explicit_cache = config
+        .ai
+        .providers
+        .get(&response.provider_id)
+        .and_then(|p| p.explicit_cache);
+
     config.ai.active_provider = Some(response.provider_id.clone());
     let provider = ProviderConfig {
         provider_type: Some(provider_type),
@@ -329,6 +338,7 @@ pub(crate) fn apply_auth_credentials(
         access_key_id,
         access_key_secret,
         security_token,
+        explicit_cache: existing_explicit_cache,
     };
     config
         .ai
@@ -733,6 +743,36 @@ mod tests {
                 .and_then(|provider| provider.api_key.as_deref()),
             Some("sk-user")
         );
+    }
+
+    #[test]
+    fn auth_refresh_preserves_explicit_cache() {
+        let mut config = CoreConfig::default();
+        config.ai.providers.insert(
+            "dashscope".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+                api_key: Some("sk-old".to_string()),
+                model: Some("qwen3.7-plus".to_string()),
+                explicit_cache: Some(true),
+                ..Default::default()
+            },
+        );
+
+        // Simulate 401/403 re-auth: same provider_id, new api_key
+        let response = AuthResponse {
+            provider_id: "dashscope".to_string(),
+            provider_type: None,
+            values: HashMap::from([("api_key".to_string(), "sk-new".to_string())]),
+            persist: true,
+        };
+        apply_auth_credentials(&mut config, &response).unwrap();
+
+        let p = config.ai.providers.get("dashscope").unwrap();
+        assert_eq!(p.api_key.as_deref(), Some("sk-new"));
+        // explicit_cache must survive re-auth
+        assert_eq!(p.explicit_cache, Some(true));
     }
 
     #[test]

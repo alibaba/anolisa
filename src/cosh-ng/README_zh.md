@@ -99,6 +99,14 @@ shell 会请求批准，并在同一个 provider 对话中追加同等预算。�
 可选别名和 fallback 行为见
 [配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#环境变量覆盖)。
 
+调用大模型时，不同推理请求可能出现输入内容的重叠（如多轮对话）。上下文缓存
+（Context Cache）可以缓存这些公共前缀，减少重复计算，提升响应速度并降低成本。
+DashScope 提供两种工作模式：显式缓存（需主动开启，5 分钟内确定性命中，创建
+成本较高但命中成本更低）和隐式缓存（默认自动模式，命中率不确定，命中成本
+略高）。在 `[ai.providers.dashscope]` 下设置 `explicit_cache = true` 可切换为
+显式缓存，详见
+[配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#cosh-core-配置)。
+
 Core 和 Shell 还会把脱敏、版本化的审计时间线写入
 `$XDG_STATE_HOME/cosh/audit` 或 `~/.local/state/cosh/audit`。既有
 SLS/metrics 导出保持不变。配置、保留、追踪和事故导出方法见

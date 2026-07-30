@@ -24,6 +24,21 @@ pub trait ProviderProfile: Send + Sync {
 
     fn adjust_request(&self, _body: &mut Value) {}
 
+    /// Whether this backend supports DashScope-style prompt caching.
+    ///
+    /// When `true` and `explicit_cache` is enabled, the provider injects
+    /// `X-DashScope-CacheControl: enable` and `cache_control` markers into the
+    /// request. Only DashScope supports this; OpenAI has automatic caching and
+    /// other backends have no cache API.
+    ///
+    /// New profiles must override this explicitly — the default is `false` to
+    /// avoid sending DashScope-specific headers to unrelated endpoints. Add the
+    /// new profile to `dashscope_profile_supports_cache_control` so the choice
+    /// is reviewed at test time.
+    fn supports_cache_control(&self) -> bool {
+        false
+    }
+
     fn auth_header_value(&self, api_key: &str) -> String {
         format!("Bearer {api_key}")
     }
@@ -49,6 +64,10 @@ impl ProviderProfile for DashScopeProfile {
     }
 
     fn supports_stream_usage(&self) -> bool {
+        true
+    }
+
+    fn supports_cache_control(&self) -> bool {
         true
     }
 }
@@ -128,6 +147,15 @@ mod tests {
         let p = DeepSeekProfile;
         assert_eq!(p.name(), "deepseek");
         assert_eq!(p.thinking_field(), Some("reasoning_content"));
+    }
+
+    #[test]
+    fn dashscope_profile_supports_cache_control() {
+        assert!(DashScopeProfile.supports_cache_control());
+        assert!(!GenericProfile.supports_cache_control());
+        assert!(!OpenAIProfile.supports_cache_control());
+        assert!(!DeepSeekProfile.supports_cache_control());
+        assert!(!profile_from_name("unknown").supports_cache_control());
     }
 
     #[test]

@@ -90,6 +90,7 @@ fn create_provider_from_resolved(
         &resolved.base_url,
         &resolved.api_key,
         provider_profile,
+        resolved.explicit_cache,
     ))
 }
 

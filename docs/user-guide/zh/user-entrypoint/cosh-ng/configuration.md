@@ -31,6 +31,12 @@ type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = ""              # 或通过 DASHSCOPE_API_KEY
 model = "qwen-plus"
+# 显式缓存开关（仅 DashScope 生效）。
+# true  = 显式缓存：主动为 system 和最后一条消息注入 cache_control
+#         标记，5 分钟内确定性命中，创建部分按 125% 计费，命中部分按 10% 计费。
+# false = 隐式缓存（默认）：自动识别公共前缀，命中率不确定，命中部分按 20% 计费，无法关闭。
+# 参考：https://help.aliyun.com/zh/model-studio/context-cache
+explicit_cache = false
 
 [agent]
 # 审批模式：trust | auto | balanced | suggest | strict

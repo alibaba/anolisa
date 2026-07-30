@@ -16,20 +16,84 @@ pub struct OpenAICompatProvider {
     pub api_key: String,
     cancelled: Arc<AtomicBool>,
     profile: Box<dyn ProviderProfile>,
+    explicit_cache: bool,
 }
 
 impl OpenAICompatProvider {
-    pub fn new(base_url: &str, api_key: &str, profile: Box<dyn ProviderProfile>) -> Self {
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        profile: Box<dyn ProviderProfile>,
+        explicit_cache: bool,
+    ) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             cancelled: Arc::new(AtomicBool::new(false)),
             profile,
+            explicit_cache,
         }
     }
 
     pub fn new_generic(base_url: &str, api_key: &str) -> Self {
-        Self::new(base_url, api_key, Box::new(profile::GenericProfile))
+        // explicit_cache is false here because GenericProfile already returns
+        // false from supports_cache_control(); the config flag is meaningless
+        // for generic endpoints but kept for API symmetry.
+        Self::new(base_url, api_key, Box::new(profile::GenericProfile), false)
+    }
+
+    fn cache_control_enabled(&self) -> bool {
+        self.profile.supports_cache_control() && self.explicit_cache
+    }
+
+    /// Inject DashScope prompt-cache markers into the request body.
+    ///
+    /// Mirrors copilot-shell's `addDashScopeCacheControl` with the `all`
+    /// strategy when streaming (system + last message) and `system_only`
+    /// when not streaming. Although cosh-core currently hardcodes `stream: true`,
+    /// the strategy is selected dynamically from the body so future non-stream
+    /// support needs no cache-logic change.
+    fn add_cache_control(&self, body: &mut Value) {
+        if !self.cache_control_enabled() {
+            return;
+        }
+
+        let is_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(true);
+        let cache_all = is_stream;
+
+        if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            // Track the system message index so we can skip re-marking it
+            // when it is also the last message (single-message edge case).
+            let mut system_index: Option<usize> = None;
+
+            // System message: always cache.
+            for (i, msg) in messages.iter_mut().enumerate() {
+                if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
+                    add_cache_control_to_message_content(msg);
+                    system_index = Some(i);
+                    break;
+                }
+            }
+
+            // Last message: cache only in `all` strategy.
+            // Skip if the last message is the same as the system message
+            // (already marked above).
+            if cache_all {
+                if let Some(last_idx) = messages.len().checked_sub(1) {
+                    if system_index != Some(last_idx) {
+                        if let Some(last_msg) = messages.get_mut(last_idx) {
+                            add_cache_control_to_message_content(last_msg);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Note: DashScope docs explicitly state that cache_control markers
+        // can only be placed in messages[].content. Tool definitions
+        // already participate in the system prefix cache calculation and
+        // do not support independent cache markers.
+        // Ref: https://help.aliyun.com/zh/model-studio/context-cache
     }
 
     fn build_request_body(
@@ -75,6 +139,11 @@ impl OpenAICompatProvider {
             body["tools"] = serde_json::json!(tool_defs);
         }
 
+        // extra_params is merged before cache markers are injected so that
+        // user-supplied fields (e.g. custom `messages` or `tools`) are in
+        // place when markers are applied. If extra_params contains a
+        // `messages` key it would replace the constructed messages entirely
+        // — that is existing behavior and not changed by cache support.
         if let Some(extra) = &config.extra_params {
             if let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
                 for (k, v) in extra_obj {
@@ -84,6 +153,8 @@ impl OpenAICompatProvider {
         }
 
         self.profile.adjust_request(&mut body);
+
+        self.add_cache_control(&mut body);
 
         body
     }
@@ -103,10 +174,16 @@ impl ContentGenerator for OpenAICompatProvider {
 
         let client = reqwest::Client::new();
         let auth_value = self.profile.auth_header_value(&self.api_key);
-        let response = client
+        let mut request = client
             .post(&url)
             .header("Authorization", auth_value)
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+
+        if self.cache_control_enabled() {
+            request = request.header("X-DashScope-CacheControl", "enable");
+        }
+
+        let response = request
             .json(&body)
             .send()
             .await
@@ -305,6 +382,54 @@ impl ContentGenerator for OpenAICompatProvider {
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Convert a message's string content to an array format and append a
+/// `cache_control: { type: "ephemeral" }` marker to the last content part.
+///
+/// DashScope requires `cache_control` on individual content parts within a
+/// message, not on the message itself. When the content is a plain string it
+/// must first be wrapped in `[{ "type": "text", "text": "..." }]` so the
+/// marker has somewhere to live.
+fn add_cache_control_to_message_content(msg: &mut Value) {
+    let Some(content) = msg.get_mut("content") else {
+        return;
+    };
+
+    // Null content (e.g. assistant tool-call messages) has nothing to cache.
+    if content.is_null() {
+        return;
+    }
+
+    // If content is a string, convert to array format.
+    if content.is_string() {
+        let text = content.as_str().unwrap_or("").to_string();
+        *content = serde_json::json!([{
+            "type": "text",
+            "text": text
+        }]);
+    }
+
+    // Append cache_control to the last content part.
+    if let Some(parts) = content.as_array_mut() {
+        if let Some(last_part) = parts.last_mut() {
+            // Wrap raw strings in a text object so the marker has a home.
+            // Numbers, booleans and null are not cacheable content — skip.
+            if last_part.is_string() {
+                let text = last_part.as_str().unwrap_or("").to_string();
+                *last_part = serde_json::json!({
+                    "type": "text",
+                    "text": text
+                });
+            }
+            if let Some(obj) = last_part.as_object_mut() {
+                obj.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({"type": "ephemeral"}),
+                );
+            }
+        }
     }
 }
 
@@ -987,6 +1112,7 @@ mod tests {
             "https://api.openai.com/v1",
             "sk-test",
             Box::new(super::super::profile::OpenAIProfile),
+            false,
         );
         let config = GenerateConfig {
             model: "o3".to_string(),
@@ -1022,6 +1148,7 @@ mod tests {
             "https://api.openai.com/v1",
             "sk-test",
             Box::new(super::super::profile::OpenAIProfile),
+            false,
         );
         let config = GenerateConfig {
             model: "test".to_string(),
@@ -1160,5 +1287,162 @@ mod tests {
                 cached_tokens: 0
             }
         ));
+    }
+
+    // ── Cache control tests ──
+
+    fn dashscope_provider(explicit: bool) -> OpenAICompatProvider {
+        OpenAICompatProvider::new(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "sk-test",
+            Box::new(super::super::profile::DashScopeProfile),
+            explicit,
+        )
+    }
+
+    #[test]
+    fn cache_control_adds_markers_to_system_and_last_message() {
+        let provider = dashscope_provider(true);
+        let messages = vec![
+            Message::system("You are a helpful assistant."),
+            Message::user("Hello"),
+            Message::assistant("Hi there"),
+            Message::user("How are you?"),
+        ];
+        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+
+        let msgs = body["messages"].as_array().unwrap();
+        // System message content should be array with cache_control on last part.
+        let system_content = &msgs[0]["content"];
+        assert!(system_content.is_array(), "system content should be array");
+        let system_parts = system_content.as_array().unwrap();
+        assert!(system_parts.last().unwrap().get("cache_control").is_some());
+        // Last message content should also have cache_control.
+        let last_content = msgs.last().unwrap()["content"].as_array().unwrap();
+        assert!(last_content.last().unwrap().get("cache_control").is_some());
+    }
+
+    #[test]
+    fn cache_control_disabled_skips_markers() {
+        let provider = dashscope_provider(false);
+        let messages = vec![
+            Message::system("You are a helpful assistant."),
+            Message::user("Hello"),
+        ];
+        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        assert!(
+            !body.to_string().contains("cache_control"),
+            "body should not contain cache_control when disabled"
+        );
+    }
+
+    #[test]
+    fn cache_control_string_content_converted_to_array() {
+        let provider = dashscope_provider(true);
+        let messages = vec![Message::system("System prompt text")];
+        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        let system_content = &body["messages"][0]["content"];
+        assert!(
+            system_content.is_array(),
+            "string content should be converted to array"
+        );
+        let parts = system_content.as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "System prompt text");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn non_dashscope_profile_no_cache_control() {
+        let provider = OpenAICompatProvider::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            Box::new(super::super::profile::GenericProfile),
+            false,
+        );
+        let messages = vec![Message::system("System"), Message::user("Hello")];
+        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        assert!(
+            !body.to_string().contains("cache_control"),
+            "generic profile should not inject cache_control"
+        );
+    }
+
+    #[test]
+    fn non_dashscope_profile_no_cache_control_even_when_opted_in() {
+        // User sets explicit_cache = true, but the provider profile is not
+        // DashScope — the profile gate must still block marker injection.
+        let provider = OpenAICompatProvider::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            Box::new(super::super::profile::GenericProfile),
+            true,
+        );
+        let messages = vec![Message::system("System"), Message::user("Hello")];
+        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+        assert!(
+            !body.to_string().contains("cache_control"),
+            "generic profile should not inject cache_control even with explicit_cache = true"
+        );
+    }
+
+    #[test]
+    fn cache_control_no_system_message_caches_last_only() {
+        let provider = dashscope_provider(true);
+        let messages = vec![
+            Message::user("Hello"),
+            Message::assistant("Hi there"),
+            Message::user("How are you?"),
+        ];
+        let body = provider.build_request_body(&messages, &[], &GenerateConfig::default());
+
+        let msgs = body["messages"].as_array().unwrap();
+        // No system message, so only the last message should have cache_control.
+        for (i, msg) in msgs.iter().enumerate() {
+            let has_cache = msg["content"]
+                .as_array()
+                .and_then(|parts| parts.last())
+                .and_then(|p| p.get("cache_control"))
+                .is_some();
+            if i == msgs.len() - 1 {
+                assert!(has_cache, "last message should have cache_control");
+            } else {
+                assert!(!has_cache, "non-last message should not have cache_control");
+            }
+        }
+    }
+
+    #[test]
+    fn cache_control_wraps_raw_string_content_part() {
+        // Regression: a raw string as the last content part used to panic
+        // because serde_json cannot index into Value::String with a string key.
+        let mut msg = serde_json::json!({
+            "role": "system",
+            "content": ["valid text", "raw string"]
+        });
+        add_cache_control_to_message_content(&mut msg);
+
+        let parts = msg["content"].as_array().unwrap();
+        let last = parts.last().unwrap();
+        assert_eq!(last["type"], "text");
+        assert_eq!(last["text"], "raw string");
+        assert_eq!(last["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_control_skips_non_object_non_string_content_part() {
+        // Numbers and booleans are not cacheable content; the function must
+        // not panic and must simply skip the marker.
+        let mut msg = serde_json::json!({
+            "role": "system",
+            "content": [{"type": "text", "text": "ok"}, 42]
+        });
+        add_cache_control_to_message_content(&mut msg);
+
+        let parts = msg["content"].as_array().unwrap();
+        let last = parts.last().unwrap();
+        assert!(last.is_number(), "number part should remain untouched");
+        assert!(last.get("cache_control").is_none());
     }
 }

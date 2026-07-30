@@ -107,6 +107,17 @@ See the
 [configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#environment-variable-overrides)
 for accepted aliases and fallback behavior.
 
+When calling LLMs, different inference requests may share overlapping input
+(e.g., multi-turn conversations). Context caching stores these common
+prefixes to reduce redundant computation, improving response speed and
+lowering cost. DashScope offers two modes: explicit caching (opt-in,
+deterministic 5-min TTL hits, higher creation cost but lower hit cost) and
+implicit caching (default automatic mode, non-deterministic hit rate,
+slightly higher hit cost). Set `explicit_cache = true` under
+`[ai.providers.dashscope]` to switch to explicit caching. See the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#cosh-core-configuration)
+for billing details.
+
 Core and Shell also write a redacted, versioned audit timeline under
 `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. The existing
 SLS/metrics export is unchanged. See the

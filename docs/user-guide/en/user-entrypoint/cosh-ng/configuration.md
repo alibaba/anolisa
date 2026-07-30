@@ -30,6 +30,14 @@ type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = ""              # Or via DASHSCOPE_API_KEY
 model = "qwen-plus"
+# Explicit cache toggle (DashScope only).
+# true  = Explicit caching: injects cache_control markers into the system
+#         and last message. Deterministic 5-min TTL hits. Cache creation
+#         billed at 125%, hits at 10%.
+# false = Implicit caching (default): auto-detects common prefixes, hit rate
+#         is non-deterministic. Hits billed at 20%. Cannot be disabled.
+# See: https://help.aliyun.com/zh/model-studio/context-cache
+explicit_cache = false
 
 [agent]
 # Approval mode: trust | auto | balanced | suggest | strict
