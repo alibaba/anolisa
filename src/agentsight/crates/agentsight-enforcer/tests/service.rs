@@ -170,7 +170,11 @@ fn uds_service_dispatches_lifecycle_and_streams_violations() {
     let subscribed: Response = read_frame(&mut reader)
         .expect("subscribe response should decode")
         .expect("subscribe response should exist");
-    assert_eq!(subscribed.request_id, request.request_id);
+    assert_eq!(
+        subscribed.request_id, request.request_id,
+        "unexpected subscription response: {:?}",
+        subscribed.result
+    );
     assert!(matches!(subscribed.result, Ok(ResponseBody::Subscribed)));
 
     let health = fixture.call(Command::Health);
@@ -293,4 +297,13 @@ fn best_effort_observer_exit_does_not_block_future_apply() {
         health.result,
         Ok(ResponseBody::Health(health)) if health.ready
     ));
+}
+
+#[test]
+fn security_subscription_is_acknowledged_when_backend_support_exists() {
+    let fixture = ServiceFixture::start();
+
+    let response = fixture.call(Command::SubscribeSecurityEvents);
+
+    assert!(matches!(response.result, Ok(ResponseBody::Subscribed)));
 }

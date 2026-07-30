@@ -371,6 +371,20 @@ fn handle_connection<B: EnforcementBackend>(
                 SubscriberClass::Required,
             );
         }
+        Command::SubscribeSecurityEvents => {
+            let receiver = backend.subscribe_security_events();
+            write_frame(
+                &mut stream,
+                &success_response(request.request_id, ResponseBody::Subscribed),
+            )?;
+            while let Ok(event) = receiver.recv() {
+                write_frame(
+                    &mut stream,
+                    &success_response(request.request_id, ResponseBody::SecurityEvent(event)),
+                )?;
+            }
+            return Ok(());
+        }
         command => command,
     };
 
@@ -513,6 +527,36 @@ fn dispatch<B: EnforcementBackend>(
                 )
                 .map(|(binding, _)| ResponseBody::Applied(binding))
         }
+        Command::ApplyCredentialPolicy(_) => Err(required_subscription_error(
+            "credential policy apply requires a live required subscription lease",
+        )),
+        Command::ApplyCredentialPolicyLeased {
+            request,
+            required_subscription_id,
+        } => {
+            let binding_id = request.binding_id;
+            required_subscriptions
+                .with_current(
+                    required_subscription_id,
+                    || {
+                        let already_present = backend
+                            .bindings()?
+                            .iter()
+                            .any(|binding| binding.request.binding_id == binding_id);
+                        backend
+                            .apply_credential_policy(request)
+                            .map(|binding| (binding, !already_present))
+                    },
+                    |(binding, created)| {
+                        if *created {
+                            backend.detach(binding.request.binding_id)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .map(|(binding, _)| ResponseBody::Applied(binding))
+        }
         Command::DetachAgent { binding_id } => {
             required_subscriptions
                 .serialize_backend_operation(|| backend.detach(binding_id))
@@ -526,6 +570,7 @@ fn dispatch<B: EnforcementBackend>(
         Command::SubscribeViolations { .. } | Command::SubscribeRequiredViolations { .. } => {
             Ok(ResponseBody::Subscribed)
         }
+        Command::SubscribeSecurityEvents => Ok(ResponseBody::Subscribed),
     }
 }
 
@@ -615,7 +660,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
 
-    use agentsight_enforcement_protocol::{ApplyPolicy, Binding, HealthStatus, ViolationEvent};
+    use agentsight_enforcement_protocol::{
+        ApplyCredentialPolicy, ApplyPolicy, Binding, CredentialExfiltrationPolicy,
+        DestinationScope, HealthStatus, PolicyMode, SecurityEvent, ViolationEvent,
+    };
 
     use super::*;
 
@@ -623,11 +671,33 @@ mod tests {
         active: Arc<AtomicBool>,
     }
 
+    fn credential_policy() -> ApplyCredentialPolicy {
+        ApplyCredentialPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "fixture-agent".into(),
+            session_id: None,
+            root_pid: 42,
+            process_start_time: 99,
+            policy: CredentialExfiltrationPolicy {
+                policy_id: "credential-exfiltration".into(),
+                revision: 1,
+                source_patterns: vec!["/tmp/fixture-credential".into()],
+                trusted_endpoints: Vec::new(),
+                taint_label: "CREDENTIAL".into(),
+                taint_ttl_secs: 900,
+                destination_scope: DestinationScope::PublicIpv4,
+                mode: PolicyMode::Audit,
+            },
+        }
+    }
+
     impl EnforcementBackend for DetachRaceBackend {
         fn health(&self) -> Result<HealthStatus, BackendError> {
             Ok(HealthStatus {
                 ready: true,
                 backend: "detach-race".into(),
+                capabilities:
+                    agentsight_enforcement_protocol::EnforcementCapabilities::mock_development(),
                 message: None,
             })
         }
@@ -635,6 +705,15 @@ mod tests {
         fn apply(&self, _request: ApplyPolicy) -> Result<Binding, BackendError> {
             Err(BackendError::KernelFailure(
                 "fixture apply is driven by the test interleaving".into(),
+            ))
+        }
+
+        fn apply_credential_policy(
+            &self,
+            _request: ApplyCredentialPolicy,
+        ) -> Result<Binding, BackendError> {
+            Err(BackendError::KernelFailure(
+                "fixture does not apply credential policies".into(),
             ))
         }
 
@@ -657,6 +736,10 @@ mod tests {
         fn unsubscribe(&self, _id: Uuid) {}
 
         fn record_required_delivery_loss(&self, _count: u64) {}
+
+        fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
+            mpsc::sync_channel(1).1
+        }
     }
 
     #[test]
@@ -778,5 +861,22 @@ mod tests {
         ));
         assert_eq!(detach_result, Ok(ResponseBody::Detached));
         assert!(!active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn unleased_credential_apply_is_rejected() {
+        let backend = crate::MockBackend::new();
+        let subscriptions = RequiredSubscriptions::default();
+
+        let result = dispatch(
+            &backend,
+            &subscriptions,
+            Command::ApplyCredentialPolicy(credential_policy()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(error) if error.code == "required_subscription_unavailable"
+        ));
     }
 }

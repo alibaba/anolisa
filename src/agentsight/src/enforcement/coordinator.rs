@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -400,6 +400,86 @@ impl EnforcementCoordinator {
                 })?;
                 Err(error.into())
             }
+        }
+    }
+
+    /// Applies a product-level credential policy and persists the adapter acknowledgement.
+    ///
+    /// Product policy compilation remains inside the privileged adapter, so AgentSight only
+    /// persists the compiled binding returned by the enforcer.
+    ///
+    /// # Errors
+    ///
+    /// Returns when ingestion is unavailable, the adapter rejects the policy, or persistence
+    /// fails.
+    pub fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, EnforcementCoordinatorError> {
+        let _lifecycle = self.lifecycle();
+        let lease = self
+            .ingestion_readiness
+            .lease()
+            .ok_or(EnforcementCoordinatorError::IngestionUnavailable)?;
+        let health = combine_health(self.client.health()?, &self.ingestion_readiness);
+        if !health.ready {
+            return Err(unavailable_from_health(health));
+        }
+        match self
+            .client
+            .apply_credential_policy(request, lease.subscription_id)
+        {
+            Ok(binding) => {
+                let post_apply_health = self
+                    .client
+                    .health()
+                    .map(|health| combine_health(health, &self.ingestion_readiness));
+                match post_apply_health {
+                    Ok(health) if health.ready => {
+                        if self
+                            .ingestion_readiness
+                            .commit_if_current(&lease, || self.store.upsert_binding(&binding))?
+                        {
+                            Ok(binding)
+                        } else {
+                            let message =
+                                "violation ingestion readiness changed during credential apply";
+                            self.persist_degraded_binding(binding, message)?;
+                            Err(EnforcementCoordinatorError::EnforcementUnavailable(
+                                message.into(),
+                            ))
+                        }
+                    }
+                    Ok(health) => {
+                        let detail = health_message(&health);
+                        log::error!(
+                            "enforcement became unavailable after credential apply: {detail}"
+                        );
+                        self.persist_degraded_binding(binding, DEGRADED_BINDING_MESSAGE)?;
+                        Err(EnforcementCoordinatorError::EnforcementUnavailable(
+                            "enforcement service became unavailable after credential apply".into(),
+                        ))
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "enforcement health check failed after credential apply: {error}"
+                        );
+                        self.persist_degraded_binding(binding, DEGRADED_BINDING_MESSAGE)?;
+                        Err(error.into())
+                    }
+                }
+            }
+            Err(EnforcementError::Remote { code, message })
+                if code == "required_subscription_unavailable" =>
+            {
+                log::error!("required violation subscription unavailable: {message}");
+                self.ingestion_readiness
+                    .invalidate_lease(&lease, INGESTION_UNAVAILABLE_MESSAGE.into());
+                Err(EnforcementCoordinatorError::EnforcementUnavailable(
+                    INGESTION_UNAVAILABLE_MESSAGE.into(),
+                ))
+            }
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -933,6 +1013,7 @@ mod tests {
             agentsight_enforcement_protocol::HealthStatus {
                 ready: false,
                 backend: "actplane".into(),
+                capabilities: agentsight_enforcement_protocol::EnforcementCapabilities::actplane(),
                 message: Some("violation event buffer overflow: dropped_events=1".into()),
             },
             &readiness,

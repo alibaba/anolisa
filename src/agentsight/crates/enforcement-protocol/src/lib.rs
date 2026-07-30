@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod security;
+pub use security::*;
+
 /// Wire protocol version implemented by this crate.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Maximum JSON payload size accepted for one NDJSON frame.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -35,7 +38,7 @@ impl Request {
     }
 }
 
-/// Operations supported by protocol version 2.
+/// Operations supported by protocol version 3.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", content = "params", rename_all = "snake_case")]
 pub enum Command {
@@ -47,6 +50,15 @@ pub enum Command {
     ApplyPolicyLeased {
         /// Desired policy binding.
         request: ApplyPolicy,
+        /// Required violation subscription proving evidence delivery is live.
+        required_subscription_id: Uuid,
+    },
+    /// Compiles a product-level credential policy inside the privileged adapter.
+    ApplyCredentialPolicy(ApplyCredentialPolicy),
+    /// Compiles and applies a credential policy only while evidence delivery is live.
+    ApplyCredentialPolicyLeased {
+        /// Product-level credential policy compiled by the privileged adapter.
+        request: ApplyCredentialPolicy,
         /// Required violation subscription proving evidence delivery is live.
         required_subscription_id: Uuid,
     },
@@ -67,6 +79,25 @@ pub enum Command {
         /// Fresh generation identity for this required stream.
         subscription_id: Uuid,
     },
+    /// Keeps the connection open and streams normalized security events.
+    SubscribeSecurityEvents,
+}
+
+/// Product-level credential policy binding sent across the privilege boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyCredentialPolicy {
+    /// Stable idempotency key for this binding.
+    pub binding_id: Uuid,
+    /// Product-level Agent identity.
+    pub agent_id: String,
+    /// Optional AgentSight session identity.
+    pub session_id: Option<String>,
+    /// Root PID whose process tree receives the policy.
+    pub root_pid: i32,
+    /// Linux process start time used to reject PID reuse.
+    pub process_start_time: u64,
+    /// ActPlane-independent taint and destination policy.
+    pub policy: CredentialExfiltrationPolicy,
 }
 
 /// Desired policy binding for one Agent process tree.
@@ -133,6 +164,67 @@ pub enum Effect {
     Kill,
 }
 
+/// Explicit operations supported by the selected enforcement backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnforcementCapabilities {
+    /// Whether credential policies may run without changing operations.
+    pub credential_observe: bool,
+    /// Whether credential policies may record matching decisions.
+    pub credential_audit: bool,
+    /// Whether credential policies may block matching operations.
+    pub credential_enforce: bool,
+    /// Whether a policy may be atomically handed off to another policy.
+    pub policy_handoff: bool,
+    /// Whether containment may retarget a different process identity.
+    pub alternate_pid_retarget: bool,
+    /// Whether this backend is an explicit test or development implementation.
+    pub test_development: bool,
+}
+
+impl EnforcementCapabilities {
+    /// Returns a safe fallback for peers that did not send capability metadata.
+    pub const fn unsupported() -> Self {
+        Self {
+            credential_observe: false,
+            credential_audit: false,
+            credential_enforce: false,
+            policy_handoff: false,
+            alternate_pid_retarget: false,
+            test_development: false,
+        }
+    }
+
+    /// Returns the capabilities implemented by the production ActPlane adapter.
+    pub const fn actplane() -> Self {
+        Self {
+            credential_observe: true,
+            credential_audit: true,
+            credential_enforce: false,
+            policy_handoff: false,
+            alternate_pid_retarget: false,
+            test_development: false,
+        }
+    }
+
+    /// Returns the capabilities implemented only by the mock test backend.
+    pub const fn mock_development() -> Self {
+        Self {
+            credential_observe: true,
+            credential_audit: true,
+            credential_enforce: true,
+            policy_handoff: false,
+            alternate_pid_retarget: true,
+            test_development: true,
+        }
+    }
+}
+
+impl Default for EnforcementCapabilities {
+    fn default() -> Self {
+        Self::unsupported()
+    }
+}
+
 /// Runtime health returned by the selected enforcement backend.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -140,6 +232,9 @@ pub struct HealthStatus {
     pub ready: bool,
     /// Stable backend name such as `mock` or `actplane`.
     pub backend: String,
+    /// Operations this backend explicitly implements.
+    #[serde(default)]
+    pub capabilities: EnforcementCapabilities,
     /// Optional actionable readiness detail.
     pub message: Option<String>,
 }
@@ -198,7 +293,7 @@ pub struct Response {
     pub result: Result<ResponseBody, RemoteError>,
 }
 
-/// Successful response payloads supported by protocol version 2.
+/// Successful response payloads supported by protocol version 3.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "response", content = "data", rename_all = "snake_case")]
 pub enum ResponseBody {
@@ -214,6 +309,8 @@ pub enum ResponseBody {
     Subscribed,
     /// One violation on a subscription connection.
     Violation(ViolationEvent),
+    /// One normalized security event on a subscription connection.
+    SecurityEvent(SecurityEvent),
 }
 
 /// Sanitized operation failure returned across the trust boundary.
@@ -496,5 +593,91 @@ mod tests {
         let error = read_frame::<_, Request>(&mut BufReader::new(Cursor::new(input)))
             .expect_err("oversized input must fail");
         assert!(matches!(error, ProtocolError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn security_subscription_command_round_trips_as_one_frame() {
+        let request = Request::new(Command::SubscribeSecurityEvents);
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request).expect("fixture should encode");
+        let decoded: Request = read_frame(&mut BufReader::new(Cursor::new(bytes)))
+            .expect("fixture should decode")
+            .expect("frame should exist");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn security_event_response_round_trips_as_one_frame() {
+        let event = SecurityEvent::policy_decision(
+            EventIdentity {
+                binding_id: Uuid::new_v4(),
+                agent_id: "agent-1".into(),
+                agent_name: None,
+                session_id: Some("session-1".into()),
+                conversation_id: None,
+                tool_call_id: None,
+                pid: 42,
+                process_start_time: 101,
+                ppid: None,
+                cgroup_id: None,
+                protocol_version: PROTOCOL_VERSION,
+                enforcer_version: "0.1.0".into(),
+                actplane_revision: "fixture-revision".into(),
+            },
+            PolicyDecision {
+                policy_id: "credential-exfiltration".into(),
+                policy_revision: 1,
+                source_event_id: Uuid::new_v4(),
+                sink_event_id: Uuid::new_v4(),
+                mode: PolicyMode::Audit,
+                requested_effect: Effect::Notify,
+                blocked: false,
+                killed: false,
+                errno: None,
+                risk_score: 60,
+                reason: "audit fixture".into(),
+            },
+        );
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            result: Ok(ResponseBody::SecurityEvent(event)),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &response).expect("fixture should encode");
+        let decoded: Response = read_frame(&mut BufReader::new(Cursor::new(bytes)))
+            .expect("fixture should decode")
+            .expect("frame should exist");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn credential_policy_command_round_trips_as_one_frame() {
+        let request = Request::new(Command::ApplyCredentialPolicyLeased {
+            request: ApplyCredentialPolicy {
+                binding_id: Uuid::new_v4(),
+                agent_id: "agent-1".into(),
+                session_id: Some("session-1".into()),
+                root_pid: 42,
+                process_start_time: 101,
+                policy: CredentialExfiltrationPolicy {
+                    policy_id: "credential-exfiltration".into(),
+                    revision: 3,
+                    source_patterns: vec!["/root/.ssh/id_rsa".into()],
+                    trusted_endpoints: vec!["10.0.0.8".into()],
+                    taint_label: "CREDENTIAL".into(),
+                    taint_ttl_secs: 900,
+                    destination_scope: DestinationScope::PublicIpv4,
+                    mode: PolicyMode::Audit,
+                },
+            },
+            required_subscription_id: Uuid::new_v4(),
+        });
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request).expect("fixture should encode");
+        let decoded: Request = read_frame(&mut BufReader::new(Cursor::new(bytes)))
+            .expect("fixture should decode")
+            .expect("frame should exist");
+        assert_eq!(decoded, request);
     }
 }

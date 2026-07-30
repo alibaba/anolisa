@@ -122,7 +122,17 @@ async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
 export interface EnforcementHealth {
   ready: boolean;
   backend: string;
+  capabilities: EnforcementCapabilities;
   message: string | null;
+}
+
+export interface EnforcementCapabilities {
+  credential_observe: boolean;
+  credential_audit: boolean;
+  credential_enforce: boolean;
+  policy_handoff: boolean;
+  alternate_pid_retarget: boolean;
+  test_development: boolean;
 }
 
 export interface EnforcementBinding {

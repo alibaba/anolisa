@@ -462,6 +462,8 @@ fn handle_controlled_connection(
             Ok(ResponseBody::Health(HealthStatus {
                 ready: state.health_ready,
                 backend: "controlled".into(),
+                capabilities:
+                    agentsight_enforcement_protocol::EnforcementCapabilities::mock_development(),
                 message: state.health_message.clone(),
             }))
         }

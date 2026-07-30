@@ -4,7 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use actix_web::{HttpResponse, delete, get, post, web};
-use agentsight_enforcement_protocol::{ApplyPolicy, Binding, BindingState, HealthStatus};
+use agentsight_enforcement_protocol::{
+    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
+    DestinationScope, HealthStatus, PolicyMode,
+};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -28,6 +31,20 @@ pub(super) struct FileBindingRequest {
     session_id: Option<String>,
     root_pid: i32,
     path: PathBuf,
+}
+
+/// Product fields for a taint-aware credential exfiltration binding.
+#[derive(Debug, Deserialize)]
+pub(super) struct CredentialBindingRequest {
+    agent_id: String,
+    session_id: Option<String>,
+    root_pid: i32,
+    source_path: PathBuf,
+    trusted_endpoint: Option<String>,
+    revision: u64,
+    mode: PolicyMode,
+    taint_ttl_secs: Option<u64>,
+    destination_scope: DestinationScope,
 }
 
 /// Returns privileged backend readiness.
@@ -87,6 +104,30 @@ pub(super) async fn apply_file_binding(
         }
     };
     run_binding(move || coordinator.apply(request)).await
+}
+
+/// Builds a product-level taint policy and delegates DSL compilation to the enforcer.
+#[post("/enforcement/credential-bindings")]
+pub(super) async fn apply_credential_binding(
+    data: web::Data<AppState>,
+    body: web::Json<CredentialBindingRequest>,
+) -> HttpResponse {
+    let Some(coordinator) = data.enforcement.clone() else {
+        return unavailable();
+    };
+    let request = match build_credential_binding(body.into_inner()) {
+        Ok(request) => request,
+        Err(message) => {
+            log::warn!("rejecting credential enforcement binding: {message}");
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "invalid_credential_binding",
+                "credential enforcement binding is invalid",
+                false,
+            );
+        }
+    };
+    run_binding(move || coordinator.apply_credential_policy(request)).await
 }
 
 /// Lists AgentSight's persisted desired binding states.
@@ -221,6 +262,49 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
         policy_id: format!("agentsight-file-open:{binding_id}"),
         policy_revision: FILE_POLICY_REVISION.into(),
         policy_dsl,
+    })
+}
+
+fn build_credential_binding(
+    request: CredentialBindingRequest,
+) -> Result<ApplyCredentialPolicy, String> {
+    let agent_id = request.agent_id.trim();
+    if agent_id.is_empty() || agent_id.len() > 128 {
+        return Err("agent_id must contain 1 to 128 characters".into());
+    }
+    let source_path = validate_policy_path(&request.source_path)?;
+    let source_path = source_path
+        .to_str()
+        .ok_or_else(|| "source_path must be valid UTF-8".to_string())?
+        .to_string();
+    let process_start_time = read_target_start_time(request.root_pid)?;
+    let trusted_endpoints = request
+        .trusted_endpoint
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .into_iter()
+        .collect();
+    let policy = CredentialExfiltrationPolicy {
+        policy_id: "agentsight-credential-exfiltration".into(),
+        revision: request.revision,
+        source_patterns: vec![source_path],
+        trusted_endpoints,
+        taint_label: "CREDENTIAL".into(),
+        taint_ttl_secs: request.taint_ttl_secs.unwrap_or(900),
+        destination_scope: request.destination_scope,
+        mode: request.mode,
+    };
+    policy.validate().map_err(|error| error.to_string())?;
+    Ok(ApplyCredentialPolicy {
+        binding_id: Uuid::new_v4(),
+        agent_id: agent_id.into(),
+        session_id: request
+            .session_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        root_pid: request.root_pid,
+        process_start_time,
+        policy,
     })
 }
 
@@ -420,6 +504,49 @@ mod tests {
     }
 
     #[test]
+    fn builds_taint_aware_credential_binding() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("fixture process should start");
+        let path = std::env::temp_dir().join(format!("agentsight-credential-{}", Uuid::new_v4()));
+        fs::write(&path, b"fixture").expect("fixture file should exist");
+
+        let binding = build_credential_binding(CredentialBindingRequest {
+            agent_id: " qoder ".into(),
+            session_id: Some(" session-1 ".into()),
+            root_pid: child.id() as i32,
+            source_path: path.clone(),
+            trusted_endpoint: Some(" 10.0.0.8 ".into()),
+            revision: 3,
+            mode: PolicyMode::Audit,
+            taint_ttl_secs: None,
+            destination_scope: DestinationScope::PublicIpv4,
+        })
+        .expect("valid credential policy should build");
+
+        assert_eq!(binding.agent_id, "qoder");
+        assert_eq!(binding.session_id.as_deref(), Some("session-1"));
+        assert_eq!(binding.policy.mode, PolicyMode::Audit);
+        assert_eq!(binding.policy.revision, 3);
+        assert_eq!(binding.policy.taint_label, "CREDENTIAL");
+        assert_eq!(binding.policy.taint_ttl_secs, 900);
+        assert_eq!(
+            binding.policy.destination_scope,
+            DestinationScope::PublicIpv4
+        );
+        assert_eq!(binding.policy.trusted_endpoints, ["10.0.0.8"]);
+        assert_eq!(
+            binding.policy.source_patterns,
+            [path.canonicalize().unwrap().to_str().unwrap()]
+        );
+
+        child.kill().expect("fixture process should stop");
+        child.wait().expect("fixture process should exit");
+        fs::remove_file(path).expect("fixture file should be removed");
+    }
+
+    #[test]
     fn rejects_unsafe_file_binding_inputs() {
         let directory = std::env::temp_dir();
         assert!(
@@ -598,5 +725,65 @@ mod tests {
             serde_json::Value::String("enforcement_unavailable".into())
         );
         assert_eq!(value["error"]["retryable"], serde_json::Value::Bool(true));
+    }
+
+    #[actix_web::test]
+    async fn coordinator_errors_do_not_expose_backend_details() {
+        let response = coordinator_error(EnforcementCoordinatorError::Client(
+            crate::enforcement::EnforcementError::Remote {
+                code: "compile_failure".into(),
+                message: "socket /run/agentsight/private.sock rejected /root/credential".into(),
+            },
+        ));
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("/run/agentsight/private.sock"));
+        assert!(!text.contains("/root/credential"));
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(value["error"]["code"], "compile_failure");
+        assert_eq!(value["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn successful_binding_and_health_payloads_redact_internal_details() {
+        let request = agentsight_enforcement_protocol::ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "agent-1".into(),
+            session_id: None,
+            root_pid: 42,
+            process_start_time: 7,
+            policy_id: "policy-1".into(),
+            policy_revision: "revision-1".into(),
+            policy_dsl: "label AGENT".into(),
+        };
+        let binding = public_binding(Binding {
+            request,
+            state: BindingState::Degraded,
+            message: Some("socket /run/agentsight/private.sock failed".into()),
+            domain_id: None,
+        });
+        let status = public_health(HealthStatus {
+            ready: false,
+            backend: "actplane".into(),
+            capabilities: agentsight_enforcement_protocol::EnforcementCapabilities::actplane(),
+            message: Some("database /root/private/enforcement.db failed".into()),
+        });
+
+        assert_eq!(
+            binding.message.as_deref(),
+            Some("enforcement binding is degraded")
+        );
+        assert_eq!(
+            status.message.as_deref(),
+            Some("enforcement backend is not ready")
+        );
     }
 }

@@ -3,18 +3,26 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
+    DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction, HealthStatus,
+    NetworkAction, NetworkDirection, PolicyDecision, PolicyMode, SecurityEvent, SecurityEventKind,
+    TaintTransition, TaintTransitionKind, ViolationEvent,
+    classify_public_ipv4_destination,
 };
 use uuid::Uuid;
 
+use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
 /// In-memory single-binding backend that performs no kernel operations.
 pub struct MockBackend {
     bindings: Mutex<HashMap<Uuid, Binding>>,
+    credential_policies: Mutex<HashMap<Uuid, CredentialExfiltrationPolicy>>,
     events: EventHub,
+    security_events: SecurityEventHub,
 }
 
 impl Default for MockBackend {
@@ -28,15 +36,52 @@ impl MockBackend {
     pub fn new() -> Self {
         Self {
             bindings: Mutex::new(HashMap::new()),
+            credential_policies: Mutex::new(HashMap::new()),
             events: EventHub::default(),
+            security_events: SecurityEventHub::default(),
         }
+    }
+
+    fn apply_policy(
+        &self,
+        request: ApplyPolicy,
+        credential_policy: Option<CredentialExfiltrationPolicy>,
+    ) -> Result<Binding, BackendError> {
+        let mut bindings = self.bindings();
+        let mut credential_policies = self.credential_policies();
+        if let Some(existing) = bindings.get(&request.binding_id) {
+            return if existing.request == request
+                && credential_policies.get(&request.binding_id) == credential_policy.as_ref()
+            {
+                Ok(existing.clone())
+            } else {
+                Err(BackendError::BindingConflict(request.binding_id))
+            };
+        }
+        if !bindings.is_empty() {
+            return Err(BackendError::BindingConflict(request.binding_id));
+        }
+
+        let binding = Binding {
+            request,
+            state: BindingState::Enforced,
+            message: Some("mock acknowledgement; no kernel policy attached".into()),
+            domain_id: Some(1),
+        };
+        if let Some(policy) = credential_policy {
+            credential_policies.insert(binding.request.binding_id, policy);
+        }
+        bindings.insert(binding.request.binding_id, binding.clone());
+        Ok(binding)
     }
 
     #[cfg(test)]
     fn with_event_capacity(capacity: usize) -> Self {
         Self {
             bindings: Mutex::new(HashMap::new()),
+            credential_policies: Mutex::new(HashMap::new()),
             events: EventHub::new(capacity),
+            security_events: SecurityEventHub::new(capacity),
         }
     }
 
@@ -54,8 +99,157 @@ impl MockBackend {
         Ok(())
     }
 
+    /// Emits a deterministic source, taint, sink, and decision chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError::MissingBinding`] when `binding_id` is unknown.
+    pub fn emit_credential_exfiltration(
+        &self,
+        binding_id: Uuid,
+        source_path: &str,
+        destination: &str,
+    ) -> Result<(), BackendError> {
+        self.emit_credential_exfiltration_after(
+            binding_id,
+            source_path,
+            destination,
+            Duration::ZERO,
+        )
+    }
+
+    /// Emits a deterministic chain after a simulated delay from source read.
+    ///
+    /// Product policies suppress trusted, non-public, and expired sinks. This
+    /// keeps the mock faithful to the product contract even when the pinned
+    /// ActPlane backend must reject an unrepresentable enforcement policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError::MissingBinding`] when `binding_id` is unknown.
+    pub fn emit_credential_exfiltration_after(
+        &self,
+        binding_id: Uuid,
+        source_path: &str,
+        destination: &str,
+        elapsed_since_source: Duration,
+    ) -> Result<(), BackendError> {
+        let binding = self
+            .bindings()
+            .get(&binding_id)
+            .cloned()
+            .ok_or(BackendError::MissingBinding(binding_id))?;
+        let revision = binding.request.policy_revision.parse().unwrap_or(1);
+        let product_policy = self.credential_policies().get(&binding_id).cloned();
+        let mode = product_policy.as_ref().map_or_else(
+            || mock_policy_mode(&binding.request.policy_dsl),
+            |policy| policy.mode,
+        );
+        let destination_class = classify_destination(destination);
+        if let Some(policy) = &product_policy
+            && (elapsed_since_source >= Duration::from_secs(policy.taint_ttl_secs)
+                || policy
+                    .trusted_endpoints
+                    .iter()
+                    .any(|trusted| trusted == destination)
+                || destination_class != DestinationClass::Public)
+        {
+            return Ok(());
+        }
+        let identity = event_identity(&binding);
+        let base_time = unix_epoch_ns();
+        let source_event_id = Uuid::new_v4();
+        let sink_event_id = Uuid::new_v4();
+
+        let events = [
+            SecurityEvent {
+                event_id: source_event_id,
+                occurred_at_ns: base_time,
+                observed_at_ns: base_time,
+                identity: identity.clone(),
+                kind: SecurityEventKind::FileAction(FileAction {
+                    policy_id: binding.request.policy_id.clone(),
+                    policy_revision: revision,
+                    operation: "read".into(),
+                    path: redact_home_path(source_path),
+                    resource_class: "credential".into(),
+                    succeeded: true,
+                    errno: None,
+                    rule_id: Some("credential-source".into()),
+                }),
+            },
+            SecurityEvent {
+                event_id: Uuid::new_v4(),
+                occurred_at_ns: base_time.saturating_add(1),
+                observed_at_ns: base_time.saturating_add(1),
+                identity: identity.clone(),
+                kind: SecurityEventKind::TaintTransition(TaintTransition {
+                    policy_id: binding.request.policy_id.clone(),
+                    policy_revision: revision,
+                    label: "credential".into(),
+                    transition: TaintTransitionKind::Add,
+                    source_pid: binding.request.root_pid,
+                    source_process_start_time: binding.request.process_start_time,
+                    target_pid: binding.request.root_pid,
+                    target_process_start_time: binding.request.process_start_time,
+                    reason: "sensitive credential source read".into(),
+                }),
+            },
+            SecurityEvent {
+                event_id: sink_event_id,
+                occurred_at_ns: base_time.saturating_add(2),
+                observed_at_ns: base_time.saturating_add(2),
+                identity: identity.clone(),
+                kind: SecurityEventKind::NetworkAction(NetworkAction {
+                    policy_id: binding.request.policy_id.clone(),
+                    policy_revision: revision,
+                    direction: NetworkDirection::Outbound,
+                    destination: destination.into(),
+                    destination_class,
+                    protocol: "tcp".into(),
+                    succeeded: mode != PolicyMode::Enforce,
+                    errno: (mode == PolicyMode::Enforce).then_some(libc::EPERM),
+                    rule_id: Some("credential-public-sink".into()),
+                }),
+            },
+            SecurityEvent {
+                event_id: Uuid::new_v4(),
+                occurred_at_ns: base_time.saturating_add(3),
+                observed_at_ns: base_time.saturating_add(3),
+                identity,
+                kind: SecurityEventKind::PolicyDecision(PolicyDecision {
+                    policy_id: binding.request.policy_id,
+                    policy_revision: revision,
+                    source_event_id,
+                    sink_event_id,
+                    mode,
+                    requested_effect: if mode == PolicyMode::Enforce {
+                        Effect::Block
+                    } else {
+                        Effect::Notify
+                    },
+                    blocked: mode == PolicyMode::Enforce,
+                    killed: false,
+                    errno: (mode == PolicyMode::Enforce).then_some(libc::EPERM),
+                    risk_score: 85,
+                    reason: "credential taint reached unknown public endpoint".into(),
+                }),
+            },
+        ];
+        for event in events {
+            self.security_events.publish(event);
+        }
+        Ok(())
+    }
+
     fn bindings(&self) -> MutexGuard<'_, HashMap<Uuid, Binding>> {
         self.bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn credential_policies(&self) -> MutexGuard<'_, HashMap<Uuid, CredentialExfiltrationPolicy>> {
+        self.credential_policies
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -63,38 +257,66 @@ impl MockBackend {
 
 impl EnforcementBackend for MockBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
-        Ok(self.events.reflect_delivery_loss(HealthStatus {
+        let health = self.events.reflect_delivery_loss(HealthStatus {
             ready: true,
             backend: "mock".into(),
+            capabilities: EnforcementCapabilities::mock_development(),
             message: Some("mock backend does not enforce kernel operations".into()),
-        }))
+        });
+        Ok(self.security_events.reflect_delivery_loss(health))
     }
 
     fn apply(&self, request: ApplyPolicy) -> Result<Binding, BackendError> {
-        let mut bindings = self.bindings();
-        if let Some(existing) = bindings.get(&request.binding_id) {
-            return if existing.request == request {
-                Ok(existing.clone())
-            } else {
-                Err(BackendError::BindingConflict(request.binding_id))
-            };
-        }
-        if !bindings.is_empty() {
-            return Err(BackendError::BindingConflict(request.binding_id));
-        }
+        self.apply_policy(request, None)
+    }
 
-        let binding = Binding {
-            request,
-            state: BindingState::Enforced,
-            message: Some("mock acknowledgement; no kernel policy attached".into()),
-            domain_id: Some(1),
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, BackendError> {
+        request
+            .policy
+            .validate()
+            .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
+        let action = if request.policy.mode == PolicyMode::Enforce {
+            "block"
+        } else {
+            "notify"
         };
-        bindings.insert(binding.request.binding_id, binding.clone());
-        Ok(binding)
+        let mut policy_dsl = format!(
+            "mode {} ttl {}\nsource AGENT = exec \"**\"\n",
+            policy_mode_name(request.policy.mode),
+            request.policy.taint_ttl_secs
+        );
+        for source in &request.policy.source_patterns {
+            policy_dsl.push_str(&format!(
+                "source {} = file \"{}\"\n",
+                request.policy.taint_label, source
+            ));
+        }
+        policy_dsl.push_str(&format!(
+            "rule agentsight-credential-exfiltration:\n  {action} connect endpoint \"*\" if {}\n",
+            request.policy.taint_label,
+        ));
+        let product_policy = request.policy.clone();
+        self.apply_policy(
+            ApplyPolicy {
+                binding_id: request.binding_id,
+                agent_id: request.agent_id,
+                session_id: request.session_id,
+                root_pid: request.root_pid,
+                process_start_time: request.process_start_time,
+                policy_id: request.policy.policy_id,
+                policy_revision: request.policy.revision.to_string(),
+                policy_dsl,
+            },
+            Some(product_policy),
+        )
     }
 
     fn detach(&self, binding_id: Uuid) -> Result<(), BackendError> {
         if self.bindings().remove(&binding_id).is_some() {
+            self.credential_policies().remove(&binding_id);
             Ok(())
         } else {
             Err(BackendError::MissingBinding(binding_id))
@@ -118,6 +340,71 @@ impl EnforcementBackend for MockBackend {
     fn record_required_delivery_loss(&self, count: u64) {
         self.events.record_required_delivery_loss(count);
     }
+
+    fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
+        self.security_events.subscribe()
+    }
+}
+
+fn event_identity(binding: &Binding) -> EventIdentity {
+    EventIdentity {
+        binding_id: binding.request.binding_id,
+        agent_id: binding.request.agent_id.clone(),
+        agent_name: Some("mock-agent".into()),
+        session_id: binding.request.session_id.clone(),
+        conversation_id: None,
+        tool_call_id: None,
+        pid: binding.request.root_pid,
+        process_start_time: binding.request.process_start_time,
+        ppid: None,
+        cgroup_id: None,
+        protocol_version: agentsight_enforcement_protocol::PROTOCOL_VERSION,
+        enforcer_version: env!("CARGO_PKG_VERSION").into(),
+        actplane_revision: "mock".into(),
+    }
+}
+
+fn mock_policy_mode(policy_dsl: &str) -> PolicyMode {
+    if policy_dsl.split_whitespace().any(|word| word == "enforce") {
+        PolicyMode::Enforce
+    } else if policy_dsl.split_whitespace().any(|word| word == "observe") {
+        PolicyMode::Observe
+    } else {
+        PolicyMode::Audit
+    }
+}
+
+fn policy_mode_name(mode: PolicyMode) -> &'static str {
+    match mode {
+        PolicyMode::Observe => "observe",
+        PolicyMode::Audit => "audit",
+        PolicyMode::Enforce => "enforce",
+    }
+}
+
+fn classify_destination(destination: &str) -> DestinationClass {
+    classify_public_ipv4_destination(destination)
+}
+
+fn redact_home_path(path: &str) -> String {
+    if let Some(relative) = path.strip_prefix("/root/") {
+        return format!("~/{relative}");
+    }
+    let Some(home_relative) = path.strip_prefix("/home/") else {
+        return path.into();
+    };
+    let Some((_, relative)) = home_relative.split_once('/') else {
+        return path.into();
+    };
+    format!("~/{relative}")
+}
+
+fn unix_epoch_ns() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    nanos.min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

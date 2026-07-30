@@ -9,7 +9,10 @@ ACTPLANE_POST_0003_BPF_LIB_BLOB="f4c0598596a5134725cc1e2fd27da4a5f6a16cdd"
 ACTPLANE_POST_0004_BPF_LIB_BLOB="b45756c17b78566162794e6520146165c12e196a"
 ACTPLANE_POST_0005_BPF_LIB_BLOB="2d3c79b85602fffe7b83481228424e3a35d7eb1c"
 ACTPLANE_POST_0006_BPF_LIB_BLOB="ca2fac0a7851c523c5b858b2dd835bb8b982c2bc"
-ACTPLANE_PATCHED_BPF_LIB_BLOB="6ddf254640e41c227a8e6d794cef247f2705bd26"
+ACTPLANE_POST_0007_BPF_LIB_BLOB="6ddf254640e41c227a8e6d794cef247f2705bd26"
+ACTPLANE_POST_0008_BPF_LIB_BLOB="2fe21a88571d3f929e9fb2ab01efb319a261cde0"
+ACTPLANE_POST_0009_BPF_LIB_BLOB="8d8ff0ee4d000c24e783fb74917b3c0fdc5f3760"
+ACTPLANE_PATCHED_BPF_LIB_BLOB="9aa60178ba61a6ad0723b1fe01e823ee94ee742d"
 ACTPLANE_PREBUILT_BPF_BLOB="0ef15841f84be784774024ad844e70bc6124a753"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -18,22 +21,41 @@ PATCH_DIR="$AGENTSIGHT_ROOT/patches/actplane"
 PATCH_0004_FILE="$PATCH_DIR/0004-drain-stale-pinned-events.patch"
 PATCH_0005_FILE="$PATCH_DIR/0005-document-pinned-drain-ownership.patch"
 PATCH_0006_FILE="$PATCH_DIR/0006-bound-startup-event-drain.patch"
-LATEST_PATCH_FILE="$PATCH_DIR/0007-gate-pinned-ring-consumption.patch"
+PATCH_0007_FILE="$PATCH_DIR/0007-gate-pinned-ring-consumption.patch"
+PATCH_0008_FILE="$PATCH_DIR/0008-reserve-network-policy-hooks.patch"
+PATCH_0009_FILE="$PATCH_DIR/0009-add-credential-exfiltration-profile.patch"
+LATEST_PATCH_FILE="$PATCH_DIR/0010-enable-credential-notify-connect.patch"
 PATCH_FILES="$PATCH_DIR/0001-add-file-enforcement-profile.patch
 $PATCH_DIR/0002-validate-file-enforcement-profile.patch
 $PATCH_DIR/0003-pin-profile-metadata.patch
 $PATCH_0004_FILE
 $PATCH_0005_FILE
 $PATCH_0006_FILE
+$PATCH_0007_FILE
+$PATCH_0008_FILE
+$PATCH_0009_FILE
 $LATEST_PATCH_FILE"
 POST_0003_PATCH_FILES="$PATCH_0004_FILE
 $PATCH_0005_FILE
 $PATCH_0006_FILE
+$PATCH_0007_FILE
+$PATCH_0008_FILE
+$PATCH_0009_FILE
 $LATEST_PATCH_FILE"
 POST_0004_PATCH_FILES="$PATCH_0005_FILE
 $PATCH_0006_FILE
+$PATCH_0007_FILE
+$PATCH_0008_FILE
+$PATCH_0009_FILE
 $LATEST_PATCH_FILE"
 POST_0005_PATCH_FILES="$PATCH_0006_FILE
+$PATCH_0007_FILE
+$PATCH_0008_FILE
+$PATCH_0009_FILE
+$LATEST_PATCH_FILE"
+POST_0006_PATCH_FILES="$PATCH_0007_FILE
+$PATCH_0008_FILE
+$PATCH_0009_FILE
 $LATEST_PATCH_FILE"
 CARGO=${CARGO:-cargo}
 
@@ -130,6 +152,21 @@ elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0005_BPF_LIB_BLOB" ]; then
         git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0006_BPF_LIB_BLOB" ]; then
+    for patch_file in $POST_0006_PATCH_FILES; do
+        git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
+    done
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0007_BPF_LIB_BLOB" ]; then
+    for patch_file in "$PATCH_0008_FILE" "$PATCH_0009_FILE" "$LATEST_PATCH_FILE"; do
+        git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
+    done
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0008_BPF_LIB_BLOB" ]; then
+    for patch_file in "$PATCH_0009_FILE" "$LATEST_PATCH_FILE"; do
+        git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
+    done
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0009_BPF_LIB_BLOB" ]; then
     git -C "$SOURCE_DIR" apply --unidiff-zero --check "$LATEST_PATCH_FILE"
     git -C "$SOURCE_DIR" apply --unidiff-zero "$LATEST_PATCH_FILE"
 elif [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ]; then
