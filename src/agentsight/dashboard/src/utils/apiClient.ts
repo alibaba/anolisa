@@ -180,6 +180,41 @@ export interface FileBindingInput {
   path: string;
 }
 
+export type EnforcementPolicyMode = 'observe' | 'audit' | 'enforce';
+export type CredentialDestinationScope = 'public_ipv4';
+
+export function enforcementSupportsMode(
+  health: EnforcementHealth | null,
+  mode: EnforcementPolicyMode,
+): boolean {
+  if (health?.ready !== true) return false;
+  if (mode === 'observe') return health.capabilities.credential_observe;
+  if (mode === 'audit') return health.capabilities.credential_audit;
+  return health.capabilities.credential_enforce;
+}
+
+export function enforcementViolationTotal(
+  violations: ReadonlyArray<Pick<EnforcementViolation, 'blocked'>>,
+  health: EnforcementHealth | null,
+): number {
+  if (health?.capabilities.credential_enforce === true) {
+    return violations.filter((event) => event.blocked).length;
+  }
+  return violations.length;
+}
+
+export interface CredentialBindingInput {
+  agent_id: string;
+  session_id?: string;
+  root_pid: number;
+  source_path: string;
+  trusted_endpoint?: string;
+  revision: number;
+  mode: EnforcementPolicyMode;
+  taint_ttl_secs?: number;
+  destination_scope: CredentialDestinationScope;
+}
+
 export class EnforcementApiError extends Error {
   constructor(
     public readonly status: number,
@@ -240,6 +275,13 @@ export const fetchEnforcementViolations = (limit = 100) =>
 
 export const createFileBinding = (input: FileBindingInput) =>
   enforcementRequest<EnforcementBinding>('/api/enforcement/file-bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+export const createCredentialBinding = (input: CredentialBindingInput) =>
+  enforcementRequest<EnforcementBinding>('/api/enforcement/credential-bindings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -1135,6 +1177,48 @@ export interface SecurityTimelineResponse {
   [key: string]: unknown;
 }
 
+export type SecurityReviewStatus =
+  | 'open'
+  | 'confirmed'
+  | 'false_positive'
+  | 'accepted_risk'
+  | 'resolved';
+
+export type SecurityRiskSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface SecurityRiskCase {
+  case_id: string;
+  policy_id: string;
+  policy_revision: number;
+  agent_id: string;
+  session_id?: string | null;
+  severity: SecurityRiskSeverity;
+  risk_score: number;
+  status: SecurityReviewStatus;
+  blocked: boolean;
+  opened_at_ns: number;
+  updated_at_ns: number;
+  summary: string;
+}
+
+export interface SecurityEvidenceEvent {
+  event_id: string;
+  event_type: string;
+  occurred_at_ns: number;
+  identity: {
+    pid: number;
+    session_id?: string | null;
+    tool_call_id?: string | null;
+    [key: string]: unknown;
+  };
+  event: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface SecurityRiskCaseDetail extends SecurityRiskCase {
+  evidence: SecurityEvidenceEvent[];
+}
+
 export type SecurityQueryValue = string | number | boolean | null | undefined;
 
 export interface SecurityTimeRangeParams {
@@ -1198,7 +1282,18 @@ function buildQuery(params?: object): string {
   return qs ? `?${qs}` : '';
 }
 
-async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
+export async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
+  return fetchSecurityApi<T>(url, false);
+}
+
+async function auditFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
+  return fetchSecurityApi<T>(url, true);
+}
+
+async function fetchSecurityApi<T>(
+  url: string,
+  rejectHttpErrorBeforeState: boolean,
+): Promise<SecurityApiResponse<T>> {
   const res = await fetch(url, { credentials: 'same-origin' });
   if (res.status === 401) {
     window.location.hash = '#/login';
@@ -1212,6 +1307,17 @@ async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
     } catch {
       body = text;
     }
+  }
+
+  if (!res.ok && rejectHttpErrorBeforeState) {
+    const errorBody = body && typeof body === 'object' && 'error' in body
+      ? (body as { error: SecurityRestError }).error
+      : {
+          code: 'security_api_error',
+          message: typeof body === 'string' && body ? body : res.statusText,
+          retryable: false,
+        };
+    throw new SecurityApiClientError(res.status, errorBody);
   }
 
   if (body && typeof body === 'object' && 'state' in body) {
@@ -1313,6 +1419,106 @@ export async function fetchSecurityTimeline(
       run_id,
     })}`
   );
+}
+
+export async function fetchAuditSummary(
+  params?: SecurityTimeRangeParams & { limit?: number },
+): Promise<SecurityApiResponse<SecuritySummary>> {
+  return auditFetch<SecuritySummary>(
+    `${API_BASE}/api/audit/summary${buildQuery(params)}`,
+  );
+}
+
+export async function fetchAuditEvents(
+  params?: SecurityEventListParams,
+): Promise<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>> {
+  return auditFetch<SecurityPaginated<SecurityEventRecord>>(
+    `${API_BASE}/api/audit/events${buildQuery(params)}`,
+  );
+}
+
+export async function fetchAuditSessions(
+  params?: SecuritySessionListParams,
+): Promise<SecurityApiResponse<SecurityPaginated<SecuritySessionSummary>>> {
+  return auditFetch<SecurityPaginated<SecuritySessionSummary>>(
+    `${API_BASE}/api/audit/sessions${buildQuery(params)}`,
+  );
+}
+
+export async function fetchSecurityCases(
+  params?: { limit?: number; offset?: number },
+): Promise<SecurityApiResponse<SecurityPaginated<SecurityRiskCase>>> {
+  return auditFetch<SecurityPaginated<SecurityRiskCase>>(
+    `${API_BASE}/api/audit/cases${buildQuery(params)}`,
+  );
+}
+
+export async function fetchSecurityCase(
+  caseId: string,
+): Promise<SecurityApiResponse<SecurityRiskCaseDetail>> {
+  const response = await auditFetch<SecurityRiskCaseDetail>(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}`,
+  );
+  if (!isSecurityRiskCaseDetail(response.data)) {
+    throw new SecurityApiClientError(200, {
+      code: 'malformed_security_case',
+      message: 'Security API returned a malformed case detail',
+      retryable: false,
+    });
+  }
+  return response;
+}
+
+function isSecurityRiskCaseDetail(value: unknown): value is SecurityRiskCaseDetail {
+  if (!isObjectRecord(value) || !Array.isArray(value.evidence)) return false;
+  const hasCaseFields = [
+    'case_id',
+    'policy_id',
+    'agent_id',
+    'severity',
+    'status',
+    'summary',
+  ].every((field) => typeof value[field] === 'string')
+    && typeof value.policy_revision === 'number'
+    && typeof value.risk_score === 'number'
+    && typeof value.blocked === 'boolean'
+    && typeof value.opened_at_ns === 'number'
+    && typeof value.updated_at_ns === 'number';
+  return hasCaseFields && value.evidence.every((event) => (
+    isObjectRecord(event)
+      && typeof event.event_id === 'string'
+      && typeof event.event_type === 'string'
+      && typeof event.occurred_at_ns === 'number'
+      && isObjectRecord(event.identity)
+      && isObjectRecord(event.event)
+  ));
+}
+
+export async function reviewSecurityCase(
+  caseId: string,
+  status: Exclude<SecurityReviewStatus, 'open'>,
+): Promise<SecurityApiResponse<SecurityRiskCase>> {
+  const response = await fetch(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/review`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    },
+  );
+  const body = await response.json().catch(() => null) as SecurityApiResponse<SecurityRiskCase> | {
+    error?: SecurityRestError;
+  } | null;
+  if (!response.ok || !body || !('state' in body)) {
+    const error = body && 'error' in body ? body.error : undefined;
+    throw new SecurityApiClientError(response.status, error ?? {
+      code: 'security_review_failed',
+      message: response.statusText || 'Risk case review failed',
+      retryable: false,
+    });
+  }
+  return body;
 }
 
 // ─── Skill Metrics types ──────────────────────────────────────────────────────

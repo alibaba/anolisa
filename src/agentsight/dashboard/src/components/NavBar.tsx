@@ -17,6 +17,7 @@ const navItems: NavItem[] = [
   { path: '/optimization', label: '优化分析', icon: '🔬', capability: 'optimization' },
   { path: '/skills', label: 'Skill 指标', icon: '🧩', capability: 'skills' },
   { path: '/security', label: '安全可观测', icon: '🛡️', capability: 'security' },
+  { path: '/audit', label: '系统审计', icon: '📋', capability: 'security' },
   { path: '/enforcement', label: '风险拦截', icon: '⛔', capability: 'enforcement' },
   { path: '/atif', label: '轨迹查看', icon: '🔍', capability: 'atif' },
   { path: '/settings', label: '设置', icon: '⚙️', capability: 'settings' },
