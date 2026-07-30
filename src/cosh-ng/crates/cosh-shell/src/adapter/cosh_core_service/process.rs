@@ -47,6 +47,12 @@ pub(super) struct PersistentProcess {
     pub(super) approval_mode: CoshApprovalMode,
     pub(super) session_id: Option<String>,
     pub(super) workspace_scope: String,
+    /// Resumability reported by the `system/init` this process emitted.
+    ///
+    /// cosh-core announces it once per process, in response to `initialize`, so
+    /// a per-turn stream parser only observes it on the first turn. Later turns
+    /// read it from here instead of defaulting to "unknown".
+    pub(super) session_resumable: Option<bool>,
 }
 
 pub(super) fn spawn_response_writer(
@@ -199,6 +205,7 @@ pub(super) fn spawn_process(
         approval_mode,
         session_id: None,
         workspace_scope: String::new(),
+        session_resumable: None,
     })
 }
 

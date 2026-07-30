@@ -25,6 +25,7 @@ pub(super) struct ClaudeStreamParser {
     completed: bool,
     session_capture_enabled: bool,
     session_resumable: Option<bool>,
+    error_code: Option<String>,
     session_error_code: Option<String>,
     session_error_phase: Option<String>,
 }
@@ -44,6 +45,7 @@ impl ClaudeStreamParser {
             completed: false,
             session_capture_enabled: true,
             session_resumable: None,
+            error_code: None,
             session_error_code: None,
             session_error_phase: None,
         }
@@ -53,8 +55,31 @@ impl ClaudeStreamParser {
         self.session_resumable
     }
 
+    pub(super) fn with_session_resumable(mut self, resumable: Option<bool>) -> Self {
+        if let Some(resumable) = resumable {
+            self.set_session_resumable(resumable);
+        }
+        self
+    }
+
+    fn set_session_resumable(&mut self, resumable: bool) {
+        self.session_capture_enabled = resumable;
+        self.session_resumable = Some(resumable);
+        if !resumable {
+            if let Some(state) = &self.session_state {
+                if let Ok(mut current) = state.lock() {
+                    *current = None;
+                }
+            }
+        }
+    }
+
     pub(super) fn session_error_code(&self) -> Option<&str> {
         self.session_error_code.as_deref()
+    }
+
+    pub(super) fn error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
     }
 
     pub(super) fn session_error_phase(&self) -> Option<&str> {
@@ -113,6 +138,10 @@ impl ClaudeStreamParser {
 
         if value.get("type").and_then(|value| value.as_str()) == Some("result") {
             self.completed = true;
+            self.error_code = value
+                .get("error_code")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
             self.session_error_code = value
                 .get("session_error_code")
                 .and_then(|value| value.as_str())
@@ -147,14 +176,8 @@ impl ClaudeStreamParser {
                 .get("session_resumable")
                 .and_then(|value| value.as_bool())
             {
-                self.session_capture_enabled = resumable;
-                self.session_resumable = Some(resumable);
+                self.set_session_resumable(resumable);
                 if !resumable {
-                    if let Some(state) = &self.session_state {
-                        if let Ok(mut current) = state.lock() {
-                            *current = None;
-                        }
-                    }
                     return;
                 }
             }

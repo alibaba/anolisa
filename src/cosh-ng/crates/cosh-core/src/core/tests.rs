@@ -1701,7 +1701,9 @@ fn unparseable_shell_turn(call_id: &str) -> Vec<GenerateEvent> {
     ]
 }
 
-async fn run_shell_turns(turns: Vec<Vec<GenerateEvent>>) -> (Result<(), String>, String) {
+async fn run_shell_turns(
+    turns: Vec<Vec<GenerateEvent>>,
+) -> (Result<AgentTurnOutcome, String>, String) {
     let mut config = CoreConfig::default();
     config.agent.approval_mode = "trust".to_string();
     let tools = ToolRegistry::with_defaults_for_test();

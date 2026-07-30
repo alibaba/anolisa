@@ -94,6 +94,12 @@ resolved from the workspace cosh-shell sends to Core. See the
 [session recovery guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-recovery.md)
 and [session compaction guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-compaction.md).
 
+Each Agent request defaults to 50 model turns. If the limit is reached after the
+session is persisted, send another prompt to continue from the same provider
+conversation. Override the budget with `agent.max_turns` or `COSH_MAX_TURNS`;
+see the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#agent-turn-budget).
+
 Core and Shell also write a redacted, versioned audit timeline under
 `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. The existing
 SLS/metrics export is unchanged. See the

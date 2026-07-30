@@ -179,7 +179,34 @@ fn context_limit_failure_retains_the_persisted_session_for_compaction() {
         error: "context_limit: effective context exceeds the emergency threshold".to_string(),
     }];
 
-    assert!(retain_context_session(&events, None));
+    assert!(retain_context_session(&events, None, None, Some(true)));
+}
+
+#[test]
+fn max_turns_failure_retains_the_persisted_session_for_continuation() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "Agent exceeded max turns (50)".to_string(),
+    }];
+
+    assert!(retain_context_session(
+        &events,
+        Some("max_turns"),
+        None,
+        Some(true)
+    ));
+    assert!(!retain_context_session(
+        &events,
+        Some("max_turns"),
+        Some("persist"),
+        Some(true)
+    ));
+    assert!(!retain_context_session(
+        &events,
+        Some("max_turns"),
+        None,
+        None
+    ));
 }
 
 #[test]
@@ -189,7 +216,7 @@ fn ordinary_failure_does_not_retain_a_provider_session() {
         error: "API error 500".to_string(),
     }];
 
-    assert!(!retain_context_session(&events, None));
+    assert!(!retain_context_session(&events, None, None, Some(true)));
 }
 
 #[test]
@@ -200,7 +227,7 @@ fn persist_failure_does_not_retain_a_context_limited_session() {
     }];
     let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
     let attempt = begin_session_attempt(&state, None, SCOPE);
-    let retain = retain_context_session(&events, Some("persist"));
+    let retain = retain_context_session(&events, None, Some("persist"), Some(true));
 
     assert!(!retain);
     assert_eq!(

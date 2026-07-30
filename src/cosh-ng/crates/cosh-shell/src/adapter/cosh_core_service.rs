@@ -22,7 +22,8 @@ use super::claude::{
 use super::cosh_core::question_ingress::CoshCoreQuestionGate;
 use super::cosh_core::{
     commit_pending_session_for_scope, invalidate_resume_on_session_failure, mark_recovery_failure,
-    terminal_events_for_session_commit, SessionResumeAttempt, SessionRuntimeState,
+    retain_context_session, terminal_events_for_session_commit, SessionResumeAttempt,
+    SessionRuntimeState,
 };
 use super::cosh_core_registry::{
     extension_mutation_requires_reload, registry_timeout, RegistryQueryError,
@@ -456,7 +457,8 @@ fn run_turn(
     let mut parser = ClaudeStreamParser::new(
         command.run_id.clone(),
         Some(Arc::clone(&command.pending_session)),
-    );
+    )
+    .with_session_resumable(process.session_resumable);
     let pending_control_tool_call =
         RefCell::new(control_protocol::PendingControlProtocolToolCall::default());
     let mut completed = false;
@@ -612,7 +614,13 @@ fn run_turn(
         completed = false;
         failed = true;
     }
-    let session_resumable = parser.session_resumable();
+    // Only the turn that carried `initialize` sees `system/init`. The parser
+    // starts with the process's cached value and writes back any value the
+    // current turn announced.
+    if let Some(observed) = parser.session_resumable() {
+        process.session_resumable = Some(observed);
+    }
+    let session_resumable = parser.session_resumable().or(process.session_resumable);
     if command.cancelled.load(Ordering::SeqCst)
         && !terminal_events
             .iter()
@@ -630,6 +638,19 @@ fn run_turn(
         &terminal_events,
         &command.session_state,
     );
+    // A retained failure keeps the persisted transcript resumable, so the commit
+    // and the process binding below both act on the effective state rather than
+    // the raw terminal flags. Cancellation never qualifies: the user asked to
+    // stop, so the fresh pending session must not be committed.
+    let retain_session = !command.cancelled.load(Ordering::SeqCst)
+        && retain_context_session(
+            &terminal_events,
+            parser.error_code(),
+            parser.session_error_phase(),
+            session_resumable,
+        );
+    let session_completed = completed || retain_session;
+    let session_failed = failed && !retain_session;
     let commit_outcome = if command.cancelled.load(Ordering::SeqCst) {
         record_cancellation_pending_session(
             &command.cancellation_artifacts,
@@ -652,8 +673,8 @@ fn run_turn(
         )
     } else {
         commit_pending_session_for_scope(
-            completed,
-            failed,
+            session_completed,
+            session_failed,
             &command.session_state,
             &command.pending_session,
             &command.session_scope,
@@ -661,7 +682,7 @@ fn run_turn(
             &command.resume_attempt,
         )
     };
-    if completed && !failed && session_resumable != Some(false) {
+    if session_completed && !session_failed && session_resumable != Some(false) {
         process.session_id = command
             .pending_session
             .lock()

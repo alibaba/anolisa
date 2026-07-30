@@ -389,16 +389,26 @@ pub(in crate::adapter) fn commit_pending_session_for_scope(
 }
 
 /// Returns whether a failed turn still leaves a safely persisted session that
-/// must remain selectable for manual compaction.
+/// should remain active for continuation or manual compaction.
+///
+/// Context-limit and per-request turn-budget failures stop the current run only
+/// after cosh-core has already written the transcript, so the provider
+/// conversation stays usable: the next user message resumes it with a fresh turn
+/// budget. A persistence-phase failure proves the opposite, so it never
+/// qualifies.
 pub(in crate::adapter) fn retain_context_session(
     terminal_events: &[AgentEvent],
+    error_code: Option<&str>,
     session_error_phase: Option<&str>,
+    session_resumable: Option<bool>,
 ) -> bool {
-    session_error_phase != Some("persist")
+    session_resumable == Some(true)
+        && session_error_phase != Some("persist")
         && terminal_events.iter().any(|event| {
             matches!(
                 event,
-                AgentEvent::AgentFailed { error, .. } if error.starts_with("context_limit:")
+                AgentEvent::AgentFailed { error, .. }
+                    if error.starts_with("context_limit:") || error_code == Some("max_turns")
             )
         })
 }

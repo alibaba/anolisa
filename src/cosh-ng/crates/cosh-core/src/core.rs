@@ -37,6 +37,13 @@ mod auth;
 mod extensions;
 mod tool_execution;
 
+/// Typed terminal state for one user-request loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTurnOutcome {
+    Completed,
+    MaxTurns { limit: u32 },
+}
+
 pub struct CoshCore {
     pub config: CoreConfig,
     pub provider: Box<dyn ContentGenerator>,
@@ -267,12 +274,12 @@ impl CoshCore {
         }
     }
 
-    pub async fn handle_user_message<W, R>(
+    pub(crate) async fn handle_user_message<W, R>(
         &mut self,
         content: &str,
         reader: &mut tokio::io::Lines<R>,
         writer: &mut W,
-    ) -> Result<(), String>
+    ) -> Result<AgentTurnOutcome, String>
     where
         W: Write,
         R: AsyncBufReadExt + Unpin,
@@ -306,7 +313,7 @@ impl CoshCore {
                     &format!("Prompt blocked by hook: {reason}"),
                 ),
             );
-            return Ok(());
+            return Ok(AgentTurnOutcome::Completed);
         }
 
         if matches!(prompt_result.decision, HookDecision::Ask) {
@@ -396,10 +403,10 @@ impl CoshCore {
                             ),
                         ),
                     );
-                    return Ok(());
+                    return Ok(AgentTurnOutcome::Completed);
                 }
                 ApprovalResult::Interrupted | ApprovalResult::HostExecutedShell { .. } => {
-                    return Ok(());
+                    return Ok(AgentTurnOutcome::Completed);
                 }
             }
         } else {
@@ -833,7 +840,7 @@ impl CoshCore {
                                     AuditOutcomeStatus::Failed,
                                     Some("question_failed"),
                                 );
-                                return Ok(());
+                                return Ok(AgentTurnOutcome::Completed);
                             }
                             self.messages.push(Message::assistant(&text_buf));
                             self.messages.push(Message::user(&format!(
@@ -897,7 +904,7 @@ impl CoshCore {
                 self.messages.push(Message::assistant(&text_buf));
                 self.audit
                     .record_turn_terminal(turn_scope, AuditOutcomeStatus::Success, None);
-                return Ok(());
+                return Ok(AgentTurnOutcome::Completed);
             }
 
             if tool_calls
@@ -996,7 +1003,7 @@ impl CoshCore {
                         ));
                     }
                     if interrupted {
-                        return Ok(());
+                        return Ok(AgentTurnOutcome::Completed);
                     }
                     continue;
                 }
@@ -1097,7 +1104,7 @@ impl CoshCore {
                         result.is_error,
                     ));
                     if interrupted {
-                        return Ok(());
+                        return Ok(AgentTurnOutcome::Completed);
                     }
                     continue;
                 }
@@ -1563,7 +1570,7 @@ impl CoshCore {
                         AuditOutcomeStatus::Cancelled,
                         Some("interrupted"),
                     );
-                    return Ok(());
+                    return Ok(AgentTurnOutcome::Completed);
                 }
             }
             // Also checked after the last call: a failure there never re-enters
@@ -1583,7 +1590,7 @@ impl CoshCore {
                 .record_turn_terminal(turn_scope, AuditOutcomeStatus::Success, None);
         }
 
-        Err(format!("Agent exceeded max turns ({max_turns})"))
+        Ok(AgentTurnOutcome::MaxTurns { limit: max_turns })
     }
 
     fn emit_provider_native_tool_result<W: Write>(
@@ -1937,6 +1944,10 @@ impl CoshCore {
         }
         ApprovalResult::Interrupted
     }
+}
+
+pub(crate) fn max_turns_error(max_turns: u32) -> String {
+    format!("Agent exceeded max turns ({max_turns})")
 }
 
 /// Audit reason code for a turn ended by a dead control transport.

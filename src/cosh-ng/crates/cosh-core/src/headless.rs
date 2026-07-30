@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::cli::CliArgs;
 use crate::compaction::{ContextBudget, ModelCapability};
 use crate::config::CoreConfig;
-use crate::core::CoshCore;
+use crate::core::{AgentTurnOutcome, CoshCore};
 use crate::extension::{ExtensionManager, RuntimeSnapshotBuilder};
 use crate::metrics::TurnMetrics;
 use crate::protocol::{InputMessage, OutputMessage, ShellControlRequest};
@@ -638,6 +638,7 @@ impl SessionRuntime {
 
 struct TurnFailure {
     message: String,
+    error_code: Option<&'static str>,
     session_error_code: Option<&'static str>,
 }
 
@@ -647,26 +648,44 @@ impl TurnFailure {
             Some(code) => {
                 OutputMessage::session_result_error(session_id, &self.message, code, "persist")
             }
-            None => OutputMessage::result_error(session_id, &self.message),
+            None => {
+                OutputMessage::result_error_with_code(session_id, &self.message, self.error_code)
+            }
         }
     }
 }
 
 fn combine_turn_and_persist(
-    turn: Result<(), String>,
+    turn: Result<AgentTurnOutcome, String>,
     persist: Result<(), SessionError>,
 ) -> Result<(), TurnFailure> {
     match (turn, persist) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(AgentTurnOutcome::Completed), Ok(())) => Ok(()),
+        (Ok(AgentTurnOutcome::MaxTurns { limit }), Ok(())) => Err(TurnFailure {
+            message: crate::core::max_turns_error(limit),
+            error_code: Some("max_turns"),
+            session_error_code: None,
+        }),
         (Err(turn_error), Ok(())) => Err(TurnFailure {
+            error_code: None,
             message: turn_error,
             session_error_code: None,
         }),
-        (Ok(()), Err(persist_error)) => Err(TurnFailure {
+        (Ok(AgentTurnOutcome::Completed), Err(persist_error)) => Err(TurnFailure {
             message: format!(
                 "session persistence failed [{}]: {persist_error}",
                 persist_error.code()
             ),
+            error_code: None,
+            session_error_code: Some(persist_error.code()),
+        }),
+        (Ok(AgentTurnOutcome::MaxTurns { limit }), Err(persist_error)) => Err(TurnFailure {
+            message: format!(
+                "{}; session persistence failed [{}]: {persist_error}",
+                crate::core::max_turns_error(limit),
+                persist_error.code()
+            ),
+            error_code: None,
             session_error_code: Some(persist_error.code()),
         }),
         (Err(turn_error), Err(persist_error)) => Err(TurnFailure {
@@ -674,6 +693,7 @@ fn combine_turn_and_persist(
                 "{turn_error}; session persistence failed [{}]: {persist_error}",
                 persist_error.code()
             ),
+            error_code: None,
             session_error_code: Some(persist_error.code()),
         }),
     }
@@ -731,6 +751,26 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    #[test]
+    fn typed_max_turn_outcome_sets_structured_result_fields() {
+        let failure = combine_turn_and_persist(Ok(AgentTurnOutcome::MaxTurns { limit: 5 }), Ok(()))
+            .expect_err("max-turn outcome");
+
+        assert_eq!(failure.error_code, Some("max_turns"));
+        assert_eq!(failure.message, "Agent exceeded max turns (5)");
+        assert_eq!(failure.session_error_code, None);
+    }
+
+    #[test]
+    fn matching_provider_error_text_stays_an_ordinary_failure() {
+        let failure = combine_turn_and_persist(Err(crate::core::max_turns_error(5)), Ok(()))
+            .expect_err("provider error");
+
+        assert_eq!(failure.error_code, None);
+        assert_eq!(failure.message, "Agent exceeded max turns (5)");
+        assert_eq!(failure.session_error_code, None);
+    }
 
     #[test]
     fn bare_reload_keeps_project_config_isolated() {

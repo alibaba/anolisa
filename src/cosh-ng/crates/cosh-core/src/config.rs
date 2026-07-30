@@ -92,7 +92,7 @@ fn default_approval_mode() -> String {
     "balanced".to_string()
 }
 fn default_max_turns() -> u32 {
-    20
+    50
 }
 fn default_session_token_limit() -> u64 {
     128_000
@@ -1037,7 +1037,7 @@ mod tests {
     fn default_config() {
         let config = CoreConfig::default();
         assert_eq!(config.agent.approval_mode, "balanced");
-        assert_eq!(config.agent.max_turns, 20);
+        assert_eq!(config.agent.max_turns, 50);
         assert_eq!(config.agent.session_token_limit, 128_000);
         assert_eq!(config.agent.max_tool_calls_per_turn, 10);
         assert!(config.session.auto_persist);
@@ -1354,7 +1354,7 @@ active_model = "test-model"
 "#;
         let config: CoreConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.agent.approval_mode, "balanced");
-        assert_eq!(config.agent.max_turns, 20);
+        assert_eq!(config.agent.max_turns, 50);
         assert!(config.ai.providers.is_empty());
     }
 
@@ -1364,7 +1364,9 @@ active_model = "test-model"
         // Phase 1: valid overrides
         std::env::set_var("COSH_APPROVAL_MODE", "trust");
         std::env::set_var("COSH_MODEL", "gpt-4");
-        std::env::set_var("COSH_MAX_TURNS", "50");
+        // Differs from the built-in default so the assertion proves the
+        // override took effect rather than matching it by coincidence.
+        std::env::set_var("COSH_MAX_TURNS", "75");
         std::env::set_var("COSH_OUTPUT_LANGUAGE", "zh-CN");
 
         let mut config = CoreConfig::default();
@@ -1372,14 +1374,14 @@ active_model = "test-model"
 
         assert_eq!(config.agent.approval_mode, "trust");
         assert_eq!(config.ai.active_model.as_deref(), Some("gpt-4"));
-        assert_eq!(config.agent.max_turns, 50);
+        assert_eq!(config.agent.max_turns, 75);
         assert_eq!(config.ai.output_language.as_deref(), Some("zh-CN"));
 
         // Phase 2: invalid max_turns — should be ignored
         std::env::set_var("COSH_MAX_TURNS", "not-a-number");
         let mut config2 = CoreConfig::default();
         config2.apply_env_overrides();
-        assert_eq!(config2.agent.max_turns, 20);
+        assert_eq!(config2.agent.max_turns, 50);
 
         // Cleanup
         std::env::remove_var("COSH_APPROVAL_MODE");

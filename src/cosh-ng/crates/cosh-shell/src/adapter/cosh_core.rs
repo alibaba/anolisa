@@ -637,7 +637,12 @@ fn start_cancellable_cosh_core_process(
             &terminal_events,
             &session_state,
         );
-        let retain_session = retain_context_session(&terminal_events, parser.session_error_phase());
+        let retain_session = retain_context_session(
+            &terminal_events,
+            parser.error_code(),
+            parser.session_error_phase(),
+            parser.session_resumable(),
+        );
         let commit_outcome = commit_pending_session_for_scope(
             completed || retain_session,
             failed && !retain_session,

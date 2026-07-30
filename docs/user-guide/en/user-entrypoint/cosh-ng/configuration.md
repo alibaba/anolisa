@@ -34,8 +34,8 @@ model = "qwen-plus"
 [agent]
 # Approval mode: trust | auto | balanced | suggest | strict
 approval_mode = "balanced"
-# Maximum conversation turns
-max_turns = 20
+# Maximum model turns inside a single Agent request
+max_turns = 50
 
 [hooks]
 enabled = true
@@ -89,6 +89,28 @@ The project layer is loaded from
 through `--workspace` or the session-management request. Relative
 `session.persist_dir` values are resolved from that workspace, not from the
 Core process's launcher directory.
+
+## Agent Turn Budget
+
+`agent.max_turns` bounds the model turns spent inside a **single** Agent
+request. It is not a session-wide quota: every new prompt you send starts with
+a fresh budget.
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `agent.max_turns` | `50` | Model turns allowed in one Agent request |
+
+When a request reaches the limit, Core stops that run and reports
+`Agent exceeded max turns (<configured limit>)` instead of continuing silently.
+When session persistence is enabled and succeeds, the transcript is written
+before the limit is reported, so the session stays active and resumable — send
+another prompt such as "continue" and the work picks up in the same provider
+conversation with a new turn budget. A run is not resumable if `auto_persist`
+is off or if session persistence itself failed.
+
+Override the budget with `max_turns` under `[agent]`, or with the
+`COSH_MAX_TURNS` environment variable. An unparsable `COSH_MAX_TURNS` value is
+ignored, leaving whatever the configuration files already resolved.
 
 ## Session Compaction
 

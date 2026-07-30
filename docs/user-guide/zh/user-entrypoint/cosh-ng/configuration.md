@@ -35,8 +35,8 @@ model = "qwen-plus"
 [agent]
 # 审批模式：trust | auto | balanced | suggest | strict
 approval_mode = "balanced"
-# 最大对话轮次
-max_turns = 20
+# 单次 Agent 请求内的最大模型轮次
+max_turns = 50
 
 [hooks]
 enabled = true
@@ -88,6 +88,24 @@ level = "warn"
 项目配置层从 `<workspace>/.copilot-shell/config.toml` 加载，其中 `workspace`
 是 `--workspace` 或会话管理请求传入的路径。相对 `session.persist_dir` 从该
 工作空间解析，而不是从 Core 进程的启动目录解析。
+
+## Agent 轮次预算
+
+`agent.max_turns` 限制**单次** Agent 请求内消耗的模型轮次，不是整个会话的
+总配额：你每发送一条新消息，都会获得新的轮次预算。
+
+| 配置项 | 默认值 | 作用 |
+|--------|--------|------|
+| `agent.max_turns` | `50` | 单次 Agent 请求允许的模型轮次 |
+
+请求达到上限时，Core 会停止当前 run 并报告
+`Agent exceeded max turns (<实际配置的上限>)`，不会静默继续运行。在会话持久化
+已启用且成功的情况下，transcript 会在报告该上限之前写入，因此会话保持 active
+且可恢复——再发送一条消息（例如“继续”），工作就会在同一个 provider 对话中以新的
+轮次预算继续。如果 `auto_persist` 关闭，或会话持久化本身失败，则该 run 不可恢复。
+
+可以通过 `[agent]` 下的 `max_turns` 或 `COSH_MAX_TURNS` 环境变量覆盖该预算。
+无法解析的 `COSH_MAX_TURNS` 值会被忽略，保留配置文件已解析出的结果。
 
 ## 会话压缩
 
