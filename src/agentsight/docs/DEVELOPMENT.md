@@ -6,7 +6,7 @@
 |------|----------|------|
 | Linux kernel | >= 5.8 | BTF 支持，eBPF 运行时 |
 | Rust | >= 1.80 | 编译 Rust 代码 |
-| clang/llvm | >= 11 | 编译 eBPF C 程序 |
+| clang/llvm | >= 15 | 编译 eBPF C 程序（14 及以下会优化掉 sslsniff/tcpsniff 的长度钳制，导致 verifier 拒绝加载）|
 | libbpf | >= 0.8 | eBPF 用户态库 |
 | Node.js | >= 16 | 前端构建 |
 | npm | >= 8 | 前端依赖管理 |

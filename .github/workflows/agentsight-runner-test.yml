@@ -50,8 +50,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            clang llvm libbpf-dev libelf-dev elfutils libssl-dev \
+            clang-15 llvm-15 libbpf-dev libelf-dev elfutils libssl-dev \
             zlib1g-dev pkg-config perl
+          echo "/usr/lib/llvm-15/bin" >> "$GITHUB_PATH"
 
       - name: Check formatting
         working-directory: src/agentsight
@@ -136,8 +137,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            clang llvm libbpf-dev libelf-dev elfutils libssl-dev \
+            clang-15 llvm-15 libbpf-dev libelf-dev elfutils libssl-dev \
             zlib1g-dev pkg-config perl
+          echo "/usr/lib/llvm-15/bin" >> "$GITHUB_PATH"
 
       - name: Load all eBPF probes
         shell: bash
