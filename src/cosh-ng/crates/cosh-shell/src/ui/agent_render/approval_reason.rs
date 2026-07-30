@@ -86,6 +86,7 @@ mod tests {
             "unknown-command",
             "and-or-list-not-auto-executable",
             "pipeline-not-auto-executable",
+            "compound-readonly",
             "unsafe-binding",
             "parse-failed",
             "not-a-real-code",

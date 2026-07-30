@@ -942,3 +942,175 @@ fn fd_duplication_and_null_suppression_compose_independently() {
     assert!(null_only.reasons.contains(&"output-suppressed"));
     assert!(!null_only.reasons.contains(&"redirection-write"));
 }
+
+#[test]
+fn parser_preserves_explicitly_quoted_empty_arguments() {
+    // An empty quoted string (`''` / `""`) is a real argv entry in every
+    // shell: `ls ''` passes an empty path and fails. The parser must not
+    // drop it, or the assessed argv would diverge from what a shell
+    // executes (R5 review finding).
+    for command in ["ls ''", "ls \"\""] {
+        let parsed = super::command_risk_parser::parse_command(command);
+        assert_eq!(
+            parsed.stages,
+            vec![vec!["ls".to_string(), String::new()]],
+            "{command}"
+        );
+    }
+    // Interior empty quotes concatenated with text stay one token.
+    let parsed = super::command_risk_parser::parse_command("echo a''b");
+    assert_eq!(
+        parsed.stages,
+        vec![vec!["echo".to_string(), "ab".to_string()]]
+    );
+}
+
+#[test]
+fn compound_readonly_auto_executes_fully_whitelisted_compounds() {
+    // Issue #1882 FAIL→PASS anchor (S2 probe promoted): every segment
+    // carries direct-readonly evidence and the token sequence is
+    // executable as-is, so the compound auto-executes through the
+    // dedicated argv executor route in auto mode (design §3 M1-M3).
+    let policy = AutoExecutionPolicy::current_runtime();
+    for command in [
+        "pwd && df -h",
+        "pwd || df -h",
+        "pwd; df -h",
+        "pwd && df -h; git status --short",
+        // Token-rebuild fidelity extremes: the parser collapses runs of
+        // spaces/tabs at token boundaries the same way bash word
+        // splitting does, so the rebuilt text stays argv-faithful and
+        // these remain eligible.
+        "pwd   &&   df    -h",
+        "pwd\t&&\tdf -h",
+    ] {
+        let assessment = assess_shell_command(
+            command,
+            policy.assessment_policy(AssessmentSource::ProviderShellTool),
+        );
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AutoAllow,
+            "{command}"
+        );
+        assert_eq!(
+            assessment.auto_allow,
+            Some(AutoAllowEvidence::CompoundReadonly),
+            "{command}"
+        );
+        assert_eq!(
+            assessment.primary_reason(),
+            "compound-readonly",
+            "{command}"
+        );
+        assert_eq!(
+            policy.route(&assessment),
+            AutoExecutionRoute::CompoundReadonlyExecutor,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn compound_readonly_auto_allow_covers_executor_widened_forms() {
+    // Issue #1882 design §3 widened rows (M2b/M10/M16-M18): the argv
+    // executor carries parser tokens verbatim, so newline separators,
+    // quoted tokens/separators, and history/glob/tilde/comment-shaped
+    // tokens all stay literal argv and the compound auto-executes.
+    let policy = AutoExecutionPolicy::current_runtime();
+    for command in [
+        "pwd\ndf -h",          // M2b: newline separator
+        "ls 'my dir' && pwd",  // M10: quoted token with space
+        "echo 'a && b' ; pwd", // M10: quoted separator
+        "echo !-2 && pwd",     // M16: history-shaped token stays literal
+        "ls *.log && pwd",     // M17: glob-shaped token stays literal
+        "ls ~ && pwd",         // M17: tilde-shaped token stays literal
+        "echo #x && pwd",      // M18: comment-shaped token stays literal
+    ] {
+        let assessment = assess_shell_command(
+            command,
+            policy.assessment_policy(AssessmentSource::ProviderShellTool),
+        );
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AutoAllow,
+            "{command}"
+        );
+        assert_eq!(
+            assessment.auto_allow,
+            Some(AutoAllowEvidence::CompoundReadonly),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn compound_readonly_fails_closed_outside_the_eligible_envelope() {
+    // Issue #1882 design §3 ASK rows: every non-eligible form keeps the
+    // pre-fix AskUser boundary even in auto mode.
+    for command in [
+        "cd /tmp && git status",      // M4: segment without evidence
+        "touch /tmp/a && pwd",        // M4: mutating segment
+        "ps aux --sort=-%mem && pwd", // M5: guarded-diagnostic-only segment
+        "ps aux | head -5 && pwd",    // M6: pipeline segment
+        "pwd && df -h 2>/dev/null",   // M7: stripped null redirection
+        "wc -l < notes.txt && pwd",   // M8: read redirection shape
+        "pwd && echo $(id)",          // M9: command substitution
+        "git status \"foo\" && pwd",  // re-anchored: the quoted token
+        // parses fine, but the git readonly rule rejects the
+        // positional pathspec (condition 4 defers to the allowlist)
+        "pwd && echo $HOME",   // M11: bare expansion in a segment
+        "echo `pwd` && df -h", // M11: backtick substitution
+        "pwd && df\\ -h",      // re-anchored (design §3 M10b):
+        // the escaped space joins the token, so argv0 is the literal
+        // `df -h`, which is off the readonly allowlist
+        "pwd\u{000c}&&\u{000c}df -h", // re-anchored: form feed is not
+        // parser whitespace, so it stays inside the token and keeps
+        // argv0 off the allowlist (bash would exec `pwd\x0c` too)
+        "pwd\u{0007}&& df -h", // bell: same token-local class
+        "pwd\u{000b}&& df -h", // vertical tab: same token-local class
+        "(pwd) && df -h",      // M12: complex fail-closed (#1785)
+        "pwd & df -h",         // M12: background list separator
+        "pwd &&",              // M13: empty tail segment
+        "pwd && && df -h",     // M13: doubled separator swallows an
+                               // empty segment; the connector/segment invariant fails closed
+    ] {
+        let assessment = auto(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert!(assessment.auto_allow.is_none(), "{command}");
+    }
+}
+
+#[test]
+fn compound_readonly_grant_preserves_aggregated_assessment_fields() {
+    // Issue #1882 invariant I4: granting the evidence changes only the
+    // execution decision, the evidence, and the structural/evidence
+    // reason; every aggregated field stays identical to the ask path.
+    let allowed = auto("pwd && df -h");
+    let asked = ask("pwd && df -h");
+    // The ask-mode boundary stays explicit here in addition to the
+    // #1785 boundary-invariant loop above.
+    assert_eq!(asked.execution, ExecutionDecision::AskUser);
+    assert!(asked.auto_allow.is_none());
+    assert_eq!(allowed.impact, asked.impact);
+    assert_eq!(allowed.confidence, asked.confidence);
+    assert_eq!(allowed.interaction, asked.interaction);
+    assert_eq!(allowed.output_stability, asked.output_stability);
+    assert_eq!(allowed.output_exposure, asked.output_exposure);
+    assert_eq!(allowed.side_effects, asked.side_effects);
+    let allowed_rest: Vec<_> = allowed
+        .reasons
+        .iter()
+        .filter(|reason| **reason != "compound-readonly")
+        .collect();
+    let asked_rest: Vec<_> = asked
+        .reasons
+        .iter()
+        .filter(|reason| **reason != "and-or-list-not-auto-executable")
+        .collect();
+    assert_eq!(allowed_rest, asked_rest);
+}

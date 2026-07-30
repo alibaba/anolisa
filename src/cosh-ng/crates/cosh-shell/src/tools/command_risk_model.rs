@@ -84,6 +84,11 @@ pub enum AutoAllowEvidence {
     DirectReadonlyBroker,
     GuardedDiagnostic,
     ReadonlyPipelineExecutor,
+    /// A readonly compound execution plan exists (issue #1882): every
+    /// segment's tokens pass the direct readonly gate as-is, and the
+    /// plan is executed by the dedicated argv executor — no shell
+    /// parsing layer, no text rebuild, no handoff.
+    CompoundReadonly,
 }
 
 impl AutoAllowEvidence {
@@ -92,6 +97,7 @@ impl AutoAllowEvidence {
             Self::DirectReadonlyBroker => "bounded-readonly",
             Self::GuardedDiagnostic => "safe-diagnostic-family",
             Self::ReadonlyPipelineExecutor => "readonly-pipeline-executor",
+            Self::CompoundReadonly => "compound-readonly",
         }
     }
 }
@@ -259,6 +265,11 @@ pub enum AutoExecutionRoute {
     DirectReadonlyBroker,
     GuardedDiagnosticExecutor,
     ReadonlyPipelineExecutor,
+    /// Auto-approves a fully readonly compound command and executes it
+    /// through the dedicated readonly compound executor (issue #1882):
+    /// parser tokens are spawned directly with `std::process::Command`,
+    /// so no shell parsing layer ever touches the assessed text.
+    CompoundReadonlyExecutor,
     Block,
 }
 
@@ -286,6 +297,13 @@ impl AutoExecutionPolicy {
         match assessment.auto_allow {
             Some(AutoAllowEvidence::DirectReadonlyBroker) => {
                 AutoExecutionRoute::DirectReadonlyBroker
+            }
+            // Always live, like DirectReadonlyBroker: the executor
+            // reuses the readonly pipeline primitives, so there is no
+            // separate mechanism to gate behind a runtime flag
+            // (issue #1882).
+            Some(AutoAllowEvidence::CompoundReadonly) => {
+                AutoExecutionRoute::CompoundReadonlyExecutor
             }
             Some(AutoAllowEvidence::GuardedDiagnostic) if self.guarded_diagnostic_executor => {
                 AutoExecutionRoute::GuardedDiagnosticExecutor

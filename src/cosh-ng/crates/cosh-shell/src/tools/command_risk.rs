@@ -405,6 +405,7 @@ fn assess_first_stage(
         stages: parsed.stages.first().cloned().into_iter().collect(),
         null_redirections: 0,
         segments: Vec::new(),
+        segment_connectors: Vec::new(),
     };
     assess_simple_command(command, simple, policy)
 }
