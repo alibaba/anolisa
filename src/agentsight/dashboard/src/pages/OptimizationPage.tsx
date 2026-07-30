@@ -1,5 +1,6 @@
 import React, { Fragment, useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 import {
   fetchOptimizeHistory,
   fetchOptimizeResults,
@@ -7,6 +8,7 @@ import {
   ApiRequestError,
 } from '../utils/apiClient';
 import type { OptimizeHistoryEntry } from '../utils/apiClient';
+import { copyText } from '../components/CopyButton';
 import type {
   AccIssue,
   AccuracyResult,
@@ -31,6 +33,8 @@ type AnalysisProgress = {
   costWaste: DimState;
   accuracy: DimState;
 };
+type DimKey = keyof AnalysisProgress;
+const ALL_DIMS: DimKey[] = ['summary', 'perf', 'perfIssues', 'cost', 'costWaste', 'accuracy'];
 type AnalysisTab = 'accuracy' | 'perf' | 'cost';
 
 const FAILURE_LABELS: Record<string, string> = {
@@ -171,12 +175,7 @@ function SummaryCard({ state, summary }: { state: DimState; summary?: Trajectory
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 mt-4 px-6 py-5">
-      <div className="flex items-center gap-2 mb-3">
-        <h2 className="text-sm font-semibold text-gray-700">轨迹摘要</h2>
-        <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">
-          LLM 生成
-        </span>
-      </div>
+      <h2 className="text-sm font-semibold text-gray-700 mb-3">轨迹摘要</h2>
 
       {summary.goal?.trim() && (
         <div className="flex gap-3 text-sm">
@@ -259,11 +258,7 @@ function CopyBtn({ text }: { text: string }) {
         setDone(true);
         setTimeout(() => setDone(false), 2000);
       };
-      if (navigator.clipboard && window.isSecureContext) {
-        navigator.clipboard.writeText(text).then(ok).catch(() => fallbackCopy(text, ok));
-      } else {
-        fallbackCopy(text, ok);
-      }
+      copyText(text, ok);
     },
     [text]
   );
@@ -280,19 +275,6 @@ function CopyBtn({ text }: { text: string }) {
       {done ? '✓ 已复制' : '⧉ 复制'}
     </button>
   );
-}
-
-function fallbackCopy(text: string, done: () => void) {
-  const el = document.createElement('textarea');
-  el.value = text;
-  el.style.position = 'fixed';
-  el.style.opacity = '0';
-  document.body.appendChild(el);
-  el.focus();
-  el.select();
-  try { document.execCommand('copy'); } catch { /* ignore */ }
-  document.body.removeChild(el);
-  done();
 }
 
 function IssueTable({ issues }: { issues: AccIssue[] }) {
@@ -435,9 +417,6 @@ function AccuracySection({ issues, failures }: { issues: AccIssue[]; failures: F
         <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">失败清单 · 点击任意行展开根因与修复</h3>
           <IssueTable issues={issues} />
-          <p className="text-[11px] text-gray-400 mt-3">
-            症状 ≠ 病灶 ≠ 处方：缺陷类型是症状，归因对象是病灶，修复落点是处方。置信度由证据层级派生，可优化为规则派生闸门。
-          </p>
         </div>
       ) : (
         // 兼容旧会话：无五字段归因时回退到旧失败清单
@@ -466,16 +445,15 @@ function PerfIssueTable({ issues, state }: { issues: PerfReport | null; state: D
   if (state !== 'done' || !issues) {
     return (
       <div className="bg-white rounded-lg shadow border border-gray-200 p-5 mt-4">
-        <h3 className="text-sm font-semibold text-gray-700">优化策略 · LLM 选择</h3>
         {state === 'error' ? (
-          <p className="text-red-500 font-mono text-[13px] mt-2">识别失败 —— LLM 调用出错，可稍后重试。</p>
+          <p className="text-red-500 font-mono text-[13px]">识别失败 —— LLM 调用出错，可稍后重试。</p>
         ) : state === 'loading' ? (
-          <div className="flex items-center gap-3 py-2 mt-1">
+          <div className="flex items-center gap-3 py-2">
             <Spinner />
             <span className="text-gray-500 font-mono text-[13px]">LLM 正在分析性能数据并选择优化策略…</span>
           </div>
         ) : (
-          <p className="text-gray-400 font-mono text-[13px] mt-2">尚未分析 —— 点击「重新分析」运行 LLM 策略选择。</p>
+          <p className="text-gray-400 font-mono text-[13px]">尚未分析 —— 点击「重新分析」运行 LLM 策略选择。</p>
         )}
       </div>
     );
@@ -484,9 +462,8 @@ function PerfIssueTable({ issues, state }: { issues: PerfReport | null; state: D
   if (issues.items.length === 0) {
     return (
       <div className="bg-white rounded-lg shadow border border-gray-200 p-5 mt-4">
-        <h3 className="text-sm font-semibold text-gray-700">优化策略 · LLM 选择</h3>
-        <p className="text-green-600 font-mono text-[13px] mt-2">
-          ✓ LLM 分析了 {issues.considered} 项数据信号，未发现适用的优化策略。
+        <p className="text-green-600 font-mono text-[13px]">
+          ✓ LLM 分析完成，未发现适用的优化策略。
         </p>
       </div>
     );
@@ -494,54 +471,39 @@ function PerfIssueTable({ issues, state }: { issues: PerfReport | null; state: D
 
   return (
     <div className="bg-white rounded-lg shadow border border-gray-200 p-5 mt-4">
-      <div className="flex items-baseline justify-between flex-wrap gap-2">
-        <h3 className="text-sm font-semibold text-gray-700 m-0">优化策略 · LLM 选择</h3>
-        <span className="text-[11px] text-gray-400 font-mono">
-          {issues.items.length} 条策略 · 共分析 {issues.considered} 项信号
-        </span>
-      </div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[700px] mt-3.5 text-sm">
+        <table className="w-full min-w-[700px] text-sm">
           <thead>
             <tr className="border-b border-gray-200">
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600">现象</th>
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600">策略类型</th>
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600">根因</th>
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600">优化策略</th>
-              <th className="text-right pb-2 text-xs font-semibold text-gray-600">预估节省</th>
+              <th className="text-left pb-2 pr-4 text-xs font-semibold text-gray-600 w-[30%]">现象</th>
+              <th className="text-left pb-2 pr-4 text-xs font-semibold text-gray-600 whitespace-nowrap">策略类型</th>
+              <th className="text-left pb-2 pr-4 text-xs font-semibold text-gray-600 w-[26%]">根因</th>
+              <th className="text-left pb-2 text-xs font-semibold text-gray-600 w-[28%]">优化策略</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {issues.items.map((it, i) => (
-              <tr key={i}>
-                <td className="py-2.5 pr-3 text-gray-800">
+              <tr key={i} className="align-top">
+                <td className="py-3 pr-4 text-[13px] text-gray-800 leading-relaxed">
                   {it.symptom}
                   {it.at && <span className="text-[10px] text-gray-400 font-mono"> · {it.at}</span>}
                 </td>
-                <td className="py-2.5 pr-3">
+                <td className="py-3 pr-4">
                   <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
                     <i
                       className="w-[9px] h-[9px] rounded-sm flex-shrink-0"
                       style={{ background: PERF_CAT_COLOR[it.category] ?? '#3b82f6' }}
                     />
                     <span className="font-mono text-xs text-gray-700">{it.subtype}</span>
-                    <span className="text-[10px] text-gray-400">· {it.confidence}</span>
                   </span>
                 </td>
-                <td className="py-2.5 pr-3 text-xs text-gray-500">{it.root_cause || it.evidence}</td>
-                <td className="py-2.5 pr-3 text-xs text-gray-700">{it.optimization}</td>
-                <td className="py-2.5 text-right font-mono text-xs text-blue-600 whitespace-nowrap">
-                  {formatSecs(it.impact_secs)}
-                  <span className="text-gray-400"> · {Math.round(it.pct)}%</span>
-                </td>
+                <td className="py-3 pr-4 text-xs text-gray-500 leading-relaxed">{it.root_cause || it.evidence}</td>
+                <td className="py-3 text-xs text-gray-700 leading-relaxed">{it.optimization}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <p className="text-[11px] text-gray-400 mt-3 font-mono">
-        「优化策略」及根因/建议由 LLM 从策略目录中选择并具体化；时间数据由 Rust 从轨迹时间戳按「工具执行 / 模型推理 / 用户空闲」正交三分算出。
-      </p>
     </div>
   );
 }
@@ -551,52 +513,59 @@ function PerfSection({ perf, issues, issuesState }: { perf: PerfStats; issues: P
   const modelPct = Math.round((perf.model_secs / wall) * 100);
   const toolPct = Math.round((perf.tool_secs / wall) * 100);
   const idlePct = Math.max(0, 100 - modelPct - toolPct);
+  // 环形图三分：仅保留有实际占用的分类，避免 0 值扇区
+  const timeSlices = [
+    { name: '模型推理', secs: perf.model_secs, pct: modelPct, color: '#3b82f6' },
+    { name: '工具执行', secs: perf.tool_secs, pct: toolPct, color: '#10b981' },
+    { name: '用户空闲', secs: perf.idle_secs, pct: idlePct, color: '#9ca3af' },
+  ].filter((s) => s.secs > 1);
 
   return (
     <section className="mt-6">
       <SectionHead idx="P" title="性能剖析" tag={formatSecs(perf.wall_secs)} tagKind="perf" />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
+        <div className="bg-white rounded-lg shadow border border-gray-200 p-5 flex flex-col">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">时间分布</h3>
-          <div className="flex h-8 rounded-lg overflow-hidden">
-            <div
-              className="flex items-center justify-center text-white text-xs whitespace-nowrap overflow-hidden"
-              style={{ flex: modelPct || 0.0001, background: '#3b82f6' }}
-            >
-              {modelPct > 15 ? `模型 ${modelPct}%` : ''}
-            </div>
-            <div
-              className="flex items-center justify-center text-white text-xs whitespace-nowrap overflow-hidden"
-              style={{ flex: toolPct || 0.0001, background: '#10b981' }}
-            >
-              {toolPct > 10 ? `工具 ${toolPct}%` : ''}
-            </div>
-            {idlePct > 0 && (
-              <div
-                className="flex items-center justify-center text-white text-xs whitespace-nowrap overflow-hidden"
-                style={{ flex: idlePct, background: '#9ca3af' }}
-              >
-                {idlePct > 15 ? `空闲 ${idlePct}%` : ''}
+          {/* 图 + 图例整体居中（卡片比右侧表格短，同时垂直居中）*/}
+          <div className="flex flex-1 items-center justify-center gap-6">
+            <div className="relative w-[150px] h-[150px] flex-shrink-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={timeSlices}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={48}
+                    outerRadius={72}
+                    paddingAngle={2}
+                    dataKey="secs"
+                    stroke="none"
+                  >
+                    {timeSlices.map((s) => (
+                      <Cell key={s.name} fill={s.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(v: number) => formatSecs(v)} />
+                </PieChart>
+              </ResponsiveContainer>
+              {/* 环心承载总量，替代原先卡片底部的汇总文字 */}
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                <span className="text-sm font-semibold text-gray-900">{formatSecs(perf.wall_secs)}</span>
+                <span className="text-[10px] text-gray-400 mt-0.5">{perf.tool_count} 次调用</span>
               </div>
-            )}
+            </div>
+            <div className="flex flex-col gap-2.5 min-w-0">
+              {timeSlices.map((s) => (
+                <div key={s.name} className="flex items-center gap-2 text-xs">
+                  <i className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: s.color }} />
+                  <span className="text-gray-600">{s.name}</span>
+                  <span className="text-gray-900 font-medium">{formatSecs(s.secs)}</span>
+                  <span className="text-gray-400 font-mono">{s.pct}%</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="flex flex-wrap gap-4 mt-2.5 text-xs text-gray-500">
-            <span className="flex items-center gap-1.5">
-              <i className="w-2.5 h-2.5 rounded-sm bg-blue-500" /> 模型推理 {formatSecs(perf.model_secs)}
-            </span>
-            <span className="flex items-center gap-1.5">
-              <i className="w-2.5 h-2.5 rounded-sm bg-emerald-500" /> 工具执行 {formatSecs(perf.tool_secs)}
-            </span>
-            {perf.idle_secs > 1 && (
-              <span className="flex items-center gap-1.5">
-                <i className="w-2.5 h-2.5 rounded-sm bg-gray-400" /> 用户空闲 {formatSecs(perf.idle_secs)}
-              </span>
-            )}
-          </div>
-          <p className="text-sm text-gray-600 mt-3">
-            共 <b>{perf.tool_count}</b> 次工具调用，总耗时 <b>{formatSecs(perf.wall_secs)}</b>
-          </p>
         </div>
 
         <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
@@ -649,6 +618,11 @@ function CostSection({ cost, waste, wasteState }: { cost: CostStats; waste: Wast
   const h = cost.headroom;
   const fmtK = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${Math.round(n)}`);
 
+  // findings 只渲染数据质量警告（采集退化）。旧落库 payload 里还带着已删除的
+  // 启发式观察条（工具返回占比/重复调用/思考占比，与火焰图和浪费诊断表重复），
+  // 按内容过滤掉，不必等重新分析。
+  const qualityFindings = cost.findings.filter(f => f.html.includes('采集不完整'));
+
   const hrSavePct = h?.headroom_save_pct ?? 0;
   const isReal = hrSavePct > 0;
   const usageSteps = cost.usage_steps ?? 0;
@@ -667,36 +641,34 @@ function CostSection({ cost, waste, wasteState }: { cost: CostStats; waste: Wast
           h
             ? isReal
               ? `${fmtK(h.total_input_tok + h.total_output_tok)} tok · Headroom 实测 -${hrSavePct.toFixed(0)}%`
-              : `${fmtK(h.total_input_tok + h.total_output_tok)} tok · 可优化 ${h.pct.toFixed(0)}%`
+              : `${fmtK(h.total_input_tok + h.total_output_tok)} tok`
             : `${cost.total_events} 事件 · ${cost.total_chars.toLocaleString()} 字符`
         }
       />
 
-      {/* Headroom summary card */}
+      {/* 元数据脚注（原「内容体积」卡降级：字符/事件/步数/token 来源属数据质量标注，不占卡位；
+          「可优化 N%」估算徽标与 Headroom 卡同源，一并移除，实测分支保留） */}
       {h && (h.total_input_tok + h.total_output_tok) > 0 && (
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="bg-white rounded-lg shadow border border-gray-200 px-4 py-3.5">
-            <div className="font-mono text-[10px] tracking-widest uppercase text-gray-500">内容体积</div>
-            <div className="text-[22px] font-bold mt-1 text-amber-600 leading-tight">
-              {cost.total_chars.toLocaleString()} <span className="text-[13px] font-normal">字符</span>
+        <div className="text-[11px] text-gray-500 font-mono mb-3">
+          {cost.total_chars.toLocaleString()} 字符 · {cost.total_events} 事件 · {cost.calls?.length ?? 0} 步 LLM 调用 · {tokSource}
+        </div>
+      )}
+
+      {/* 数据质量警告（采集退化）— 必须醒目，避免退化轨迹被误读为干净 */}
+      {qualityFindings.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {qualityFindings.map((f, i) => (
+            <div
+              key={i}
+              className={`text-[12px] leading-relaxed rounded-md border px-3 py-2 ${
+                f.severity === 'high'
+                  ? 'bg-rose-50 border-rose-200 text-rose-800'
+                  : 'bg-amber-50 border-amber-200 text-amber-800'
+              }`}
+            >
+              {H(f.html)}
             </div>
-            <div className="text-[11px] text-gray-500 mt-1 font-mono">
-              {cost.total_events} 事件 · {cost.calls?.length ?? 0} 步 LLM 调用 · {tokSource}
-            </div>
-          </div>
-          <div className="bg-white rounded-lg shadow border border-gray-200 px-4 py-3.5">
-            <div className={`font-mono text-[10px] tracking-widest uppercase ${isReal ? 'text-emerald-600' : 'text-gray-500'}`}>
-              {isReal ? 'Headroom 实测' : 'Optimization Headroom'}
-            </div>
-            <div className="text-[22px] font-bold mt-1 text-emerald-600 leading-tight">
-              {isReal ? `-${hrSavePct.toFixed(0)}%` : `${h.pct.toFixed(0)}%`}
-            </div>
-            <div className="text-[11px] text-gray-500 mt-1 font-mono">
-              {isReal
-                ? `压缩后 ${fmtK(h.headroom_compressed_tok ?? 0)} tok`
-                : `payload 可优化 ${fmtK(h.payload_deletable_tok + h.payload_cacheable_tok)} tok`}
-            </div>
-          </div>
+          ))}
         </div>
       )}
 
@@ -881,15 +853,17 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
     }
   }, []);
 
-  // 渐进式分析：并行触发 5 个维度，每个维度独立更新 loading/done/error
-  const runAnalysis = useCallback(() => {
-    setReport(EMPTY_REPORT);
-    setProgress({ summary: 'loading', perf: 'loading', perfIssues: 'loading', cost: 'loading', costWaste: 'loading', accuracy: 'loading' });
-    setAnalyzeError(null);
-    setLlmNotConfigured(false);
+  // 渐进式分析：按维度触发，每个维度独立更新 loading/done/error
+  const runDimensions = useCallback((dims: DimKey[]) => {
+    const has = (d: DimKey) => dims.includes(d);
+    setProgress((prev) => {
+      const next = { ...prev };
+      dims.forEach((d) => { next[d] = 'loading'; });
+      return next;
+    });
 
     // summary — 叙事摘要，单次 LLM 调用，数秒
-    runOptimizeDimension<TrajectorySummary>(sessionId, 'summary')
+    if (has('summary')) runOptimizeDimension<TrajectorySummary>(sessionId, 'summary')
       .then((data) => {
         setReport((prev) => ({ ...prev, summary: data }));
         setProgress((prev) => ({ ...prev, summary: 'done' }));
@@ -897,7 +871,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       .catch((e) => { handleDimError(e); setProgress((prev) => ({ ...prev, summary: 'error' })); });
 
     // perf — 纯计算，毫秒级
-    runOptimizeDimension<PerfStats>(sessionId, 'perf')
+    if (has('perf')) runOptimizeDimension<PerfStats>(sessionId, 'perf')
       .then((data) => {
         setReport((prev) => ({ ...prev, perf: data }));
         setProgress((prev) => ({ ...prev, perf: 'done' }));
@@ -905,7 +879,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       .catch((e) => { handleDimError(e); setProgress((prev) => ({ ...prev, perf: 'error' })); });
 
     // perf-issues — Rust 供数 + LLM 策略选择，10-30s
-    runOptimizeDimension<PerfReport>(sessionId, 'perf-issues')
+    if (has('perfIssues')) runOptimizeDimension<PerfReport>(sessionId, 'perf-issues')
       .then((data) => {
         setReport((prev) => ({ ...prev, perf_issues: data }));
         setProgress((prev) => ({ ...prev, perfIssues: 'done' }));
@@ -913,7 +887,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       .catch((e) => { handleDimError(e); setProgress((prev) => ({ ...prev, perfIssues: 'error' })); });
 
     // cost — 纯计算，毫秒级
-    runOptimizeDimension<CostStats>(sessionId, 'cost')
+    if (has('cost')) runOptimizeDimension<CostStats>(sessionId, 'cost')
       .then((data) => {
         setReport((prev) => ({ ...prev, cost: data }));
         setProgress((prev) => ({ ...prev, cost: 'done' }));
@@ -921,7 +895,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       .catch((e) => { handleDimError(e); setProgress((prev) => ({ ...prev, cost: 'error' })); });
 
     // cost-waste — Rust 候选 + LLM 判定，10-30s
-    runOptimizeDimension<WasteReport>(sessionId, 'cost-waste')
+    if (has('costWaste')) runOptimizeDimension<WasteReport>(sessionId, 'cost-waste')
       .then((data) => {
         setReport((prev) => ({ ...prev, cost_waste: data }));
         setProgress((prev) => ({ ...prev, costWaste: 'done' }));
@@ -929,7 +903,7 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       .catch((e) => { handleDimError(e); setProgress((prev) => ({ ...prev, costWaste: 'error' })); });
 
     // accuracy — LLM 多检测器，30-60s+，不设短超时
-    runOptimizeDimension<AccuracyResult>(sessionId, 'accuracy')
+    if (has('accuracy')) runOptimizeDimension<AccuracyResult>(sessionId, 'accuracy')
       .then((data) => {
         setReport((prev) => ({
           ...prev,
@@ -946,14 +920,27 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
       });
   }, [sessionId, handleDimError]);
 
-  // 无历史结果时自动触发分析（首次进入未分析过的会话）
+  // 全量重新分析（「重新分析」按钮）：清空已有结果后并行触发全部维度
+  const runAnalysis = useCallback(() => {
+    setReport(EMPTY_REPORT);
+    setAnalyzeError(null);
+    setLlmNotConfigured(false);
+    runDimensions(ALL_DIMS);
+  }, [runDimensions]);
+
+  // 历史结果加载后自动补齐缺失维度：全空 = 首次进入，自动全量分析；
+  // 部分缺失（如 cost 已落库但 cost-waste 从未跑成）只补跑缺的维度，
+  // 避免这些维度停在「尚未分析」死等手动重跑
   useEffect(() => {
     if (loadingResults) return;
-    const allIdle = Object.values(progress).every((s) => s === 'idle');
-    if (allIdle) {
+    const idle = ALL_DIMS.filter((k) => progress[k] === 'idle');
+    if (idle.length === 0) return;
+    if (idle.length === ALL_DIMS.length) {
       runAnalysis();
+    } else {
+      runDimensions(idle);
     }
-  }, [loadingResults, progress, runAnalysis]);
+  }, [loadingResults, progress, runAnalysis, runDimensions]);
 
   const running = Object.values(progress).some((s) => s === 'loading');
   const hasAnyResult = Object.values(progress).some((s) => s === 'done');
@@ -971,6 +958,26 @@ function SessionAnalysisView({ sessionId }: { sessionId: string }) {
         <div className="min-w-0">
           <p className="text-xs text-gray-400">优化分析 · 会话</p>
           <p className="font-mono text-sm text-gray-800 truncate" title={sessionId}>{sessionId}</p>
+          <div className="flex items-center gap-3 mt-1">
+            {/* 轨迹在新标签页打开：分析页可能正在跑维度（LLM 调用 10–60s），
+                同标签跳走会卸载组件、丢掉进行中的分析 */}
+            <a
+              href={`#/atif?type=session&id=${encodeURIComponent(sessionId)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+            >
+              🔍 查看被分析轨迹 ↗
+            </a>
+            <a
+              href={`#/atif?type=session&id=${encodeURIComponent(`opt:${sessionId}`)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+            >
+              🤖 查看分析轨迹 (agentsight-opt) ↗
+            </a>
+          </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <button
@@ -1060,22 +1067,32 @@ const DIM_TAG_CLS: Record<string, string> = {
   accuracy: SEC_TAG_CLS.acc,
 };
 
+/** 历史记录每页行数（与 AgentSessionsPage 保持一致）。 */
+const HISTORY_PAGE_SIZE = 15;
+/** 一次拉取的最大条数——服务端 `/api/optimize/results` 的硬上限。 */
+const HISTORY_FETCH_LIMIT = 200;
+
 function SessionEntryView() {
   const navigate = useNavigate();
   const [input, setInput] = useState('');
   const [history, setHistory] = useState<OptimizeHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
   const trimmed = input.trim();
 
   useEffect(() => {
     let cancelled = false;
-    fetchOptimizeHistory()
+    fetchOptimizeHistory(HISTORY_FETCH_LIMIT)
       .then((data) => { if (!cancelled) setHistory(data); })
       .catch((e) => { if (!cancelled) setError(userFacingError(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
+
+  const totalPages = Math.max(1, Math.ceil(history.length / HISTORY_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paged = history.slice((safePage - 1) * HISTORY_PAGE_SIZE, safePage * HISTORY_PAGE_SIZE);
 
   const go = () => {
     if (!trimmed) return;
@@ -1115,7 +1132,10 @@ function SessionEntryView() {
         <div className="px-4 lg:px-6 py-3 border-b border-gray-200 bg-gray-50 flex items-center gap-2">
           <h2 className="text-sm font-semibold text-gray-700">历史分析记录</h2>
           {!loading && !error && history.length > 0 && (
-            <span className="text-xs text-gray-400">共 {history.length} 条</span>
+            <span className="text-xs text-gray-400">
+              共 {history.length} 条
+              {history.length >= HISTORY_FETCH_LIMIT && `（仅显示最近 ${HISTORY_FETCH_LIMIT} 条）`}
+            </span>
           )}
         </div>
 
@@ -1145,7 +1165,7 @@ function SessionEntryView() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {history.map((h) => (
+                {paged.map((h) => (
                   <tr
                     key={h.session_id}
                     className="hover:bg-blue-50 transition-colors cursor-pointer"
@@ -1187,6 +1207,45 @@ function SessionEntryView() {
           </div>
         )}
       </div>
+
+      {/* ── 分页（复用 AgentSessionsPage 的控件形态）── */}
+      {!loading && !error && history.length > HISTORY_PAGE_SIZE && (
+        <div className="flex items-center justify-between text-sm text-gray-600">
+          <span>
+            {history.length} 条结果 · 第 {safePage}/{totalPages} 页
+          </span>
+          <div className="flex gap-1">
+            <button
+              disabled={safePage <= 1}
+              onClick={() => setPage(1)}
+              className="px-2.5 py-1 rounded border border-gray-300 disabled:opacity-40 hover:bg-gray-100"
+            >
+              «
+            </button>
+            <button
+              disabled={safePage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="px-2.5 py-1 rounded border border-gray-300 disabled:opacity-40 hover:bg-gray-100"
+            >
+              ‹
+            </button>
+            <button
+              disabled={safePage >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              className="px-2.5 py-1 rounded border border-gray-300 disabled:opacity-40 hover:bg-gray-100"
+            >
+              ›
+            </button>
+            <button
+              disabled={safePage >= totalPages}
+              onClick={() => setPage(totalPages)}
+              className="px-2.5 py-1 rounded border border-gray-300 disabled:opacity-40 hover:bg-gray-100"
+            >
+              »
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

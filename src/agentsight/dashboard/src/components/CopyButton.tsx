@@ -13,6 +13,15 @@ function fallbackCopy(text: string, done: () => void) {
   done();
 }
 
+/** 复制文本到剪贴板，HTTP 非安全上下文自动降级到 execCommand */
+export function copyText(text: string, done: () => void) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+
 /** 复制按钮组件，点击后短暂显示「已复制」反馈 */
 export const CopyButton: React.FC<{ text: string; title?: string }> = ({
   text,
@@ -28,11 +37,7 @@ export const CopyButton: React.FC<{ text: string; title?: string }> = ({
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     };
     // HTTP 环境下 clipboard API 可能不可用，使用 execCommand fallback
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-    } else {
-      fallbackCopy(text, done);
-    }
+    copyText(text, done);
   };
   return (
     <button
