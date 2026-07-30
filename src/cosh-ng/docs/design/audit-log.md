@@ -220,6 +220,13 @@ A provider stream, control permission, and foreground handoff for one tool share
 `run_id + tool_use_id`; they are lifecycle events, not three executions. A Shell handoff adds
 `command_id`. Readers display missing starts or terminals as gaps instead of inventing completion.
 
+An approval whose request could not be sent is still terminal: Core writes `approval.resolved` with
+`outcome.status=failed`, `decision=emit_failed`, and `reason_code=control_transport_<class>` when the
+control request could not be serialized, written, or flushed. The claim is that this producer never
+obtained a decision, not that the request was provably lost — a failed write may still have put bytes
+on the wire, so delivery could not be confirmed either way. Readers must not fold it into a user
+`deny`: nobody decided anything.
+
 ## Field Minimization and Redaction
 
 ### Default persisted content

@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -62,6 +62,12 @@ pub struct CoshCore {
     request_counter: AtomicU32,
     truncator: OutputTruncator,
     loop_detector: LoopDetector,
+    /// First control-transport failure of this process, if any.
+    ///
+    /// Set from `&self` paths (`handle_ask_user`, `handle_shell_evidence`), so
+    /// it is a `OnceLock` rather than a plain field: the first failure is the
+    /// diagnostic one and the session is over either way.
+    control_transport_failure: OnceLock<String>,
 }
 
 impl CoshCore {
@@ -74,6 +80,81 @@ impl CoshCore {
             let _ = writeln!(writer, "{json}");
             let _ = writer.flush();
         }
+    }
+
+    /// Emits a control request whose response the core will then block on.
+    ///
+    /// [`Self::emit`] drops transport errors on the floor, which is fine for
+    /// fire-and-forget stream events but not for a request that gates a
+    /// blocking read: if the request did not arrive it can never be answered,
+    /// so the wait would only end when the session dies.
+    ///
+    /// An error means *delivery is unknown*, not that nothing was sent.
+    /// `write_all` may issue several underlying writes, a writer may accept a
+    /// prefix before failing, and `BufWriter::flush` can fail after draining
+    /// part of its buffer. Writing the line in one call keeps a failure from
+    /// interleaving with other output; it cannot make the write atomic. The
+    /// only safe reaction is therefore to stop waiting and end the session,
+    /// whichever side of the pipe the bytes reached.
+    fn emit_control_request_checked<W: Write>(
+        &self,
+        writer: &mut W,
+        msg: &OutputMessage,
+    ) -> Result<(), ControlTransportError> {
+        let json = serde_json::to_string(msg)
+            .map_err(|error| ControlTransportError::new("serialize", error.to_string()))?;
+        let mut line = json.into_bytes();
+        line.push(b'\n');
+        writer
+            .write_all(&line)
+            .map_err(|error| ControlTransportError::new("write", error.to_string()))?;
+        writer
+            .flush()
+            .map_err(|error| ControlTransportError::new("flush", error.to_string()))
+    }
+
+    /// Records a control-transport failure as session-fatal.
+    ///
+    /// The transport carries every request/response pair, so once a write on it
+    /// fails there is no reliable way to reach the Shell and no way to learn
+    /// what the user decided. Callers must return instead of waiting; the
+    /// process then exits non-zero and the Shell recovers the run through its
+    /// existing child-failure path, which also closes a card the Shell may have
+    /// managed to display.
+    fn note_control_transport_failure(&self, request_id: &str, error: &ControlTransportError) {
+        let detail = format!("control transport {error} (request_id={request_id})");
+        tracing::error!(
+            request_id = %request_id,
+            error_class = error.class(),
+            "{detail}"
+        );
+        if self.control_transport_failure.set(detail.clone()).is_ok() {
+            // The log file is not visible to the Shell; stderr is, and the
+            // Shell surfaces its tail when the child exits non-zero.
+            emit_fatal_diagnostic(&mut std::io::stderr().lock(), &detail);
+        }
+    }
+
+    /// The session-fatal control-transport failure, if one happened.
+    pub fn control_transport_failure(&self) -> Option<&str> {
+        self.control_transport_failure.get().map(String::as_str)
+    }
+
+    /// Turns a control-transport failure into the error that ends this batch.
+    ///
+    /// [`Self::handle_ask_user`] and [`Self::handle_shell_evidence`] take
+    /// `&self`, so the session flag is the only channel they have. Promoting it
+    /// in the tool loop is what stops the remaining calls of the batch from
+    /// running after the transport died; an already-set fatal turn wins.
+    fn promote_control_transport_failure(&self, fatal_turn: &mut Option<FatalTurn>) {
+        if fatal_turn.is_some() {
+            return;
+        }
+        let Some(failure) = self.control_transport_failure() else {
+            return;
+        };
+        let error = format!("{failure}; session cannot continue");
+        *fatal_turn = Some(FatalTurn::new(error, CONTROL_TRANSPORT_AUDIT_REASON));
     }
 
     fn emit_hook_notifications<W: Write>(
@@ -266,7 +347,10 @@ impl CoshCore {
                     .record_approval_requested(approval_scope, "hook", "hook_ask", None);
 
             // Emit approval request with HOOK: prefix and empty input.
-            self.emit(
+            // Checked like every other request the core then blocks on (#1994):
+            // nothing has been appended to the transcript yet, so this one can
+            // fail the turn immediately.
+            if let Err(error) = self.emit_control_request_checked(
                 writer,
                 &OutputMessage::can_use_tool_with_audit_ref(
                     &request_id,
@@ -276,7 +360,18 @@ impl CoshCore {
                     true, // hook_requires_approval
                     audit_ref,
                 ),
-            );
+            ) {
+                self.note_control_transport_failure(&request_id, &error);
+                let audit_error = self
+                    .audit
+                    .record_approval_emit_failed(approval_scope, "hook", None, error.class())
+                    .err();
+                return Err(control_transport_turn_error(
+                    &request_id,
+                    &error,
+                    audit_error.as_deref(),
+                ));
+            }
 
             let approval = self.wait_for_approval(&request_id, false, reader).await;
             let (approval_status, approval_decision) = approval_audit_outcome(&approval);
@@ -848,17 +943,23 @@ impl CoshCore {
             let mut interrupted = false;
             // Set once a tool call ends the run. The error is returned only after
             // this batch is fully answered.
-            let mut fatal_error: Option<String> = None;
+            let mut fatal_turn: Option<FatalTurn> = None;
 
             for tc in &tool_calls {
                 if tc.name.is_empty() {
                     continue;
                 }
 
+                // A transport failure seen on a `&self` path can only surface
+                // through the session flag, so it becomes fatal here: the rest
+                // of the batch must be skipped, not executed against a peer the
+                // core can no longer talk to.
+                self.promote_control_transport_failure(&mut fatal_turn);
+
                 // Every id in the assistant message needs exactly one tool result,
                 // or the next provider request violates tool-message pairing — and
                 // headless persists and reuses the session even when a turn fails.
-                if fatal_error.is_some() {
+                if fatal_turn.is_some() {
                     self.skip_unexecuted_tool_call(
                         CoreAuditScope::tool(&run_id, &turn_id, &tc.id),
                         writer,
@@ -957,16 +1058,13 @@ impl CoshCore {
                         // looks like it is still generating arguments.
                         self.emit_provider_native_tool_result(writer, &tc.id, &result);
                         if attempt >= MAX_INVALID_ARGUMENT_ATTEMPTS {
-                            self.audit.record_turn_terminal(
-                                turn_scope,
-                                AuditOutcomeStatus::Failed,
-                                Some("invalid_tool_arguments_exhausted"),
-                            );
-                            // Recorded, not returned: the assistant message already
+                            // Held, not returned: the assistant message already
                             // declared every call in this batch, and the loop must
                             // still answer the rest before the run ends.
-                            fatal_error =
-                                Some(invalid_arguments_exhausted_error(&tc.name, &parse_error));
+                            fatal_turn = Some(FatalTurn::new(
+                                invalid_arguments_exhausted_error(&tc.name, &parse_error),
+                                "invalid_tool_arguments_exhausted",
+                            ));
                         }
                         continue;
                     }
@@ -1124,7 +1222,10 @@ impl CoshCore {
                             },
                             Some(hash_json(&params)),
                         );
-                        self.emit(
+                        // Checked, not fire-and-forget: waiting for a decision
+                        // on a request that may never have arrived is the silent
+                        // permanent hang from #1994.
+                        if let Err(error) = self.emit_control_request_checked(
                             writer,
                             &OutputMessage::can_use_tool_with_audit_ref(
                                 &request_id,
@@ -1134,66 +1235,96 @@ impl CoshCore {
                                 hook_requires_approval,
                                 audit_ref,
                             ),
-                        );
-
-                        let accepts_host_executed_shell = self
-                            .tools
-                            .get(&tc.name)
-                            .map(|tool| tool.kind() == ToolKind::ShellExec)
-                            .unwrap_or(false);
-                        // ─── SLS: approval wait timing ───
-                        let approval_start = Instant::now();
-                        let approval_result = self
-                            .wait_for_approval(&request_id, accepts_host_executed_shell, reader)
-                            .await;
-                        let approval_wait_ms = approval_start.elapsed().as_millis() as u64;
-                        let (approval_status, approval_decision) =
-                            approval_audit_outcome(&approval_result);
-                        if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. }) {
-                            self.audit.record_approval_resolved(
-                                approval_scope,
-                                &tc.name,
-                                approval_status,
-                                None,
-                                approval_decision,
-                                Some(approval_wait_ms),
-                            )?;
-                        }
-                        self.metrics.approval_wait_ms += approval_wait_ms;
-                        self.metrics.approval_count += 1;
-                        match approval_result {
-                            ApprovalResult::Allowed => {
-                                self.metrics.approval_allow += 1;
-                                self.audit.record_tool_execution_started(
-                                    tool_scope, &tc.name, &tool_data,
+                        ) {
+                            self.note_control_transport_failure(&request_id, &error);
+                            // Held, not propagated with `?`: this barrier can
+                            // fail too, and returning here would leave the
+                            // assistant's tool call without a result in a
+                            // transcript headless still persists.
+                            let audit_error = self
+                                .audit
+                                .record_approval_emit_failed(
+                                    approval_scope,
+                                    &tc.name,
+                                    None,
+                                    error.class(),
+                                )
+                                .err();
+                            // No interaction reached the wait, so this is
+                            // neither an approval decision nor part of the
+                            // average approval-wait denominator.
+                            if fatal_turn.is_none() {
+                                fatal_turn = Some(FatalTurn::new(
+                                    control_transport_turn_error(
+                                        &request_id,
+                                        &error,
+                                        audit_error.as_deref(),
+                                    ),
+                                    CONTROL_TRANSPORT_AUDIT_REASON,
+                                ));
+                            }
+                            ToolResult::error(approval_emit_failed_tool_error(&error))
+                        } else {
+                            let accepts_host_executed_shell = self
+                                .tools
+                                .get(&tc.name)
+                                .map(|tool| tool.kind() == ToolKind::ShellExec)
+                                .unwrap_or(false);
+                            // ─── SLS: approval wait timing ───
+                            let approval_start = Instant::now();
+                            let approval_result = self
+                                .wait_for_approval(&request_id, accepts_host_executed_shell, reader)
+                                .await;
+                            let approval_wait_ms = approval_start.elapsed().as_millis() as u64;
+                            let (approval_status, approval_decision) =
+                                approval_audit_outcome(&approval_result);
+                            if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. })
+                            {
+                                self.audit.record_approval_resolved(
+                                    approval_scope,
+                                    &tc.name,
+                                    approval_status,
+                                    None,
+                                    approval_decision,
+                                    Some(approval_wait_ms),
                                 )?;
-                                let result = self.execute_tool(&tc.name, params, &ctx).await;
-                                self.emit_provider_native_tool_result(writer, &tc.id, &result);
-                                tool_result_already_emitted = true;
-                                result
                             }
-                            ApprovalResult::HostExecutedShell {
-                                llm_content,
-                                exit_code,
-                            } => {
-                                self.metrics.approval_allow += 1;
-                                let is_error = exit_code.is_some_and(|c| c != 0);
-                                ToolResult {
-                                    output: llm_content,
-                                    is_error,
+                            self.metrics.approval_wait_ms += approval_wait_ms;
+                            self.metrics.approval_count += 1;
+                            match approval_result {
+                                ApprovalResult::Allowed => {
+                                    self.metrics.approval_allow += 1;
+                                    self.audit.record_tool_execution_started(
+                                        tool_scope, &tc.name, &tool_data,
+                                    )?;
+                                    let result = self.execute_tool(&tc.name, params, &ctx).await;
+                                    self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                                    tool_result_already_emitted = true;
+                                    result
                                 }
-                            }
-                            ApprovalResult::Denied(reason) => {
-                                self.metrics.approval_deny += 1;
-                                ToolResult::error(format!(
-                                    "Tool call denied: {}",
-                                    reason.unwrap_or_else(|| "no reason given".to_string())
-                                ))
-                            }
-                            ApprovalResult::Interrupted => {
-                                self.metrics.approval_deny += 1;
-                                interrupted = true;
-                                ToolResult::error("Interrupted by user")
+                                ApprovalResult::HostExecutedShell {
+                                    llm_content,
+                                    exit_code,
+                                } => {
+                                    self.metrics.approval_allow += 1;
+                                    let is_error = exit_code.is_some_and(|c| c != 0);
+                                    ToolResult {
+                                        output: llm_content,
+                                        is_error,
+                                    }
+                                }
+                                ApprovalResult::Denied(reason) => {
+                                    self.metrics.approval_deny += 1;
+                                    ToolResult::error(format!(
+                                        "Tool call denied: {}",
+                                        reason.unwrap_or_else(|| "no reason given".to_string())
+                                    ))
+                                }
+                                ApprovalResult::Interrupted => {
+                                    self.metrics.approval_deny += 1;
+                                    interrupted = true;
+                                    ToolResult::error("Interrupted by user")
+                                }
                             }
                         }
                     }
@@ -1321,7 +1452,11 @@ impl CoshCore {
                                 "command": &bypass.original_command
                             }))),
                         );
-                        self.emit(
+                        // Same #1994 guard as the policy approval above: an
+                        // unsent bypass panel must not become a blocking
+                        // read. The sandbox failure stays as the tool result,
+                        // exactly as for a denied bypass.
+                        if let Err(error) = self.emit_control_request_checked(
                             writer,
                             &OutputMessage::can_use_tool_with_audit_ref(
                                 &request_id,
@@ -1331,51 +1466,74 @@ impl CoshCore {
                                 true,
                                 audit_ref,
                             ),
-                        );
-
-                        let approval_start = Instant::now();
-                        let approval_result =
-                            self.wait_for_approval(&request_id, true, reader).await;
-                        let (approval_status, approval_decision) =
-                            approval_audit_outcome(&approval_result);
-                        if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. }) {
-                            self.audit.record_approval_resolved(
-                                approval_scope,
-                                &tc.name,
-                                approval_status,
-                                Some("sandbox_bypass"),
-                                approval_decision,
-                                Some(approval_start.elapsed().as_millis() as u64),
-                            )?;
-                        }
-
-                        match approval_result {
-                            ApprovalResult::Allowed => {
-                                self.audit.record_tool_execution_started(
-                                    tool_scope, &tc.name, &tool_data,
+                        ) {
+                            self.note_control_transport_failure(&request_id, &error);
+                            let audit_error = self
+                                .audit
+                                .record_approval_emit_failed(
+                                    approval_scope,
+                                    &tc.name,
+                                    Some("sandbox_bypass"),
+                                    error.class(),
+                                )
+                                .err();
+                            if fatal_turn.is_none() {
+                                fatal_turn = Some(FatalTurn::new(
+                                    control_transport_turn_error(
+                                        &request_id,
+                                        &error,
+                                        audit_error.as_deref(),
+                                    ),
+                                    CONTROL_TRANSPORT_AUDIT_REASON,
+                                ));
+                            }
+                        } else {
+                            let approval_start = Instant::now();
+                            let approval_result =
+                                self.wait_for_approval(&request_id, true, reader).await;
+                            let (approval_status, approval_decision) =
+                                approval_audit_outcome(&approval_result);
+                            if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. })
+                            {
+                                self.audit.record_approval_resolved(
+                                    approval_scope,
+                                    &tc.name,
+                                    approval_status,
+                                    Some("sandbox_bypass"),
+                                    approval_decision,
+                                    Some(approval_start.elapsed().as_millis() as u64),
                                 )?;
-                                self.hook_system.set_hook_disabled("sandbox-guard", true);
-                                let retry_params =
-                                    serde_json::json!({"command": &bypass.original_command});
-                                let retry = self.execute_tool(&tc.name, retry_params, &ctx).await;
-                                // Re-enable immediately after execute, before any other
-                                // operation. execute_tool returns ToolResult (infallible),
-                                // so this line is always reached.
-                                self.hook_system.set_hook_disabled("sandbox-guard", false);
-                                self.emit_provider_native_tool_result(writer, &tc.id, &retry);
-                                result = retry;
                             }
-                            ApprovalResult::HostExecutedShell {
-                                llm_content,
-                                exit_code,
-                            } => {
-                                let is_error = exit_code.is_some_and(|c| c != 0);
-                                result = ToolResult {
-                                    output: llm_content,
-                                    is_error,
-                                };
+
+                            match approval_result {
+                                ApprovalResult::Allowed => {
+                                    self.audit.record_tool_execution_started(
+                                        tool_scope, &tc.name, &tool_data,
+                                    )?;
+                                    self.hook_system.set_hook_disabled("sandbox-guard", true);
+                                    let retry_params =
+                                        serde_json::json!({"command": &bypass.original_command});
+                                    let retry =
+                                        self.execute_tool(&tc.name, retry_params, &ctx).await;
+                                    // Re-enable immediately after execute, before any other
+                                    // operation. execute_tool returns ToolResult (infallible),
+                                    // so this line is always reached.
+                                    self.hook_system.set_hook_disabled("sandbox-guard", false);
+                                    self.emit_provider_native_tool_result(writer, &tc.id, &retry);
+                                    result = retry;
+                                }
+                                ApprovalResult::HostExecutedShell {
+                                    llm_content,
+                                    exit_code,
+                                } => {
+                                    let is_error = exit_code.is_some_and(|c| c != 0);
+                                    result = ToolResult {
+                                        output: llm_content,
+                                        is_error,
+                                    };
+                                }
+                                _ => { /* denied / interrupted: keep original error */ }
                             }
-                            _ => { /* denied / interrupted: keep original error */ }
                         }
                     }
                 }
@@ -1408,10 +1566,18 @@ impl CoshCore {
                     return Ok(());
                 }
             }
-            // The turn was already audited as failed at the rejection; every call in
-            // the batch now has a result, so the run can end on a paired history.
-            if let Some(error) = fatal_error {
-                return Err(error);
+            // Also checked after the last call: a failure there never re-enters
+            // the loop boundary above.
+            self.promote_control_transport_failure(&mut fatal_turn);
+            // A turn terminal is emitted only after every declared call has a
+            // terminal event and a paired history result.
+            if let Some(fatal) = fatal_turn {
+                self.audit.record_turn_terminal(
+                    turn_scope,
+                    AuditOutcomeStatus::Failed,
+                    Some(fatal.reason_code),
+                );
+                return Err(fatal.error);
             }
             self.audit
                 .record_turn_terminal(turn_scope, AuditOutcomeStatus::Success, None);
@@ -1540,7 +1706,7 @@ impl CoshCore {
                         }
                     },
                 };
-                self.emit(
+                if let Err(error) = self.emit_control_request_checked(
                     writer,
                     &OutputMessage::shell_evidence_list_commands(
                         &request_id,
@@ -1548,7 +1714,9 @@ impl CoshCore {
                         limit,
                         cursor,
                     ),
-                );
+                ) {
+                    return self.evidence_request_emit_failed(&request_id, &error);
+                }
             }
             "read_output" => {
                 let Some(output_id) = params.get("output_id").and_then(|v| v.as_str()) else {
@@ -1591,7 +1759,7 @@ impl CoshCore {
                     None => false,
                 };
 
-                self.emit(
+                if let Err(error) = self.emit_control_request_checked(
                     writer,
                     &OutputMessage::shell_evidence_read_output(
                         &request_id,
@@ -1601,7 +1769,9 @@ impl CoshCore {
                         lines,
                         bypass_recent_filter,
                     ),
-                );
+                ) {
+                    return self.evidence_request_emit_failed(&request_id, &error);
+                }
             }
             _ => {
                 return ToolResult::error(
@@ -1611,6 +1781,23 @@ impl CoshCore {
         }
 
         self.wait_for_shell_evidence(&request_id, reader).await
+    }
+
+    /// Fails an evidence request that could not be sent.
+    ///
+    /// Returning instead of calling [`Self::wait_for_shell_evidence`] keeps the
+    /// core off a read that no response can end (#1994); the flag makes the
+    /// session fatal, and the tool loop promotes it before the next call runs.
+    fn evidence_request_emit_failed(
+        &self,
+        request_id: &str,
+        error: &ControlTransportError,
+    ) -> ToolResult {
+        self.note_control_transport_failure(request_id, error);
+        ToolResult::error(format!(
+            "cosh_shell_evidence request was not answered: delivery could not be confirmed ({})",
+            error.class()
+        ))
     }
 
     async fn wait_for_shell_evidence<R: AsyncBufReadExt + Unpin>(
@@ -1749,6 +1936,82 @@ impl CoshCore {
             }
         }
         ApprovalResult::Interrupted
+    }
+}
+
+/// Audit reason code for a turn ended by a dead control transport.
+const CONTROL_TRANSPORT_AUDIT_REASON: &str = "control_transport_failed";
+
+/// One fatal turn outcome held until every declared tool call is closed.
+struct FatalTurn {
+    error: String,
+    reason_code: &'static str,
+}
+
+impl FatalTurn {
+    fn new(error: String, reason_code: &'static str) -> Self {
+        Self { error, reason_code }
+    }
+}
+
+/// Writes the fatal diagnostic without letting a broken stderr abort cleanup.
+fn emit_fatal_diagnostic<W: Write>(writer: &mut W, detail: &str) {
+    let _ = writeln!(writer, "cosh-core fatal: {detail}");
+}
+
+/// Why a control request that must be answered could not be sent intact.
+///
+/// Delivery is unknown after any of these: the Shell may have received the
+/// whole line, part of it, or nothing at all.
+#[derive(Debug)]
+pub(crate) struct ControlTransportError {
+    /// Stable failure class: `serialize`, `write`, or `flush`.
+    class: &'static str,
+    detail: String,
+}
+
+impl ControlTransportError {
+    fn new(class: &'static str, detail: String) -> Self {
+        Self { class, detail }
+    }
+
+    pub(crate) fn class(&self) -> &'static str {
+        self.class
+    }
+}
+
+impl std::fmt::Display for ControlTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} failed: {}", self.class, self.detail)
+    }
+}
+
+/// Tool-result text for a call whose approval request could not be sent.
+///
+/// Not phrased as a denial: nobody decided anything, and the transcript must
+/// not teach the model that the user refused. The call did not run, so it still
+/// owes a result rather than an unpaired tool call.
+fn approval_emit_failed_tool_error(error: &ControlTransportError) -> String {
+    format!(
+        "Tool call not executed: delivery of the approval request could not be confirmed ({})",
+        error.class()
+    )
+}
+
+/// Turn-level error for a broken control transport.
+///
+/// Carries the audit failure too when the terminal approval record could not be
+/// persisted either: both are session-fatal, and the transport is the cause.
+fn control_transport_turn_error(
+    request_id: &str,
+    error: &ControlTransportError,
+    audit_error: Option<&str>,
+) -> String {
+    let base =
+        format!("control transport {error} (request_id={request_id}); session cannot continue");
+    match audit_error {
+        Some(audit_error) => format!("{base}; audit record failed: {audit_error}"),
+        None => base,
     }
 }
 

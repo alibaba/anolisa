@@ -284,6 +284,36 @@ impl CoreAuditRecorder {
         )
     }
 
+    /// Records an approval request that could not be sent to its decider.
+    ///
+    /// The approval still owes a terminal event, so this is an
+    /// `approval.resolved` with `decision=emit_failed` and the transport
+    /// failure class as the reason code. Delivery is unknown, not proven
+    /// absent — what the record asserts is that this core never obtained a
+    /// decision, which production audit must not fold into a user deny (#1994).
+    pub(crate) fn record_approval_emit_failed(
+        &mut self,
+        scope: CoreAuditScope<'_>,
+        subject: &str,
+        assessment: Option<&str>,
+        error_class: &str,
+    ) -> Result<(), String> {
+        let identity = self.scope_identity(scope);
+        self.barrier(
+            KnownAuditEventType::ApprovalResolved,
+            identity,
+            AuditOutcomeStatus::Failed,
+            "approval",
+            Some(subject),
+            &AuditApprovalData {
+                assessment: assessment.map(str::to_string),
+                decision: Some("emit_failed".to_string()),
+                reason_code: Some(format!("control_transport_{error_class}")),
+                ..AuditApprovalData::default()
+            },
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_approval_resolved(
         &mut self,

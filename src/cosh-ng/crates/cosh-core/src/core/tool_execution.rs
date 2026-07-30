@@ -548,7 +548,9 @@ impl CoshCore {
             .collect();
 
         let request_id = self.next_request_id();
-        self.emit(
+        // Checked: an unasked question can never be answered, so waiting for
+        // one is the silent permanent hang from #1994.
+        if let Err(error) = self.emit_control_request_checked(
             writer,
             &OutputMessage::ControlRequest {
                 request_id: request_id.clone(),
@@ -559,7 +561,13 @@ impl CoshCore {
                     multi_select: params.multi_select,
                 },
             },
-        );
+        ) {
+            self.note_control_transport_failure(&request_id, &error);
+            return ToolResult::error(format!(
+                "question was not answered: delivery could not be confirmed ({})",
+                error.class()
+            ));
+        }
 
         match self.wait_for_answer(&request_id, reader).await {
             Some(answer) => ToolResult::success(answer),
