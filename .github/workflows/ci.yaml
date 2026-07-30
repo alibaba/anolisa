@@ -606,7 +606,7 @@ jobs:
     name: Test agentsight
     needs: detect-changes
     if: needs.detect-changes.outputs.agentsight == 'true'
-    runs-on: anolisa-k8s-general-ci-x64
+    runs-on: anolisa-agentsight-ci-x64
     steps:
       - uses: actions/checkout@v4
         with:
