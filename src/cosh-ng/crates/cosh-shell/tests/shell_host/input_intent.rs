@@ -193,22 +193,16 @@ fn long_ascii_input_avoids_per_byte_subprocess_cost() {
 }
 
 #[test]
-fn max_non_ascii_input_avoids_per_byte_subprocess_cost() {
+fn max_non_ascii_input_needs_no_byte_subprocess() {
     let input = "é".repeat(2048);
     for shell in ["bash", "zsh"] {
         if !shell_available(shell) {
             continue;
         }
-        let started = Instant::now();
         assert_eq!(
-            classify(shell, &input, &input).as_deref(),
+            classify_with_setup(shell, &input, &input, "PATH=/nonexistent").as_deref(),
             Some("ambiguous"),
             "{shell}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "{shell}: {:?}",
-            started.elapsed()
         );
     }
 }

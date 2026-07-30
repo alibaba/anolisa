@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn scripted_shell_exit_timeout_kills_foreground_group() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-scripted-exit-timeout-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let work_dir = root.join("work");
+    let descendant_pid_file = root.join("descendant.pid");
+    std::fs::create_dir_all(&root).expect("timeout test root");
+    let mut config = ShellHostConfig::new("scripted-exit-timeout", &work_dir);
+    config.native_mode = false;
+    let started = Instant::now();
+    let override_exit = format!(
+        "exit() {{ sh -c 'trap \"\" HUP TERM; printf \"%s\\n\" \"$$\" > {}; while :; do sleep 60; done'; }}",
+        shell_arg(&descendant_pid_file)
+    );
+
+    let error = run_scripted_bash(&config, &[ScriptedInput::command(override_exit)])
+        .expect_err("scripted shell that ignores exit must time out");
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(8));
+    let descendant_pid = std::fs::read_to_string(&descendant_pid_file)
+        .expect("descendant pid")
+        .trim()
+        .parse::<i32>()
+        .expect("numeric descendant pid");
+    for _ in 0..20 {
+        #[cfg(target_os = "linux")]
+        let is_zombie = std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .map(|(_, suffix)| suffix.starts_with('Z'))
+            })
+            == Some(true);
+        #[cfg(not(target_os = "linux"))]
+        let is_zombie = false;
+        let result = unsafe { nix::libc::kill(descendant_pid, 0) };
+        let is_gone =
+            result < 0 && io::Error::last_os_error().raw_os_error() == Some(nix::libc::ESRCH);
+        if is_zombie || is_gone {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    unsafe {
+        nix::libc::kill(descendant_pid, nix::libc::SIGKILL);
+    }
+    panic!("scripted shell descendant {descendant_pid} survived timeout");
+}
+
+#[test]
 fn transparent_bash_preserves_user_stty_modes() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;

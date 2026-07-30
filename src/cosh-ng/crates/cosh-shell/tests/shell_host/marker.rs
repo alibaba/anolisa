@@ -2004,6 +2004,88 @@ fn routing_c1_cnf_han_tier_a_routes_to_agent() {
 }
 
 #[test]
+fn isolated_bash_ignores_inherited_prompt_and_history_filters() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    let supports_command_not_found = bash_supports_command_not_found_handler();
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-isolated-prompt-command-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let inherited_inputrc = work_dir.join("inherited-inputrc");
+    std::fs::write(
+        &inherited_inputrc,
+        "set input-meta off\nset convert-meta on\nset output-meta off\n",
+    )
+    .expect("inherited inputrc");
+    let inherited_marker = work_dir.join("inherited-prompt-command-ran");
+    let mut config = ShellHostConfig::new("isolated-prompt-command", &work_dir)
+        .with_env(
+            "PROMPT_COMMAND",
+            format!("printf inherited > {}", shell_arg(&inherited_marker)),
+        )
+        .with_env("HISTIGNORE", "*")
+        .with_env("HISTSIZE", "0")
+        .with_env("HISTFILESIZE", "0")
+        .with_env("INPUTRC", inherited_inputrc.display().to_string());
+    config.native_mode = false;
+    let input = "解释 inherited history filter";
+
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(
+                "printf '__cosh_hist_limits__%s:%s\\n' \"$HISTSIZE\" \"$HISTFILESIZE\"",
+            ),
+            ScriptedInput::user_line(input),
+        ],
+    )
+    .expect("isolated scripted bash");
+
+    assert!(!inherited_marker.exists());
+    assert!(
+        String::from_utf8_lossy(&output.terminal_output).contains("__cosh_hist_limits__1000:1000")
+    );
+    if supports_command_not_found {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("natural_language")
+        }));
+    }
+}
+
+#[test]
+fn isolated_zsh_preserves_inputrc_override() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-isolated-zsh-inputrc-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let inputrc = work_dir.join("custom-inputrc");
+    let mut config = ShellHostConfig::new("isolated-zsh-inputrc", &work_dir)
+        .with_env("INPUTRC", inputrc.display().to_string());
+    config.native_mode = false;
+
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line(
+            "printf '__cosh_inputrc__%s\\n' \"$INPUTRC\"",
+        )],
+    )
+    .expect("isolated scripted zsh");
+
+    assert!(String::from_utf8_lossy(&output.terminal_output)
+        .contains(&format!("__cosh_inputrc__{}", inputrc.display())));
+}
+
+#[test]
 fn routing_c1_zsh_ascii_question_unmatched_routes_to_agent() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;

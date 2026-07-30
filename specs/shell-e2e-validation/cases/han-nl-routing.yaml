@@ -15,7 +15,12 @@ defaults:
     - >-
       cd /work/repo/src/cosh-ng &&
       cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null &&
-      exec "$CARGO_TARGET_DIR/debug/cosh-shell" raw cosh-core
+      exec env TERM=xterm-256color COSH_SHELL_WIDTH=96
+      COSH_SHELL_ISOLATED=1 COSH_SHELL_BOOTSTRAP_PATH=0
+      COSH_SHELL_HEALTH_SCAN=disabled COSH_RECOMMENDATIONS_ENABLED=0
+      COSH_SHELL_LANG=zh-CN COSH_SHELL_RAW_SHELL=bash
+      COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8
+      "$CARGO_TARGET_DIR/debug/cosh-shell" raw cosh-core
 cases:
   - id: HAN-NL-001
     title: Bash routes Han Tier-A, question, and quoted-word prompts to Agent

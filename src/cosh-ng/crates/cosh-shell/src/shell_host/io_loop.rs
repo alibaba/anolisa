@@ -1,8 +1,12 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
+
+use crate::raw_input::{foreground_process_group_for_fds, signal_process_group_id};
 
 use super::osc::OscParser;
 
@@ -85,11 +89,39 @@ pub(super) fn read_until_streaming<W: Write>(
     Ok(condition(parser))
 }
 
-pub(super) fn wait_child(child: &mut Child) -> io::Result<Option<i32>> {
-    match child.try_wait()? {
-        Some(status) => Ok(status.code()),
-        None => Ok(child.wait()?.code()),
+pub(super) fn wait_pty_foreground_bounded(
+    master: &File,
+    terminal: &File,
+    child: &mut Child,
+    timeout: Duration,
+) -> io::Result<Option<i32>> {
+    if let Some(status) = child.wait_timeout(timeout)? {
+        return Ok(status.code());
     }
+
+    let shell_group = child.id() as i32;
+    let mut process_groups =
+        foreground_process_group_for_fds(master.as_raw_fd(), terminal.as_raw_fd())
+            .into_iter()
+            .collect::<Vec<_>>();
+    if !process_groups.contains(&shell_group) {
+        process_groups.push(shell_group);
+    }
+    let mut signal_error = None;
+    for process_group in process_groups {
+        if let Err(error) = signal_process_group_id(process_group, nix::libc::SIGKILL) {
+            signal_error.get_or_insert(error);
+        }
+    }
+    let _ = child.kill();
+    child.wait()?;
+    if let Some(error) = signal_error {
+        return Err(error);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("shell did not exit within {timeout:?}"),
+    ))
 }
 
 #[cfg(unix)]

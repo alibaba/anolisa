@@ -6,10 +6,12 @@ use std::time::Duration;
 use crate::input::InputDecision;
 
 use super::bootstrap::{start_bash_session, start_zsh_session, PtySession};
-use super::io_loop::{read_until, read_until_streaming, wait_child};
+use super::io_loop::{read_until, read_until_streaming, wait_pty_foreground_bounded};
 use super::lifecycle::finish_shell_host_output;
 use super::model::{ScriptedInput, ShellHostConfig, ShellHostOutput};
 use super::osc::OscParser;
+
+const SCRIPTED_SHELL_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn run_scripted_bash(
     config: &ShellHostConfig,
@@ -92,7 +94,12 @@ fn run_scripted_shell(
         |_| false,
     )?;
     session.parser.flush_pending();
-    let exit_status = wait_child(&mut session.child)?;
+    let exit_status = wait_pty_foreground_bounded(
+        &session.master,
+        &session.terminal,
+        &mut session.child,
+        SCRIPTED_SHELL_EXIT_TIMEOUT,
+    )?;
     finish_shell_host_output(config, session.parser, exit_status)
 }
 
@@ -165,7 +172,12 @@ where
     output.write_all(&session.parser.display[display_start..])?;
     output.flush()?;
 
-    let exit_status = wait_child(&mut session.child)?;
+    let exit_status = wait_pty_foreground_bounded(
+        &session.master,
+        &session.terminal,
+        &mut session.child,
+        SCRIPTED_SHELL_EXIT_TIMEOUT,
+    )?;
     finish_shell_host_output(config, session.parser, exit_status)
 }
 

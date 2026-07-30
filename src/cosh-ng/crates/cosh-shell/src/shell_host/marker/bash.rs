@@ -44,7 +44,10 @@ else
   export PS1="$COSH_POC_PS1"
   set -o history
   export HISTFILE="${COSH_HISTFILE:-/dev/null}"
+  export HISTSIZE=1000
+  export HISTFILESIZE=1000
   export HISTCONTROL=
+  export HISTIGNORE=
   export HISTTIMEFORMAT=
 fi
 _cosh_load_native_bash_history_if_empty
@@ -847,7 +850,10 @@ shopt -s extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 _COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
 trap '_cosh_preexec_marker' DEBUG
-if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
+  unset _COSH_USER_PROMPT_COMMAND
+  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
+elif [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
   _COSH_USER_PROMPT_COMMAND_IS_ARRAY=1
   _COSH_USER_PROMPT_COMMAND=("${PROMPT_COMMAND[@]}")
 elif [[ -n "${PROMPT_COMMAND+x}" ]]; then
