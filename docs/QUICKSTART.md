@@ -49,7 +49,7 @@ anolisa install tokenless
 # Workspace checkpoints (btrfs COW)
 sudo anolisa --install-mode system install ws-ckpt
 
-# Observability (requires sudo — eBPF needs root)
+# Observability (Linux system mode; includes the agentsight-enforcer service)
 sudo anolisa --install-mode system install agentsight
 
 # Security (requires sudo)

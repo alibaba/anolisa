@@ -190,14 +190,18 @@ jobs:
 
             (
               cd "$SOURCE_ROOT"
-              make build-all NPM_REGISTRY=https://registry.npmmirror.com
+              make build-frontend NPM_REGISTRY=https://registry.npmmirror.com
+              make build
+              ./scripts/build-enforcer.sh
             )
 
             PACKAGE_DIR=$(mktemp -d)
             mkdir -p "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
             cp -p "$SOURCE_ROOT/target/release/agentsight" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/target/release/agentsight-enforcer" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/scripts/agentsight-start.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/agentsight-start"
             cp -p "$SOURCE_ROOT/scripts/agentsight.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/scripts/agentsight-enforcer.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/component.toml" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/README.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/README_zh.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"

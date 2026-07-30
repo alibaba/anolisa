@@ -161,12 +161,26 @@ fn wait_for_socket(path: &Path) {
 #[test]
 fn uds_service_dispatches_lifecycle_and_streams_violations() {
     let fixture = ServiceFixture::start();
+    let subscription_id = Uuid::new_v4();
+    let request = Request::new(Command::SubscribeRequiredViolations { subscription_id });
+    let mut stream =
+        UnixStream::connect(&fixture.socket_path).expect("fixture subscriber should connect");
+    write_frame(&mut stream, &request).expect("subscribe request should encode");
+    let mut reader = BufReader::new(stream);
+    let subscribed: Response = read_frame(&mut reader)
+        .expect("subscribe response should decode")
+        .expect("subscribe response should exist");
+    assert_eq!(subscribed.request_id, request.request_id);
+    assert!(matches!(subscribed.result, Ok(ResponseBody::Subscribed)));
 
     let health = fixture.call(Command::Health);
     assert!(matches!(health.result, Ok(ResponseBody::Health(_))));
 
     let apply = fixture_apply_policy();
-    let applied = fixture.call(Command::ApplyPolicy(apply.clone()));
+    let applied = fixture.call(Command::ApplyPolicyLeased {
+        request: apply.clone(),
+        required_subscription_id: subscription_id,
+    });
     let Ok(ResponseBody::Applied(binding)) = applied.result else {
         panic!("apply must return a binding");
     };
@@ -177,17 +191,6 @@ fn uds_service_dispatches_lifecycle_and_streams_violations() {
         panic!("list must return bindings");
     };
     assert_eq!(bindings.len(), 1);
-
-    let request = Request::new(Command::SubscribeViolations);
-    let mut stream =
-        UnixStream::connect(&fixture.socket_path).expect("fixture subscriber should connect");
-    write_frame(&mut stream, &request).expect("subscribe request should encode");
-    let mut reader = BufReader::new(stream);
-    let subscribed: Response = read_frame(&mut reader)
-        .expect("subscribe response should decode")
-        .expect("subscribe response should exist");
-    assert_eq!(subscribed.request_id, request.request_id);
-    assert!(matches!(subscribed.result, Ok(ResponseBody::Subscribed)));
 
     let violation = fixture_violation(&apply);
     fixture
@@ -206,4 +209,88 @@ fn uds_service_dispatches_lifecycle_and_streams_violations() {
     assert!(matches!(detached.result, Ok(ResponseBody::Detached)));
     let listed = fixture.call(Command::ListBindings);
     assert_eq!(listed.result, Ok(ResponseBody::Bindings(Vec::new())));
+}
+
+#[test]
+fn leased_apply_rejects_a_remotely_closed_required_subscription() {
+    let fixture = ServiceFixture::start();
+    let subscription_id = Uuid::new_v4();
+    let request = Request::new(Command::SubscribeRequiredViolations { subscription_id });
+    let mut stream =
+        UnixStream::connect(&fixture.socket_path).expect("fixture subscriber should connect");
+    write_frame(&mut stream, &request).expect("subscribe request should encode");
+    let mut reader = BufReader::new(stream);
+    let subscribed: Response = read_frame(&mut reader)
+        .expect("subscribe response should decode")
+        .expect("subscribe response should exist");
+    assert!(matches!(subscribed.result, Ok(ResponseBody::Subscribed)));
+    drop(reader);
+
+    let applied = fixture.call(Command::ApplyPolicyLeased {
+        request: fixture_apply_policy(),
+        required_subscription_id: subscription_id,
+    });
+
+    assert!(matches!(
+        applied.result,
+        Err(error) if error.code == "required_subscription_unavailable"
+    ));
+    assert!(
+        fixture
+            .backend
+            .bindings()
+            .expect("backend bindings should load")
+            .is_empty()
+    );
+}
+
+#[test]
+fn best_effort_observer_exit_does_not_block_future_apply() {
+    let fixture = ServiceFixture::start();
+    let required_subscription_id = Uuid::new_v4();
+    let required_request = Request::new(Command::SubscribeRequiredViolations {
+        subscription_id: required_subscription_id,
+    });
+    let mut required_stream =
+        UnixStream::connect(&fixture.socket_path).expect("required subscriber should connect");
+    write_frame(&mut required_stream, &required_request)
+        .expect("required subscribe request should encode");
+    let mut required_reader = BufReader::new(required_stream);
+    let required_ack: Response = read_frame(&mut required_reader)
+        .expect("required response should decode")
+        .expect("required response should exist");
+    assert!(matches!(required_ack.result, Ok(ResponseBody::Subscribed)));
+
+    let observer_request = Request::new(Command::SubscribeViolations {
+        subscription_id: Uuid::new_v4(),
+    });
+    let mut observer_stream =
+        UnixStream::connect(&fixture.socket_path).expect("observer should connect");
+    write_frame(&mut observer_stream, &observer_request).expect("observer request should encode");
+    let mut observer_reader = BufReader::new(observer_stream);
+    let observer_ack: Response = read_frame(&mut observer_reader)
+        .expect("observer response should decode")
+        .expect("observer response should exist");
+    assert!(matches!(observer_ack.result, Ok(ResponseBody::Subscribed)));
+    drop(observer_reader);
+    let apply = fixture_apply_policy();
+    let applied = fixture.call(Command::ApplyPolicyLeased {
+        request: apply.clone(),
+        required_subscription_id,
+    });
+    assert!(matches!(applied.result, Ok(ResponseBody::Applied(_))));
+    let violation = fixture_violation(&apply);
+    fixture
+        .backend
+        .publish_violation(violation.clone())
+        .expect("fixture violation should publish");
+    let streamed: Response = read_frame(&mut required_reader)
+        .expect("required violation should decode")
+        .expect("required violation should exist");
+    assert_eq!(streamed.result, Ok(ResponseBody::Violation(violation)));
+    let health = fixture.call(Command::Health);
+    assert!(matches!(
+        health.result,
+        Ok(ResponseBody::Health(health)) if health.ready
+    ));
 }

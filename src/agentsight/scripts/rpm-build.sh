@@ -15,10 +15,11 @@
 #
 # The script will:
 #   1. Build frontend (npm install && npm run build:embed)
-#   2. Build Rust binary (cargo build --release)
+#   2. Build the AgentSight binary and attested ActPlane enforcer
 #   3. Create a tarball: agentsight-<version>.tar.gz
-#   4. The tarball contains: agentsight, agentsight-start, agentsight.service,
-#      component.toml, agentsight.json, README.md, README_zh.md, LICENSE
+#   4. The tarball contains: agentsight, agentsight-enforcer, agentsight-start,
+#      both systemd units, component.toml, agentsight.json, README.md,
+#      README_zh.md, LICENSE
 # =============================================================================
 
 set -e
@@ -51,10 +52,11 @@ Options:
 
 The script will:
     1. Build frontend (npm install && npm run build:embed)
-    2. Build Rust binary (cargo build --release)
+    2. Build the AgentSight binary and attested ActPlane enforcer
     3. Create a tarball: agentsight-<version>.tar.gz
-    4. The tarball contains: agentsight, agentsight-start, agentsight.service,
-       component.toml, agentsight.json, README.md, README_zh.md, LICENSE
+    4. The tarball contains: agentsight, agentsight-enforcer, agentsight-start,
+       both systemd units, component.toml, agentsight.json, README.md,
+       README_zh.md, LICENSE
 
 Example:
     $(basename "$0")                    # Build with default version
@@ -134,16 +136,19 @@ echo "" >> Cargo.toml
 echo "$HF_PATCH" >> Cargo.toml
 trap 'truncate -s "$CARGO_TOML_SIZE" Cargo.toml' EXIT
 
-cargo build --release
+cargo build --release --bin agentsight
+./scripts/build-enforcer.sh
 
 # Restore Cargo.toml (remove appended patch)
 truncate -s "$CARGO_TOML_SIZE" Cargo.toml
 
 # Verify binary exists
-if [[ ! -f "target/release/agentsight" ]]; then
-    log_error "Binary not found: target/release/agentsight"
-    exit 1
-fi
+for binary in agentsight agentsight-enforcer; do
+    if [[ ! -f "target/release/$binary" ]]; then
+        log_error "Binary not found: target/release/$binary"
+        exit 1
+    fi
+done
 
 log_info "Binary built successfully"
 
@@ -156,8 +161,10 @@ mkdir -p "$TARBALL_DIR"
 
 # Copy required files
 cp "target/release/agentsight" "$TARBALL_DIR/"
+cp "target/release/agentsight-enforcer" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/scripts/agentsight-start.sh" "$TARBALL_DIR/agentsight-start"
 cp "$PROJECT_ROOT/scripts/agentsight.service" "$TARBALL_DIR/"
+cp "$PROJECT_ROOT/scripts/agentsight-enforcer.service" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/component.toml" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/agentsight.json" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/README.md" "$TARBALL_DIR/"

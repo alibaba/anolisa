@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,7 +21,7 @@ use ebpf_ifc_engine::{GLOBAL_ACTIVE_DOMAIN_ID, PinnedEngine, ReloadHandle, Viola
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{BackendError, EnforcementBackend, EventHub};
+use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
 /// Exact official upstream revision compiled into this adapter.
 pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
@@ -77,7 +78,8 @@ impl ActPlaneBackend {
     /// # Errors
     ///
     /// Returns a kernel error when the pinned engine, exclusive runtime lock,
-    /// reload handle, self-protection, or initial cleanup cannot be established.
+    /// reload handle, self-protection, initial cleanup, or event drain cannot be
+    /// established.
     pub fn open() -> Result<Self, BackendError> {
         let engine = Arc::new(
             PinnedEngine::open_or_install_singleton()
@@ -94,9 +96,18 @@ impl ActPlaneBackend {
         engine
             .protect_pid(std::process::id() as i32)
             .map_err(|error| kernel_error("protect enforcer pid", error))?;
-        reload
-            .clear_runtime_state()
-            .map_err(|error| kernel_error("clear stale runtime state", error))?;
+        let _ = prepare_runtime(
+            || {
+                reload
+                    .clear_runtime_state()
+                    .map_err(|error| kernel_error("clear stale runtime state", error))
+            },
+            || {
+                engine
+                    .drain_pending_events()
+                    .map_err(|error| kernel_error("drain stale pinned events", error))
+            },
+        )?;
 
         let state = Arc::new(RuntimeState::new());
         let stop = Arc::new(AtomicBool::new(false));
@@ -137,11 +148,11 @@ impl ActPlaneBackend {
 impl EnforcementBackend for ActPlaneBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
         let runtime_error = self.state.runtime_error().clone();
-        Ok(HealthStatus {
+        Ok(self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
             message: runtime_error,
-        })
+        }))
     }
 
     fn apply(&self, request: ApplyPolicy) -> Result<Binding, BackendError> {
@@ -272,9 +283,25 @@ impl EnforcementBackend for ActPlaneBackend {
         Ok(bindings)
     }
 
-    fn subscribe(&self) -> Receiver<ViolationEvent> {
-        self.state.events.subscribe()
+    fn subscribe(&self, id: Uuid, class: SubscriberClass) -> Receiver<ViolationEvent> {
+        self.state.events.subscribe(id, class)
     }
+
+    fn unsubscribe(&self, id: Uuid) {
+        self.state.events.unsubscribe(id);
+    }
+
+    fn record_required_delivery_loss(&self, count: u64) {
+        self.state.events.record_required_delivery_loss(count);
+    }
+}
+
+fn prepare_runtime(
+    clear: impl FnOnce() -> Result<(), BackendError>,
+    drain: impl FnOnce() -> Result<usize, BackendError>,
+) -> Result<usize, BackendError> {
+    clear()?;
+    drain()
 }
 
 impl Drop for ActPlaneBackend {
@@ -355,7 +382,23 @@ fn read_process_start_time(pid: i32) -> Result<u64, BackendError> {
 }
 
 fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
+    let monotonic_now_ns = monotonic_now_ns();
+    let observed_at_ns = now_ns();
+    convert_violation_at(raw, active, observed_at_ns, monotonic_now_ns)
+}
+
+fn convert_violation_at(
+    raw: Violation,
+    active: &ActiveBinding,
+    observed_at_ns: u64,
+    monotonic_now_ns: Option<u64>,
+) -> ViolationEvent {
     let rule_index = raw.rule_id as usize;
+    let occurred_at_ns = monotonic_now_ns
+        .map(|monotonic_now_ns| {
+            monotonic_to_epoch_ns(raw.timestamp_ns, monotonic_now_ns, observed_at_ns)
+        })
+        .unwrap_or(observed_at_ns);
     ViolationEvent {
         event_id: Uuid::new_v4(),
         binding_id: active.binding.request.binding_id,
@@ -377,8 +420,8 @@ fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
             .cloned()
             .or_else(|| Some(raw.rule_id.to_string())),
         reason: active.reasons.get(rule_index).cloned(),
-        occurred_at_ns: raw.timestamp_ns,
-        observed_at_ns: now_ns(),
+        occurred_at_ns,
+        observed_at_ns,
         actplane_revision: ACTPLANE_REVISION.into(),
     }
 }
@@ -400,6 +443,35 @@ fn effect(value: u32) -> Effect {
         2 => Effect::Kill,
         _ => Effect::Notify,
     }
+}
+
+fn monotonic_to_epoch_ns(
+    event_monotonic_ns: u64,
+    monotonic_now_ns: u64,
+    realtime_now_ns: u64,
+) -> u64 {
+    let Some(elapsed_ns) = monotonic_now_ns.checked_sub(event_monotonic_ns) else {
+        return realtime_now_ns;
+    };
+    realtime_now_ns
+        .checked_sub(elapsed_ns)
+        .unwrap_or(realtime_now_ns)
+}
+
+fn monotonic_now_ns() -> Option<u64> {
+    let mut timestamp = MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `clock_gettime` initializes the provided timespec on success.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, timestamp.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: The successful call above initialized `timestamp`.
+    let timestamp = unsafe { timestamp.assume_init() };
+    let seconds = u64::try_from(timestamp.tv_sec).ok()?;
+    let nanoseconds = u64::try_from(timestamp.tv_nsec).ok()?;
+    if nanoseconds >= 1_000_000_000 {
+        return None;
+    }
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanoseconds)
 }
 
 fn now_ns() -> u64 {
@@ -429,6 +501,8 @@ fn kernel_error_with_cleanup(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+
     use agentsight_enforcement_protocol::{
         ApplyPolicy, Binding, BindingState, Effect, ViolationEvent,
     };
@@ -437,12 +511,96 @@ mod tests {
 
     use super::*;
 
+    const _: fn(&PinnedEngine) -> std::io::Result<usize> = PinnedEngine::drain_pending_events;
+
+    fn active_binding() -> ActiveBinding {
+        ActiveBinding {
+            binding: Binding {
+                request: ApplyPolicy {
+                    binding_id: Uuid::new_v4(),
+                    agent_id: "agent-1".into(),
+                    session_id: Some("session-1".into()),
+                    root_pid: 42,
+                    process_start_time: 98765,
+                    policy_id: "policy-1".into(),
+                    policy_revision: "revision-1".into(),
+                    policy_dsl: "fixture".into(),
+                },
+                state: BindingState::Enforced,
+                message: None,
+                domain_id: Some(7),
+            },
+            reasons: vec!["credential reached an external sink".into()],
+            rule_names: vec!["block-exfiltration".into()],
+        }
+    }
+
+    fn raw_violation(timestamp_ns: u64) -> Violation {
+        Violation {
+            effect: 1,
+            blocked: true,
+            killed: false,
+            comm: "curl".into(),
+            pid: 43,
+            ppid: 42,
+            target: "198.51.100.10".into(),
+            rule_id: 0,
+            op: 3,
+            domain_id: 7,
+            session_root: 42,
+            label: 1,
+            matched_label: 1,
+            matched_labels: 1,
+            provenance: None,
+            timestamp_ns,
+        }
+    }
+
     #[test]
     fn domain_id_is_stable_and_nonzero() {
         let id = Uuid::parse_str("00000000-0000-4000-8000-000000000123")
             .expect("fixture UUID should parse");
         assert_eq!(domain_id(id), domain_id(id));
         assert_ne!(domain_id(id), 0);
+    }
+
+    #[test]
+    fn prepare_runtime_clears_stale_state_before_draining_events() {
+        let operations = RefCell::new(Vec::new());
+
+        let drained = prepare_runtime(
+            || {
+                operations.borrow_mut().push("clear");
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("drain");
+                Ok(3)
+            },
+        )
+        .expect("runtime preparation should succeed");
+
+        assert_eq!(drained, 3);
+        assert_eq!(operations.into_inner(), ["clear", "drain"]);
+    }
+
+    #[test]
+    fn prepare_runtime_skips_drain_when_cleanup_fails() {
+        let drain_called = Cell::new(false);
+
+        let result = prepare_runtime(
+            || Err(BackendError::KernelFailure("clear failed".into())),
+            || {
+                drain_called.set(true);
+                Ok(0)
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(BackendError::KernelFailure(message)) if message == "clear failed"
+        ));
+        assert!(!drain_called.get());
     }
 
     #[test]
@@ -459,55 +617,91 @@ mod tests {
     }
 
     #[test]
-    fn raw_violation_conversion_preserves_block_and_rule_metadata() {
-        let binding_id = Uuid::new_v4();
-        let active = ActiveBinding {
-            binding: Binding {
-                request: ApplyPolicy {
-                    binding_id,
-                    agent_id: "agent-1".into(),
-                    session_id: Some("session-1".into()),
-                    root_pid: 42,
-                    process_start_time: 98765,
-                    policy_id: "policy-1".into(),
-                    policy_revision: "revision-1".into(),
-                    policy_dsl: "fixture".into(),
-                },
-                state: BindingState::Enforced,
-                message: None,
-                domain_id: Some(7),
-            },
-            reasons: vec!["credential reached an external sink".into()],
-            rule_names: vec!["block-exfiltration".into()],
-        };
-        let raw = Violation {
-            effect: 1,
-            blocked: true,
-            killed: false,
-            comm: "curl".into(),
-            pid: 43,
-            ppid: 42,
-            target: "198.51.100.10".into(),
-            rule_id: 0,
-            op: 3,
-            domain_id: 7,
-            session_root: 42,
-            label: 1,
-            matched_label: 1,
-            matched_labels: 1,
-            provenance: None,
-            timestamp_ns: 100,
-        };
+    fn monotonic_event_time_is_converted_to_unix_epoch() {
+        let occurred_at_ns =
+            monotonic_to_epoch_ns(270_000_000_000, 271_000_000_000, 1_784_000_000_000_000_000);
 
-        let event: ViolationEvent = convert_violation(raw, &active);
+        assert_eq!(occurred_at_ns, 1_783_999_999_000_000_000);
+    }
+
+    #[test]
+    fn invalid_clock_relationships_fall_back_to_observation_time() {
+        assert_eq!(monotonic_to_epoch_ns(30, 20, 5), 5);
+        assert_eq!(monotonic_to_epoch_ns(10, 20, 5), 5);
+    }
+
+    #[test]
+    fn violation_adapter_maps_fields_and_converts_fixed_observation() {
+        let active = active_binding();
+        let raw = raw_violation(270_000_000_000);
+
+        let event: ViolationEvent = convert_violation_at(
+            raw,
+            &active,
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+        );
+        assert_eq!(event.binding_id, active.binding.request.binding_id);
+        assert_eq!(event.agent_id, "agent-1");
+        assert_eq!(event.session_id.as_deref(), Some("session-1"));
+        assert_eq!(event.policy_id, "policy-1");
+        assert_eq!(event.policy_revision, "revision-1");
+        assert_eq!(event.pid, 43);
+        assert_eq!(event.ppid, Some(42));
         assert_eq!(event.effect, Effect::Block);
         assert!(event.blocked);
+        assert!(!event.killed);
         assert_eq!(event.operation, "connect");
+        assert_eq!(event.target, "198.51.100.10");
         assert_eq!(event.rule_id.as_deref(), Some("block-exfiltration"));
         assert_eq!(
             event.reason.as_deref(),
             Some("credential reached an external sink")
         );
+        assert_eq!(event.occurred_at_ns, 1_783_999_999_000_000_000);
+        assert_eq!(event.observed_at_ns, 1_784_000_000_000_000_000);
         assert_eq!(event.actplane_revision, ACTPLANE_REVISION);
+    }
+
+    #[test]
+    fn violation_adapter_falls_back_when_monotonic_read_fails() {
+        let active = active_binding();
+        let observed_at_ns = 1_784_000_000_000_000_000;
+
+        let event = convert_violation_at(
+            raw_violation(270_000_000_000),
+            &active,
+            observed_at_ns,
+            None,
+        );
+
+        assert_eq!(event.occurred_at_ns, observed_at_ns);
+        assert_eq!(event.observed_at_ns, observed_at_ns);
+    }
+
+    #[test]
+    fn violation_adapter_falls_back_for_future_monotonic_event() {
+        let observed_at_ns = 1_784_000_000_000_000_000;
+        let event = convert_violation_at(
+            raw_violation(272_000_000_000),
+            &active_binding(),
+            observed_at_ns,
+            Some(271_000_000_000),
+        );
+
+        assert_eq!(event.occurred_at_ns, observed_at_ns);
+    }
+
+    #[test]
+    fn violation_adapter_falls_back_when_epoch_subtraction_underflows() {
+        let observed_at_ns = 5;
+        let event = convert_violation_at(
+            raw_violation(10),
+            &active_binding(),
+            observed_at_ns,
+            Some(20),
+        );
+
+        assert_eq!(event.occurred_at_ns, observed_at_ns);
     }
 }

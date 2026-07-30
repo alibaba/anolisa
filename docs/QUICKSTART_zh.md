@@ -44,7 +44,7 @@ anolisa install tokenless
 # 工作区快照（基于 btrfs COW）
 sudo anolisa --install-mode system install ws-ckpt
 
-# 可观测性（需要 sudo — eBPF 依赖 root）
+# 可观测性（仅 Linux system mode；包含 agentsight-enforcer 服务）
 sudo anolisa --install-mode system install agentsight
 
 # 安全内核（需要 sudo）

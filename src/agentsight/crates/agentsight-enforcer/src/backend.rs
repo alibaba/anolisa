@@ -6,6 +6,8 @@ use agentsight_enforcement_protocol::{ApplyPolicy, Binding, HealthStatus, Violat
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::SubscriberClass;
+
 /// Failures produced while managing a policy binding.
 #[derive(Debug, Error)]
 pub enum BackendError {
@@ -60,6 +62,12 @@ pub trait EnforcementBackend: Send + Sync + 'static {
     /// Returns a backend error when state cannot be read safely.
     fn bindings(&self) -> Result<Vec<Binding>, BackendError>;
 
-    /// Creates an independent bounded violation subscription.
-    fn subscribe(&self) -> Receiver<ViolationEvent>;
+    /// Creates an identified bounded violation subscription.
+    fn subscribe(&self, id: Uuid, class: SubscriberClass) -> Receiver<ViolationEvent>;
+
+    /// Removes a subscription during normal connection lifecycle cleanup.
+    fn unsubscribe(&self, id: Uuid);
+
+    /// Records events that reached the required queue but not its remote peer.
+    fn record_required_delivery_loss(&self, count: u64);
 }

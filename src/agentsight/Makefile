@@ -16,8 +16,7 @@ build: ## Build agentsight binary
 build-enforcer: ## Build the privileged ActPlane enforcement daemon
 	env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
 		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
-		cargo build --release -p agentsight-enforcer \
-			--no-default-features --features actplane
+		./scripts/build-enforcer.sh
 
 .PHONY: build-frontend
 build-frontend: ## Build and embed frontend into frontend-dist/
@@ -95,8 +94,12 @@ uninstall:
 # =============================================================================
 
 .PHONY: test
-test: ## Run unit tests (fast, no coverage)
+test: test-rpm-packaging ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test
+
+.PHONY: test-rpm-packaging
+test-rpm-packaging: ## Validate the portable RPM payload contract
+	cd $(CURDIR) && bash scripts/test-rpm-packaging.sh
 
 .PHONY: lint
 lint: ## Check formatting + clippy

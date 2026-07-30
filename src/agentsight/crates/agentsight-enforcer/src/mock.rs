@@ -9,7 +9,7 @@ use agentsight_enforcement_protocol::{
 };
 use uuid::Uuid;
 
-use crate::{BackendError, EnforcementBackend, EventHub};
+use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
 /// In-memory single-binding backend that performs no kernel operations.
 pub struct MockBackend {
@@ -29,6 +29,14 @@ impl MockBackend {
         Self {
             bindings: Mutex::new(HashMap::new()),
             events: EventHub::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_event_capacity(capacity: usize) -> Self {
+        Self {
+            bindings: Mutex::new(HashMap::new()),
+            events: EventHub::new(capacity),
         }
     }
 
@@ -55,11 +63,11 @@ impl MockBackend {
 
 impl EnforcementBackend for MockBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
-        Ok(HealthStatus {
+        Ok(self.events.reflect_delivery_loss(HealthStatus {
             ready: true,
             backend: "mock".into(),
             message: Some("mock backend does not enforce kernel operations".into()),
-        })
+        }))
     }
 
     fn apply(&self, request: ApplyPolicy) -> Result<Binding, BackendError> {
@@ -99,7 +107,81 @@ impl EnforcementBackend for MockBackend {
         Ok(bindings)
     }
 
-    fn subscribe(&self) -> Receiver<ViolationEvent> {
-        self.events.subscribe()
+    fn subscribe(&self, id: Uuid, class: SubscriberClass) -> Receiver<ViolationEvent> {
+        self.events.subscribe(id, class)
+    }
+
+    fn unsubscribe(&self, id: Uuid) {
+        self.events.unsubscribe(id);
+    }
+
+    fn record_required_delivery_loss(&self, count: u64) {
+        self.events.record_required_delivery_loss(count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agentsight_enforcement_protocol::Effect;
+
+    use super::*;
+
+    fn request() -> ApplyPolicy {
+        ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "mock-health-test".into(),
+            session_id: None,
+            root_pid: 42,
+            process_start_time: 99,
+            policy_id: "policy".into(),
+            policy_revision: "revision".into(),
+            policy_dsl: "label AGENT".into(),
+        }
+    }
+
+    fn violation(binding_id: Uuid) -> ViolationEvent {
+        ViolationEvent {
+            event_id: Uuid::new_v4(),
+            binding_id,
+            agent_id: "mock-health-test".into(),
+            session_id: None,
+            policy_id: "policy".into(),
+            policy_revision: "revision".into(),
+            pid: 42,
+            ppid: Some(1),
+            process_start_time: 99,
+            operation: "open".into(),
+            target: "/tmp/secret".into(),
+            effect: Effect::Block,
+            blocked: true,
+            killed: false,
+            rule_id: None,
+            reason: None,
+            occurred_at_ns: 100,
+            observed_at_ns: 101,
+            actplane_revision: "mock".into(),
+        }
+    }
+
+    #[test]
+    fn health_is_not_ready_after_the_violation_queue_overflows() {
+        let backend = MockBackend::with_event_capacity(1);
+        let binding = backend.apply(request()).expect("binding should apply");
+        let _subscriber = backend.subscribe(Uuid::new_v4(), SubscriberClass::Required);
+
+        for _ in 0..2 {
+            backend
+                .publish_violation(violation(binding.request.binding_id))
+                .expect("active binding should publish");
+        }
+
+        let health = backend.health().expect("mock health should load");
+        assert!(!health.ready);
+        assert_eq!(
+            health.message.as_deref(),
+            Some(
+                "mock backend does not enforce kernel operations; violation event delivery loss: dropped_events=1"
+            )
+        );
     }
 }

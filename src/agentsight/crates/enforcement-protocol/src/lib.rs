@@ -8,7 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Wire protocol version implemented by this crate.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Maximum JSON payload size accepted for one NDJSON frame.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -35,7 +35,7 @@ impl Request {
     }
 }
 
-/// Operations supported by protocol version 1.
+/// Operations supported by protocol version 2.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", content = "params", rename_all = "snake_case")]
 pub enum Command {
@@ -43,6 +43,13 @@ pub enum Command {
     Health,
     /// Compiles and attaches one policy binding.
     ApplyPolicy(ApplyPolicy),
+    /// Applies a policy only while the named required evidence stream is live.
+    ApplyPolicyLeased {
+        /// Desired policy binding.
+        request: ApplyPolicy,
+        /// Required violation subscription proving evidence delivery is live.
+        required_subscription_id: Uuid,
+    },
     /// Detaches a binding by its stable identifier.
     DetachAgent {
         /// Binding to detach.
@@ -50,8 +57,16 @@ pub enum Command {
     },
     /// Lists known policy bindings.
     ListBindings,
-    /// Keeps the connection open and streams violation responses.
-    SubscribeViolations,
+    /// Keeps a best-effort observer connection open for violation responses.
+    SubscribeViolations {
+        /// Identity used to prune this observer during connection cleanup.
+        subscription_id: Uuid,
+    },
+    /// Registers the one required evidence stream used to authorize applies.
+    SubscribeRequiredViolations {
+        /// Fresh generation identity for this required stream.
+        subscription_id: Uuid,
+    },
 }
 
 /// Desired policy binding for one Agent process tree.
@@ -164,9 +179,9 @@ pub struct ViolationEvent {
     pub rule_id: Option<String>,
     /// Sanitized upstream reason when available.
     pub reason: Option<String>,
-    /// Kernel or backend event time in nanoseconds.
+    /// Event occurrence time as Unix epoch nanoseconds.
     pub occurred_at_ns: u64,
-    /// Enforcer observation time in nanoseconds.
+    /// Time the enforcer received and normalized the event, as Unix epoch nanoseconds.
     pub observed_at_ns: u64,
     /// Exact upstream ActPlane revision that produced the event.
     pub actplane_revision: String,
@@ -183,7 +198,7 @@ pub struct Response {
     pub result: Result<ResponseBody, RemoteError>,
 }
 
-/// Successful response payloads supported by protocol version 1.
+/// Successful response payloads supported by protocol version 2.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "response", content = "data", rename_all = "snake_case")]
 pub enum ResponseBody {
