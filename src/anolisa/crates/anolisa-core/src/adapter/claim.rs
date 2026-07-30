@@ -34,6 +34,8 @@ use serde_json::Value;
 use crate::path_safety::{PathBoundaryError, canonicalize_nearest_existing, validate_owned_path};
 use anolisa_platform::fs_layout::FsLayout;
 
+use super::util::digest_tree;
+
 /// Schema version for the generic claim shape and [`ClaimResource`].
 /// Persisted in every receipt so a future on-disk migration can branch.
 pub const CLAIM_SCHEMA_VERSION: u32 = 1;
@@ -105,6 +107,21 @@ impl AdapterClaim {
     /// Whether this receipt represents a skill-only adapter bundle.
     pub fn is_skill_bundle(&self) -> bool {
         self.adapter_type.as_deref() == Some("skill_bundle")
+    }
+
+    /// Compare the enable-time [`Self::bundle_digest`] against a fresh digest
+    /// of [`Self::resource_root`].
+    ///
+    /// This is the drift/upgrade detection the `bundle_digest` field exists
+    /// for; the drivers' `ResourceBundleMatches` condition and post-update
+    /// adapter actions branch on the same verdict, so the comparison lives
+    /// with the receipt schema instead of being re-derived per caller.
+    pub fn bundle_match(&self) -> BundleMatch {
+        match (&self.bundle_digest, digest_tree(&self.resource_root)) {
+            (Some(recorded), Some(current)) if recorded == &current => BundleMatch::Matched,
+            (Some(_), Some(_)) => BundleMatch::Changed,
+            _ => BundleMatch::Unknown,
+        }
     }
 
     /// Find a resource by its stable `id`.
@@ -188,6 +205,49 @@ impl AdapterClaim {
         }
         Ok(())
     }
+}
+
+/// Reason text for reports about a receipt whose resource bundle changed
+/// after enable. The drivers' `ResourceBundleMatches` status condition and
+/// the post-update adapter actions share this wording so `adapter status`
+/// and `update` name the same problem identically.
+pub const BUNDLE_CHANGED_REASON: &str = "resource bundle changed since enable";
+
+/// How a receipt's enable-time bundle digest compares to the resource tree
+/// currently on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleMatch {
+    /// The recorded digest matches a fresh digest of the resource root.
+    Matched,
+    /// Both digests exist and differ: the resource bundle changed after
+    /// enable, so the framework-side state no longer corresponds to the
+    /// component's current adapter resources.
+    Changed,
+    /// No digest was recorded at enable time or the resource root cannot be
+    /// digested now; drift cannot be decided either way.
+    Unknown,
+}
+
+/// Enabled receipts for `component` whose resource bundle changed since
+/// enable — the receipts a component update leaves stale until the adapter
+/// is re-enabled.
+///
+/// Receipts without a recorded digest (or with an unreadable resource root)
+/// are excluded: their drift is unknown, not detected. Receipts kept for a
+/// failed disable (`CleanupFailed`) are not enabled adapters and are
+/// excluded too.
+pub fn stale_enabled_claims<'a>(
+    claims: &'a [AdapterClaim],
+    component: &str,
+) -> Vec<&'a AdapterClaim> {
+    claims
+        .iter()
+        .filter(|claim| {
+            claim.component == component
+                && claim.status == ClaimStatus::Enabled
+                && claim.bundle_match() == BundleMatch::Changed
+        })
+        .collect()
 }
 
 /// Lifecycle status of a receipt.
@@ -946,6 +1006,76 @@ mod tests {
         let json = serde_json::to_string(&claim).expect("serialize JSON");
         let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse JSON");
         assert_eq!(claim, parsed);
+    }
+
+    fn bundle_claim(root: &Path, digest: Option<String>) -> AdapterClaim {
+        let mut claim = sample_claim();
+        claim.resource_root = root.to_path_buf();
+        claim.bundle_digest = digest;
+        claim
+    }
+
+    #[test]
+    fn bundle_match_classifies_matched_changed_and_unknown() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        std::fs::write(dir.path().join("bundle.json"), b"v1").expect("write bundle");
+        let mut claim = bundle_claim(dir.path(), None);
+
+        // No digest recorded at enable time: drift cannot be decided.
+        assert_eq!(claim.bundle_match(), BundleMatch::Unknown);
+
+        claim.bundle_digest = digest_tree(dir.path());
+        assert_eq!(claim.bundle_match(), BundleMatch::Matched);
+
+        std::fs::write(dir.path().join("bundle.json"), b"v2").expect("rewrite bundle");
+        assert_eq!(claim.bundle_match(), BundleMatch::Changed);
+
+        // A vanished resource root is Unknown again, not Changed: the
+        // verdict must never rest on a digest that could not be computed.
+        std::fs::remove_dir_all(dir.path()).expect("remove bundle root");
+        assert_eq!(claim.bundle_match(), BundleMatch::Unknown);
+    }
+
+    #[test]
+    fn stale_enabled_claims_selects_only_enabled_changed_receipts() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        std::fs::write(dir.path().join("bundle.json"), b"v1").expect("write bundle");
+        let current = digest_tree(dir.path()).expect("digest");
+
+        let fresh = bundle_claim(dir.path(), Some(current));
+        let mut stale = bundle_claim(dir.path(), Some("sha256:enable-time".to_string()));
+        stale.framework = "cosh".to_string();
+        let mut retry_cleanup = stale.clone();
+        retry_cleanup.status = ClaimStatus::CleanupFailed;
+        let no_digest = bundle_claim(dir.path(), None);
+        let mut other_component = stale.clone();
+        other_component.component = "agent-memory".to_string();
+
+        let claims = vec![
+            fresh,
+            stale.clone(),
+            retry_cleanup,
+            no_digest,
+            other_component.clone(),
+        ];
+        assert_eq!(
+            stale_enabled_claims(&claims, "tokenless"),
+            vec![&stale],
+            "only the enabled receipt with a changed bundle qualifies"
+        );
+        assert_eq!(
+            stale_enabled_claims(&claims, "agent-memory"),
+            vec![&other_component],
+            "a receipt is only ever reported under its own component"
+        );
+    }
+
+    #[test]
+    fn bundle_changed_reason_matches_the_status_condition_wording() {
+        assert_eq!(
+            BUNDLE_CHANGED_REASON,
+            "resource bundle changed since enable"
+        );
     }
 
     #[test]
