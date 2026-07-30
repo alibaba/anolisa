@@ -7,6 +7,12 @@
 本文档格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [0.2.6] - 2026-07-30
+
+### 修复
+
+- **agent-memory**：更新到 v0.2.6，在短 token 的 LIKE 严格匹配无结果时改用 OR 匹配，并优先保留匹配更多关键词的结果，Agent 可从包含停用词的 prompt 中召回相关记忆而不再得到空结果（#2040）
+
 ## [0.2.5] - 2026-07-27
 
 ### 修复

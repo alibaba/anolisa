@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-07-30
+
+### Fixed
+
+- **agent-memory**: Updated to v0.2.6, retries short-token LIKE searches with OR matching when strict matching finds nothing and ranks stronger keyword matches first, agents can recall relevant memories from stopword-heavy prompts instead of receiving an empty result (#2040)
+
 ## [0.2.5] - 2026-07-27
 
 ### Fixed
