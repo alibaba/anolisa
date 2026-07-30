@@ -1,6 +1,5 @@
 //! Desired-state coordinator between AgentSight, SQLite, and the enforcer.
 
-use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -14,9 +13,15 @@ use uuid::Uuid;
 
 use super::{EnforcementClient, EnforcementError, EnforcementStore, EnforcementStoreError};
 
+mod reconciliation;
+
+use reconciliation::reconcile_desired_state;
+
 const INGESTION_UNAVAILABLE_MESSAGE: &str = "violation ingestion is not subscribed";
 const DEGRADED_BINDING_MESSAGE: &str = "enforcement binding is degraded";
 const FAILED_BINDING_MESSAGE: &str = "enforcement binding failed";
+const CREDENTIAL_APPLY_CLIENT_CALLS: u32 = 3;
+const CREDENTIAL_APPLY_MARGIN_CALLS: u32 = 1;
 
 type WorkerTask = Box<dyn FnOnce() + Send + 'static>;
 
@@ -38,10 +43,17 @@ struct IngestionReadiness {
     state: Arc<Mutex<IngestionState>>,
 }
 
-struct IngestionLease {
+/// Opaque snapshot of one acknowledged required-subscription generation.
+#[derive(Clone)]
+pub(crate) struct IngestionLease {
     worker: Arc<WorkerToken>,
     subscription_id: Uuid,
     generation: u64,
+}
+
+/// Guard that prevents the leased ingestion generation from changing.
+pub(crate) struct IngestionGenerationLease<'a> {
+    _state: MutexGuard<'a, IngestionState>,
 }
 
 impl IngestionReadiness {
@@ -186,6 +198,13 @@ impl IngestionReadiness {
         Ok(true)
     }
 
+    fn lease_current(&self, lease: &IngestionLease) -> Option<IngestionGenerationLease<'_>> {
+        let state = self.state();
+        lease
+            .matches(&state)
+            .then_some(IngestionGenerationLease { _state: state })
+    }
+
     fn invalidate_lease(&self, lease: &IngestionLease, message: String) {
         let mut state = self.state();
         if state.subscription_id == Some(lease.subscription_id)
@@ -294,6 +313,13 @@ impl EnforcementCoordinator {
         }
     }
 
+    /// Bounds foreground ownership across health, apply, post-apply health, and scheduling slack.
+    pub(crate) fn credential_apply_claim_lease(&self) -> Duration {
+        self.client.request_timeout().saturating_mul(
+            CREDENTIAL_APPLY_CLIENT_CALLS.saturating_add(CREDENTIAL_APPLY_MARGIN_CALLS),
+        )
+    }
+
     /// Persists pending desired state, then applies and persists acknowledgement.
     ///
     /// # Errors
@@ -392,10 +418,11 @@ impl EnforcementCoordinator {
                 ))
             }
             Err(error) => {
+                log::error!("enforcement policy apply failed: {error}");
                 self.store.upsert_binding(&Binding {
                     request,
                     state: BindingState::Failed,
-                    message: Some(error.to_string()),
+                    message: Some(FAILED_BINDING_MESSAGE.into()),
                     domain_id: None,
                 })?;
                 Err(error.into())
@@ -514,7 +541,8 @@ impl EnforcementCoordinator {
                 Ok(())
             }
             Err(error) => {
-                binding.message = Some(error.to_string());
+                log::error!("enforcement detach failed: {error}");
+                binding.message = Some(FAILED_BINDING_MESSAGE.into());
                 self.store.upsert_binding(&binding)?;
                 Err(error.into())
             }
@@ -528,6 +556,28 @@ impl EnforcementCoordinator {
     /// Returns a persistence error.
     pub fn bindings(&self) -> Result<Vec<Binding>, EnforcementCoordinatorError> {
         Ok(self.store.bindings()?)
+    }
+
+    /// Snapshots the current acknowledged required-subscription generation.
+    pub(crate) fn ingestion_generation(
+        &self,
+    ) -> Result<IngestionLease, EnforcementCoordinatorError> {
+        self.ingestion_readiness
+            .lease()
+            .ok_or(EnforcementCoordinatorError::IngestionUnavailable)
+    }
+
+    /// Returns whether an earlier generation snapshot remains current.
+    pub(crate) fn ingestion_generation_is_current(&self, lease: &IngestionLease) -> bool {
+        lease.is_current(&self.ingestion_readiness)
+    }
+
+    /// Holds the readiness lock only when the expected generation is still current.
+    pub(crate) fn lease_ingestion_generation(
+        &self,
+        lease: &IngestionLease,
+    ) -> Option<IngestionGenerationLease<'_>> {
+        self.ingestion_readiness.lease_current(lease)
     }
 
     /// Lists newest persisted violations.
@@ -785,56 +835,6 @@ fn persist_violation_until_stored(
     }
 }
 
-fn reconcile_desired_state(
-    client: &EnforcementClient,
-    store: &EnforcementStore,
-    subscription_id: Uuid,
-) -> Result<(), EnforcementCoordinatorError> {
-    let desired = store.bindings()?;
-    let actual = client.bindings()?;
-    let desired_by_id: HashMap<_, _> = desired
-        .iter()
-        .map(|binding| (binding.request.binding_id, binding))
-        .collect();
-    let mut retained_actual = HashMap::new();
-
-    for binding in actual {
-        let binding_id = binding.request.binding_id;
-        let matches_active_desired = desired_by_id.get(&binding_id).is_some_and(|desired| {
-            is_active_desired(desired.state) && desired.request == binding.request
-        });
-        if matches_active_desired {
-            retained_actual.insert(binding_id, binding);
-        } else {
-            client.detach(binding_id)?;
-        }
-    }
-
-    for mut binding in desired {
-        let binding_id = binding.request.binding_id;
-        if is_active_desired(binding.state) {
-            let acknowledged = match retained_actual.remove(&binding_id) {
-                Some(actual) => actual,
-                None => client.apply(binding.request.clone(), subscription_id)?,
-            };
-            store.upsert_binding(&acknowledged)?;
-        } else if binding.state == BindingState::Detaching {
-            binding.state = BindingState::Detached;
-            binding.message = None;
-            binding.domain_id = None;
-            store.upsert_binding(&binding)?;
-        }
-    }
-    Ok(())
-}
-
-fn is_active_desired(state: BindingState) -> bool {
-    matches!(
-        state,
-        BindingState::Pending | BindingState::Enforced | BindingState::Degraded
-    )
-}
-
 fn sleep_until_superseded(
     ingestion_readiness: &IngestionReadiness,
     worker: &Arc<WorkerToken>,
@@ -880,6 +880,20 @@ mod tests {
         ));
         assert!(coordinator.ingestion_readiness.is_current(&active));
         assert!(coordinator.ingestion_readiness.is_ready());
+    }
+
+    #[test]
+    fn credential_apply_claim_lease_scales_with_configured_request_timeout() {
+        let coordinator = EnforcementCoordinator::new(
+            EnforcementClient::new("/tmp/unused-enforcement.sock")
+                .with_timeout(Duration::from_secs(20)),
+            EnforcementStore::open(":memory:").expect("test store should open"),
+        );
+
+        assert_eq!(
+            coordinator.credential_apply_claim_lease(),
+            Duration::from_secs(80)
+        );
     }
 
     #[test]

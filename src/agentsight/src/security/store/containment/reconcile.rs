@@ -4,11 +4,15 @@ use rusqlite::{Connection, params};
 
 use super::super::{SecurityStore, SecurityStoreError, sqlite_time};
 use super::{ACTION_COLUMNS, ContainmentRow, containment_action_from_row, containment_row};
-use crate::security::{ContainmentAction, ContainmentFailureStage, ContainmentLifecycle};
+use crate::security::ContainmentAction;
+#[cfg(target_os = "linux")]
+use crate::security::{ContainmentFailureStage, ContainmentLifecycle};
 
+#[cfg(target_os = "linux")]
 const RECONCILE_CLAIM_LEASE_NS: u64 = 1_000_000_000;
 
 /// One bounded due-row decode outcome.
+#[cfg(target_os = "linux")]
 pub(crate) enum DueContainmentAction {
     /// A valid action ready for claim acquisition.
     Valid(ContainmentAction),
@@ -44,6 +48,7 @@ impl SecurityStore {
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
+    #[cfg(target_os = "linux")]
     pub(crate) fn due_containment_candidates(
         &self,
         now_ns: u64,
@@ -71,6 +76,7 @@ impl SecurityStore {
     /// # Errors
     ///
     /// Returns a typed database, timestamp, stored-data, or lock error.
+    #[cfg(target_os = "linux")]
     pub(crate) fn quarantine_containment_action(
         &self,
         action_key: &str,
@@ -101,6 +107,7 @@ impl SecurityStore {
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
+    #[cfg(target_os = "linux")]
     pub(crate) fn claim_containment_reconciliation(
         &self,
         action: &ContainmentAction,
@@ -148,6 +155,7 @@ impl SecurityStore {
     /// # Errors
     ///
     /// Returns a typed database, timestamp, unsigned-value, or lock error.
+    #[cfg(target_os = "linux")]
     pub(crate) fn finish_containment_reconciliation(
         &self,
         action: &ContainmentAction,
@@ -183,6 +191,7 @@ impl SecurityStore {
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
+    #[cfg(target_os = "linux")]
     pub(crate) fn begin_containment_cleanup(
         &self,
         action: &ContainmentAction,
@@ -254,6 +263,7 @@ fn due_containment_rows(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+#[cfg(target_os = "linux")]
 fn sanitize_corrupt_reason(reason: &str) -> String {
     let sanitized: String = reason
         .chars()
@@ -269,6 +279,7 @@ fn sanitize_corrupt_reason(reason: &str) -> String {
     format!("invalid persisted containment action: {}", sanitized.trim())
 }
 
+#[cfg(target_os = "linux")]
 fn lifecycle_value(value: ContainmentLifecycle) -> &'static str {
     match value {
         ContainmentLifecycle::Pending => "pending",

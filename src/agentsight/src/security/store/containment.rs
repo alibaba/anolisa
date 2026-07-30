@@ -3,6 +3,7 @@
 mod evidence;
 mod reconcile;
 
+#[cfg(target_os = "linux")]
 pub(crate) use reconcile::DueContainmentAction;
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};

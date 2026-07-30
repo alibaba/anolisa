@@ -3,6 +3,7 @@
 mod containment;
 mod retention;
 
+#[cfg(target_os = "linux")]
 pub(crate) use containment::DueContainmentAction;
 pub use containment::{ContainmentActivationResult, ContainmentClaimResult};
 
