@@ -58,6 +58,7 @@ crate-type = ["cdylib", "rlib"]
 # Cross-platform dependencies (compile on all OSes)
 [dependencies]
 agentsight-atif = { path = "crates/agentsight-atif" }
+agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
 agentsight-opt = { path = "crates/agentsight-opt", optional = true }
 agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
 agentsight-trajectory-collector = { path = "crates/agentsight-trajectory-collector" }
@@ -131,7 +132,6 @@ openssl = { version = "0.10", features = ["vendored"] }
 flate2 = "1"
 zstd = "0.13"
 brotli = "8"
-agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
 async-stream = "0.3.6"
 async-trait = { workspace = true }
 cached = "0.52.0"

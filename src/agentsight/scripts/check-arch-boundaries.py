@@ -28,6 +28,7 @@ LAYER_MAP = {
     "agent_sec":   7,   # L7: Serve
     "grader":      7,   # L7: Serve
     "enforcement": 7,   # L7: Security control plane
+    "security":    7,   # L7: Security audit and containment
     "server":      7,   # L7: Serve
     "health":      7,   # L7: Serve
     "bin":         8,   # L8: Entry
@@ -46,10 +47,19 @@ ALLOWED_DEPS = {
     "tokenizer":   set(),
     "genai":       {"analyzer", "aggregator", "parser"},
     "atif":        {"genai", "storage"},
-    "storage":     {"analyzer", "genai"},
+    "storage":     {"analyzer", "genai", "security"},
     "grader":      {"storage"},
     "enforcement": {"storage"},
-    "server":      {"storage", "health", "atif", "agent_sec", "grader", "enforcement"},
+    "security":    {"enforcement"},
+    "server":      {
+        "storage",
+        "health",
+        "atif",
+        "agent_sec",
+        "grader",
+        "enforcement",
+        "security",
+    },
     "agent_sec":   set(),
     "health":      {"storage"},
     "unified":     "*",

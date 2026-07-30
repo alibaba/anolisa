@@ -62,6 +62,7 @@ require_literal src/agentsight/agentsight.spec.in "%systemd_post agentsight-enfo
 require_literal src/agentsight/agentsight.spec.in "%systemd_preun agentsight-enforcer.service"
 require_literal src/agentsight/agentsight.spec.in "%systemd_postun agentsight-enforcer.service"
 require_literal src/agentsight/scripts/agentsight.service "Wants=agentsight-enforcer.service"
+require_literal src/agentsight/scripts/agentsight-enforcer.service "PartOf=agentsight.service"
 require_literal src/agentsight/scripts/agentsight.service "UMask=0077"
 require_literal src/agentsight/scripts/agentsight-enforcer.service "UMask=0077"
 
@@ -75,6 +76,11 @@ require_literal src/anolisa/manifests/components/agentsight/component.toml \
     'target = "{unitdir}/agentsight-enforcer.service"'
 require_literal src/anolisa/manifests/components/agentsight/component.toml \
     'unit = "agentsight-enforcer.service"'
+
+require_count src/agentsight/tests/security_pipeline.rs \
+    "let required_subscription = client.subscribe_required().expect(\"subscribe required\");" 2
+require_count src/agentsight/tests/security_pipeline.rs \
+    ".apply(request.clone(), required_subscription.subscription_id())" 2
 
 for document in docs/QUICKSTART.md docs/QUICKSTART_zh.md src/agentsight/README.md src/agentsight/README_zh.md; do
     require_literal "$document" "agentsight-enforcer"

@@ -1,6 +1,7 @@
 [Unit]
 Description=AgentSight ActPlane Enforcement Engine
 Before=agentsight.service
+PartOf=agentsight.service
 After=local-fs.target
 
 [Service]

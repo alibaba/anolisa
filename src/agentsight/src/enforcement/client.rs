@@ -193,6 +193,27 @@ impl EnforcementClient {
         }
     }
 
+    /// Opens an independent normalized security-event stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, protocol, remote, or response-shape error.
+    pub fn subscribe_security_events(&self) -> Result<SecurityEventSubscription, EnforcementError> {
+        let request = Request::new(Command::SubscribeSecurityEvents);
+        let mut stream = self.connect()?;
+        stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+        write_frame(&mut stream, &request)?;
+        let mut reader = BufReader::new(stream);
+        let response = read_required_response(&mut reader, request.request_id)?;
+        match response {
+            ResponseBody::Subscribed => Ok(SecurityEventSubscription {
+                reader: FrameReader::new(reader),
+                request_id: request.request_id,
+            }),
+            body => Err(unexpected("subscribe security events", &body)),
+        }
+    }
+
     fn call(&self, command: Command) -> Result<ResponseBody, EnforcementError> {
         let request = Request::new(command);
         let mut stream = self.connect()?;
@@ -247,6 +268,43 @@ impl ViolationSubscription {
         match body {
             ResponseBody::Violation(event) => Ok(Some(event)),
             body => Err(unexpected("violation subscription", &body)),
+        }
+    }
+}
+
+/// One long-lived normalized security-event subscription.
+pub struct SecurityEventSubscription {
+    reader: FrameReader<BufReader<UnixStream>>,
+    request_id: Uuid,
+}
+
+impl SecurityEventSubscription {
+    /// Waits briefly for the next normalized security event.
+    ///
+    /// `Ok(None)` means the bounded read interval elapsed. EOF is returned as a
+    /// disconnect error so callers can reconnect without losing desired state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol, remote, disconnect, or response-shape error.
+    pub fn next_event(&mut self) -> Result<Option<SecurityEvent>, EnforcementError> {
+        let response: Response = match self.reader.read_frame() {
+            Ok(Some(response)) => response,
+            Ok(None) => return Err(EnforcementError::Disconnected),
+            Err(ProtocolError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let body = response_body(response, self.request_id)?;
+        match body {
+            ResponseBody::SecurityEvent(event) => Ok(Some(event)),
+            body => Err(unexpected("security event subscription", &body)),
         }
     }
 }

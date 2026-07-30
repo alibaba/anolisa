@@ -28,6 +28,7 @@ pub mod config;
 pub mod ecs_metadata;
 mod logging;
 mod private_sqlite;
+pub mod security;
 pub mod tokenizer;
 pub mod utils;
 

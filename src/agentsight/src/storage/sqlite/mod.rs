@@ -45,3 +45,7 @@ pub use connection::{create_connection, default_base_path, sibling_db_path};
 
 // Re-export tokenless stats storage
 pub use tokenless::{TokenlessStatsStore, TokenlessWindowSummary};
+
+// Security storage lives in the product-level security module but remains
+// reachable through the SQLite storage surface for unified callers.
+pub use crate::security::SecurityStore;

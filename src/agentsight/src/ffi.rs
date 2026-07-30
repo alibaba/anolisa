@@ -7,14 +7,18 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use crate::analyzer::HttpRecord;
 use crate::config::AgentsightConfig;
 use crate::genai::semantic::LLMCall;
 use crate::unified::AgentSight;
+use agentsight_enforcement_protocol::{
+    EnforcementStateEvent, EventIdentity, SecurityEvent, SecurityEventKind,
+};
+use uuid::Uuid;
 
 // ===========================================================================
 // Internal FFI event types (shared with unified.rs via crate::ffi)
@@ -27,6 +31,7 @@ use crate::unified::AgentSight;
 pub(crate) enum FfiEvent {
     Https(HttpRecord),
     Llm(LLMCall),
+    Security(SecurityEvent),
 }
 
 /// Commands sent from the FFI caller thread to the background pipeline thread.
@@ -41,10 +46,60 @@ enum ProbeCommand {
 ///
 /// Uses a bounded channel to prevent unbounded memory growth when the FFI
 /// consumer does not call `agentsight_read()` frequently enough.
+#[derive(Clone)]
 pub(crate) struct FfiEventSender {
     tx: mpsc::SyncSender<FfiEvent>,
     eventfd: i32,
     enable_raw_https: bool,
+    security_drops: Arc<SecurityDropState>,
+}
+
+#[derive(Default)]
+struct SecurityDropState {
+    count: AtomicU64,
+    last_identity: Mutex<Option<EventIdentity>>,
+}
+
+impl SecurityDropState {
+    fn record(&self, event: &SecurityEvent) {
+        let mut identity = self
+            .last_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *identity = Some(event.identity.clone());
+        self.count.fetch_add(1, Ordering::Release);
+    }
+
+    fn take_event(&self) -> Option<SecurityEvent> {
+        let dropped_events = self.count.swap(0, Ordering::AcqRel);
+        if dropped_events == 0 {
+            return None;
+        }
+        let identity = self
+            .last_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        Some(SecurityEvent {
+            event_id: Uuid::new_v4(),
+            occurred_at_ns: now,
+            observed_at_ns: now,
+            identity,
+            kind: SecurityEventKind::EnforcementState(EnforcementStateEvent {
+                policy_id: None,
+                policy_revision: None,
+                code: "ffi_queue_evidence_loss".into(),
+                ready: true,
+                message: "normalized security events were dropped because the FFI consumer queue was full".into(),
+                dropped_events: Some(dropped_events),
+            }),
+        })
+    }
 }
 
 impl FfiEventSender {
@@ -60,7 +115,10 @@ impl FfiEventSender {
                     libc::write(self.eventfd, &val as *const u64 as *const c_void, 8);
                 }
             }
-            Err(mpsc::TrySendError::Full(_)) => {
+            Err(mpsc::TrySendError::Full(dropped)) => {
+                if let FfiEvent::Security(event) = &dropped {
+                    self.security_drops.record(event);
+                }
                 log::warn!(
                     "FFI event channel full; dropping event because consumer is not reading fast enough"
                 );
@@ -91,6 +149,18 @@ fn set_last_error(msg: &str) {
     LAST_ERROR.with(|e| {
         *e.borrow_mut() = CString::new(msg.replace('\0', "")).ok();
     });
+}
+
+fn ffi_boundary(name: &str, operation: impl FnOnce() -> c_int) -> c_int {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
+        Ok(result) => result,
+        Err(_) => {
+            let message = format!("{name} panicked");
+            set_last_error(&message);
+            log::error!("{message}");
+            -1
+        }
+    }
 }
 
 // ===========================================================================
@@ -198,6 +268,25 @@ pub struct AgentsightLLMData {
     pub input_message_delta_len: u32,
 }
 
+/// Stable discriminator for the versioned generic event envelope.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentsightEventType {
+    Https = 1,
+    Llm = 2,
+    Security = 3,
+}
+
+/// Generic event envelope. The payload pointer is valid only during callback.
+#[repr(C)]
+pub struct AgentsightEvent {
+    pub event_type: AgentsightEventType,
+    pub schema_version: u16,
+    pub timestamp_ns: u64,
+    pub payload_json: *const c_char,
+    pub payload_json_len: u32,
+}
+
 // ===========================================================================
 // Opaque handles
 // ===========================================================================
@@ -215,7 +304,10 @@ pub struct AgentsightHandle {
     tx: Option<mpsc::SyncSender<FfiEvent>>,
     eventfd: i32,
     running: Arc<AtomicBool>,
+    security_drops: Arc<SecurityDropState>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Optional normalized security-event subscriber sharing the same FFI queue.
+    security_thread: Option<std::thread::JoinHandle<()>>,
     /// Config stored until `agentsight_start()` moves it into the thread.
     config: Option<AgentsightConfig>,
     /// Channel for runtime probe control commands (e.g. dynamic cgroup filter updates).
@@ -229,6 +321,7 @@ pub struct AgentsightHandle {
 
 type HttpsCallbackFn = Option<unsafe extern "C" fn(*const AgentsightHttpsData, *mut c_void)>;
 type LlmCallbackFn = Option<unsafe extern "C" fn(*const AgentsightLLMData, *mut c_void)>;
+type EventCallbackFn = Option<unsafe extern "C" fn(*const AgentsightEvent, *mut c_void)>;
 
 /// Flag for `agentsight_read()`: block until at least one event is available.
 pub const AGENTSIGHT_READ_BLOCK: c_int = 1;
@@ -262,6 +355,43 @@ struct LlmDataHolder {
     _resp_messages: CString,
     _tools: CString,
     _input_message_delta: CString,
+}
+
+struct EventDataHolder {
+    c_data: AgentsightEvent,
+    _payload_json: Vec<u8>,
+}
+
+fn build_event_data(event: &FfiEvent) -> Result<EventDataHolder, serde_json::Error> {
+    let (event_type, timestamp_ns, payload_json) = match event {
+        FfiEvent::Https(record) => (
+            AgentsightEventType::Https,
+            record.timestamp_ns,
+            serde_json::to_vec(record)?,
+        ),
+        FfiEvent::Llm(call) => (
+            AgentsightEventType::Llm,
+            call.start_timestamp_ns,
+            serde_json::to_vec(call)?,
+        ),
+        FfiEvent::Security(event) => (
+            AgentsightEventType::Security,
+            event.occurred_at_ns,
+            serde_json::to_vec(event)?,
+        ),
+    };
+    let payload_json_len = payload_json.len().min(u32::MAX as usize) as u32;
+    let c_data = AgentsightEvent {
+        event_type,
+        schema_version: 1,
+        timestamp_ns,
+        payload_json: payload_json.as_ptr().cast(),
+        payload_json_len,
+    };
+    Ok(EventDataHolder {
+        c_data,
+        _payload_json: payload_json,
+    })
 }
 
 fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
@@ -476,7 +606,29 @@ unsafe fn dispatch_event(
                 unsafe { cb(&holder.c_data, llm_ud) };
             }
         }
+        FfiEvent::Security(_) => {}
     }
+}
+
+/// Dispatches legacy typed callbacks and the versioned generic callback from
+/// the same queue item. This lets existing consumers keep their LLM mapping
+/// while incrementally adopting generic event types.
+unsafe fn dispatch_event_v2(
+    event: FfiEvent,
+    http_cb: HttpsCallbackFn,
+    http_ud: *mut c_void,
+    llm_cb: LlmCallbackFn,
+    llm_ud: *mut c_void,
+    event_cb: EventCallbackFn,
+    event_ud: *mut c_void,
+) {
+    if let Some(cb) = event_cb {
+        match build_event_data(&event) {
+            Ok(holder) => unsafe { cb(&holder.c_data, event_ud) },
+            Err(error) => log::warn!("failed to serialize FFI event envelope: {error}"),
+        }
+    }
+    unsafe { dispatch_event(event, http_cb, http_ud, llm_cb, llm_ud) };
 }
 
 // ===========================================================================
@@ -551,6 +703,32 @@ pub unsafe extern "C" fn agentsight_config_set_enable_raw_https(
 ) {
     if !cfg.is_null() {
         unsafe { (*cfg).ffi_enable_raw_https = enabled != 0 };
+    }
+}
+
+/// Enable or disable normalized security audit events in FFI mode.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_set_enable_security_audit(
+    cfg: *mut AgentsightConfigHandle,
+    enabled: c_int,
+) {
+    if !cfg.is_null() {
+        unsafe { (*cfg).ffi_enable_security_audit = enabled != 0 };
+    }
+}
+
+/// Override the local enforcer socket used by the security audit subscriber.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_set_enforcer_socket(
+    cfg: *mut AgentsightConfigHandle,
+    path: *const c_char,
+) {
+    if cfg.is_null() || path.is_null() {
+        return;
+    }
+    let value = unsafe { CStr::from_ptr(path) }.to_string_lossy();
+    if !value.is_empty() {
+        unsafe { (*cfg).ffi_enforcer_socket = std::path::PathBuf::from(value.as_ref()) };
     }
 }
 
@@ -734,13 +912,16 @@ pub unsafe extern "C" fn agentsight_new(cfg: *mut AgentsightConfigHandle) -> *mu
     let ffi_channel_capacity = config.runtime_limits.event_channel_capacity.max(1);
     let (tx, rx) = mpsc::sync_channel(ffi_channel_capacity);
     let running = Arc::new(AtomicBool::new(false));
+    let security_drops = Arc::new(SecurityDropState::default());
 
     Box::into_raw(Box::new(AgentsightHandle {
         rx,
         tx: Some(tx),
         eventfd: efd,
         running,
+        security_drops,
         thread: None,
+        security_thread: None,
         config: Some(config),
         probe_cmd_tx: None,
     }))
@@ -780,6 +961,22 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
     running.store(true, Ordering::SeqCst);
     let eventfd = handle.eventfd;
 
+    if config.ffi_enable_security_audit {
+        let security_tx = tx.clone();
+        let security_running = running.clone();
+        let socket_path = config.ffi_enforcer_socket.clone();
+        let security_drops = Arc::clone(&handle.security_drops);
+        handle.security_thread = Some(std::thread::spawn(move || {
+            ffi_security_background_thread(
+                socket_path,
+                security_tx,
+                eventfd,
+                security_running,
+                security_drops,
+            );
+        }));
+    }
+
     // Probe control channel: caller thread sends commands; background thread drains them.
     let (probe_cmd_tx, probe_cmd_rx) = mpsc::channel::<ProbeCommand>();
     handle.probe_cmd_tx = Some(probe_cmd_tx);
@@ -789,6 +986,67 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
     }));
 
     0
+}
+
+fn ffi_security_background_thread(
+    socket_path: std::path::PathBuf,
+    tx: mpsc::SyncSender<FfiEvent>,
+    eventfd: i32,
+    running: Arc<AtomicBool>,
+    security_drops: Arc<SecurityDropState>,
+) {
+    const MIN_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+    const MAX_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+    let sender = FfiEventSender {
+        tx,
+        eventfd,
+        enable_raw_https: false,
+        security_drops,
+    };
+    let client = crate::enforcement::EnforcementClient::new(&socket_path);
+    let mut retry_delay = MIN_RETRY;
+    while running.load(Ordering::SeqCst) {
+        let mut subscription = match client.subscribe_security_events() {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                log::warn!(
+                    "AgentSight security audit subscriber could not connect to {}: {error}",
+                    socket_path.display()
+                );
+                sleep_while_running(running.as_ref(), retry_delay);
+                retry_delay = (retry_delay * 2).min(MAX_RETRY);
+                continue;
+            }
+        };
+        retry_delay = MIN_RETRY;
+        log::info!(
+            "AgentSight security audit subscriber connected to {}",
+            socket_path.display()
+        );
+        while running.load(Ordering::SeqCst) {
+            match subscription.next_event() {
+                Ok(Some(event)) => sender.send(FfiEvent::Security(event)),
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("AgentSight security audit subscription disconnected: {error}");
+                    sleep_while_running(running.as_ref(), retry_delay);
+                    retry_delay = (retry_delay * 2).min(MAX_RETRY);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn sleep_while_running(running: &AtomicBool, duration: std::time::Duration) {
+    let deadline = std::time::Instant::now() + duration;
+    while running.load(Ordering::SeqCst) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+    }
 }
 
 /// Background thread: creates AgentSight and runs the event loop.
@@ -806,6 +1064,7 @@ fn ffi_background_thread(
         tx,
         eventfd,
         enable_raw_https: config.ffi_enable_raw_https,
+        security_drops: Arc::new(SecurityDropState::default()),
     };
 
     let mut sight = match AgentSight::new(config) {
@@ -870,6 +1129,9 @@ pub unsafe extern "C" fn agentsight_stop(h: *mut AgentsightHandle) -> c_int {
     if let Some(th) = handle.thread.take() {
         let _ = th.join();
     }
+    if let Some(th) = handle.security_thread.take() {
+        let _ = th.join();
+    }
     0
 }
 
@@ -896,6 +1158,10 @@ impl Drop for AgentsightHandle {
         }
         // Join the background thread if still running.
         if let Some(th) = self.thread.take() {
+            self.running.store(false, Ordering::SeqCst);
+            let _ = th.join();
+        }
+        if let Some(th) = self.security_thread.take() {
             self.running.store(false, Ordering::SeqCst);
             let _ = th.join();
         }
@@ -961,11 +1227,17 @@ pub unsafe extern "C" fn agentsight_read(
     if flags & AGENTSIGHT_READ_BLOCK != 0 {
         match handle.rx.recv() {
             Ok(event) => {
+                // Clear notifications before draining the queue. A producer
+                // racing after this read leaves eventfd readable, so its event
+                // cannot be stranded without a future wakeup.
+                drain_eventfd(handle.eventfd);
                 unsafe { dispatch_event(event, http_cb, http_ud, llm_cb, llm_ud) };
                 count += 1;
             }
             Err(_) => return -1,
         }
+    } else {
+        drain_eventfd(handle.eventfd);
     }
 
     // Non-blocking drain of remaining (or all) events.
@@ -974,9 +1246,77 @@ pub unsafe extern "C" fn agentsight_read(
         count += 1;
     }
 
-    // Drain the eventfd counter to prevent stale wakeups.
-    drain_eventfd(handle.eventfd);
+    count
+}
 
+/// Process available events through both legacy typed callbacks and a generic,
+/// versioned JSON envelope callback. All callbacks observe the same queue item.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_read_v2(
+    h: *mut AgentsightHandle,
+    http_cb: HttpsCallbackFn,
+    http_ud: *mut c_void,
+    llm_cb: LlmCallbackFn,
+    llm_ud: *mut c_void,
+    event_cb: EventCallbackFn,
+    event_ud: *mut c_void,
+    flags: c_int,
+) -> c_int {
+    ffi_boundary("agentsight_read_v2", || unsafe {
+        agentsight_read_v2_inner(
+            h, http_cb, http_ud, llm_cb, llm_ud, event_cb, event_ud, flags,
+        )
+    })
+}
+
+unsafe fn agentsight_read_v2_inner(
+    h: *mut AgentsightHandle,
+    http_cb: HttpsCallbackFn,
+    http_ud: *mut c_void,
+    llm_cb: LlmCallbackFn,
+    llm_ud: *mut c_void,
+    event_cb: EventCallbackFn,
+    event_ud: *mut c_void,
+    flags: c_int,
+) -> c_int {
+    if h.is_null() {
+        return -1;
+    }
+    let handle = unsafe { &*h };
+    let mut count: c_int = 0;
+
+    if flags & AGENTSIGHT_READ_BLOCK != 0 {
+        match handle.rx.recv() {
+            Ok(event) => {
+                drain_eventfd(handle.eventfd);
+                unsafe {
+                    dispatch_event_v2(event, http_cb, http_ud, llm_cb, llm_ud, event_cb, event_ud)
+                };
+                count += 1;
+            }
+            Err(_) => return -1,
+        }
+    } else {
+        drain_eventfd(handle.eventfd);
+    }
+    while let Ok(event) = handle.rx.try_recv() {
+        unsafe { dispatch_event_v2(event, http_cb, http_ud, llm_cb, llm_ud, event_cb, event_ud) };
+        count += 1;
+    }
+    if let Some(event) = handle.security_drops.take_event() {
+        unsafe {
+            dispatch_event_v2(
+                FfiEvent::Security(event),
+                http_cb,
+                http_ud,
+                llm_cb,
+                llm_ud,
+                event_cb,
+                event_ud,
+            )
+        };
+        count += 1;
+    }
     count
 }
 
@@ -1042,6 +1382,8 @@ pub unsafe extern "C" fn agentsight_remove_traced_cgroup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentsight_enforcement_protocol::{Effect, EventIdentity, PolicyDecision, PolicyMode};
+    use uuid::Uuid;
 
     fn new_cfg() -> AgentsightConfig {
         let mut cfg = AgentsightConfig::default();
@@ -1265,6 +1607,7 @@ mod tests {
             tx,
             eventfd: -1,
             enable_raw_https: false,
+            security_drops: Arc::new(SecurityDropState::default()),
         };
         sender.send_https(&make_http_record(None, None));
         sender.send(FfiEvent::Llm(make_llm_call(None, 1)));
@@ -1278,6 +1621,7 @@ mod tests {
             tx,
             eventfd: -1,
             enable_raw_https: true,
+            security_drops: Arc::new(SecurityDropState::default()),
         };
         sender.send_https(&make_http_record(None, None));
         assert!(matches!(rx.try_recv(), Ok(FfiEvent::Https(_))));
@@ -1318,6 +1662,193 @@ mod tests {
             agent_name: agent_name.map(str::to_string),
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    fn make_security_event() -> SecurityEvent {
+        SecurityEvent::policy_decision(
+            EventIdentity {
+                binding_id: Uuid::nil(),
+                agent_id: "agent-1".to_string(),
+                agent_name: Some("claude".to_string()),
+                session_id: Some("session-1".to_string()),
+                conversation_id: None,
+                tool_call_id: None,
+                pid: 42,
+                process_start_time: 7,
+                ppid: Some(1),
+                cgroup_id: Some(99),
+                protocol_version: 1,
+                enforcer_version: "test".to_string(),
+                actplane_revision: "revision-1".to_string(),
+            },
+            PolicyDecision {
+                policy_id: "credential-exfiltration".to_string(),
+                policy_revision: 3,
+                source_event_id: Uuid::nil(),
+                sink_event_id: Uuid::nil(),
+                mode: PolicyMode::Audit,
+                requested_effect: Effect::Notify,
+                blocked: false,
+                killed: false,
+                errno: None,
+                risk_score: 85,
+                reason: "credential reached an unknown public endpoint".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_build_event_data_wraps_security_event_as_versioned_json() {
+        let event = make_security_event();
+        let holder = build_event_data(&FfiEvent::Security(event.clone()))
+            .expect("security event should serialize");
+
+        assert_eq!(holder.c_data.event_type, AgentsightEventType::Security);
+        assert_eq!(holder.c_data.schema_version, 1);
+        assert_eq!(holder.c_data.timestamp_ns, event.occurred_at_ns);
+        let payload = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.payload_json.cast::<u8>(),
+                holder.c_data.payload_json_len as usize,
+            )
+        };
+        let decoded: SecurityEvent =
+            serde_json::from_slice(payload).expect("payload should be a SecurityEvent");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn full_ffi_queue_emits_normalized_security_evidence_loss() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let security_drops = Arc::new(SecurityDropState::default());
+        let sender = FfiEventSender {
+            tx,
+            eventfd: -1,
+            enable_raw_https: false,
+            security_drops: Arc::clone(&security_drops),
+        };
+        sender.send(FfiEvent::Llm(make_llm_call(None, 1)));
+        sender.send(FfiEvent::Security(make_security_event()));
+
+        let loss = security_drops
+            .take_event()
+            .expect("queue loss should become a security event");
+        let SecurityEventKind::EnforcementState(state) = loss.kind else {
+            panic!("expected enforcement state");
+        };
+        assert_eq!(state.code, "ffi_queue_evidence_loss");
+        assert_eq!(state.dropped_events, Some(1));
+        assert!(state.ready);
+        assert!(security_drops.take_event().is_none());
+    }
+
+    #[derive(Default)]
+    struct CallbackCounts {
+        llm: usize,
+        generic_llm: usize,
+        security: usize,
+    }
+
+    unsafe extern "C" fn count_llm(_: *const AgentsightLLMData, user_data: *mut c_void) {
+        let counts = unsafe { &mut *user_data.cast::<CallbackCounts>() };
+        counts.llm += 1;
+    }
+
+    unsafe extern "C" fn count_generic(event: *const AgentsightEvent, user_data: *mut c_void) {
+        let counts = unsafe { &mut *user_data.cast::<CallbackCounts>() };
+        match unsafe { (*event).event_type } {
+            AgentsightEventType::Llm => counts.generic_llm += 1,
+            AgentsightEventType::Security => counts.security += 1,
+            AgentsightEventType::Https => {}
+        }
+    }
+
+    #[test]
+    fn test_dispatch_v2_keeps_legacy_llm_callback_and_emits_generic_events() {
+        let mut counts = CallbackCounts::default();
+        let user_data = (&mut counts as *mut CallbackCounts).cast::<c_void>();
+
+        unsafe {
+            dispatch_event_v2(
+                FfiEvent::Llm(make_llm_call(None, 1)),
+                None,
+                ptr::null_mut(),
+                Some(count_llm),
+                user_data,
+                Some(count_generic),
+                user_data,
+            );
+            dispatch_event_v2(
+                FfiEvent::Security(make_security_event()),
+                None,
+                ptr::null_mut(),
+                Some(count_llm),
+                user_data,
+                Some(count_generic),
+                user_data,
+            );
+        }
+
+        assert_eq!(counts.llm, 1);
+        assert_eq!(counts.generic_llm, 1);
+        assert_eq!(counts.security, 1);
+    }
+
+    #[test]
+    fn ffi_boundary_translates_panics_to_an_error_result() {
+        let result = ffi_boundary("agentsight_read_v2", || -> c_int {
+            panic!("test-only FFI panic")
+        });
+
+        assert_eq!(result, -1);
+        let message = unsafe { CStr::from_ptr(agentsight_last_error()) }
+            .to_str()
+            .expect("last error should be valid UTF-8");
+        assert!(message.contains("agentsight_read_v2 panicked"));
+    }
+
+    #[test]
+    fn test_config_security_audit_is_opt_in_and_socket_is_configurable() {
+        let cfg = agentsight_config_new();
+        assert!(!cfg.is_null());
+        assert!(!unsafe { (*cfg).ffi_enable_security_audit });
+
+        let socket = CString::new("/tmp/agentsight-enforcer.sock").unwrap();
+        unsafe {
+            agentsight_config_set_enable_security_audit(cfg, 1);
+            agentsight_config_set_enforcer_socket(cfg, socket.as_ptr());
+        }
+        assert!(unsafe { (*cfg).ffi_enable_security_audit });
+        assert_eq!(
+            unsafe { &(*cfg).ffi_enforcer_socket },
+            &std::path::PathBuf::from("/tmp/agentsight-enforcer.sock")
+        );
+
+        unsafe { agentsight_config_free(cfg) };
+    }
+
+    #[test]
+    fn test_security_subscriber_stops_cleanly_when_enforcer_is_unavailable() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_running = running.clone();
+        let socket = std::env::temp_dir().join(format!(
+            "agentsight-missing-enforcer-{}.sock",
+            std::process::id()
+        ));
+        let worker = std::thread::spawn(move || {
+            ffi_security_background_thread(
+                socket,
+                tx,
+                -1,
+                worker_running,
+                Arc::new(SecurityDropState::default()),
+            );
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        running.store(false, Ordering::SeqCst);
+        worker.join().expect("security subscriber should stop");
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

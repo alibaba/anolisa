@@ -8,6 +8,7 @@ mod enforcement;
 mod handlers;
 pub mod optimize;
 mod secret;
+mod system_audit;
 mod token_savings;
 
 use std::path::PathBuf;
@@ -22,6 +23,7 @@ use crate::config::ServerAuthConfig;
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
+use crate::security::{SecurityCoordinator, SecurityStore};
 use crate::storage::sqlite::InterruptionStore;
 use agentsight_trajectory_collector::TrajectoryStore;
 
@@ -59,6 +61,8 @@ pub struct AppState {
     pub evaluation_store: Arc<EvaluationStore>,
     /// Desired enforcement state and privileged-service client.
     pub enforcement: Option<Arc<EnforcementCoordinator>>,
+    /// AgentSight-owned security events and correlated audit cases.
+    pub security_store: Arc<SecurityStore>,
     /// agent-sec security observability integration configuration
     pub security_observability: SecurityObservabilityConfig,
     /// Dashboard authentication state
@@ -236,7 +240,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::get_interruption)
                 .service(token_savings::get_token_savings)
                 .service(token_savings::get_session_savings)
-                // agent-sec Security Observability API routes
+                // AgentSight local security and system-audit API routes
                 .service(handlers::security_status)
                 .service(handlers::security_summary)
                 .service(handlers::security_events_count_by)
@@ -245,6 +249,12 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::security_observability_sessions)
                 .service(handlers::security_observability_runs)
                 .service(handlers::security_observability_timeline)
+                .service(system_audit::summary)
+                .service(system_audit::sessions)
+                .service(system_audit::events)
+                .service(system_audit::cases)
+                .service(system_audit::case_detail)
+                .service(system_audit::review_case)
                 // AgentSight-owned enforcement API routes
                 .service(enforcement::health)
                 .service(enforcement::apply_binding)
@@ -298,6 +308,14 @@ pub async fn run_server(
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
 
+    let state_dir = storage_path
+        .parent()
+        .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"));
+    let security_store = Arc::new(
+        SecurityStore::open_private(state_dir)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    );
+
     let evaluation_store = Arc::new(
         EvaluationStore::new_with_path(&storage_path)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
@@ -306,17 +324,24 @@ pub async fn run_server(
     let enforcement_socket = std::env::var_os("AGENTSIGHT_ENFORCER_SOCKET")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/run/agentsight/enforcer.sock"));
-    let state_dir = storage_path
-        .parent()
-        .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"));
+    let enforcement_client = EnforcementClient::new(enforcement_socket);
     let enforcement = Arc::new(EnforcementCoordinator::new(
-        EnforcementClient::new(enforcement_socket),
+        enforcement_client.clone(),
         EnforcementStore::open_private(state_dir)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     ));
     let enforcement_ingestion = enforcement
         .start_ingestion()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let security_coordinator =
+        SecurityCoordinator::new(enforcement_client, Arc::clone(&security_store));
+    let security_ingestion = match security_coordinator.start() {
+        Ok(ingestion) => ingestion,
+        Err(error) => {
+            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+    };
 
     // Initialize dashboard authentication
     let storage_base = storage_path
@@ -409,6 +434,7 @@ pub async fn run_server(
         interruption_store,
         evaluation_store,
         enforcement: Some(Arc::clone(&enforcement)),
+        security_store,
         security_observability,
         auth: dashboard_auth.clone(),
         optimize: Some(optimize_state),
@@ -443,6 +469,7 @@ pub async fn run_server(
     {
         Ok(server) => server,
         Err(error) => {
+            stop_security_ingestion(&security_coordinator, security_ingestion);
             stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
             return Err(error);
         }
@@ -458,8 +485,19 @@ pub async fn run_server(
 
     let server_result = server.run().await;
 
+    stop_security_ingestion(&security_coordinator, security_ingestion);
     stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
     server_result
+}
+
+fn stop_security_ingestion(
+    coordinator: &SecurityCoordinator,
+    ingestion: std::thread::JoinHandle<()>,
+) {
+    coordinator.stop();
+    if ingestion.join().is_err() {
+        log::error!("AgentSight security ingestion worker panicked during shutdown");
+    }
 }
 
 fn stop_enforcement_ingestion(
@@ -599,6 +637,7 @@ mod tests {
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
             enforcement: None,
+            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
             optimize: None,

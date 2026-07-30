@@ -467,13 +467,62 @@ fn handle_controlled_connection(
                 message: state.health_message.clone(),
             }))
         }
-        Command::ApplyPolicy(_) => Err(RemoteError {
+        Command::ApplyPolicy(_) | Command::ApplyCredentialPolicy(_) => Err(RemoteError {
             code: "required_subscription_unavailable".into(),
             message: "fixture requires a subscription lease".into(),
         }),
         Command::ApplyPolicyLeased { request, .. } => {
             let binding = Binding {
                 request,
+                state: BindingState::Enforced,
+                message: None,
+                domain_id: Some(1),
+            };
+            let (state, changed) = &*state;
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.apply_attempts += 1;
+            changed.notify_all();
+            if state.reject_next_required_subscription {
+                state.reject_next_required_subscription = false;
+                return write_frame(
+                    &mut stream,
+                    &Response {
+                        protocol_version: agentsight_enforcement_protocol::PROTOCOL_VERSION,
+                        request_id,
+                        result: Err(RemoteError {
+                            code: "required_subscription_unavailable".into(),
+                            message: "fixture required subscription is stale".into(),
+                        }),
+                    },
+                )
+                .expect("controlled response should encode");
+            }
+            while state.apply_blocked && !stop.load(Ordering::Acquire) {
+                state = changed
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            state.bindings.push(binding.clone());
+            Ok(ResponseBody::Applied(binding))
+        }
+        Command::ApplyCredentialPolicyLeased { request, .. } => {
+            let policy = request.policy;
+            let binding = Binding {
+                request: ApplyPolicy {
+                    binding_id: request.binding_id,
+                    agent_id: request.agent_id,
+                    session_id: request.session_id,
+                    root_pid: request.root_pid,
+                    process_start_time: request.process_start_time,
+                    policy_id: policy.policy_id,
+                    policy_revision: policy.revision.to_string(),
+                    policy_dsl: String::new(),
+                },
                 state: BindingState::Enforced,
                 message: None,
                 domain_id: Some(1),
@@ -563,7 +612,9 @@ fn handle_controlled_connection(
                 }
             }
         }
-        Command::SubscribeViolations { .. } | Command::SubscribeRequiredViolations { .. } => {
+        Command::SubscribeViolations { .. }
+        | Command::SubscribeRequiredViolations { .. }
+        | Command::SubscribeSecurityEvents => {
             let (shared, changed) = &*state;
             let mut shared = shared
                 .lock()
