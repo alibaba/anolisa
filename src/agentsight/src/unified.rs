@@ -1278,13 +1278,21 @@ impl AgentSight {
 
     /// Immediate crash detection when a tracked agent process exits.
     ///
-    /// Called from `ProcMon::Exit` handler. Drains in-flight connections for
-    /// the PID and persists them as pending calls regardless of how the
-    /// process terminated, then delegates the crash decision to
+    /// Called from `ProcMon::Exit` handler. Flushes the pid's deferred GenAI
+    /// events (issue #2032), drains in-flight connections for the PID and
+    /// persists them as pending calls regardless of how the process
+    /// terminated, then delegates the crash decision to
     /// [`record_agent_crash_interruptions`], passing the decoded raw
     /// `task_struct->exit_code` so clean exits are not misreported.
     fn handle_agent_crash_detection(&mut self, pid: u32, agent_name: &str, raw_exit_code: u32) {
         use crate::aggregator::ConnectionState;
+
+        // Flush this pid's deferred GenAI events first: the exited process can
+        // never produce the awaited session_id mapping, and the pending-calls
+        // query below must see those already-answered calls as 'complete' so
+        // neither the grader (issue #2032) nor the crash path below treats
+        // them as unanswered.
+        self.flush_deferred_genai_for_pid(pid);
 
         // Persist the raw exit status to the shared interruption DB first: the
         // serve-mode HealthChecker runs in a separate process and re-detects
@@ -1840,6 +1848,32 @@ impl AgentSight {
         }
     }
 
+    /// Immediately flush deferred GenAI events belonging to an exited process.
+    ///
+    /// The deferral window only exists to wait for a FileWrite event to
+    /// register the response_id → session_id mapping (see
+    /// `resolve_pending_genai`). Once the process has exited that mapping can
+    /// never be written anymore, so waiting out the remaining
+    /// PENDING_SESSION_TIMEOUT would only leave the DB row 'pending'
+    /// (output_tokens=0, no output_messages) — a grader reading it inside the
+    /// window misjudges the finished call as no_final_answer (issue #2032).
+    /// Falling back to the response_id-based session_id therefore loses
+    /// nothing. Deferred events of other (still-live) pids keep waiting.
+    fn flush_deferred_genai_for_pid(&mut self, pid: u32) {
+        if self.pending_genai.is_empty() {
+            return;
+        }
+
+        let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
+        let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
+        self.pending_genai = still_pending;
+
+        for events in &to_export {
+            self.complete_and_export_deferred_genai(events);
+            self.detect_and_store_interruptions(events);
+        }
+    }
+
     /// Get reference to aggregator
     pub fn aggregator(&self) -> &Aggregator {
         &self.aggregator
@@ -2041,6 +2075,35 @@ fn complete_deferred_genai(
             }
         }
     }
+}
+
+/// Split the deferred queue on process exit: entries of `pid` are selected
+/// for immediate fallback completion regardless of how long they have been
+/// queued (the exited process can no longer produce the awaited session_id
+/// mapping); entries of other pids are kept waiting.
+///
+/// Extracted as a free function so the exit-flush selection is unit-testable
+/// without constructing a full `AgentSight` instance.
+fn take_deferred_genai_for_pid(
+    pending_items: Vec<PendingGenAI>,
+    pid: u32,
+) -> (Vec<Vec<GenAISemanticEvent>>, Vec<PendingGenAI>) {
+    let mut still_pending = Vec::new();
+    let mut to_export: Vec<Vec<GenAISemanticEvent>> = Vec::new();
+
+    for pending in pending_items {
+        if pending.pid == pid {
+            log::debug!(
+                "Deferred session_id flushed on exit of pid={pid} for response_id={}, using fallback",
+                pending.response_id
+            );
+            to_export.push(pending.events);
+        } else {
+            still_pending.push(pending);
+        }
+    }
+
+    (to_export, still_pending)
 }
 
 /// Record `agent_crash` interruption events for the pending calls of an
@@ -2608,6 +2671,89 @@ mod tests {
         let bytes = pending.estimated_bytes();
         // 1 event × 512 bytes estimate
         assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
+    }
+
+    // ── Test for exit-time deferred flush (issue #2032) ──
+
+    #[test]
+    fn test_exit_flush_completes_deferred_call_without_waiting_timeout() {
+        let dir = unique_tmp_dir("exit-flush");
+        let db_path = dir.join("genai_events.db");
+        let store = Arc::new(GenAISqliteStore::new_with_path(&db_path).expect("create test store"));
+
+        // Pending rows for both pids, as written at deferred-queue time.
+        let mut exiting = make_test_pending_info("exit-flush-call");
+        exiting.pid = 4242;
+        store.insert_pending(&exiting).expect("insert_pending");
+        let mut other = make_test_pending_info("other-pid-call");
+        other.pid = 5555;
+        store.insert_pending(&other).expect("insert_pending");
+
+        // The exiting pid's deferred event already carries the full response.
+        let mut call = make_test_llm_call("exit-flush-call");
+        call.token_usage = Some(crate::genai::semantic::TokenUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            total_tokens: 18,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        let entries = vec![
+            PendingGenAI {
+                events: vec![GenAISemanticEvent::LLMCall(call)],
+                response_id: "resp-exit".to_string(),
+                pid: 4242,
+                // Fresh entry: the exit flush must not wait for
+                // PENDING_SESSION_TIMEOUT (the old behavior, which left the
+                // row pending for up to 5s and let the grader misjudge it).
+                created_at: std::time::Instant::now(),
+            },
+            PendingGenAI {
+                events: vec![GenAISemanticEvent::LLMCall(make_test_llm_call(
+                    "other-pid-call",
+                ))],
+                response_id: "resp-other".to_string(),
+                pid: 5555,
+                created_at: std::time::Instant::now(),
+            },
+        ];
+
+        // Exit of pid 4242: selection ignores created_at, keeps other pids.
+        let (flushed, kept) = take_deferred_genai_for_pid(entries, 4242);
+        assert_eq!(flushed.len(), 1, "exiting pid's events flush immediately");
+        assert_eq!(kept.len(), 1, "other pid's events keep waiting");
+        assert_eq!(kept[0].pid, 5555);
+
+        // Completing the flushed batches promotes the row with real output.
+        for events in &flushed {
+            complete_deferred_genai(events, Some(&store), &[], None);
+        }
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (status, output_tokens): (String, i64) = conn
+            .query_row(
+                "SELECT status, output_tokens FROM genai_events WHERE call_id = 'exit-flush-call'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "complete", "complete right at exit, not after 5s");
+        assert_eq!(
+            output_tokens, 7,
+            "no no_final_answer precondition left (output_tokens > 0)"
+        );
+
+        // The untouched pid's row stays pending — per-pid selection only.
+        let other_status: String = conn
+            .query_row(
+                "SELECT status FROM genai_events WHERE call_id = 'other-pid-call'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(other_status, "pending");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── Tests for the AgentsightHttpsData fallback path ──
