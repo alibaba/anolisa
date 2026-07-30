@@ -86,7 +86,7 @@ async fn require_slot_path(
     path: &Path,
     required_type: RequiredPathType,
 ) -> Result<()> {
-    match tokio::fs::metadata(path).await {
+    match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if required_type.matches(&metadata) => Ok(()),
         Ok(_) => Err(BlazeError::StorageIncomplete {
             instance_id: instance_id.to_string(),
@@ -519,6 +519,85 @@ mod tests {
                 expected: "file",
             } if instance_id == "missing-artifact" && path == &slot.mem_diff_path
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconstruct_rejects_a_linked_slot_root() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::TempDir::new().unwrap();
+        let target = tempfile::TempDir::new().unwrap();
+        for artifact in ["rootfs.ext4", "mem.bin", "mem.diff", "rootfs.diff"] {
+            tokio::fs::write(target.path().join(artifact), b"external")
+                .await
+                .unwrap();
+        }
+        symlink(target.path(), storage.path().join("linked-slot")).unwrap();
+        let provider = FileStorageProvider::new(storage.path().to_path_buf());
+
+        let error = provider
+            .reconstruct("linked-slot")
+            .await
+            .expect_err("linked slot root must be rejected");
+
+        assert!(matches!(
+            error,
+            BlazeError::StorageIncomplete {
+                ref instance_id,
+                ref path,
+                expected: "directory",
+            } if instance_id == "linked-slot" && path == &storage.path().join("linked-slot")
+        ));
+        assert!(
+            std::fs::symlink_metadata(storage.path().join("linked-slot"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(target.path().is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconstruct_rejects_a_linked_slot_artifact() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(temp.path().to_path_buf());
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: "linked-artifact".into(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .unwrap();
+        tokio::fs::remove_file(&slot.mem_diff_path).await.unwrap();
+        let external = temp.path().join("external-memory-diff");
+        tokio::fs::write(&external, b"external").await.unwrap();
+        symlink(&external, &slot.mem_diff_path).unwrap();
+
+        let error = provider
+            .reconstruct("linked-artifact")
+            .await
+            .expect_err("linked artifact must be rejected");
+
+        assert!(matches!(
+            error,
+            BlazeError::StorageIncomplete {
+                ref instance_id,
+                ref path,
+                expected: "file",
+            } if instance_id == "linked-artifact" && path == &slot.mem_diff_path
+        ));
+        assert!(
+            std::fs::symlink_metadata(&slot.mem_diff_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(external.is_file());
     }
 
     #[tokio::test]
