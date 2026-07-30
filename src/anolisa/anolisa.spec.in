@@ -143,7 +143,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Jul 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Jul 30 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Interactive install and uninstall commands now report phase-based activity.
+- Human errors now use conventional labels while JSON retains machine codes.
+- Update notices now quote their recommended commands.
+
+* Wed Jul 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.14-1
 - Status and doctor now detect managed file mode and capability drift.
 - Repair now restores declared metadata without granting unconfirmed capabilities.
 

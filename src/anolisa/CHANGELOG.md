@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-07-30
+
+### Added
+
+- Interactive `anolisa install`, `anolisa install --all`, and
+  `anolisa uninstall` now display phase-based activity during long-running
+  planning and execution. ANSI-capable terminals animate the current phase,
+  while limited interactive terminals print static phase lines
+  ([#2036](https://github.com/alibaba/anolisa/pull/2036)).
+
+### Changed
+
+- Human-readable failures now use conventional `error:` and `hint:` labels
+  without exposing machine codes. `--json` retains structured error codes, and
+  exit statuses remain unchanged.
+- Update notifications now quote the recommended `sudo anolisa upgrade` and
+  `anolisa update --check` commands so their boundaries are clear.
+
 ## [0.2.14] - 2026-07-29
 
 ### Fixed
@@ -721,6 +739,22 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.15] - 2026-07-30
+
+### 新增
+
+- 交互式 `anolisa install`、`anolisa install --all` 和 `anolisa uninstall`
+  现会在耗时的规划与执行阶段显示分阶段进度。支持 ANSI 的终端会动态显示当前阶段，
+  能力受限的交互式终端则输出静态阶段提示
+  ([#2036](https://github.com/alibaba/anolisa/pull/2036))。
+
+### 变更
+
+- 面向用户的失败信息现采用常规的 `error:` 和 `hint:` 标签，不再显示机器错误码；
+  `--json` 仍保留结构化错误码，退出状态保持不变。
+- 更新通知现会为建议运行的 `sudo anolisa upgrade` 和 `anolisa update --check`
+  命令加上引号，使命令边界更加清晰。
 
 ## [0.2.14] - 2026-07-29
 
