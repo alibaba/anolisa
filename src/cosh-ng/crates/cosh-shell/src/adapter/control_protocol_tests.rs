@@ -828,12 +828,30 @@ fn serialize_user_message_format() {
     assert_eq!(v["type"], "user");
     assert_eq!(v["message"]["role"], "user");
     assert_eq!(v["message"]["content"], "hello world");
+    assert!(v["message"].get("system_context").is_none());
     assert!(v["parent_tool_use_id"].is_null());
     assert_eq!(v["session_id"], "sess-1");
 
     let s2 = serialize_user_message("hi", None);
     let v2: Value = serde_json::from_str(&s2).unwrap();
     assert!(v2.get("session_id").is_none());
+}
+
+#[test]
+fn serialize_user_message_with_system_context_format() {
+    let s = serialize_user_message_with_system_context(
+        "查看当前目录下的文件",
+        Some("wrapper instructions"),
+        Some("sess-1"),
+    );
+    let v: Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["message"]["content"], "查看当前目录下的文件");
+    assert_eq!(v["message"]["system_context"], "wrapper instructions");
+    assert_eq!(v["session_id"], "sess-1");
+
+    let s2 = serialize_user_message_with_system_context("hi", None, None);
+    let v2: Value = serde_json::from_str(&s2).unwrap();
+    assert!(v2["message"].get("system_context").is_none());
 }
 
 #[test]

@@ -511,6 +511,9 @@ pub struct PreparedInvocation {
     pub program: String,
     pub args: Vec<String>,
     pub prompt: String,
+    /// Wrapper instructions sent separately from the raw prompt so cosh-core
+    /// persists the real user input as the user message (cosh-core only).
+    pub system_context: Option<String>,
 }
 
 impl PreparedInvocation {
@@ -519,6 +522,16 @@ impl PreparedInvocation {
         argv.extend(self.args.clone());
         argv.push("<prompt>".to_string());
         argv
+    }
+
+    /// Provider-visible text for gates that scan the outgoing turn; joins the
+    /// prompt with the split-off system context so markers spread across both
+    /// parts are still detected.
+    pub fn analysis_gate_text(&self) -> String {
+        match &self.system_context {
+            Some(system_context) => format!("{}{system_context}", self.prompt),
+            None => self.prompt.clone(),
+        }
     }
 }
 

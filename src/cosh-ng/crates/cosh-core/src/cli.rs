@@ -155,6 +155,11 @@ pub struct CliArgs {
     #[arg(long, hide = true)]
     pub include_partial_messages: bool,
 
+    /// Wrapper instructions persisted as a system message alongside the
+    /// single-shot prompt (sent by cosh-shell)
+    #[arg(long, value_name = "TEXT", hide = true)]
+    pub system_context: Option<String>,
+
     /// Single-shot prompt (headless mode: send one user message then exit)
     pub prompt: Option<String>,
 }

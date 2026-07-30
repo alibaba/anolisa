@@ -38,11 +38,25 @@ pub fn serialize_initialize(request_id: &str) -> String {
 }
 
 pub fn serialize_user_message(content: &str, session_id: Option<&str>) -> String {
+    serialize_user_message_with_system_context(content, None, session_id)
+}
+
+/// cosh-core JSONL user message; `system_context` carries wrapper instructions
+/// so cosh-core persists the raw input as the user message. Omitted when
+/// `None` to stay byte-compatible with other providers.
+pub fn serialize_user_message_with_system_context(
+    content: &str,
+    system_context: Option<&str>,
+    session_id: Option<&str>,
+) -> String {
     let mut message = json!({
         "type": "user",
         "message": { "role": "user", "content": content },
         "parent_tool_use_id": null
     });
+    if let Some(system_context) = system_context {
+        message["message"]["system_context"] = Value::String(system_context.to_string());
+    }
     if let Some(session_id) = session_id {
         message["session_id"] = Value::String(session_id.to_string());
     }

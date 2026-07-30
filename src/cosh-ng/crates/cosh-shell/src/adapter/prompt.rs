@@ -31,6 +31,94 @@ pub fn prompt_from_request_with_evidence_policy(
     bound_provider_context(trigger, runtime, hook, request)
 }
 
+/// Provider prompt split into instruction context and the user-authored message.
+pub(crate) struct ProviderPromptParts {
+    /// Wrapper instructions plus runtime frame, suitable for a system-role channel.
+    /// `None` when the request variant must stay a single user message.
+    pub system_context: Option<String>,
+    /// Raw user input when split, otherwise the full combined prompt.
+    pub user_message: String,
+}
+
+/// Splits the provider prompt so the natural-language wrapper can travel as
+/// system context while the raw user input remains the persisted user message.
+/// Only the natural-language variant splits; continuation and insight variants
+/// keep the combined prompt unchanged.
+pub(crate) fn split_prompt_from_request_with_evidence_policy(
+    request: &AgentRequest,
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> ProviderPromptParts {
+    if let Some(input) = natural_language_user_input(request, access, allow_output_requests) {
+        let body = natural_language_trigger_body(access, allow_output_requests);
+        let runtime = redact_sensitive_text(&runtime_frame_prompt(
+            request,
+            access,
+            allow_output_requests,
+        ))
+        .0;
+        let hook = redact_sensitive_text(&hook_finding_prompt(request)).0;
+        return ProviderPromptParts {
+            system_context: Some(format!("{body}{runtime}{hook}")),
+            user_message: input.to_string(),
+        };
+    }
+    ProviderPromptParts {
+        system_context: None,
+        user_message: prompt_from_request_with_evidence_policy(
+            request,
+            access,
+            allow_output_requests,
+        ),
+    }
+}
+
+// Mirrors the branch chain in `trigger_evidence_prompt`: returns the raw input
+// only when the natural-language wrapper branch would be taken.
+fn natural_language_user_input(
+    request: &AgentRequest,
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> Option<&str> {
+    let output_access = output_access_instruction(access, allow_output_requests);
+    let input = request.user_input.as_deref()?;
+    if input.starts_with("Answer to pending Agent question:")
+        || input.starts_with("Tool result for request ")
+        || input.starts_with("Tool result for approved request ")
+        || input.starts_with("Approval result for request ")
+        || input.starts_with("ShellEvidenceExcerpt\n")
+    {
+        return None;
+    }
+    if bound_insight_prompt(request, output_access, allow_output_requests).is_some() {
+        return None;
+    }
+    Some(input)
+}
+
+fn natural_language_trigger_body(
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> String {
+    format!(
+        "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
+         Decide based on user intent:\n\
+         - If the user wants to DO something (view files, check status, run tests, inspect system, debug), \
+         use the Bash tool directly. cosh-shell has an approval system that reviews every tool request \
+         before execution.\n\
+         - If the user wants to KNOW something (ask a question, request explanation, compare options), \
+         answer in prose with example commands in code blocks.\n\
+         Prefer one bounded read-only Bash command at a time when that is enough. \
+         If shell syntax such as pipes, redirects, or command chains materially improves the task, \
+         use it as a Bash tool request and let cosh-shell ask for confirmation when required.\n\
+         If more user input is needed, request AskUserQuestion with the visible question text \
+         and 2-4 concrete options; allow free text for an Other answer when appropriate.\n\
+         history_access: {}\n\
+         Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n",
+        history_access_instruction(access, allow_output_requests)
+    )
+}
+
 fn bound_provider_context(
     trigger: String,
     runtime: String,
@@ -180,23 +268,8 @@ fn trigger_evidence_prompt(
             prompt
         } else {
             format!(
-                "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
-                 Decide based on user intent:\n\
-                 - If the user wants to DO something (view files, check status, run tests, inspect system, debug), \
-                 use the Bash tool directly. cosh-shell has an approval system that reviews every tool request \
-                 before execution.\n\
-                 - If the user wants to KNOW something (ask a question, request explanation, compare options), \
-                 answer in prose with example commands in code blocks.\n\
-                 Prefer one bounded read-only Bash command at a time when that is enough. \
-                 If shell syntax such as pipes, redirects, or command chains materially improves the task, \
-                 use it as a Bash tool request and let cosh-shell ask for confirmation when required.\n\
-                 If more user input is needed, request AskUserQuestion with the visible question text \
-                 and 2-4 concrete options; allow free text for an Other answer when appropriate.\n\
-                 history_access: {}\n\
-                 Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
-                 user_input: {}\n\
-                 ",
-                history_access_instruction(access, allow_output_requests),
+                "{}user_input: {}\n",
+                natural_language_trigger_body(access, allow_output_requests),
                 input
             )
         }

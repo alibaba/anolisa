@@ -94,6 +94,7 @@ impl QwenCliAdapter {
             program: self.program.clone(),
             args,
             prompt: qwen_prompt_from_request(request, mode),
+            system_context: None,
         }
     }
 
@@ -522,6 +523,7 @@ mod tests {
                 "Read,Grep,Glob,LS".to_string(),
             ],
             prompt: "hello prompt".to_string(),
+            system_context: None,
         });
 
         let prompt_at = args

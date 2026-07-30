@@ -318,6 +318,75 @@ fn summaries_are_newest_first_and_derive_metadata() {
 }
 
 #[test]
+fn first_prompt_uses_raw_user_input_when_wrapper_is_a_system_message() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let mut session = PersistedSession::new(
+        ProviderSessionId::new(),
+        store.workspace_scope().to_string(),
+        "mock-model".to_string(),
+        vec![
+            Message::user("查看当前目录下的文件"),
+            Message::system(
+                "Handle this natural-language shell prompt request for a Shell-first assistant.",
+            ),
+            Message::assistant("done"),
+        ],
+    );
+    store.persist(&mut session).unwrap();
+
+    let summary = store.inspect(&session.session_id).unwrap();
+
+    assert_eq!(
+        summary.first_prompt.as_deref(),
+        Some("查看当前目录下的文件")
+    );
+}
+
+#[test]
+fn first_prompt_extracts_raw_input_from_legacy_wrapper_merged_message() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let legacy_prompt =
+        "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
+        Decide based on user intent:\n\
+        history_access: Recent shell history is not included by default.\n\
+        Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
+        user_input: 帮我检查 nginx 服务状态\n\
+        \n\nruntime_frame:\ncwd: /repo";
+    let mut session = PersistedSession::new(
+        ProviderSessionId::new(),
+        store.workspace_scope().to_string(),
+        "mock-model".to_string(),
+        vec![Message::user(legacy_prompt), Message::assistant("done")],
+    );
+    store.persist(&mut session).unwrap();
+
+    let summary = store.inspect(&session.session_id).unwrap();
+
+    assert_eq!(
+        summary.first_prompt.as_deref(),
+        Some("帮我检查 nginx 服务状态")
+    );
+}
+
+#[test]
+fn first_prompt_keeps_genuine_user_text_mentioning_user_input_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let genuine = "please explain what\nuser_input: means in this codebase";
+    let mut session = new_session(&store, genuine);
+    store.persist(&mut session).unwrap();
+
+    let summary = store.inspect(&session.session_id).unwrap();
+
+    assert_eq!(
+        summary.first_prompt.as_deref(),
+        Some("please explain what user_input: means in this codebase")
+    );
+}
+
+#[test]
 fn summaries_bound_untrusted_model_and_mismatched_workspace_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);

@@ -389,15 +389,23 @@ pub(super) fn control_request(subtype: &str, request_id: &str, fields: Value) ->
     .to_string()
 }
 
-pub(super) fn user_message(content: &str, session_id: Option<&str>, cwd: &str) -> String {
-    serde_json::json!({
+pub(super) fn user_message(
+    content: &str,
+    system_context: Option<&str>,
+    session_id: Option<&str>,
+    cwd: &str,
+) -> String {
+    let mut message = serde_json::json!({
         "type": "user",
         "message": {"role": "user", "content": content},
         "parent_tool_use_id": null,
         "session_id": session_id.unwrap_or("default"),
         "shell_context": {"cwd": cwd, "env": {}, "last_exit_code": 0},
-    })
-    .to_string()
+    });
+    if let Some(system_context) = system_context {
+        message["message"]["system_context"] = Value::String(system_context.to_string());
+    }
+    message.to_string()
 }
 
 #[cfg(test)]

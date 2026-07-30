@@ -420,6 +420,7 @@ fn run_turn(
         &process.stdin,
         &user_message(
             &command.prepared.prompt,
+            command.prepared.system_context.as_deref(),
             session_id.as_deref(),
             &command.session_scope,
         ),

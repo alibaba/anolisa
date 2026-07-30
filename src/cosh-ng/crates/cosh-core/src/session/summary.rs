@@ -18,7 +18,12 @@ pub(super) fn summary_from_session(
         .messages
         .iter()
         .filter(|message| message.role == "user")
-        .find_map(|message| bounded_message_preview(&message.content));
+        .find_map(
+            |message| match legacy_wrapper_user_input(&message.content) {
+                Some(input) => bounded_message_preview(&MessageContent::Text(input.to_string())),
+                None => bounded_message_preview(&message.content),
+            },
+        );
     SessionSummary {
         session_id: session.session_id.clone(),
         workspace_scope: bounded_summary_text(
@@ -34,6 +39,29 @@ pub(super) fn summary_from_session(
         schema_version: Some(session.schema_version),
         health,
     }
+}
+
+/// First line of the cosh-shell prompt wrapper that older shells merged into
+/// the persisted user message (before the system_context split).
+const LEGACY_WRAPPER_PREFIX: &str =
+    "Handle this natural-language shell prompt request for a Shell-first assistant.";
+const LEGACY_USER_INPUT_MARKER: &str = "\nuser_input: ";
+const LEGACY_RUNTIME_FRAME_MARKER: &str = "\n\nruntime_frame:";
+
+// Recovers the raw user input from a legacy wrapper-merged user message so
+// previews of pre-split sessions do not all show the same wrapper prefix.
+// The exact-prefix guard keeps genuine user text untouched.
+fn legacy_wrapper_user_input(content: &MessageContent) -> Option<&str> {
+    let MessageContent::Text(text) = content else {
+        return None;
+    };
+    if !text.starts_with(LEGACY_WRAPPER_PREFIX) {
+        return None;
+    }
+    let start = text.find(LEGACY_USER_INPUT_MARKER)? + LEGACY_USER_INPUT_MARKER.len();
+    let rest = &text[start..];
+    let end = rest.find(LEGACY_RUNTIME_FRAME_MARKER).unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 /// Truncates summary metadata without splitting a UTF-8 code point.

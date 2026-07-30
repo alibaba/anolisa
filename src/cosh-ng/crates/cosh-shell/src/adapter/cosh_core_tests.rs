@@ -259,17 +259,16 @@ fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
     let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
 
     assert!(inv.args.contains(&"strict".to_string()));
-    assert!(!inv.prompt.contains("recommend mode"), "{}", inv.prompt);
+    assert_eq!(inv.prompt, "test");
+    let context = inv.system_context.expect("split system context");
+    assert!(!context.contains("recommend mode"), "{context}");
     assert!(
-        inv.prompt
-            .contains("approval mode is auto and has not changed"),
-        "{}",
-        inv.prompt
+        context.contains("approval mode is auto and has not changed"),
+        "{context}"
     );
     assert!(
-        inv.prompt.contains("Do not emit tool calls in this turn"),
-        "{}",
-        inv.prompt
+        context.contains("Do not emit tool calls in this turn"),
+        "{context}"
     );
 }
 
@@ -277,17 +276,14 @@ fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
 fn prepare_invocation_prompt_includes_cosh_shell_contract() {
     let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
 
-    assert!(inv
-        .prompt
-        .contains("Handle this natural-language shell prompt request"));
-    assert!(inv.prompt.contains("cosh-shell Agent contract"));
-    assert!(inv
-        .prompt
-        .contains("Always emit a provider permission request"));
-    assert!(inv.prompt.contains("State the diagnostic conclusion first"));
-    assert!(inv
-        .prompt
-        .contains("at most one primary recommendation command"));
+    assert_eq!(inv.prompt, "test");
+    let context = inv.system_context.expect("split system context");
+    assert!(context.contains("Handle this natural-language shell prompt request"));
+    assert!(context.contains("cosh-shell Agent contract"));
+    assert!(context.contains("Always emit a provider permission request"));
+    assert!(context.contains("State the diagnostic conclusion first"));
+    assert!(context.contains("at most one primary recommendation command"));
+    assert!(!context.contains("user_input:"), "{context}");
 }
 
 #[test]
@@ -316,47 +312,31 @@ fn prepare_invocation_prompt_uses_shell_output_tool_mode() {
 
     let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Auto);
 
-    assert!(inv.prompt.contains("cosh_shell_evidence"), "{}", inv.prompt);
+    let context = inv.system_context.expect("split system context");
+    assert!(context.contains("cosh_shell_evidence"), "{context}");
+    assert!(context.contains("action=list_commands"), "{context}");
+    assert!(context.contains("action=read_output"), "{context}");
     assert!(
-        inv.prompt.contains("action=list_commands"),
-        "{}",
-        inv.prompt
-    );
-    assert!(inv.prompt.contains("action=read_output"), "{}", inv.prompt);
-    assert!(
-        inv.prompt.contains("Use current tool results first"),
-        "{}",
-        inv.prompt
+        context.contains("Use current tool results first"),
+        "{context}"
     );
     assert!(
-        inv.prompt
-            .contains("Use read_output only for older shell ledger output"),
-        "{}",
-        inv.prompt
+        context.contains("Use read_output only for older shell ledger output"),
+        "{context}"
     );
     assert!(
-        inv.prompt.contains("activity recaps or command lists"),
-        "{}",
-        inv.prompt
+        context.contains("activity recaps or command lists"),
+        "{context}"
     );
+    assert!(context.contains("output_available=false"), "{context}");
+    assert!(context.contains("output_bytes=0"), "{context}");
     assert!(
-        inv.prompt.contains("output_available=false"),
-        "{}",
-        inv.prompt
+        context.contains("call cosh_shell_evidence with action=list_commands"),
+        "{context}"
     );
-    assert!(inv.prompt.contains("output_bytes=0"), "{}", inv.prompt);
-    assert!(
-        inv.prompt
-            .contains("call cosh_shell_evidence with action=list_commands"),
-        "{}",
-        inv.prompt
-    );
+    assert!(!context.contains("```cosh-request"), "{context}");
+    assert!(!context.contains("```cosh-request\noutput"), "{context}");
     assert!(!inv.prompt.contains("```cosh-request"), "{}", inv.prompt);
-    assert!(
-        !inv.prompt.contains("```cosh-request\noutput"),
-        "{}",
-        inv.prompt
-    );
 }
 
 #[test]
@@ -371,17 +351,13 @@ fn prepare_invocation_prompt_suppresses_shell_output_requests_in_recommend_mode(
 
     let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
 
+    let context = inv.system_context.expect("split system context");
     assert!(
-        inv.prompt
-            .contains("do not request shell output automatically"),
-        "{}",
-        inv.prompt
+        context.contains("do not request shell output automatically"),
+        "{context}"
     );
-    assert!(
-        !inv.prompt.contains("cosh_shell_evidence"),
-        "{}",
-        inv.prompt
-    );
+    assert!(!context.contains("cosh_shell_evidence"), "{context}");
+    assert!(!context.contains("```cosh-request"), "{context}");
     assert!(!inv.prompt.contains("```cosh-request"), "{}", inv.prompt);
 }
 

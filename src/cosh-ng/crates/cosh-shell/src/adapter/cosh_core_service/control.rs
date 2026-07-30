@@ -31,7 +31,7 @@ pub(super) fn handle_control_request(
                 .borrow_mut()
                 .take_matching_control_shell(&command.run_id, &tool_use_id);
             if let Some(response) = control_protocol::analysis_continuation_shell_deny_response(
-                &command.prepared.prompt,
+                &command.prepared.analysis_gate_text(),
                 &request_id,
                 &tool_name,
                 &tool_input,

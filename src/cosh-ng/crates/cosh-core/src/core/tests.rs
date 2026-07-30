@@ -263,6 +263,54 @@ async fn user_provided_secret_reaches_the_provider_boundary() {
     assert!(user_message.content.as_text().contains(secret));
 }
 
+#[tokio::test]
+async fn system_context_is_persisted_after_raw_user_message_and_reaches_provider() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message_with_system_context(
+        "查看当前目录下的文件",
+        Some("Handle this natural-language shell prompt request wrapper"),
+        &mut reader,
+        &mut output,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(core.messages[0].role, "user");
+    assert_eq!(core.messages[0].content.as_text(), "查看当前目录下的文件");
+    assert_eq!(core.messages[1].role, "system");
+    assert_eq!(
+        core.messages[1].content.as_text(),
+        "Handle this natural-language shell prompt request wrapper"
+    );
+
+    let messages = captured.lock().unwrap();
+    let user_index = messages
+        .iter()
+        .position(|message| message.role == "user")
+        .expect("provider user message");
+    assert_eq!(
+        messages[user_index].content.as_text(),
+        "查看当前目录下的文件"
+    );
+    assert!(messages.iter().any(|message| {
+        message.role == "system"
+            && message
+                .content
+                .as_text()
+                .contains("natural-language shell prompt request wrapper")
+    }));
+}
+
 fn find_declaration<'a>(
     declarations: &'a [crate::provider::ToolDeclaration],
     name: &str,

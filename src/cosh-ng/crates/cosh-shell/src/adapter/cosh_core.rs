@@ -14,14 +14,16 @@ use super::cosh_core_process::{
     suppress_synthetic_completion_after_transport_failure,
 };
 use super::cosh_core_service::PersistentCoshCoreRuntime;
-use super::prompt::provider_prompt_contract_for_request_with_evidence_access;
+use super::prompt::{
+    provider_prompt_contract_for_request_with_evidence_access,
+    split_prompt_from_request_with_evidence_policy,
+};
 use super::{
-    agent_event_is_provider_progress, control_protocol, prompt_from_request_with_evidence_policy,
-    record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
-    start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
-    AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, FreshSessionOutcome,
-    PreparedInvocation, ProviderCancellationArtifactStore, ProviderLineProgress,
-    ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
+    agent_event_is_provider_progress, control_protocol, record_cancellation_pending_session,
+    run_provider_process_loop, spawn_provider_child, start_threaded_adapter_run, AdapterError,
+    AdapterInstance, AgentAdapter, AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser,
+    FreshSessionOutcome, PreparedInvocation, ProviderCancellationArtifactStore,
+    ProviderLineProgress, ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
 };
 
 pub(super) mod question_ingress;
@@ -324,10 +326,12 @@ impl CoshCoreAdapter {
             args.extend(["--resume".to_string(), session_id]);
         }
 
+        let (prompt, system_context) = cosh_core_prompt_from_request(request, mode);
         PreparedInvocation {
             program: self.program.clone(),
             args,
-            prompt: cosh_core_prompt_from_request(request, mode),
+            prompt,
+            system_context,
         }
     }
 
@@ -427,18 +431,25 @@ fn protected_session_ids_from_state(session: &SessionRuntimeState) -> Vec<String
     protected
 }
 
-fn cosh_core_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) -> String {
+fn cosh_core_prompt_from_request(
+    request: &AgentRequest,
+    mode: CoshApprovalMode,
+) -> (String, Option<String>) {
     let access = crate::evidence::ShellEvidenceAccess::ControlProtocolTool;
-    let request_prompt = prompt_from_request_with_evidence_policy(
+    let parts = split_prompt_from_request_with_evidence_policy(
         request,
         access,
         mode != CoshApprovalMode::Recommend,
     );
-    format!(
-        "{}{}",
-        request_prompt,
-        provider_prompt_contract_for_request_with_evidence_access(request, mode, "shell", access)
-    )
+    let contract =
+        provider_prompt_contract_for_request_with_evidence_access(request, mode, "shell", access);
+    match parts.system_context {
+        Some(system_context) => (
+            parts.user_message,
+            Some(format!("{system_context}{contract}")),
+        ),
+        None => (format!("{}{}", parts.user_message, contract), None),
+    }
 }
 
 fn cosh_core_dry_run_events(

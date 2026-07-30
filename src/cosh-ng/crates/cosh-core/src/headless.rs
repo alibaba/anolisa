@@ -137,7 +137,12 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
         }
         let start = std::time::Instant::now();
         let turn_result = engine
-            .handle_user_message(prompt, &mut lines, &mut writer)
+            .handle_user_message_with_system_context(
+                prompt,
+                args.system_context.as_deref(),
+                &mut lines,
+                &mut writer,
+            )
             .await;
         let persist_result = session.persist(&engine);
         match combine_turn_and_persist(turn_result, persist_result) {
@@ -394,7 +399,12 @@ where
             let start = std::time::Instant::now();
 
             let turn_result = engine
-                .handle_user_message(&message.content, lines, writer)
+                .handle_user_message_with_system_context(
+                    &message.content,
+                    message.system_context.as_deref(),
+                    lines,
+                    writer,
+                )
                 .await;
             let persist_result = session.persist(engine);
             match combine_turn_and_persist(turn_result, persist_result) {

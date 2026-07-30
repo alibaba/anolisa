@@ -72,6 +72,9 @@ pub(crate) fn spawn_provider_child(
         match prompt_mode {
             ProviderPromptArgMode::None => {}
             ProviderPromptArgMode::TrailingArgIfNonEmpty => {
+                if let Some(system_context) = &prepared.system_context {
+                    command.arg("--system-context").arg(system_context);
+                }
                 if !prepared.prompt.is_empty() {
                     command.arg(&prepared.prompt);
                 }

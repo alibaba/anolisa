@@ -2,7 +2,7 @@ use super::prompt::{
     prompt_from_request, prompt_from_request_with_evidence_access,
     prompt_from_request_with_evidence_policy, provider_prompt_contract,
     provider_prompt_contract_for_language, provider_prompt_contract_for_request,
-    provider_prompt_contract_with_evidence_access,
+    provider_prompt_contract_with_evidence_access, split_prompt_from_request_with_evidence_policy,
 };
 use crate::evidence::ShellEvidenceAccess;
 use crate::types::{
@@ -1249,4 +1249,132 @@ fn bound_insight_prompt_does_not_treat_user_text_as_evidence_boundary() {
         "provider context bytes: {}",
         prompt.len()
     );
+}
+
+fn natural_language_request(input: &str) -> AgentRequest {
+    AgentRequest {
+        id: "agent-request-split".to_string(),
+        session_id: "session-1".to_string(),
+        command_block: command_block("input-1", input, 0, None),
+        context_blocks: vec![command_block("cmd-1", "echo split-context", 0, None)],
+        context_hints: Vec::new(),
+        user_input: Some(input.to_string()),
+        findings: Vec::new(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
+    }
+}
+
+#[test]
+fn split_natural_language_prompt_separates_wrapper_from_raw_user_input() {
+    let input = "查看当前目录下的文件";
+    let request = natural_language_request(input);
+
+    let parts = split_prompt_from_request_with_evidence_policy(
+        &request,
+        ShellEvidenceAccess::FencedRequestFallback,
+        true,
+    );
+
+    assert_eq!(parts.user_message, input);
+    let system_context = parts.system_context.expect("natural language split");
+    assert!(
+        system_context.starts_with("Handle this natural-language shell prompt request"),
+        "{system_context}"
+    );
+    assert!(
+        system_context.contains("history_access:"),
+        "{system_context}"
+    );
+    assert!(
+        system_context.contains("runtime_frame:"),
+        "{system_context}"
+    );
+    assert!(system_context.contains("cwd: /repo"), "{system_context}");
+    assert!(!system_context.contains("user_input:"), "{system_context}");
+    assert!(!system_context.contains(input), "{system_context}");
+}
+
+#[test]
+fn split_continuation_variants_keep_combined_prompt_byte_identical() {
+    for input in [
+        "Answer to pending Agent question: yes",
+        "Tool result for request req-1: done",
+        "Tool result for approved request req-1: done",
+        "Approval result for request req-1: denied",
+        "ShellEvidenceExcerpt\nexcerpt-body",
+    ] {
+        let request = natural_language_request(input);
+
+        let parts = split_prompt_from_request_with_evidence_policy(
+            &request,
+            ShellEvidenceAccess::FencedRequestFallback,
+            true,
+        );
+
+        assert!(parts.system_context.is_none(), "{input}");
+        assert_eq!(
+            parts.user_message,
+            prompt_from_request_with_evidence_policy(
+                &request,
+                ShellEvidenceAccess::FencedRequestFallback,
+                true,
+            )
+        );
+    }
+}
+
+#[test]
+fn split_insight_and_failure_variants_keep_combined_prompt_byte_identical() {
+    for request in [
+        bound_failure_request("BuildOrTestFailure", None),
+        bound_failure_request("BuildOrTestFailure", Some("聚焦这一次失败")),
+        bound_failure_request("", None),
+    ] {
+        let parts = split_prompt_from_request_with_evidence_policy(
+            &request,
+            ShellEvidenceAccess::FencedRequestFallback,
+            true,
+        );
+
+        assert!(parts.system_context.is_none());
+        assert_eq!(
+            parts.user_message,
+            prompt_from_request_with_evidence_policy(
+                &request,
+                ShellEvidenceAccess::FencedRequestFallback,
+                true,
+            )
+        );
+    }
+}
+
+#[test]
+fn split_occurs_iff_combined_prompt_starts_with_natural_language_wrapper() {
+    let requests = [
+        natural_language_request("list files"),
+        natural_language_request("Answer to pending Agent question: yes"),
+        natural_language_request("ShellEvidenceExcerpt\nbody"),
+        bound_failure_request("BuildOrTestFailure", None),
+        bound_failure_request("", Some("聚焦这一次失败")),
+    ];
+    for request in requests {
+        let combined = prompt_from_request_with_evidence_policy(
+            &request,
+            ShellEvidenceAccess::FencedRequestFallback,
+            true,
+        );
+        let parts = split_prompt_from_request_with_evidence_policy(
+            &request,
+            ShellEvidenceAccess::FencedRequestFallback,
+            true,
+        );
+        assert_eq!(
+            parts.system_context.is_some(),
+            combined.starts_with("Handle this natural-language shell prompt request"),
+            "{combined}"
+        );
+    }
 }

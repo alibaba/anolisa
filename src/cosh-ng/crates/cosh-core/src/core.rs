@@ -196,6 +196,21 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
+        self.handle_user_message_with_system_context(content, None, reader, writer)
+            .await
+    }
+
+    pub async fn handle_user_message_with_system_context<W, R>(
+        &mut self,
+        content: &str,
+        system_context: Option<&str>,
+        reader: &mut tokio::io::Lines<R>,
+        writer: &mut W,
+    ) -> Result<(), String>
+    where
+        W: Write,
+        R: AsyncBufReadExt + Unpin,
+    {
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
@@ -314,6 +329,11 @@ impl CoshCore {
         }
 
         self.messages.push(Message::user(content));
+
+        // After the user message so compaction keeps it inside this run's span.
+        if let Some(ctx) = system_context {
+            self.messages.push(Message::system(ctx));
+        }
 
         // Inject additional context from hooks
         if let Some(ref ctx) = prompt_result.additional_context {

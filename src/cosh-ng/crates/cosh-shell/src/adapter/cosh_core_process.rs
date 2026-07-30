@@ -219,6 +219,8 @@ pub(super) fn start_control_protocol_cosh_core_process(
     });
 
     let prompt = prepared.prompt.clone();
+    let system_context = prepared.system_context.clone();
+    let analysis_gate_text = prepared.analysis_gate_text();
     let pending_session_for_thread = Arc::clone(&pending_session);
     let session_scope_for_thread = session_scope;
     let cancellation_artifacts_for_thread = cancellation_artifacts.clone();
@@ -270,6 +272,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
         let writer_thread = QuestionWriter {
             stdin,
             prompt: prompt_for_loop.clone(),
+            system_context,
             approval_rx,
             auth_rx,
             done: Arc::clone(&writer_done),
@@ -351,7 +354,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
                                 .take_matching_control_shell(&run_id, &tool_use_id);
                             if let Some(response) =
                                 control_protocol::analysis_continuation_shell_deny_response(
-                                    &prompt_for_loop,
+                                    &analysis_gate_text,
                                     &request_id,
                                     &tool_name,
                                     &tool_input,

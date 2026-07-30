@@ -136,6 +136,7 @@ impl ClaudeCodeAdapter {
             program: self.program.clone(),
             args,
             prompt: claude_prompt_from_request(request, mode),
+            system_context: None,
         }
     }
 }

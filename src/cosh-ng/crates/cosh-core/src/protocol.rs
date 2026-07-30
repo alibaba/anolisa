@@ -83,6 +83,10 @@ pub enum InputMessage {
 pub struct UserMessageContent {
     pub role: String,
     pub content: String,
+    /// Wrapper instructions sent by cosh-shell alongside the raw user input.
+    /// Persisted as a system message so session previews keep the raw input.
+    #[serde(default)]
+    pub system_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -767,7 +771,24 @@ mod tests {
             } => {
                 assert_eq!(message.role, "user");
                 assert_eq!(message.content, "hello world");
+                assert_eq!(message.system_context, None);
                 assert_eq!(session_id.as_deref(), Some("default"));
+            }
+            _ => panic!("expected User variant"),
+        }
+    }
+
+    #[test]
+    fn parse_user_message_with_system_context() {
+        let json = r#"{"type":"user","message":{"role":"user","content":"list files","system_context":"wrapper instructions"},"parent_tool_use_id":null}"#;
+        let msg: InputMessage = serde_json::from_str(json).expect("should parse user message");
+        match msg {
+            InputMessage::User { message, .. } => {
+                assert_eq!(message.content, "list files");
+                assert_eq!(
+                    message.system_context.as_deref(),
+                    Some("wrapper instructions")
+                );
             }
             _ => panic!("expected User variant"),
         }
