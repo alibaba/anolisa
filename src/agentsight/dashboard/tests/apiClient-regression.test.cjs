@@ -2,8 +2,10 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
+  enforcementSupportsContainment,
   enforcementSupportsMode,
   enforcementViolationTotal,
+  fetchContainmentPlan,
   fetchSecurityCase,
   fetchSecurityStatus,
 } = require(process.env.AGENTSIGHT_API_CLIENT_BUILD);
@@ -22,6 +24,7 @@ function securityCaseDetail() {
     updated_at_ns: 1,
     summary: 'fixture',
     evidence: [],
+    containment: null,
   };
 }
 
@@ -61,6 +64,18 @@ test('fetchSecurityCase accepts a valid system-audit detail response', async () 
   assert.equal(response.data.case_id, 'case-1');
   assert.deepEqual(response.data.evidence, []);
 });
+
+test('fetchContainmentPlan rejects a non-2xx state envelope', async () => {
+  global.fetch = async () => new Response(JSON.stringify({
+    state: 'missing',
+    data: { case_id: 'case-1' },
+  }), { status: 404, statusText: 'Not Found' });
+
+  await assert.rejects(
+    () => fetchContainmentPlan('case-1'),
+    (error) => error?.status === 404 && error?.code === 'security_api_error',
+  );
+});
 test('fetchSecurityCase rejects a successful response whose detail shape is malformed', async () => {
   global.fetch = async () => new Response(JSON.stringify({
     state: 'ok',
@@ -89,6 +104,7 @@ test('enforcement capabilities fail closed while the backend is not ready', () =
   };
 
   assert.equal(enforcementSupportsMode(health, 'enforce'), false);
+  assert.equal(enforcementSupportsContainment(health), false);
 });
 
 test('audit-only backends report all observed violations instead of blocked-only rows', () => {

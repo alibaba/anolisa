@@ -1,5 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ContainmentDialog } from '../components/ContainmentDialog';
+import { ContainmentLifecycleCard } from '../components/ContainmentLifecycleCard';
 import {
   fetchSecurityCase,
   fetchSecurityCases,
@@ -87,6 +89,13 @@ function evidenceSummary(item: SecurityEvidenceEvent): string {
   }
 }
 
+function containmentEligible(riskCase: SecurityRiskCase): boolean {
+  return (riskCase.severity === 'high' || riskCase.severity === 'critical')
+    && riskCase.status !== 'false_positive'
+    && riskCase.status !== 'accepted_risk'
+    && riskCase.status !== 'resolved';
+}
+
 const StatCard: React.FC<{ label: string; value: React.ReactNode; hint: string }> = ({
   label,
   value,
@@ -111,8 +120,14 @@ export const SystemAuditPage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState('');
   const [reviewing, setReviewing] = useState(false);
+  const [containmentDialogOpen, setContainmentDialogOpen] = useState(false);
+  const caseRequestVersion = useRef(0);
+  const reviewRequestVersion = useRef(0);
+  const loadRequestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    loadRequestVersion.current += 1;
+    const version = loadRequestVersion.current;
     setLoading(true);
     const results = await Promise.allSettled([
       fetchAuditSummary({ limit: 10 }),
@@ -120,6 +135,7 @@ export const SystemAuditPage: React.FC = () => {
       fetchAuditSessions({ limit: 100, offset: 0 }),
       fetchAuditEvents({ limit: 100, offset: 0, include_details: true }),
     ]);
+    if (loadRequestVersion.current !== version) return;
     const failures = results.filter((result) => result.status === 'rejected');
     if (results[0].status === 'fulfilled') setSummary(results[0].value.data);
     if (results[1].status === 'fulfilled') setCases(results[1].value.data.items);
@@ -134,32 +150,66 @@ export const SystemAuditPage: React.FC = () => {
   }, [load]);
 
   const openCase = async (caseId: string) => {
+    caseRequestVersion.current += 1;
+    reviewRequestVersion.current += 1;
+    const version = caseRequestVersion.current;
+    setContainmentDialogOpen(false);
+    setSelectedCase(null);
     setDetailLoading(true);
     setError('');
+    setReviewing(false);
     try {
       const response = await fetchSecurityCase(caseId);
+      if (caseRequestVersion.current !== version) return;
       setSelectedCase(response.data);
     } catch (nextError) {
-      setError(errorText(nextError));
+      if (caseRequestVersion.current === version) setError(errorText(nextError));
     } finally {
-      setDetailLoading(false);
+      if (caseRequestVersion.current === version) setDetailLoading(false);
     }
+  };
+
+  const refresh = async () => {
+    const selectedCaseId = selectedCase?.case_id;
+    const version = caseRequestVersion.current;
+    await load();
+    if (selectedCaseId && caseRequestVersion.current === version) await openCase(selectedCaseId);
+  };
+
+  const handleContained = async (caseId: string) => {
+    const version = caseRequestVersion.current;
+    setContainmentDialogOpen(false);
+    await load();
+    if (caseRequestVersion.current === version) await openCase(caseId);
   };
 
   const review = async (
     status: 'confirmed' | 'false_positive' | 'accepted_risk' | 'resolved',
   ) => {
     if (!selectedCase) return;
+    reviewRequestVersion.current += 1;
+    const reviewVersion = reviewRequestVersion.current;
+    const caseVersion = caseRequestVersion.current;
     const caseId = selectedCase.case_id;
     setReviewing(true);
     try {
       await reviewSecurityCase(caseId, status);
+      if (
+        reviewRequestVersion.current !== reviewVersion
+        || caseRequestVersion.current !== caseVersion
+      ) return;
       await load();
-      await openCase(caseId);
+      if (caseRequestVersion.current === caseVersion) await openCase(caseId);
     } catch (nextError) {
-      setError(errorText(nextError));
+      if (
+        reviewRequestVersion.current === reviewVersion
+        && caseRequestVersion.current === caseVersion
+      ) setError(errorText(nextError));
     } finally {
-      setReviewing(false);
+      if (
+        reviewRequestVersion.current === reviewVersion
+        && caseRequestVersion.current === caseVersion
+      ) setReviewing(false);
     }
   };
 
@@ -195,7 +245,7 @@ export const SystemAuditPage: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => void load()}
+            onClick={() => void refresh()}
             disabled={loading}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:bg-blue-300"
           >
@@ -300,11 +350,24 @@ export const SystemAuditPage: React.FC = () => {
                     </button>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                    <button type="button" onClick={() => void review('false_positive')} className="rounded border px-3 py-1.5 text-gray-600">标记误报</button>
-                    <button type="button" onClick={() => void review('accepted_risk')} className="rounded border px-3 py-1.5 text-gray-600">接受风险</button>
-                    <button type="button" onClick={() => void review('resolved')} className="rounded border px-3 py-1.5 text-gray-600">标记已处置</button>
+                    <button type="button" disabled={reviewing} onClick={() => void review('false_positive')} className="rounded border px-3 py-1.5 text-gray-600 disabled:opacity-40">标记误报</button>
+                    <button type="button" disabled={reviewing} onClick={() => void review('accepted_risk')} className="rounded border px-3 py-1.5 text-gray-600 disabled:opacity-40">接受风险</button>
+                    {!selectedCase.containment && (
+                      <button type="button" disabled={reviewing} onClick={() => void review('resolved')} className="rounded border px-3 py-1.5 text-gray-600 disabled:opacity-40">标记已处置</button>
+                    )}
                     <button type="button" onClick={() => navigate('/enforcement')} className="rounded border border-blue-200 px-3 py-1.5 text-blue-700">查看拦截策略</button>
                   </div>
+                  {(containmentEligible(selectedCase) || selectedCase.containment) && (
+                    <ContainmentLifecycleCard
+                      action={selectedCase.containment}
+                      loading={false}
+                      error={false}
+                      canUpgrade={containmentEligible(selectedCase)}
+                      reviewing={reviewing}
+                      onUpgrade={() => setContainmentDialogOpen(true)}
+                      onResolve={() => void review('resolved')}
+                    />
+                  )}
                 </div>
                 <div className="p-5">
                   <h3 className="font-semibold text-gray-900">完整证据链</h3>
@@ -367,6 +430,15 @@ export const SystemAuditPage: React.FC = () => {
             </tbody>
           </table>
         </section>
+      )}
+
+      {selectedCase && (
+        <ContainmentDialog
+          caseId={selectedCase.case_id}
+          open={containmentDialogOpen}
+          onClose={() => setContainmentDialogOpen(false)}
+          onContained={() => void handleContained(selectedCase.case_id)}
+        />
       )}
     </div>
   );

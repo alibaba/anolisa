@@ -193,6 +193,12 @@ export function enforcementSupportsMode(
   return health.capabilities.credential_enforce;
 }
 
+export function enforcementSupportsContainment(health: EnforcementHealth | null): boolean {
+  return health?.ready === true
+    && health.capabilities.credential_enforce
+    && health.capabilities.policy_handoff;
+}
+
 export function enforcementViolationTotal(
   violations: ReadonlyArray<Pick<EnforcementViolation, 'blocked'>>,
   health: EnforcementHealth | null,
@@ -1217,6 +1223,58 @@ export interface SecurityEvidenceEvent {
 
 export interface SecurityRiskCaseDetail extends SecurityRiskCase {
   evidence: SecurityEvidenceEvent[];
+  containment: SecurityContainmentAction | null;
+}
+
+export type SecurityContainmentLifecycle =
+  | 'pending'
+  | 'active'
+  | 'expiring'
+  | 'expired'
+  | 'failed';
+
+export interface SecurityContainmentCandidate {
+  agent_id: string;
+  root_pid: number;
+  process_start_time: number;
+  display_name: string;
+}
+
+export interface SecurityContainmentAction {
+  action_id: string;
+  case_id: string;
+  binding_id: string;
+  agent_id: string;
+  root_pid: number;
+  process_start_time: number;
+  duration_secs: number | null;
+  expires_at_ns: number | null;
+  lifecycle_state: SecurityContainmentLifecycle;
+  blocked_at_ns: number | null;
+  requested_by: string;
+  failure_stage: 'attach' | 'detach' | 'reconcile' | null;
+  failure_summary: string | null;
+  attempt_count: number;
+  next_retry_at_ns: number | null;
+  created_at_ns: number;
+  updated_at_ns: number;
+}
+
+export interface SecurityContainmentPlan {
+  case_id: string;
+  source_path: string;
+  original_target: SecurityContainmentCandidate | null;
+  original_target_valid: boolean;
+  candidates: SecurityContainmentCandidate[];
+  default_duration_secs: number;
+  min_duration_secs: number;
+  max_duration_secs: number;
+  existing_action: SecurityContainmentAction | null;
+}
+
+export interface SecurityContainmentRequest {
+  root_pid: number;
+  duration_secs: number | null;
 }
 
 export type SecurityQueryValue = string | number | boolean | null | undefined;
@@ -1483,7 +1541,8 @@ function isSecurityRiskCaseDetail(value: unknown): value is SecurityRiskCaseDeta
     && typeof value.risk_score === 'number'
     && typeof value.blocked === 'boolean'
     && typeof value.opened_at_ns === 'number'
-    && typeof value.updated_at_ns === 'number';
+    && typeof value.updated_at_ns === 'number'
+    && (value.containment === null || isObjectRecord(value.containment));
   return hasCaseFields && value.evidence.every((event) => (
     isObjectRecord(event)
       && typeof event.event_id === 'string'
@@ -1492,6 +1551,46 @@ function isSecurityRiskCaseDetail(value: unknown): value is SecurityRiskCaseDeta
       && isObjectRecord(event.identity)
       && isObjectRecord(event.event)
   ));
+}
+
+export async function fetchContainmentPlan(
+  caseId: string,
+): Promise<SecurityApiResponse<SecurityContainmentPlan>> {
+  return auditFetch<SecurityContainmentPlan>(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/containment-plan`,
+  );
+}
+
+export async function containSecurityCase(
+  caseId: string,
+  request: SecurityContainmentRequest,
+): Promise<SecurityApiResponse<SecurityContainmentAction>> {
+  const response = await fetch(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/contain`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    },
+  );
+  if (response.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
+  const body = await response.json().catch(() => null) as
+    | SecurityApiResponse<SecurityContainmentAction>
+    | { error?: SecurityRestError }
+    | null;
+  if (!response.ok || !body || !('state' in body)) {
+    const error = body && 'error' in body ? body.error : undefined;
+    throw new SecurityApiClientError(response.status, error ?? {
+      code: 'containment_request_failed',
+      message: response.statusText || 'Containment request failed',
+      retryable: false,
+    });
+  }
+  return body;
 }
 
 export async function reviewSecurityCase(
