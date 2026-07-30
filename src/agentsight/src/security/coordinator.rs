@@ -131,7 +131,8 @@ fn ingest_event(
     let SecurityEventKind::PolicyDecision(decision) = &event.kind else {
         return Ok(());
     };
-    if decision.mode == PolicyMode::Observe {
+    let containment_case = store.case_id_for_containment_binding(event.identity.binding_id)?;
+    if decision.mode == PolicyMode::Observe && containment_case.is_none() {
         return Ok(());
     }
 
@@ -161,6 +162,22 @@ fn ingest_event(
         .items;
     transitions.sort_by_key(|item| (item.occurred_at_ns, item.event_id));
 
+    let mut evidence_ids = Vec::with_capacity(transitions.len().saturating_add(3));
+    evidence_ids.push(source.event_id);
+    evidence_ids.extend(transitions.into_iter().map(|item| item.event_id));
+    evidence_ids.push(sink.event_id);
+    evidence_ids.push(event.event_id);
+    if let Some(case_id) = containment_case {
+        store.append_containment_evidence(
+            case_id,
+            event.identity.binding_id,
+            &evidence_ids,
+            decision.risk_score,
+            decision.blocked,
+            event.occurred_at_ns,
+        )?;
+        return Ok(());
+    }
     let destination_class = match &sink.kind {
         SecurityEventKind::NetworkAction(network) => network.destination_class,
         _ => DestinationClass::Unknown,
@@ -188,11 +205,6 @@ fn ingest_event(
         updated_at_ns: event.occurred_at_ns,
         summary: decision.reason.clone(),
     };
-    let mut evidence_ids = Vec::with_capacity(transitions.len().saturating_add(3));
-    evidence_ids.push(source.event_id);
-    evidence_ids.extend(transitions.into_iter().map(|item| item.event_id));
-    evidence_ids.push(sink.event_id);
-    evidence_ids.push(event.event_id);
     store.upsert_case(&case, &evidence_ids)?;
     Ok(())
 }

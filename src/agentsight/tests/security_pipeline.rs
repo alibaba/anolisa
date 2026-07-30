@@ -6,10 +6,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentsight::enforcement::{ApplyPolicy, EnforcementClient};
-use agentsight::security::{RiskCaseStatus, RiskSeverity, SecurityCoordinator, SecurityStore};
+use agentsight::security::{
+    ContainmentAction, ContainmentLifecycle, RiskCaseStatus, RiskSeverity, SecurityCoordinator,
+    SecurityStore, SecurityStoreError,
+};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, CredentialExfiltrationPolicy, DestinationScope, PolicyMode,
-    SecurityEventKind,
+    SecurityEvent, SecurityEventKind,
 };
 use agentsight_enforcer::{EnforcementBackend, EnforcerService, MockBackend};
 use uuid::Uuid;
@@ -70,6 +73,60 @@ fn ingest_mock_chain(mode: PolicyMode) -> (Arc<SecurityStore>, Vec<uuid::Uuid>) 
         coordinator.ingest(event).expect("event should ingest");
     }
     (store, event_ids)
+}
+
+fn insert_containment_action(store: &SecurityStore, case_id: Uuid, binding_id: Uuid) {
+    store
+        .insert_containment_action(&ContainmentAction {
+            action_id: Uuid::new_v4(),
+            case_id,
+            binding_id,
+            agent_id: "hermes-test".into(),
+            root_pid: 4242,
+            process_start_time: 99,
+            source_path: "/root/.ssh/id_rsa".into(),
+            duration_secs: Some(900),
+            expires_at_ns: Some(900_000_000_000),
+            lifecycle_state: ContainmentLifecycle::Active,
+            blocked_at_ns: None,
+            requested_by: "principal:test-operator".into(),
+            failure_stage: None,
+            failure_reason: None,
+            attempt_count: 0,
+            next_retry_at_ns: None,
+            created_at_ns: 10,
+            updated_at_ns: 10,
+        })
+        .expect("containment action should persist");
+}
+
+// Explicit fields keep each decision fixture's chronology and outcome visible at the call site.
+#[allow(clippy::too_many_arguments)]
+fn containment_decision(
+    store: &SecurityStore,
+    template_id: Uuid,
+    binding_id: Uuid,
+    event_id: Uuid,
+    occurred_at_ns: u64,
+    mode: PolicyMode,
+    blocked: bool,
+    risk_score: u8,
+) -> SecurityEvent {
+    let mut event = store
+        .event(template_id)
+        .expect("decision query should work")
+        .expect("decision should exist");
+    event.event_id = event_id;
+    event.occurred_at_ns = occurred_at_ns;
+    event.observed_at_ns = occurred_at_ns;
+    event.identity.binding_id = binding_id;
+    let SecurityEventKind::PolicyDecision(decision) = &mut event.kind else {
+        panic!("template must be a policy decision");
+    };
+    decision.mode = mode;
+    decision.blocked = blocked;
+    decision.risk_score = risk_score;
+    event
 }
 
 #[test]
@@ -190,6 +247,137 @@ fn enforce_chain_creates_a_critical_blocked_case() {
         .remove(0);
     assert_eq!(case.severity, RiskSeverity::Critical);
     assert!(case.blocked);
+}
+
+#[test]
+fn allowed_containment_decision_appends_without_claiming_a_block() {
+    let (store, event_ids) = ingest_mock_chain(PolicyMode::Audit);
+    let case_id = store.list_cases(10, 0).expect("case list should load")[0].case_id;
+    let binding_id = Uuid::new_v4();
+    insert_containment_action(&store, case_id, binding_id);
+    let decision = containment_decision(
+        &store,
+        *event_ids.last().expect("decision id should exist"),
+        binding_id,
+        Uuid::new_v4(),
+        700,
+        PolicyMode::Audit,
+        false,
+        91,
+    );
+    let coordinator = SecurityCoordinator::new(
+        EnforcementClient::new("/unused/agentsight-enforcer.sock"),
+        Arc::clone(&store),
+    );
+
+    coordinator
+        .ingest(decision)
+        .expect("allowed containment decision should ingest");
+
+    let action = store
+        .latest_containment_action(case_id)
+        .expect("action query should work")
+        .expect("action should exist");
+    let detail = store.case_detail(case_id).expect("case should load");
+    assert_eq!(action.blocked_at_ns, None);
+    assert!(!detail.case.blocked);
+    assert_eq!(detail.case.severity, RiskSeverity::High);
+    assert_eq!(detail.case.risk_score, 91);
+    assert_eq!(detail.evidence.len(), 5);
+    assert_eq!(store.list_cases(10, 0).expect("cases should load").len(), 1);
+}
+
+#[test]
+fn containment_correlation_rolls_back_when_the_binding_is_missing() {
+    let (store, event_ids) = ingest_mock_chain(PolicyMode::Audit);
+    let case_id = store.list_cases(10, 0).expect("case list should load")[0].case_id;
+    let binding_id = Uuid::new_v4();
+    insert_containment_action(&store, case_id, binding_id);
+    let before = store.case_detail(case_id).expect("case should load");
+
+    let error = store
+        .append_containment_evidence(
+            case_id,
+            Uuid::new_v4(),
+            &[*event_ids.last().expect("decision id should exist")],
+            99,
+            true,
+            900,
+        )
+        .expect_err("a missing containment binding must abort the transaction");
+
+    assert!(matches!(error, SecurityStoreError::InvalidData(_)));
+    let after = store.case_detail(case_id).expect("case should load");
+    let action = store
+        .latest_containment_action(case_id)
+        .expect("action query should work")
+        .expect("action should exist");
+    assert_eq!(after, before);
+    assert_eq!(action.blocked_at_ns, None);
+}
+
+#[test]
+fn reordered_duplicate_block_decisions_mark_original_case_at_earliest_time() {
+    let (store, event_ids) = ingest_mock_chain(PolicyMode::Audit);
+    let case_id = store.list_cases(10, 0).expect("case list should load")[0].case_id;
+    let binding_id = Uuid::new_v4();
+    insert_containment_action(&store, case_id, binding_id);
+    let template_id = *event_ids.last().expect("decision id should exist");
+    let later_id = Uuid::new_v4();
+    let later = containment_decision(
+        &store,
+        template_id,
+        binding_id,
+        later_id,
+        800,
+        PolicyMode::Enforce,
+        true,
+        94,
+    );
+    let earlier = containment_decision(
+        &store,
+        template_id,
+        binding_id,
+        Uuid::new_v4(),
+        700,
+        PolicyMode::Enforce,
+        true,
+        96,
+    );
+    let coordinator = SecurityCoordinator::new(
+        EnforcementClient::new("/unused/agentsight-enforcer.sock"),
+        Arc::clone(&store),
+    );
+
+    coordinator
+        .ingest(later.clone())
+        .expect("later block should ingest");
+    coordinator
+        .ingest(earlier)
+        .expect("earlier block should ingest");
+    coordinator
+        .ingest(later)
+        .expect("duplicate block should ingest idempotently");
+
+    let action = store
+        .latest_containment_action(case_id)
+        .expect("action query should work")
+        .expect("action should exist");
+    let detail = store.case_detail(case_id).expect("case should load");
+    assert_eq!(action.blocked_at_ns, Some(700));
+    assert!(detail.case.blocked);
+    assert_eq!(detail.case.severity, RiskSeverity::Critical);
+    assert_eq!(detail.case.risk_score, 96);
+    assert_eq!(detail.evidence.len(), 6);
+    assert_eq!(store.list_cases(10, 0).expect("cases should load").len(), 1);
+    assert_eq!(
+        detail
+            .evidence
+            .iter()
+            .filter(|event| event.event_id == later_id)
+            .count(),
+        1
+    );
 }
 
 #[test]

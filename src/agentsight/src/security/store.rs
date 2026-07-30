@@ -1,5 +1,11 @@
 //! SQLite persistence for immutable normalized security events.
 
+mod containment;
+mod retention;
+
+pub(crate) use containment::DueContainmentAction;
+pub use containment::{ContainmentActivationResult, ContainmentClaimResult};
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -145,6 +151,30 @@ impl SecurityStore {
         <Self as SecurityEventStore>::list_events(self, filter)
     }
 
+    /// Confirms that normalized evidence uniquely maps a live process to an agent identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed database, timestamp, or lock error.
+    pub fn process_identity_matches(
+        &self,
+        pid: i32,
+        process_start_time: u64,
+        agent_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<bool, SecurityStoreError> {
+        let (agent_count, matching_rows) = self.connection()?.query_row(
+            "SELECT COUNT(DISTINCT agent_id),
+                    COALESCE(SUM(CASE WHEN agent_id = ?3 AND (?4 IS NULL OR session_id = ?4)
+                                      THEN 1 ELSE 0 END), 0)
+             FROM security_events
+             WHERE pid = ?1 AND process_start_time = ?2",
+            params![pid, sqlite_time(process_start_time)?, agent_id, session_id,],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        Ok(agent_count == 1 && matching_rows > 0)
+    }
+
     fn from_connection(conn: Connection) -> Result<Self, SecurityStoreError> {
         conn.busy_timeout(std::time::Duration::from_millis(500))?;
         conn.execute_batch(
@@ -196,7 +226,34 @@ impl SecurityStore {
                 policy_json TEXT NOT NULL,
                 created_at_ns INTEGER NOT NULL,
                 PRIMARY KEY(policy_id, revision)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS containment_actions (
+                action_id TEXT PRIMARY KEY,
+                case_id TEXT NOT NULL,
+                binding_id TEXT NOT NULL UNIQUE,
+                agent_id TEXT NOT NULL,
+                root_pid INTEGER NOT NULL,
+                process_start_time INTEGER NOT NULL,
+                source_path TEXT NOT NULL,
+                duration_secs INTEGER,
+                expires_at_ns INTEGER,
+                lifecycle_state TEXT NOT NULL,
+                blocked_at_ns INTEGER,
+                requested_by TEXT NOT NULL,
+                failure_stage TEXT,
+                failure_reason TEXT,
+                attempt_count INTEGER NOT NULL,
+                next_retry_at_ns INTEGER,
+                created_at_ns INTEGER NOT NULL,
+                updated_at_ns INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_containment_case_time
+                ON containment_actions(case_id, created_at_ns DESC);
+            CREATE INDEX IF NOT EXISTS idx_containment_due
+                ON containment_actions(lifecycle_state, expires_at_ns, next_retry_at_ns);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_containment_live_case
+                ON containment_actions(case_id)
+                WHERE lifecycle_state IN ('pending', 'active', 'expiring');",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -385,19 +442,6 @@ impl SecurityStore {
             limit,
             offset,
         })
-    }
-
-    /// Deletes immutable events older than `cutoff_ns`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed database, timestamp, or lock error.
-    pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64, SecurityStoreError> {
-        let deleted = self.connection()?.execute(
-            "DELETE FROM security_events WHERE occurred_at_ns < ?1",
-            [sqlite_time(cutoff_ns)?],
-        )?;
-        Ok(deleted as u64)
     }
 
     /// Creates or updates one idempotent risk case and its evidence links.

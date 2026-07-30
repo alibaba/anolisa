@@ -10,7 +10,11 @@ mod store;
 #[cfg(target_os = "linux")]
 pub use coordinator::{SecurityCoordinator, SecurityCoordinatorError};
 pub use query::{
-    RiskCase, RiskCaseDetail, RiskCaseStatus, RiskSeverity, SecurityCountBy, SecurityEventFilter,
-    SecurityEventPage, SecuritySession, SecuritySessionPage, SecuritySummary,
+    ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, RiskCase, RiskCaseDetail,
+    RiskCaseStatus, RiskSeverity, SecurityCountBy, SecurityEventFilter, SecurityEventPage,
+    SecuritySession, SecuritySessionPage, SecuritySummary,
 };
-pub use store::{SecurityEventStore, SecurityStore, SecurityStoreError};
+pub use store::{
+    ContainmentActivationResult, ContainmentClaimResult, SecurityEventStore, SecurityStore,
+    SecurityStoreError,
+};
