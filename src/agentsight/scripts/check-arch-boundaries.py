@@ -27,6 +27,7 @@ LAYER_MAP = {
     "storage":     6,   # L6: Persist
     "agent_sec":   7,   # L7: Serve
     "grader":      7,   # L7: Serve
+    "enforcement": 7,   # L7: Security control plane
     "server":      7,   # L7: Serve
     "health":      7,   # L7: Serve
     "bin":         8,   # L8: Entry
@@ -47,7 +48,8 @@ ALLOWED_DEPS = {
     "atif":        {"genai", "storage"},
     "storage":     {"analyzer", "genai"},
     "grader":      {"storage"},
-    "server":      {"storage", "health", "atif", "agent_sec", "grader"},
+    "enforcement": {"storage"},
+    "server":      {"storage", "health", "atif", "agent_sec", "grader", "enforcement"},
     "agent_sec":   set(),
     "health":      {"storage"},
     "unified":     "*",
@@ -68,6 +70,7 @@ CROSS_CUTTING = {
     "skill_metrics",   # metric helpers
     "token_breakdown", # token analysis helpers
     "ecs_metadata",    # shared ECS metadata client primitives
+    "private_sqlite",  # private state-file creation shared by control modules
 }
 
 # Known violations: (source_file_relative_to_src, target_module, reason)
