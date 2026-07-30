@@ -1,7 +1,8 @@
 use super::command_risk::{
     assess_pipeline, assess_simple_command, insert_structural_reason, is_high_risk_explanation,
-    AssessmentConfidence, AssessmentPolicy, CommandAssessment, CommandShape, ExecutionDecision,
-    InteractionRequirement, OutputExposure, OutputStability, RiskImpact, SideEffectClass,
+    AssessmentConfidence, AssessmentPolicy, AutoAllowEvidence, CommandAssessment, CommandShape,
+    ExecutionDecision, InteractionRequirement, OutputExposure, OutputStability, RiskImpact,
+    SideEffectClass,
 };
 use super::command_risk_build::{
     dedupe_reasons, max_output_exposure, max_output_stability, min_confidence,
@@ -41,8 +42,13 @@ pub(super) fn compound_segments(parsed: &ParsedCommand) -> Option<Vec<Vec<Vec<St
 /// run`, `awk system()`, `curl | sh`) and escalated benign arguments
 /// (`echo rm>/dev/null && true`).
 ///
-/// The compound execution boundary is unchanged: always `AskUser`, never
-/// auto-allow. Only the assessment precision is improved.
+/// When `policy.compound_readonly_executor` is set, all segments carry
+/// per-segment `AutoAllowEvidence`, none contains a shell builtin with
+/// cross-segment state effects (`cd`, `export`, env assignments), and
+/// none requires TTY interaction, the assessment is upgraded to
+/// `AutoAllow` with `AutoAllowEvidence::CompoundReadonlyExecutor`.
+/// Aggregated `Low` impact alone is insufficient; every segment must
+/// individually qualify (issue #1882).
 pub(super) fn assess_stripped_compound(
     command: &str,
     shape: CommandShape,
@@ -56,6 +62,7 @@ pub(super) fn assess_stripped_compound(
     let mut output_exposure = OutputExposure::Normal;
     let mut side_effects: Vec<SideEffectClass> = Vec::new();
     let mut reasons: Vec<&'static str> = Vec::new();
+    let mut all_segments_auto_allow = true;
 
     for segment in segments {
         let segment_text = segment
@@ -89,6 +96,11 @@ pub(super) fn assess_stripped_compound(
             }
         }
         reasons.extend(assessed.reasons);
+        // Track whether this segment individually carries auto-allow evidence
+        // and does not contain state-mutating shell constructs.
+        if assessed.auto_allow.is_none() || segment_has_state_mutating_builtin(segment) {
+            all_segments_auto_allow = false;
+        }
     }
 
     let mut reasons = dedupe_reasons(reasons);
@@ -103,6 +115,34 @@ pub(super) fn assess_stripped_compound(
             reasons.insert(0, primary);
         }
     }
+
+    // When every segment individually qualifies for auto-allow and no
+    // segment contains state-mutating builtins or TTY requirements, the
+    // compound can be run through CompoundReadonlyExecutor without a shell.
+    let compound_auto_allow = policy.compound_readonly_executor
+        && all_segments_auto_allow
+        && !segments.is_empty()
+        && interaction == InteractionRequirement::None
+        && impact == RiskImpact::Low;
+
+    if compound_auto_allow {
+        reasons.insert(0, "compound-readonly-executor");
+        return CommandAssessment {
+            source: policy.source,
+            command: command.to_string(),
+            shape,
+            execution: ExecutionDecision::AutoAllow,
+            impact,
+            confidence: min_confidence(confidence, AssessmentConfidence::High),
+            interaction,
+            output_stability,
+            output_exposure,
+            side_effects,
+            reasons,
+            auto_allow: Some(AutoAllowEvidence::CompoundReadonlyExecutor),
+        };
+    }
+
     insert_structural_reason(
         &mut reasons,
         match shape {
@@ -164,4 +204,32 @@ fn max_interaction(
     } else {
         left
     }
+}
+
+/// Returns `true` if the segment's first stage contains a shell builtin
+/// or construct that mutates session state consumed by later segments:
+/// `cd` (working directory), `export`/`unset` (environment), or a bare
+/// env-assignment token (shell variable). These constructs require a real
+/// shell interpreter and must never be routed through CompoundReadonlyExecutor.
+fn segment_has_state_mutating_builtin(segment: &[Vec<String>]) -> bool {
+    let Some(first_stage) = segment.first() else {
+        return false;
+    };
+    let Some(program) = first_stage.first() else {
+        return false;
+    };
+    // Shell builtins that mutate session state visible to subsequent segments.
+    if matches!(program.as_str(), "cd" | "export" | "unset" | "source" | ".") {
+        return true;
+    }
+    // A bare env-assignment (e.g. `FOO=bar`) in command position is a shell
+    // variable assignment, not an env-prefix for a program invocation. The
+    // parser records it as the first token of a Simple stage; detect it by
+    // the presence of `=` in the program name (env-prefix assignments are
+    // only valid immediately before a command, and the parser puts them
+    // before the program token in the same stage).
+    if program.contains('=') {
+        return true;
+    }
+    false
 }

@@ -7,6 +7,7 @@ mod command_risk_model;
 mod command_risk_parser;
 #[cfg(test)]
 mod command_risk_tests;
+pub(crate) mod compound_readonly_executor;
 pub mod display;
 pub(crate) mod guarded_diagnostic;
 pub(crate) mod readonly_pipeline;
@@ -68,6 +69,10 @@ pub use command_risk::{
     AutoExecutionRoute, CommandAssessment, CommandShape, ExecutionDecision, InteractionRequirement,
     OutputExposure, OutputStability as CommandRiskOutputStability, ReadonlyEvidence, RiskImpact,
     RiskReason, SideEffectClass,
+};
+pub use compound_readonly_executor::{
+    run_compound_readonly, validate_compound_readonly, CompoundReadonlyConfig,
+    CompoundReadonlyError, CompoundReadonlyOutput, CompoundReadonlyPlan, SegmentConnector,
 };
 pub use guarded_diagnostic::{
     run_guarded_diagnostic, validate_guarded_diagnostic, GuardedDiagnosticConfig,

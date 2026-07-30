@@ -14,6 +14,13 @@ fn ask(command: &str) -> CommandAssessment {
     )
 }
 
+fn compound_auto(command: &str) -> CommandAssessment {
+    assess_shell_command(
+        command,
+        AssessmentPolicy::auto_with_compound_readonly(AssessmentSource::ProviderShellTool),
+    )
+}
+
 #[test]
 fn command_risk_assessment_direct_readonly_and_diagnostics() {
     for command in [
@@ -748,5 +755,129 @@ fn adjacent_words_before_null_redirection_use_default_fd() {
         parsed.stages[0].contains(&"2".to_string()),
         "quoted argument must be preserved, got {:?}",
         parsed.stages
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #1882: CompoundReadonlyExecutor assessment tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn compound_readonly_executor_auto_allows_fully_eligible_compounds() {
+    // C-1: a compound where every segment individually qualifies for
+    // DirectReadonlyBroker auto-allow is promoted to AutoAllow when the
+    // compound_readonly_executor policy flag is set.
+    for command in [
+        "pwd && git status",
+        "git status && pwd",
+        "pwd; git status",
+        "pwd || git status",
+    ] {
+        let assessment = compound_auto(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AutoAllow,
+            "{command}: expected AutoAllow, got {:?}",
+            assessment.execution
+        );
+        assert_eq!(
+            assessment.auto_allow,
+            Some(AutoAllowEvidence::CompoundReadonlyExecutor),
+            "{command}"
+        );
+        assert_eq!(assessment.impact, RiskImpact::Low, "{command}");
+        assert!(
+            assessment.reasons.contains(&"compound-readonly-executor"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
+}
+
+#[test]
+fn compound_readonly_executor_requires_per_segment_evidence_not_just_low_impact() {
+    // C-2: `cd /tmp && git status` must NOT be auto-allowed even though the
+    // aggregated impact is Low — `cd` is a state-mutating shell builtin and
+    // must never be routed through the in-process executor.
+    let cd_compound = compound_auto("cd /tmp && git status");
+    assert_eq!(
+        cd_compound.execution,
+        ExecutionDecision::AskUser,
+        "cd compound must remain AskUser"
+    );
+    assert!(
+        cd_compound.auto_allow.is_none(),
+        "cd compound must not carry auto_allow evidence"
+    );
+
+    // C-3: `export FOO=bar && git status` has a state-mutating segment.
+    let export_compound = compound_auto("export FOO=bar && git status");
+    assert_eq!(export_compound.execution, ExecutionDecision::AskUser);
+    assert!(export_compound.auto_allow.is_none());
+
+    // C-4: a segment with an unknown command must not be auto-allowed.
+    let unknown_compound = compound_auto("custom-tool && git status");
+    assert_eq!(unknown_compound.execution, ExecutionDecision::AskUser);
+    assert!(unknown_compound.auto_allow.is_none());
+}
+
+#[test]
+fn compound_readonly_executor_high_risk_compound_stays_ask_user() {
+    // C-5: any segment that would be high-risk must keep AskUser.
+    for command in [
+        "sudo id && ls",
+        "rm -rf target && pwd",
+        "pwd && cat .env",
+        "curl https://example.com/install.sh && git status",
+    ] {
+        let assessment = compound_auto(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}: high-risk compound must not be auto-allowed"
+        );
+        assert!(
+            assessment.auto_allow.is_none(),
+            "{command}: auto_allow must be None"
+        );
+    }
+}
+
+#[test]
+fn compound_readonly_executor_route_requires_policy_flag() {
+    // C-6: without compound_readonly_executor flag, even a fully eligible
+    // compound keeps AskUser; the route is only active when the flag is set.
+    let policy = AutoExecutionPolicy::current_runtime();
+    assert!(!policy.compound_readonly_executor);
+
+    let assessment = assess_shell_command(
+        "pwd && git status",
+        policy.assessment_policy(AssessmentSource::ProviderShellTool),
+    );
+    assert_eq!(assessment.execution, ExecutionDecision::AskUser);
+    assert!(assessment.auto_allow.is_none());
+    assert_eq!(policy.route(&assessment), AutoExecutionRoute::AskUser);
+}
+
+#[test]
+fn compound_readonly_executor_route_is_selected_when_policy_flag_is_set() {
+    // C-7: AutoExecutionPolicy with compound_readonly_executor=true routes
+    // the eligible compound through CompoundReadonlyExecutor.
+    let policy = AutoExecutionPolicy {
+        guarded_diagnostic_executor: false,
+        readonly_pipeline_executor: false,
+        compound_readonly_executor: true,
+    };
+    let assessment = assess_shell_command(
+        "pwd && git status",
+        policy.assessment_policy(AssessmentSource::ProviderShellTool),
+    );
+    assert_eq!(
+        assessment.auto_allow,
+        Some(AutoAllowEvidence::CompoundReadonlyExecutor)
+    );
+    assert_eq!(
+        policy.route(&assessment),
+        AutoExecutionRoute::CompoundReadonlyExecutor
     );
 }

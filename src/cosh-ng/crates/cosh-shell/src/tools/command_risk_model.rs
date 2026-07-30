@@ -84,6 +84,7 @@ pub enum AutoAllowEvidence {
     DirectReadonlyBroker,
     GuardedDiagnostic,
     ReadonlyPipelineExecutor,
+    CompoundReadonlyExecutor,
 }
 
 impl AutoAllowEvidence {
@@ -92,6 +93,7 @@ impl AutoAllowEvidence {
             Self::DirectReadonlyBroker => "bounded-readonly",
             Self::GuardedDiagnostic => "safe-diagnostic-family",
             Self::ReadonlyPipelineExecutor => "readonly-pipeline-executor",
+            Self::CompoundReadonlyExecutor => "compound-readonly-executor",
         }
     }
 }
@@ -207,6 +209,7 @@ pub struct AssessmentPolicy {
     pub auto_mode: bool,
     pub guarded_diagnostic_executor: bool,
     pub readonly_pipeline_executor: bool,
+    pub compound_readonly_executor: bool,
 }
 
 impl AssessmentPolicy {
@@ -216,6 +219,7 @@ impl AssessmentPolicy {
             auto_mode: false,
             guarded_diagnostic_executor: false,
             readonly_pipeline_executor: false,
+            compound_readonly_executor: false,
         }
     }
 
@@ -225,6 +229,7 @@ impl AssessmentPolicy {
             auto_mode: true,
             guarded_diagnostic_executor: true,
             readonly_pipeline_executor: false,
+            compound_readonly_executor: false,
         }
     }
 
@@ -234,6 +239,7 @@ impl AssessmentPolicy {
             auto_mode: true,
             guarded_diagnostic_executor: false,
             readonly_pipeline_executor: false,
+            compound_readonly_executor: false,
         }
     }
 
@@ -243,6 +249,17 @@ impl AssessmentPolicy {
             auto_mode: true,
             guarded_diagnostic_executor: false,
             readonly_pipeline_executor: true,
+            compound_readonly_executor: false,
+        }
+    }
+
+    pub fn auto_with_compound_readonly(source: AssessmentSource) -> Self {
+        Self {
+            source,
+            auto_mode: true,
+            guarded_diagnostic_executor: false,
+            readonly_pipeline_executor: false,
+            compound_readonly_executor: true,
         }
     }
 }
@@ -251,6 +268,7 @@ impl AssessmentPolicy {
 pub struct AutoExecutionPolicy {
     pub guarded_diagnostic_executor: bool,
     pub readonly_pipeline_executor: bool,
+    pub compound_readonly_executor: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +277,7 @@ pub enum AutoExecutionRoute {
     DirectReadonlyBroker,
     GuardedDiagnosticExecutor,
     ReadonlyPipelineExecutor,
+    CompoundReadonlyExecutor,
     Block,
 }
 
@@ -267,6 +286,7 @@ impl AutoExecutionPolicy {
         Self {
             guarded_diagnostic_executor: false,
             readonly_pipeline_executor: false,
+            compound_readonly_executor: false,
         }
     }
 
@@ -276,6 +296,7 @@ impl AutoExecutionPolicy {
             auto_mode: true,
             guarded_diagnostic_executor: self.guarded_diagnostic_executor,
             readonly_pipeline_executor: self.readonly_pipeline_executor,
+            compound_readonly_executor: self.compound_readonly_executor,
         }
     }
 
@@ -294,6 +315,11 @@ impl AutoExecutionPolicy {
                 if self.readonly_pipeline_executor =>
             {
                 AutoExecutionRoute::ReadonlyPipelineExecutor
+            }
+            Some(AutoAllowEvidence::CompoundReadonlyExecutor)
+                if self.compound_readonly_executor =>
+            {
+                AutoExecutionRoute::CompoundReadonlyExecutor
             }
             _ => AutoExecutionRoute::AskUser,
         }
