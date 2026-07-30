@@ -16,6 +16,7 @@ fn turn_consent_model(next_label: Option<&str>) -> ApprovalPanelModel<'_> {
         selected_action: ApprovalPanelAction::Approve,
         expanded: false,
         turn_consent: true,
+        turn_extension: false,
         hook_warnings: Vec::new(),
     }
 }
@@ -124,6 +125,7 @@ fn approval_panel_renders_active_request_with_queue_summary() {
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -174,6 +176,7 @@ fn approval_panel_high_risk_shows_reason_continuation_line() {
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -228,6 +231,7 @@ fn approval_panel_high_risk_continuation_wraps_within_narrow_width() {
                 selected_action: ApprovalPanelAction::Approve,
                 expanded: false,
                 turn_consent: false,
+                turn_extension: false,
                 hook_warnings: Vec::new(),
             })
             .join("\n");
@@ -258,6 +262,7 @@ fn approval_panel_long_subject_never_hides_risk_badge() {
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -289,6 +294,7 @@ fn approval_panel_unknown_risk_value_falls_back_to_localized_label() {
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -316,6 +322,7 @@ fn approval_panel_uses_zh_labels_without_translating_command() {
             selected_action: ApprovalPanelAction::Approve,
             expanded: true,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -355,6 +362,7 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -384,6 +392,7 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
             selected_action: ApprovalPanelAction::Details,
             expanded: true,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -414,6 +423,7 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -459,6 +469,7 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
                 selected_action: ApprovalPanelAction::Deny,
                 expanded: false,
                 turn_consent: false,
+                turn_extension: false,
                 hook_warnings: Vec::new(),
             },
         )
@@ -496,6 +507,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         },
     )
@@ -525,6 +537,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             selected_action: ApprovalPanelAction::Details,
             expanded: false,
             turn_consent: false,
+            turn_extension: false,
             hook_warnings: Vec::new(),
         },
     )
@@ -556,6 +569,7 @@ fn plain_approval_panel_keeps_queue_before_actions() {
         selected_action: ApprovalPanelAction::Approve,
         expanded: false,
         turn_consent: false,
+        turn_extension: false,
         hook_warnings: Vec::new(),
     });
     let text = lines.join("\n");

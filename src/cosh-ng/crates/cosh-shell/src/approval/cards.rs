@@ -136,7 +136,10 @@ fn approval_receipt_decision<'a>(
                 i18n.t(MessageId::ApprovalReceiptDecisionSentToShell)
             } else if provider_native_shell {
                 i18n.t(MessageId::ApprovalReceiptDecisionProviderNativeAllowed)
-            } else if request.kind == ApprovalRequestKind::Tool {
+            } else if matches!(
+                request.kind,
+                ApprovalRequestKind::Tool | ApprovalRequestKind::TurnExtension
+            ) {
                 i18n.t(MessageId::ApprovalReceiptDecisionApproved)
             } else {
                 i18n.t(MessageId::ApprovalReceiptDecisionApprovedDisplayOnly)
@@ -161,6 +164,7 @@ fn approval_receipt_kind<'a>(
         ApprovalRequestKind::ShellCommand => {
             i18n.t(MessageId::ApprovalReceiptKindShellCommandRequest)
         }
+        ApprovalRequestKind::TurnExtension => i18n.t(MessageId::ApprovalReceiptKindTurnExtension),
     }
 }
 
@@ -188,6 +192,7 @@ pub(crate) fn render_approval_details<W: Write>(
     let preview_label = match request.kind {
         ApprovalRequestKind::Tool => i18n.t(MessageId::ApprovalToolInputLabel),
         ApprovalRequestKind::ShellCommand => i18n.t(MessageId::ApprovalCommandLabel),
+        ApprovalRequestKind::TurnExtension => i18n.t(MessageId::ApprovalTurnExtensionLabel),
     };
 
     RatatuiInlineRenderer::for_terminal()

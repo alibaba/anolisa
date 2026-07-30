@@ -642,13 +642,9 @@ fn run_turn(
     // and the process binding below both act on the effective state rather than
     // the raw terminal flags. Cancellation never qualifies: the user asked to
     // stop, so the fresh pending session must not be committed.
+    let session_error_phase = parser.session_error_phase();
     let retain_session = !command.cancelled.load(Ordering::SeqCst)
-        && retain_context_session(
-            &terminal_events,
-            parser.error_code(),
-            parser.session_error_phase(),
-            session_resumable,
-        );
+        && retain_context_session(&terminal_events, session_error_phase, session_resumable);
     let session_completed = completed || retain_session;
     let session_failed = failed && !retain_session;
     let commit_outcome = if command.cancelled.load(Ordering::SeqCst) {

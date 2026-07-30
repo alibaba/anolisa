@@ -123,6 +123,11 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         output,
     )?;
     record_agent_run_facts(state, &active_run);
+    crate::agent::turn_extension::note_capped_run(
+        state,
+        &active_run,
+        adapter.committed_session_id(),
+    );
     state.auth.state = None;
     if provider_timed_out {
         let dropped = trim_queued_requests_after_provider_timeout(state);
@@ -153,6 +158,11 @@ pub(crate) fn finish_active_agent_run<W: Write>(
             .agent_run
             .queued_requests
             .retain(|pending| pending.intent == AgentStartIntent::UserInitiated);
+        return Ok(());
+    }
+
+    if crate::agent::turn_extension::activate_pending_turn_extension(state, output)? {
+        output.flush()?;
         return Ok(());
     }
 

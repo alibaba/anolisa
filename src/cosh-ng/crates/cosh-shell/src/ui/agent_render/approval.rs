@@ -37,6 +37,8 @@ pub struct ApprovalPanelModel<'a> {
     /// Offer the turn-scope batch consent action (issue #1773): true when
     /// the run already has ≥ 2 approval requests (queued or resolved).
     pub turn_consent: bool,
+    /// Offer only Continue and Stop for a persisted capped Agent run.
+    pub turn_extension: bool,
     pub hook_warnings: Vec<HookWarningView<'a>>,
 }
 
@@ -698,6 +700,8 @@ fn render_hook_approval_panel(
 fn model_action_set(model: &ApprovalPanelModel<'_>) -> ApprovalActionSet {
     if is_hook_approval_request(model) {
         ApprovalActionSet::Hook
+    } else if model.turn_extension {
+        ApprovalActionSet::TurnExtension
     } else if model.turn_consent {
         ApprovalActionSet::TurnConsent
     } else {

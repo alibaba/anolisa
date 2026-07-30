@@ -25,7 +25,7 @@ pub(super) fn hook_approval_action_spans(
         }
         first = false;
         spans.push(action_span(
-            approval_action_label(descriptor.action, i18n),
+            approval_action_label(descriptor.action, ApprovalActionSet::Hook, i18n),
             descriptor.action,
             selected == descriptor.action,
         ));
@@ -42,7 +42,7 @@ pub(super) fn hook_approval_action_line(
         .descriptors()
         .iter()
         .map(|descriptor| {
-            let label = approval_action_label(descriptor.action, i18n);
+            let label = approval_action_label(descriptor.action, ApprovalActionSet::Hook, i18n);
             if descriptor.action == selected {
                 format!("[{label}]")
             } else {
@@ -63,7 +63,7 @@ pub(super) fn packed_approval_actions(
     let descriptors = set.descriptors();
     let widths = descriptors
         .iter()
-        .map(|descriptor| display_width(approval_action_label(descriptor.action, i18n)))
+        .map(|descriptor| display_width(approval_action_label(descriptor.action, set, i18n)))
         .collect::<Vec<_>>();
     pack_action_rows(&widths, content_width)
         .into_iter()
@@ -100,7 +100,7 @@ pub(super) fn approval_action_styled_rows(
                     spans.push(Span::raw("  "));
                 }
                 spans.push(action_span(
-                    approval_action_label(action, i18n),
+                    approval_action_label(action, set, i18n),
                     action,
                     selected == action,
                 ));
@@ -121,7 +121,7 @@ pub(super) fn approval_action_plain_rows(
         .map(|row| {
             row.into_iter()
                 .map(|action| {
-                    let label = approval_action_label(action, i18n);
+                    let label = approval_action_label(action, set, i18n);
                     if action == selected {
                         format!("[{label}]")
                     } else {
@@ -136,8 +136,18 @@ pub(super) fn approval_action_plain_rows(
 
 pub(super) fn approval_action_label(
     action: ApprovalPanelAction,
+    set: ApprovalActionSet,
     i18n: crate::I18n,
 ) -> &'static str {
+    if set == ApprovalActionSet::TurnExtension {
+        match action {
+            ApprovalPanelAction::Approve => {
+                return i18n.t(crate::MessageId::ApprovalActionContinue);
+            }
+            ApprovalPanelAction::Deny => return i18n.t(crate::MessageId::ApprovalActionStop),
+            _ => {}
+        }
+    }
     match action {
         ApprovalPanelAction::Approve => i18n.t(crate::MessageId::ApprovalActionAllowOnce),
         ApprovalPanelAction::ApproveTurn => i18n.t(crate::MessageId::ApprovalActionApproveTurn),

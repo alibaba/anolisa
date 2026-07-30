@@ -71,13 +71,20 @@ impl QwenStreamParser {
                 run_id,
                 summary: "analysis completed".to_string(),
             }],
-            AgentEvent::AgentFailed { run_id, error } => vec![AgentEvent::AgentFailed {
+            AgentEvent::AgentFailed {
+                run_id,
+                error,
+                error_code,
+                max_turns,
+            } => vec![AgentEvent::AgentFailed {
                 run_id,
                 error: error
                     .replace("Claude Code", "model")
                     .replace("Claude", "model")
                     .replace("claude-code", "model")
                     .replace("claude code", "model"),
+                error_code,
+                max_turns,
             }],
             AgentEvent::TextDelta { run_id, text } => self.localize_text_delta(run_id, text),
             other => vec![other],

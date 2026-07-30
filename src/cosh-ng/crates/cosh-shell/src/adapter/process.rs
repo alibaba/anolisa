@@ -245,6 +245,8 @@ pub(crate) fn run_provider_process_loop(
             let _ = sender.send(Ok(AgentEvent::AgentFailed {
                 run_id,
                 error: timeout_failure_message(provider_label, timeout, &stderr_tail.snapshot()),
+                error_code: None,
+                max_turns: None,
             }));
             return ProviderRunOutcome::Failed;
         }

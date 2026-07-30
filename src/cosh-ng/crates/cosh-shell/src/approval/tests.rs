@@ -7,6 +7,7 @@ use crate::approval::handoff::{
 use crate::approval::requests::{approval_request_from_governed_event, record_approval_requests};
 use crate::approval::resolution::{
     apply_approval_decision, approval_outcome_for_request, approval_resolution_agent_request,
+    should_send_approval_resolution_to_agent,
 };
 use crate::runtime::prelude::{
     AgentEvent, AgentRunHandle, AgentRunPoll, ApprovalDecision, CoshApprovalMode, CoshCoreAdapter,
@@ -1220,6 +1221,41 @@ fn approve_turn_blocked_request_does_not_grant_consent() {
     );
 }
 
+#[test]
+fn turn_extension_decisions_use_continuation_semantics() {
+    let mut approved_state = InlineState::default();
+    let mut approved = turn_request("req-cap", "run-cap", "continue", "low");
+    approved.kind = ApprovalRequestKind::TurnExtension;
+    approved_state.approvals.requests.push(approved);
+    assert!(
+        apply_approval_decision(&mut approved_state, 0, ApprovalCommandKind::ApproveTurn).is_none()
+    );
+
+    let decision = apply_approval_decision(&mut approved_state, 0, ApprovalCommandKind::Approve)
+        .expect("approved extension");
+    assert_eq!(decision.title, MessageId::ApprovalResolutionContinuingTitle);
+    assert_eq!(
+        decision.request.execution_path,
+        Some("provider_session_continuation")
+    );
+
+    let mut denied_state = InlineState::default();
+    let mut denied = turn_request("req-cap", "run-cap", "continue", "low");
+    denied.kind = ApprovalRequestKind::TurnExtension;
+    denied_state.approvals.requests.push(denied);
+    let decision = apply_approval_decision(&mut denied_state, 0, ApprovalCommandKind::Deny)
+        .expect("denied extension");
+    assert_eq!(decision.title, MessageId::ApprovalResolutionStoppedTitle);
+    assert_eq!(
+        decision.request.execution_path,
+        Some("not_executed_stopped")
+    );
+    assert!(!should_send_approval_resolution_to_agent(
+        &denied_state,
+        &decision.request
+    ));
+}
+
 /// 批量清扫决策复用同一管线，journal 逐条留痕 actor=batch_consent，
 /// preview/risk/run_id 完整（V2/G4/I3）。
 #[test]
@@ -1270,6 +1306,22 @@ fn stopping_active_run_clears_batch_consent() {
 /// Standard；hook 永远 Hook（SC7/SC8/V9/N8/N9）。
 #[test]
 fn approval_action_set_matrix() {
+    // Turn-extension cards always have the dedicated Continue/Stop set.
+    let mut extension = turn_request("req-cap", "run-cap", "continue", "low");
+    extension.kind = ApprovalRequestKind::TurnExtension;
+    assert_eq!(
+        approval_action_set_for(&extension, &[]),
+        ApprovalActionSet::TurnExtension
+    );
+    assert_eq!(
+        ApprovalActionSet::TurnExtension
+            .descriptors()
+            .iter()
+            .map(|descriptor| descriptor.action)
+            .collect::<Vec<_>>(),
+        vec![ApprovalPanelAction::Approve, ApprovalPanelAction::Deny]
+    );
+
     // 单卡轮次：Standard。
     let solo = vec![turn_request("req-1", "run-1", "git status", "medium")];
     assert_eq!(

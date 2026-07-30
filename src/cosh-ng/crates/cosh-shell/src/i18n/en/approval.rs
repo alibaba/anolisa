@@ -148,6 +148,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseRedirectionWrite => "write redirection",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk shell execution",
         MessageId::ApprovalRiskLevelUnknown => "unknown risk",
+        MessageId::ApprovalTurnExtensionSubject => "Agent turn budget",
+        MessageId::ApprovalTurnExtensionPreview => {
+            "The Agent used all {turns} configured turns. Continue the same task with {turns} more?"
+        }
+        MessageId::ApprovalTurnExtensionLabel => "Turn budget",
+        MessageId::ApprovalActionContinue => "Continue",
+        MessageId::ApprovalActionStop => "Stop",
+        MessageId::ApprovalResolutionContinuingTitle => "Continuing",
+        MessageId::ApprovalResolutionStoppedTitle => "Stopped",
+        MessageId::ApprovalReceiptKindTurnExtension => "turn budget extension",
+        MessageId::ApprovalTurnExtensionUnavailableTitle => "Cannot continue",
+        MessageId::ApprovalTurnExtensionUnavailableBody => {
+            "The persisted provider session changed before the extension was approved."
+        }
         _ => return None,
     })
 }

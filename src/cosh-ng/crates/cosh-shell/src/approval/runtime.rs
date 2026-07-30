@@ -186,6 +186,22 @@ fn deliver_approval_decision<W: Write>(
     output: &mut W,
     render_next_card: bool,
 ) -> std::io::Result<()> {
+    if decision.request.kind == ApprovalRequestKind::TurnExtension {
+        clear_active_approval_panel(state, output)?;
+        render_approval_resolution(state, &decision.request, decision.title, output)?;
+        crate::agent::turn_extension::resolve_turn_extension(
+            &decision.request,
+            adapter,
+            state,
+            output,
+            event_index,
+        )?;
+        if render_next_card {
+            render_current_approval_request(state, output)?;
+        }
+        return Ok(());
+    }
+
     if let Some(ref ctrl_request_id) = decision.request.request_id {
         let outcome = approval_outcome_for_request(state, &decision.request);
         if outcome == ApprovalOutcome::ProviderNativeShellFallback {
@@ -391,6 +407,9 @@ fn approval_resolution_needs_queue_slot(
     state: &InlineState,
     request: &RuntimeApprovalRequest,
 ) -> bool {
+    if request.kind == ApprovalRequestKind::TurnExtension {
+        return false;
+    }
     if crate::slash::session::compaction_pending_or_active(state) {
         return true;
     }

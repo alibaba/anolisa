@@ -177,6 +177,8 @@ fn poll_active_agent_run_with_policy<W: Write>(
             Err(err) => AgentEvent::AgentFailed {
                 run_id: active_run.request.id.clone(),
                 error: err.message,
+                error_code: None,
+                max_turns: None,
             },
         };
 

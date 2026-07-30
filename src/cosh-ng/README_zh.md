@@ -89,9 +89,9 @@ ID，并通过 `/session status` 查看已选择和已激活的身份。`/sessio
 [会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)
 和[会话压缩指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-compaction.md)。
 
-单次 Agent 请求默认为 50 个模型轮次。如果会话已经持久化后才达到上限，再发送一条
-消息即可在同一个 provider 对话中继续。可通过 `agent.max_turns` 或
-`COSH_MAX_TURNS` 覆盖该预算，详见
+单次 Agent 请求默认为 50 个模型轮次。如果会话已经持久化后才达到上限，交互式
+shell 会请求批准，并在同一个 provider 对话中追加同等预算。可通过
+`agent.max_turns` 或 `COSH_MAX_TURNS` 覆盖该预算，详见
 [配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#agent-轮次预算)。
 
 Core 和 Shell 还会把脱敏、版本化的审计时间线写入

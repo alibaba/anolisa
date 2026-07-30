@@ -209,6 +209,8 @@ pub enum OutputMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error_code: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        max_turns: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         session_error_code: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_error_phase: Option<String>,
@@ -518,6 +520,7 @@ impl OutputMessage {
             result: Some(result.to_string()),
             errors: None,
             error_code: None,
+            max_turns: None,
             session_error_code: None,
             session_error_phase: None,
             session_id: Some(session_id.to_string()),
@@ -538,6 +541,24 @@ impl OutputMessage {
             result: Some(error.to_string()),
             errors: Some(vec![error.to_string()]),
             error_code: error_code.map(str::to_string),
+            max_turns: None,
+            session_error_code: None,
+            session_error_phase: None,
+            session_id: Some(session_id.to_string()),
+            env_delta: None,
+            duration_ms: None,
+        }
+    }
+
+    /// Builds a max-turn result with stable machine-readable metadata.
+    pub fn max_turns_result_error(session_id: &str, error: &str, max_turns: u32) -> Self {
+        Self::Result {
+            subtype: Some("error".to_string()),
+            is_error: true,
+            result: Some(error.to_string()),
+            errors: Some(vec![error.to_string()]),
+            error_code: Some("max_turns".to_string()),
+            max_turns: Some(max_turns),
             session_error_code: None,
             session_error_phase: None,
             session_id: Some(session_id.to_string()),
@@ -558,6 +579,7 @@ impl OutputMessage {
             result: Some(error.to_string()),
             errors: Some(vec![error.to_string()]),
             error_code: None,
+            max_turns: None,
             session_error_code: Some(session_error_code.to_string()),
             session_error_phase: Some(session_error_phase.to_string()),
             session_id: Some(session_id.to_string()),
@@ -1059,6 +1081,16 @@ mod tests {
         assert_eq!(v["type"], "result");
         assert_eq!(v["is_error"], true);
         assert!(v.get("session_error_code").is_none());
+    }
+
+    #[test]
+    fn serialize_max_turns_result_error() {
+        let msg = OutputMessage::max_turns_result_error("sess-1", "turn limit", 50);
+        let value = serde_json::to_value(msg).unwrap();
+
+        assert_eq!(value["type"], "result");
+        assert_eq!(value["error_code"], "max_turns");
+        assert_eq!(value["max_turns"], 50);
     }
 
     #[test]

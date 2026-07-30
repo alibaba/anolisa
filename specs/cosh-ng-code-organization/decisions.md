@@ -83,3 +83,26 @@ always been shared.
 Revisit trigger: if a non-UI consumer ever needs to construct or branch
 on sets without rendering context, move the enum to `types/` as an
 explicit cross-module contract in a dedicated refactor.
+
+## D16: turn-extension approval orchestration (bounded exception)
+
+Registered: 2026-07-30, max-turn continuation.
+
+Decision: `agent/turn_extension.rs` may call approval request rendering and
+resolution helpers, while `approval/runtime.rs` may call the turn-extension
+resolver. This bidirectional edge is limited to the lifecycle of a retained
+max-turn run: record a continuation candidate, request explicit user consent,
+then resume the same provider session once.
+
+Reasons:
+
+- The approval owner remains responsible for presenting and recording the
+  decision; the agent owner remains responsible for starting the continuation.
+- Moving this single flow into a new coordinator would add another runtime
+  abstraction without removing state or policy from either owner.
+- The edge is confined to the turn-extension request kind and does not expose
+  provider protocol details or UI policy across owners.
+
+Removal condition: when a second cross-owner approval workflow needs the same
+lifecycle, introduce runtime domain commands and events for approval outcomes,
+move orchestration into that coordinator, and delete this exception.

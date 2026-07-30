@@ -103,10 +103,12 @@ a fresh budget.
 When a request reaches the limit, Core stops that run and reports
 `Agent exceeded max turns (<configured limit>)` instead of continuing silently.
 When session persistence is enabled and succeeds, the transcript is written
-before the limit is reported, so the session stays active and resumable — send
-another prompt such as "continue" and the work picks up in the same provider
-conversation with a new turn budget. A run is not resumable if `auto_persist`
-is off or if session persistence itself failed.
+before the limit is reported, so the session stays active and resumable. The
+interactive shell then offers `Continue` or `Stop`. `Continue` starts another
+Agent request in the same provider conversation with the same configured
+budget; reaching the limit again requires another approval. `Stop` leaves the
+session available for a later manual prompt. A run is not resumable if
+`auto_persist` is off or if session persistence itself failed.
 
 Override the budget with `max_turns` under `[agent]`, or with the
 `COSH_MAX_TURNS` environment variable. An unparsable `COSH_MAX_TURNS` value is

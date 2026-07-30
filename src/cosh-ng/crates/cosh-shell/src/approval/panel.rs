@@ -13,6 +13,9 @@ pub(crate) fn approval_action_set_for(
     request: &RuntimeApprovalRequest,
     requests: &[RuntimeApprovalRequest],
 ) -> ApprovalActionSet {
+    if request.kind == ApprovalRequestKind::TurnExtension {
+        return ApprovalActionSet::TurnExtension;
+    }
     if request.subject.contains("HOOK:") {
         return ApprovalActionSet::Hook;
     }
@@ -87,6 +90,7 @@ pub(crate) fn render_current_approval_request<W: Write>(
     let preview_label = match request.kind {
         ApprovalRequestKind::Tool => i18n.t(MessageId::ApprovalToolInputLabel),
         ApprovalRequestKind::ShellCommand => i18n.t(MessageId::ApprovalCommandLabel),
+        ApprovalRequestKind::TurnExtension => i18n.t(MessageId::ApprovalTurnExtensionLabel),
     };
     let next_label = next_pending.map(|next| format!("{} {}", next.id, next.subject));
     let action_set = approval_action_set_for(request, &state.approvals.requests);
@@ -102,6 +106,7 @@ pub(crate) fn render_current_approval_request<W: Write>(
         .unwrap_or(ApprovalPanelAction::Approve);
     let expanded = state.approvals.expanded_cards.contains(&request.id);
     let turn_consent = action_set == ApprovalActionSet::TurnConsent;
+    let turn_extension = action_set == ApprovalActionSet::TurnExtension;
     // Card-facing reason policy (ARP): only High risk with a whitelisted
     // primary reason yields a natural-language phrase; everything else is
     // fail-quiet. Raw codes stay in details/journal only.
@@ -126,6 +131,7 @@ pub(crate) fn render_current_approval_request<W: Write>(
                 selected_action,
                 expanded,
                 turn_consent,
+                turn_extension,
                 hook_warnings: request
                     .hook_warnings
                     .iter()

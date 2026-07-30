@@ -29,6 +29,7 @@ pub(super) mod question_writer;
 mod recovery;
 mod session;
 
+pub(crate) use recovery::max_turn_limit;
 pub(super) use recovery::{
     begin_session_attempt, commit_pending_session_for_scope, invalidate_resume_on_session_failure,
     mark_recovery_failure, retain_context_session, session_scope_from_request,
@@ -637,19 +638,16 @@ fn start_cancellable_cosh_core_process(
             &terminal_events,
             &session_state,
         );
-        let retain_session = retain_context_session(
-            &terminal_events,
-            parser.error_code(),
-            parser.session_error_phase(),
-            parser.session_resumable(),
-        );
+        let session_metadata = (parser.session_error_phase(), parser.session_resumable());
+        let retain_session =
+            retain_context_session(&terminal_events, session_metadata.0, session_metadata.1);
         let commit_outcome = commit_pending_session_for_scope(
             completed || retain_session,
             failed && !retain_session,
             &session_state,
             &pending_session_for_thread,
             &session_scope_for_thread,
-            parser.session_resumable(),
+            session_metadata.1,
             &resume_attempt,
         );
         for event in terminal_events_for_session_commit(&run_id, terminal_events, commit_outcome) {

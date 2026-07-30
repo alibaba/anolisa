@@ -134,6 +134,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "Agent timed out: No provider response within 20s".to_string(),
+                        error_code: None,
+                        max_turns: None,
                     }]);
                 }
                 if input.contains("trigger resume timeout")
@@ -145,6 +147,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "Agent timed out: No provider response within 20s".to_string(),
+                        error_code: None,
+                        max_turns: None,
                     }]);
                 }
                 return Ok(vec![
@@ -288,6 +292,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::AgentFailed {
                         run_id,
                         error: "fake backend unavailable".to_string(),
+                        error_code: None,
+                        max_turns: None,
                     },
                 ]);
             }
@@ -647,6 +653,8 @@ impl AgentAdapter for FakeAgentAdapter {
                         run_id,
                         error: "recommend prompt exposed shell evidence request instructions"
                             .to_string(),
+                        error_code: None,
+                        max_turns: None,
                     }]);
                 }
                 return Ok(vec![
@@ -665,6 +673,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "list-only prompt included output excerpt".to_string(),
+                        error_code: None,
+                        max_turns: None,
                     }]);
                 }
                 return Ok(vec![

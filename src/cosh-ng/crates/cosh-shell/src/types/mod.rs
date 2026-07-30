@@ -438,6 +438,10 @@ pub enum AgentEvent {
     AgentFailed {
         run_id: String,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_turns: Option<u32>,
     },
     AgentCancelled {
         run_id: String,

@@ -120,7 +120,15 @@ pub(super) fn start_cancellable_claude_process(
             } => {
                 if !status.success() {
                     let error = stderr_tail.trim().to_string();
-                    send_agent_event(&sender, AgentEvent::AgentFailed { run_id, error });
+                    send_agent_event(
+                        &sender,
+                        AgentEvent::AgentFailed {
+                            run_id,
+                            error,
+                            error_code: None,
+                            max_turns: None,
+                        },
+                    );
                     return;
                 }
             }
@@ -470,7 +478,15 @@ pub(super) fn start_control_protocol_claude_process(
                 if !status.success() {
                     writer_done.store(true, Ordering::SeqCst);
                     let error = stderr_tail.trim().to_string();
-                    send_agent_event(&event_tx, AgentEvent::AgentFailed { run_id, error });
+                    send_agent_event(
+                        &event_tx,
+                        AgentEvent::AgentFailed {
+                            run_id,
+                            error,
+                            error_code: None,
+                            max_turns: None,
+                        },
+                    );
                     return;
                 }
             }

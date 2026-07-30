@@ -157,6 +157,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
                     result: Some("completed".to_string()),
                     errors: None,
                     error_code: None,
+                    max_turns: None,
                     session_error_code: None,
                     session_error_phase: None,
                     session_id: Some(engine.session_id.clone()),
@@ -429,6 +430,7 @@ where
                         result: Some("completed".to_string()),
                         errors: None,
                         error_code: None,
+                        max_turns: None,
                         session_error_code: None,
                         session_error_phase: None,
                         session_id: Some(engine.session_id.clone()),
@@ -639,6 +641,7 @@ impl SessionRuntime {
 struct TurnFailure {
     message: String,
     error_code: Option<&'static str>,
+    max_turns: Option<u32>,
     session_error_code: Option<&'static str>,
 }
 
@@ -647,6 +650,13 @@ impl TurnFailure {
         match self.session_error_code {
             Some(code) => {
                 OutputMessage::session_result_error(session_id, &self.message, code, "persist")
+            }
+            None if self.error_code == Some("max_turns") && self.max_turns.is_some() => {
+                OutputMessage::max_turns_result_error(
+                    session_id,
+                    &self.message,
+                    self.max_turns.unwrap_or_default(),
+                )
             }
             None => {
                 OutputMessage::result_error_with_code(session_id, &self.message, self.error_code)
@@ -664,10 +674,12 @@ fn combine_turn_and_persist(
         (Ok(AgentTurnOutcome::MaxTurns { limit }), Ok(())) => Err(TurnFailure {
             message: crate::core::max_turns_error(limit),
             error_code: Some("max_turns"),
+            max_turns: Some(limit),
             session_error_code: None,
         }),
         (Err(turn_error), Ok(())) => Err(TurnFailure {
             error_code: None,
+            max_turns: None,
             message: turn_error,
             session_error_code: None,
         }),
@@ -677,6 +689,7 @@ fn combine_turn_and_persist(
                 persist_error.code()
             ),
             error_code: None,
+            max_turns: None,
             session_error_code: Some(persist_error.code()),
         }),
         (Ok(AgentTurnOutcome::MaxTurns { limit }), Err(persist_error)) => Err(TurnFailure {
@@ -686,6 +699,7 @@ fn combine_turn_and_persist(
                 persist_error.code()
             ),
             error_code: None,
+            max_turns: None,
             session_error_code: Some(persist_error.code()),
         }),
         (Err(turn_error), Err(persist_error)) => Err(TurnFailure {
@@ -694,6 +708,7 @@ fn combine_turn_and_persist(
                 persist_error.code()
             ),
             error_code: None,
+            max_turns: None,
             session_error_code: Some(persist_error.code()),
         }),
     }
@@ -758,6 +773,7 @@ mod tests {
             .expect_err("max-turn outcome");
 
         assert_eq!(failure.error_code, Some("max_turns"));
+        assert_eq!(failure.max_turns, Some(5));
         assert_eq!(failure.message, "Agent exceeded max turns (5)");
         assert_eq!(failure.session_error_code, None);
     }
@@ -768,6 +784,7 @@ mod tests {
             .expect_err("provider error");
 
         assert_eq!(failure.error_code, None);
+        assert_eq!(failure.max_turns, None);
         assert_eq!(failure.message, "Agent exceeded max turns (5)");
         assert_eq!(failure.session_error_code, None);
     }

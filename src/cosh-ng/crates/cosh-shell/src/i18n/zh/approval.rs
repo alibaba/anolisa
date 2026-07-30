@@ -132,6 +132,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseRedirectionWrite => "重定向写文件",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk 执行外部命令",
         MessageId::ApprovalRiskLevelUnknown => "未知风险",
+        MessageId::ApprovalTurnExtensionSubject => "Agent 轮次预算",
+        MessageId::ApprovalTurnExtensionPreview => {
+            "Agent 已用完配置的 {turns} 轮。是否继续同一任务并增加 {turns} 轮？"
+        }
+        MessageId::ApprovalTurnExtensionLabel => "轮次预算",
+        MessageId::ApprovalActionContinue => "继续",
+        MessageId::ApprovalActionStop => "停止",
+        MessageId::ApprovalResolutionContinuingTitle => "正在继续",
+        MessageId::ApprovalResolutionStoppedTitle => "已停止",
+        MessageId::ApprovalReceiptKindTurnExtension => "轮次预算扩容",
+        MessageId::ApprovalTurnExtensionUnavailableTitle => "无法继续",
+        MessageId::ApprovalTurnExtensionUnavailableBody => {
+            "批准扩容前，已持久化的 provider 会话发生了变化。"
+        }
         _ => return None,
     })
 }

@@ -65,6 +65,8 @@ pub(crate) fn render_agent_structured_events<W: Write>(
                 AgentEvent::AgentFailed {
                     run_id: active_run.request.id.clone(),
                     error: format!("cosh-core-question-protocol:{reason}"),
+                    error_code: None,
+                    max_turns: None,
                 },
                 output,
                 None,

@@ -1,9 +1,10 @@
+use crate::runtime::approval_state::RuntimeApprovalRequest;
 use crate::runtime::prelude::{
     redact_provider_command_text, AgentContextBinding, AgentMode, AgentRequest, AgentRunOrigin,
     ApprovalDecision, ApprovalResponse, CommandBlock, CommandStatus, HostExecutedShellMetadata,
     HostExecutedShellResult, OutputRefs, ShellHandoffRequest,
 };
-use crate::runtime::state::{InlineState, RuntimeApprovalRequest};
+use crate::runtime::state::InlineState;
 
 use super::evidence_state::{EvidenceState, RuntimeShellCommandCompleted, ShellEvidenceDelivery};
 

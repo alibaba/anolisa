@@ -172,6 +172,8 @@ mod tests {
             event: AgentEvent::AgentFailed {
                 run_id: "run-1".to_string(),
                 error: "Agent timed out: resume failed".to_string(),
+                error_code: None,
+                max_turns: None,
             },
             reason: "failed".to_string(),
             display_text: "failed".to_string(),
@@ -195,6 +197,8 @@ mod tests {
             event: AgentEvent::AgentFailed {
                 run_id: "run-2".to_string(),
                 error: "Agent timed out again".to_string(),
+                error_code: None,
+                max_turns: None,
             },
             reason: "failed".to_string(),
             display_text: "failed".to_string(),

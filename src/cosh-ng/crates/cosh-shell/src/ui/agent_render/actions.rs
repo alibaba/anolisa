@@ -61,6 +61,17 @@ pub const TURN_APPROVAL_PANEL_ACTIONS: [ApprovalActionDescriptor; 5] = [
     },
 ];
 
+/// Actions for a capped Agent run: explicitly continue with one more
+/// configured budget or stop without discarding the persisted session.
+pub const TURN_EXTENSION_PANEL_ACTIONS: [ApprovalActionDescriptor; 2] = [
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Approve,
+    },
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Deny,
+    },
+];
+
 /// Which action list an approval card offers. Resolved once per request
 /// (single source of truth) and shared by rendering, raw-input capture,
 /// and focus parsing.
@@ -69,6 +80,7 @@ pub enum ApprovalActionSet {
     Hook,
     Standard,
     TurnConsent,
+    TurnExtension,
 }
 
 impl ApprovalActionSet {
@@ -77,6 +89,7 @@ impl ApprovalActionSet {
             Self::Hook => &HOOK_APPROVAL_PANEL_ACTIONS,
             Self::Standard => &APPROVAL_PANEL_ACTIONS,
             Self::TurnConsent => &TURN_APPROVAL_PANEL_ACTIONS,
+            Self::TurnExtension => &TURN_EXTENSION_PANEL_ACTIONS,
         }
     }
     pub fn action_at(self, index: usize) -> Option<ApprovalPanelAction> {

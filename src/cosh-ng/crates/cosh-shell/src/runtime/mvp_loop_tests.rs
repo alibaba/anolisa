@@ -305,6 +305,8 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
         AgentEvent::AgentFailed {
             run_id: "run-1".to_string(),
             error: "analysis returned an error".to_string(),
+            error_code: None,
+            max_turns: None,
         },
     ];
 

@@ -43,7 +43,7 @@ pub(crate) fn record_approval_requests(
                     let mut warnings = Vec::new();
                     active_run.pending_hook_notifications.retain(|n| {
                         if n.tool_use_id.as_deref() == Some(tool_use_id) {
-                            warnings.push(crate::runtime::state::HookWarning {
+                            warnings.push(crate::runtime::approval_state::HookWarning {
                                 hook_name: n.hook_name.clone(),
                                 message: n.message.clone(),
                                 decision: n.decision.clone(),

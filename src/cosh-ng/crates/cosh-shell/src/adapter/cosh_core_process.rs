@@ -150,7 +150,6 @@ pub(super) fn run_sync_cosh_core_process(
         );
         let retain_session = retain_context_session(
             &terminal_events,
-            parser.error_code(),
             parser.session_error_phase(),
             observed_resumability,
         );
@@ -559,7 +558,6 @@ pub(super) fn start_control_protocol_cosh_core_process(
         );
         let retain_session = retain_context_session(
             &terminal_events,
-            parser.error_code(),
             parser.session_error_phase(),
             parser.session_resumable(),
         );
@@ -625,6 +623,8 @@ pub(super) fn replace_synthetic_completion_for_nonzero_exit(
     terminal_events.push(AgentEvent::AgentFailed {
         run_id: run_id.to_string(),
         error,
+        error_code: None,
+        max_turns: None,
     });
 }
 

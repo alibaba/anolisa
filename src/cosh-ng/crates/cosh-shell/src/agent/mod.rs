@@ -13,5 +13,6 @@ pub(crate) mod queue;
 pub(super) mod run;
 pub(crate) mod skill_context;
 mod structured_events;
+pub(crate) mod turn_extension;
 
 pub(crate) use governance::{govern_agent_events, govern_agent_events_with_language};

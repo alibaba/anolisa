@@ -34,6 +34,7 @@ mod qwen_stream;
 pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
 pub use control_protocol::*;
+pub(crate) use cosh_core::max_turn_limit;
 pub use cosh_core::{
     CoshCoreAdapter, SessionClearFailure, SessionClearInterruption, SessionClearPlan,
     SessionClearResult, SessionErrorInfo, SessionHealth, SessionList, SessionManagementClient,

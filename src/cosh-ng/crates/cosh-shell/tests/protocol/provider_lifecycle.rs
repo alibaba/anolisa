@@ -1221,7 +1221,7 @@ read -r init
 printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","capabilities":{{}}}}}}}}'
 read -r first_message
 printf '%s\n' '{{"type":"system","subtype":"init","session_id":"{id}","session_resumable":true,"model":"mock","tools":[]}}'
-printf '%s\n' '{{"type":"result","subtype":"error","session_id":"{id}","is_error":true,"result":"Agent exceeded max turns (50)"}}'
+printf '%s\n' '{{"type":"result","subtype":"error","session_id":"{id}","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}}'
 read -r second_message
 printf '%s\n' '{{"type":"system","subtype":"init","session_id":"{id}","session_resumable":true,"model":"mock","tools":[]}}'
 printf '%s\n' '{{"type":"result","subtype":"success","session_id":"{id}","is_error":false,"duration_ms":1,"result":"continued"}}'
@@ -1308,7 +1308,7 @@ fn non_resumable_max_turn_failure_commits_no_persistent_service_session() {
     let script = mock_provider_script(
         "cosh-core-max-turns-non-resumable",
         r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}'
-printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)"}'"#,
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}'"#,
     );
     let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
 
@@ -1337,7 +1337,7 @@ fn non_resumable_service_process_commits_no_session_on_later_turns() {
     for (label, second_turn) in [
         (
             "max-turns",
-            r#"{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)"}"#,
+            r#"{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}"#,
         ),
         (
             "success",
@@ -1449,7 +1449,7 @@ fn cancelled_max_turn_run_commits_no_fresh_persistent_session() {
         "cosh-core-max-turns-then-cancel",
         r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":true,"model":"mock","tools":[]}'
 IFS= read -r _
-printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)"}'
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}'
 exec sleep 30"#,
     );
     let adapter = CoshCoreAdapter::new(script.display().to_string(), true);

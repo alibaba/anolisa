@@ -93,4 +93,5 @@ collect_message_ids!([
     multiline_entry_ids,
     mcp_registry_ids,
     approval_foreground_interactive_ids,
+    approval_turn_extension_ids,
 ],);
