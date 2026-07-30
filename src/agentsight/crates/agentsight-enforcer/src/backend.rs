@@ -94,4 +94,19 @@ pub trait EnforcementBackend: Send + Sync + 'static {
 
     /// Creates an independent bounded normalized security-event subscription.
     fn subscribe_security_events(&self) -> Receiver<SecurityEvent>;
+
+    /// Records normalized events accepted locally but lost at the remote peer.
+    fn record_security_delivery_loss(&self, count: u64);
+
+    /// Detaches every active binding before the daemon exits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first lifecycle or kernel cleanup failure.
+    fn shutdown(&self) -> Result<(), BackendError> {
+        for binding in self.bindings()? {
+            self.detach(binding.request.binding_id)?;
+        }
+        Ok(())
+    }
 }

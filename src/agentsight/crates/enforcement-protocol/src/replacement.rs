@@ -158,20 +158,6 @@ impl ReplacementPolicy {
         }
     }
 
-    fn root_pid(&self) -> i32 {
-        match self {
-            Self::Generic(request) => request.root_pid,
-            Self::Credential(request) => request.root_pid,
-        }
-    }
-
-    fn process_start_time(&self) -> u64 {
-        match self {
-            Self::Generic(request) => request.process_start_time,
-            Self::Credential(request) => request.process_start_time,
-        }
-    }
-
     fn matches_acknowledgement(&self, request: &ApplyPolicy) -> bool {
         match self {
             Self::Generic(expected) => expected == request,
@@ -225,12 +211,6 @@ impl ReplacePolicy {
         if self.replacement.session_id() != source.session_id.as_deref() {
             return Err(ReplaceValidationError::SessionMismatch);
         }
-        if self.replacement.root_pid() != source.root_pid {
-            return Err(ReplaceValidationError::RootPidMismatch);
-        }
-        if self.replacement.process_start_time() != source.process_start_time {
-            return Err(ReplaceValidationError::ProcessStartTimeMismatch);
-        }
         if let ReplacementSource::Credential(snapshot) = &self.source {
             let policy = snapshot.policy()?;
             if policy.policy_id != source.policy_id
@@ -269,21 +249,29 @@ impl ReplacePolicy {
         Ok(())
     }
 
-    /// Builds the inverse handoff while preserving both structured policies.
+    /// Restores the source policy on the process identity that owns the target binding.
     pub fn reverse(&self, target: Binding) -> Self {
         let source = &self.expected.request;
+        let current = &target.request;
         let replacement = match &self.source {
             ReplacementSource::Credential(snapshot) => {
                 ReplacementPolicy::Credential(ApplyCredentialPolicy {
                     binding_id: source.binding_id,
-                    agent_id: source.agent_id.clone(),
-                    session_id: source.session_id.clone(),
-                    root_pid: source.root_pid,
-                    process_start_time: source.process_start_time,
+                    agent_id: current.agent_id.clone(),
+                    session_id: current.session_id.clone(),
+                    root_pid: current.root_pid,
+                    process_start_time: current.process_start_time,
                     policy: snapshot.policy.clone(),
                 })
             }
-            ReplacementSource::Generic => ReplacementPolicy::Generic(source.clone()),
+            ReplacementSource::Generic => {
+                let mut request = source.clone();
+                request.agent_id = current.agent_id.clone();
+                request.session_id = current.session_id.clone();
+                request.root_pid = current.root_pid;
+                request.process_start_time = current.process_start_time;
+                ReplacementPolicy::Generic(request)
+            }
         };
         let source = match &self.replacement {
             ReplacementPolicy::Credential(request) => {
@@ -320,12 +308,6 @@ pub enum ReplaceValidationError {
     /// Replacement must preserve the source session identity.
     #[error("replacement session must match source session")]
     SessionMismatch,
-    /// Replacement must preserve the source root process.
-    #[error("replacement root PID must match source root PID")]
-    RootPidMismatch,
-    /// Replacement must preserve the source process-start identity.
-    #[error("replacement process start time must match source")]
-    ProcessStartTimeMismatch,
     /// Structured source policy must describe the acknowledged source revision.
     #[error("source credential policy does not match source binding")]
     SourcePolicyMismatch,

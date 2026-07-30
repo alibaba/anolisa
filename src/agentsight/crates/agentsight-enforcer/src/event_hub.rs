@@ -244,7 +244,7 @@ impl SecurityEventHub {
         });
     }
 
-    fn record_delivery_loss(&self, count: u64) {
+    pub(crate) fn record_delivery_loss(&self, count: u64) {
         if count == 0 {
             return;
         }

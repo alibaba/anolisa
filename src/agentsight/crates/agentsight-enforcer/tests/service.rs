@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::BufReader;
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,7 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, BindingState, Command, Effect, ReplaceOutcome, ReplacePolicy, ReplacementPolicy,
+    ApplyCredentialPolicy, ApplyPolicy, BindingState, Command, CredentialExfiltrationPolicy,
+    DestinationScope, Effect, PolicyMode, ReplaceOutcome, ReplacePolicy, ReplacementPolicy,
     ReplacementSource, Request, Response, ResponseBody, ViolationEvent, read_frame, write_frame,
 };
 use agentsight_enforcer::{BackendError, EnforcementBackend, EnforcerService, MockBackend};
@@ -26,6 +28,7 @@ fn fixture_apply_policy() -> ApplyPolicy {
         policy_id: "test-policy".into(),
         policy_revision: "revision-1".into(),
         policy_dsl: "label AGENT".into(),
+        policy_mode: None,
     }
 }
 
@@ -324,4 +327,64 @@ fn security_subscription_is_acknowledged_when_backend_support_exists() {
     let response = fixture.call(Command::SubscribeSecurityEvents);
 
     assert!(matches!(response.result, Ok(ResponseBody::Subscribed)));
+}
+
+#[test]
+fn security_disconnect_records_failed_and_queued_frames() {
+    let fixture = ServiceFixture::start();
+    let request = ApplyCredentialPolicy {
+        binding_id: Uuid::new_v4(),
+        agent_id: "security-disconnect".into(),
+        session_id: Some("session-1".into()),
+        root_pid: 4242,
+        process_start_time: 99,
+        policy: CredentialExfiltrationPolicy {
+            policy_id: "credential-exfiltration".into(),
+            revision: 1,
+            source_patterns: vec!["/tmp/credential".into()],
+            trusted_endpoints: Vec::new(),
+            taint_label: "CREDENTIAL".into(),
+            taint_ttl_secs: 300,
+            destination_scope: DestinationScope::PublicIpv4,
+            mode: PolicyMode::Audit,
+        },
+    };
+    fixture
+        .backend
+        .apply_credential_policy(request.clone())
+        .expect("fixture credential policy should apply");
+    let subscribe = Request::new(Command::SubscribeSecurityEvents);
+    let mut stream =
+        UnixStream::connect(&fixture.socket_path).expect("security subscriber should connect");
+    write_frame(&mut stream, &subscribe).expect("security subscribe request should encode");
+    let mut reader = BufReader::new(stream);
+    let subscribed: Response = read_frame(&mut reader)
+        .expect("security subscribe response should decode")
+        .expect("security subscribe response should exist");
+    assert!(matches!(subscribed.result, Ok(ResponseBody::Subscribed)));
+    reader
+        .get_ref()
+        .shutdown(Shutdown::Both)
+        .expect("fixture peer should disconnect");
+    drop(reader);
+
+    fixture
+        .backend
+        .emit_credential_exfiltration(request.binding_id, "/tmp/credential", "8.8.8.8:443")
+        .expect("fixture evidence chain should publish");
+
+    let mut degraded = false;
+    for _ in 0..100 {
+        if fixture.backend.health().is_ok_and(|health| {
+            health
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("security event delivery loss"))
+        }) {
+            degraded = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(degraded, "socket write loss must degrade backend health");
 }

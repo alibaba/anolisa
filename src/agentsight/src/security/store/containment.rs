@@ -14,7 +14,8 @@ use crate::security::{
     ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, RiskCaseStatus,
 };
 
-const ACTION_COLUMNS: &str = "action_id, case_id, binding_id, agent_id, root_pid,
+const ACTION_COLUMNS: &str =
+    "action_id, case_id, binding_id, source_binding_id, agent_id, root_pid,
     process_start_time, source_path, duration_secs, expires_at_ns, lifecycle_state,
     blocked_at_ns, requested_by, failure_stage, failure_reason, attempt_count,
     next_retry_at_ns, created_at_ns, updated_at_ns";
@@ -68,6 +69,11 @@ impl SecurityStore {
         if action.lifecycle_state != ContainmentLifecycle::Pending {
             return Err(SecurityStoreError::InvalidData(
                 "a containment claim must start pending".into(),
+            ));
+        }
+        if action.source_binding_id.is_none() {
+            return Err(SecurityStoreError::InvalidData(
+                "a new containment claim requires an exact source binding".into(),
             ));
         }
         let mut conn = self.connection()?;
@@ -202,6 +208,29 @@ impl SecurityStore {
             .transpose()
     }
 
+    /// Loads one containment action by its unique enforcement binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed database, stored-data, or lock error.
+    pub fn containment_action_by_binding(
+        &self,
+        binding_id: Uuid,
+    ) -> Result<Option<ContainmentAction>, SecurityStoreError> {
+        self.connection()?
+            .query_row(
+                &format!(
+                    "SELECT {ACTION_COLUMNS}
+                     FROM containment_actions WHERE binding_id = ?1"
+                ),
+                [binding_id.to_string()],
+                containment_row,
+            )
+            .optional()?
+            .map(containment_action_from_row)
+            .transpose()
+    }
+
     /// Loads the newest containment action for one case.
     ///
     /// # Errors
@@ -224,6 +253,31 @@ impl SecurityStore {
             .optional()?
             .map(containment_action_from_row)
             .transpose()
+    }
+
+    /// Requests immediate reverse reconciliation for one live containment binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed database, timestamp, or lock error.
+    pub fn request_containment_expiry(
+        &self,
+        binding_id: Uuid,
+        current_time_ns: u64,
+    ) -> Result<bool, SecurityStoreError> {
+        let current_time_ns = sqlite_time(current_time_ns)?;
+        let changed = self.connection()?.execute(
+            "UPDATE containment_actions
+             SET lifecycle_state = 'expiring',
+                 failure_stage = NULL,
+                 failure_reason = NULL,
+                 next_retry_at_ns = ?1,
+                 updated_at_ns = MAX(updated_at_ns + 1, ?1)
+             WHERE binding_id = ?2
+               AND lifecycle_state IN ('pending', 'active', 'expiring')",
+            params![current_time_ns, binding_id.to_string()],
+        )?;
+        Ok(changed == 1)
     }
 
     /// Persists the current mutable lifecycle fields for an action.
@@ -298,18 +352,19 @@ fn insert_action(
 ) -> Result<usize, SecurityStoreError> {
     conn.execute(
         "INSERT INTO containment_actions (
-            action_id, case_id, binding_id, agent_id, root_pid, process_start_time,
+            action_id, case_id, binding_id, source_binding_id, agent_id, root_pid, process_start_time,
             source_path, duration_secs, expires_at_ns, lifecycle_state, blocked_at_ns,
             requested_by, failure_stage, failure_reason, attempt_count, next_retry_at_ns,
             created_at_ns, updated_at_ns
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18
+            ?16, ?17, ?18, ?19
          ) ON CONFLICT DO NOTHING",
         params![
             action.action_id.to_string(),
             action.case_id.to_string(),
             action.binding_id.to_string(),
+            action.source_binding_id.map(|id| id.to_string()),
             action.agent_id,
             i64::from(action.root_pid),
             sqlite_time(action.process_start_time)?,
@@ -351,6 +406,7 @@ type ContainmentRow = (
     String,
     String,
     String,
+    Option<String>,
     String,
     i32,
     i64,
@@ -388,6 +444,7 @@ fn containment_row(row: &Row<'_>) -> rusqlite::Result<ContainmentRow> {
         row.get(15)?,
         row.get(16)?,
         row.get(17)?,
+        row.get(18)?,
     ))
 }
 
@@ -398,34 +455,35 @@ fn containment_action_from_row(
         action_id: parse_uuid(&row.0)?,
         case_id: parse_uuid(&row.1)?,
         binding_id: parse_uuid(&row.2)?,
-        agent_id: row.3,
-        root_pid: row.4,
-        process_start_time: unsigned(row.5, "process_start_time")?,
-        source_path: row.6,
+        source_binding_id: row.3.as_deref().map(parse_uuid).transpose()?,
+        agent_id: row.4,
+        root_pid: row.5,
+        process_start_time: unsigned(row.6, "process_start_time")?,
+        source_path: row.7,
         duration_secs: row
-            .7
+            .8
             .map(|value| unsigned(value, "duration_secs"))
             .transpose()?,
         expires_at_ns: row
-            .8
+            .9
             .map(|value| unsigned(value, "expires_at_ns"))
             .transpose()?,
-        lifecycle_state: parse_lifecycle(&row.9)?,
+        lifecycle_state: parse_lifecycle(&row.10)?,
         blocked_at_ns: row
-            .10
+            .11
             .map(|value| unsigned(value, "blocked_at_ns"))
             .transpose()?,
-        requested_by: row.11,
-        failure_stage: row.12.as_deref().map(parse_failure_stage).transpose()?,
-        failure_reason: row.13,
-        attempt_count: u32::try_from(row.14)
+        requested_by: row.12,
+        failure_stage: row.13.as_deref().map(parse_failure_stage).transpose()?,
+        failure_reason: row.14,
+        attempt_count: u32::try_from(row.15)
             .map_err(|_| SecurityStoreError::InvalidData("attempt_count is out of range".into()))?,
         next_retry_at_ns: row
-            .15
+            .16
             .map(|value| unsigned(value, "next_retry_at_ns"))
             .transpose()?,
-        created_at_ns: unsigned(row.16, "created_at_ns")?,
-        updated_at_ns: unsigned(row.17, "updated_at_ns")?,
+        created_at_ns: unsigned(row.17, "created_at_ns")?,
+        updated_at_ns: unsigned(row.18, "updated_at_ns")?,
     })
 }
 

@@ -19,6 +19,7 @@ fn containment_action(lifecycle_state: ContainmentLifecycle) -> ContainmentActio
         action_id: Uuid::new_v4(),
         case_id: Uuid::new_v4(),
         binding_id: Uuid::new_v4(),
+        source_binding_id: Some(Uuid::new_v4()),
         agent_id: "hermes-test".into(),
         root_pid: 4242,
         process_start_time: 99,

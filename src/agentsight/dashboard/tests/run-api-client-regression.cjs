@@ -22,6 +22,7 @@ try {
       '--lib',
       'es2020,dom',
       'src/utils/apiClient.ts',
+      'src/utils/containmentLifecycle.ts',
       'tests/apiClient-globals.d.ts',
     ],
     { stdio: 'inherit' },
@@ -30,6 +31,7 @@ try {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
+      AGENTSIGHT_CONTAINMENT_LIFECYCLE_BUILD: join(outputDir, 'utils', 'containmentLifecycle.js'),
     },
     stdio: 'inherit',
   });

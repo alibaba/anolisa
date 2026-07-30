@@ -692,6 +692,7 @@ mod tests {
                 policy_id: "transition-policy".into(),
                 policy_revision: "1".into(),
                 policy_dsl: "source AGENT = exec \"**\"".into(),
+                policy_mode: Some(PolicyMode::Audit),
             },
             state,
             message: None,
@@ -805,6 +806,32 @@ mod tests {
                 .expect("intent should remain retryable")[0]
                 .state,
             BindingState::Pending
+        );
+    }
+
+    #[test]
+    fn credential_acknowledgement_must_match_structured_policy_mode() {
+        let store = EnforcementStore::open(":memory:").expect("test store should open");
+        let request = credential_request(Uuid::new_v4(), 300);
+        store
+            .begin_credential_policy_intent(&request)
+            .expect("typed intent should seed");
+        let mut acknowledgement = transition_binding(BindingState::Enforced);
+        acknowledgement.request.binding_id = request.binding_id;
+        acknowledgement.request.policy_id = request.policy.policy_id.clone();
+        acknowledgement.request.policy_revision = request.policy.revision.to_string();
+        acknowledgement.request.policy_mode = Some(PolicyMode::Enforce);
+
+        assert!(matches!(
+            store.upsert_credential_binding(&acknowledgement, &request.policy),
+            Err(EnforcementStoreError::InvalidCredentialPolicySnapshot { binding_id, .. })
+                if binding_id == request.binding_id
+        ));
+        assert_eq!(
+            store
+                .binding(request.binding_id)
+                .expect("failed acknowledgement must roll back"),
+            None
         );
     }
 

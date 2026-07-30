@@ -93,6 +93,7 @@ impl TestEnforcer {
             policy_id: "pipeline-policy".into(),
             policy_revision: "revision-1".into(),
             policy_dsl: "label AGENT".into(),
+            policy_mode: None,
         }
     }
 
@@ -193,6 +194,7 @@ impl ControlledEnforcer {
             policy_id: "controlled-policy".into(),
             policy_revision: "revision-1".into(),
             policy_dsl: "label AGENT".into(),
+            policy_mode: None,
         }
     }
 
@@ -525,6 +527,7 @@ fn handle_controlled_connection(
                     policy_id: policy.policy_id,
                     policy_revision: policy.revision.to_string(),
                     policy_dsl: String::new(),
+                    policy_mode: Some(policy.mode),
                 },
                 state: BindingState::Enforced,
                 message: None,
@@ -574,6 +577,7 @@ fn handle_controlled_connection(
                     policy_id: request.policy.policy_id,
                     policy_revision: request.policy.revision.to_string(),
                     policy_dsl: String::new(),
+                    policy_mode: Some(request.policy.mode),
                 },
             };
             let target = Binding {

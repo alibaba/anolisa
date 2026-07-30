@@ -66,6 +66,45 @@ impl EnforcementCoordinator {
         self.execute_live_transition(transition)
     }
 
+    /// Restores the source audit policy recorded by a completed forward transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the forward transition is missing or incomplete, ingestion
+    /// is unavailable, persistence fails, or runtime ownership cannot be proved.
+    pub fn begin_reverse_transition(
+        &self,
+        action_id: Uuid,
+    ) -> Result<PolicyTransition, EnforcementCoordinatorError> {
+        let _lifecycle = self.lifecycle();
+        let forward_key = TransitionKey {
+            action_id,
+            direction: crate::enforcement::TransitionDirection::Forward,
+        };
+        let forward = self
+            .store
+            .transition(&forward_key)?
+            .ok_or(super::EnforcementStoreError::MissingTransition(action_id))?;
+        if forward.phase != TransitionPhase::Completed {
+            return Err(super::EnforcementStoreError::TransitionConflict(action_id).into());
+        }
+        let expected = forward.acknowledgement.ok_or_else(|| {
+            super::EnforcementStoreError::InvalidTransitionState {
+                field: "acknowledgement",
+                value: "missing completed forward acknowledgement".into(),
+            }
+        })?;
+        let reverse = PolicyTransition::pending(
+            TransitionKey {
+                action_id,
+                direction: crate::enforcement::TransitionDirection::Reverse,
+            },
+            forward.request.reverse(expected),
+        );
+        let transition = self.store.begin_transition(&reverse)?;
+        self.execute_live_transition(transition)
+    }
+
     fn execute_live_transition(
         &self,
         transition: PolicyTransition,

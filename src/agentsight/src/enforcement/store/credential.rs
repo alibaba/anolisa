@@ -286,6 +286,7 @@ pub(crate) fn credential_binding_matches_request(
         && binding.request.process_start_time == request.process_start_time
         && binding.request.policy_id == request.policy.policy_id
         && binding.request.policy_revision == request.policy.revision.to_string()
+        && binding.request.policy_mode == Some(request.policy.mode)
 }
 
 fn validate_request(request: &ApplyCredentialPolicy) -> Result<(), EnforcementStoreError> {
@@ -308,7 +309,8 @@ fn validate_binding(
         && binding.request.root_pid == request.root_pid
         && binding.request.process_start_time == request.process_start_time
         && binding.request.policy_id == request.policy.policy_id
-        && binding.request.policy_revision == request.policy.revision.to_string();
+        && binding.request.policy_revision == request.policy.revision.to_string()
+        && binding.request.policy_mode == Some(request.policy.mode);
     let persisted_non_active = matches!(
         binding.state,
         BindingState::Pending

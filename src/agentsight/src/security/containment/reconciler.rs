@@ -1,19 +1,24 @@
 //! Bounded restart recovery and expiry handling for containment actions.
 
-use agentsight_enforcement_protocol::Binding;
+mod expiry;
 
+use agentsight_enforcement_protocol::{
+    BindingState, ReplacePolicy, ReplacementPolicy, ReplacementSource,
+};
+
+use crate::enforcement::{TransitionDirection, TransitionKey};
 use crate::security::store::DueContainmentAction;
 
-use super::pending::{record_pending_unavailable, retry_delay_ns};
+use super::pending::record_pending_unavailable;
 use super::{
     ContainmentAction, ContainmentActivationResult, ContainmentCoordinator, ContainmentEnforcer,
     ContainmentEnforcerError, ContainmentError, ContainmentFailureStage, ContainmentLifecycle,
     RiskCaseStatus, SecurityStore, SecurityStoreError, acknowledgement_matches, enforce_request,
-    resolve_policy, sanitize_failure, validate_process_identity,
+    exact_binding, resolve_transition_policy, sanitize_failure, source_policy_snapshot,
+    validate_process_identity,
 };
 
 const DUE_BATCH_LIMIT: usize = 100;
-const DETACH_MAX_RETRIES: u32 = 5;
 
 impl ContainmentCoordinator {
     /// Reconciles at most one bounded batch of due persisted actions.
@@ -24,6 +29,18 @@ impl ContainmentCoordinator {
     /// continuing to process the rest of the fetched batch.
     pub fn reconcile_once(&self, current_time_ns: u64) -> Result<(), ContainmentError> {
         reconcile_batch(&self.store, self.enforcer.as_ref(), current_time_ns)
+    }
+
+    pub(super) fn reconcile_action(
+        &self,
+        action_id: uuid::Uuid,
+        current_time_ns: u64,
+    ) -> Result<(), ContainmentError> {
+        Reconciler {
+            store: &self.store,
+            enforcer: self.enforcer.as_ref(),
+        }
+        .reconcile_action(action_id, current_time_ns)
     }
 }
 
@@ -41,6 +58,25 @@ struct Reconciler<'a> {
 }
 
 impl Reconciler<'_> {
+    fn reconcile_action(
+        &self,
+        action_id: uuid::Uuid,
+        current_time_ns: u64,
+    ) -> Result<(), ContainmentError> {
+        let action = self.store.containment_action(action_id)?.ok_or_else(|| {
+            SecurityStoreError::InvalidData(format!(
+                "containment action {action_id} disappeared during targeted reconciliation"
+            ))
+        })?;
+        let Some(claimed) = self
+            .store
+            .claim_containment_reconciliation(&action, current_time_ns)?
+        else {
+            return Err(ContainmentError::ClaimLost(action_id));
+        };
+        self.reconcile_claimed(claimed, current_time_ns)
+    }
+
     fn reconcile_once(&self, current_time_ns: u64) -> Result<(), ContainmentError> {
         let candidates = self
             .store
@@ -125,8 +161,17 @@ impl Reconciler<'_> {
             Err(ContainmentEnforcerError::Rejected(message)) => {
                 return self.fail_pending(action, claimed_at_ns, &message, false, current_time_ns);
             }
+            Err(ContainmentEnforcerError::MissingTransition(_)) => {
+                return self.fail_pending(
+                    action,
+                    claimed_at_ns,
+                    "enforcement binding snapshot unexpectedly reported a missing transition",
+                    false,
+                    current_time_ns,
+                );
+            }
         };
-        let (bindings, snapshot_stamp) = snapshot.into_parts();
+        let (bindings, _) = snapshot.into_parts();
         let exact = exact_binding(&bindings, action.binding_id);
         if exact.is_err() {
             return self.fail_pending(
@@ -151,6 +196,15 @@ impl Reconciler<'_> {
             action.next_retry_at_ns = None;
             return self.finish_claimed(&action, ContainmentLifecycle::Pending, claimed_at_ns);
         }
+        let Some(source_binding_id) = action.source_binding_id else {
+            return self.fail_pending(
+                action,
+                claimed_at_ns,
+                "legacy containment action lacks exact source audit binding provenance",
+                exact.is_some(),
+                current_time_ns,
+            );
+        };
         let detail = self.store.case_detail(action.case_id)?;
         if !matches!(
             detail.case.status,
@@ -164,7 +218,21 @@ impl Reconciler<'_> {
                 current_time_ns,
             );
         }
-        let Some(context) = resolve_policy(detail, bindings) else {
+        let stored_policy_snapshot =
+            match self.enforcer.credential_policy_snapshot(source_binding_id) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    return self.record_pending_unavailable(
+                        &mut action,
+                        claimed_at_ns,
+                        current_time_ns,
+                        error.to_string(),
+                    );
+                }
+            };
+        let Some(context) =
+            resolve_transition_policy(detail, bindings, source_binding_id, stored_policy_snapshot)
+        else {
             return self.fail_pending(
                 action,
                 claimed_at_ns,
@@ -199,20 +267,22 @@ impl Reconciler<'_> {
             );
         };
 
-        let (acknowledgement, activation_stamp) = match exact {
-            Some(binding) if acknowledgement_matches(&binding, &request) => {
-                (binding, snapshot_stamp)
-            }
-            Some(_) => {
-                return self.fail_pending(
-                    action,
-                    claimed_at_ns,
-                    "existing containment binding does not match durable intent",
-                    true,
-                    current_time_ns,
-                );
-            }
-            None => {
+        let key = TransitionKey {
+            action_id: action.action_id,
+            direction: TransitionDirection::Forward,
+        };
+        let stamped = match self.enforcer.resume_transition(&key) {
+            Ok(stamped) => Ok(stamped),
+            Err(ContainmentEnforcerError::MissingTransition(_)) => {
+                if context.binding.state != BindingState::Enforced {
+                    return self.fail_pending(
+                        action,
+                        claimed_at_ns,
+                        "missing transition cannot be rebuilt from a detached audit binding",
+                        exact.is_some(),
+                        current_time_ns,
+                    );
+                }
                 if validate_process_identity(action.root_pid, action.process_start_time).is_err() {
                     return self.fail_pending(
                         action,
@@ -222,28 +292,40 @@ impl Reconciler<'_> {
                         current_time_ns,
                     );
                 }
-                match self.enforcer.apply_credential_policy(request.clone()) {
-                    Ok(stamped) => stamped.into_parts(),
-                    Err(ContainmentEnforcerError::Unavailable(message)) => {
-                        return self.record_pending_unavailable(
-                            &mut action,
-                            claimed_at_ns,
-                            current_time_ns,
-                            message,
-                        );
-                    }
-                    Err(ContainmentEnforcerError::Rejected(message)) => {
-                        let reason = sanitize_failure(&message);
-                        action.lifecycle_state = ContainmentLifecycle::Failed;
-                        action.failure_stage = Some(ContainmentFailureStage::Reconcile);
-                        action.failure_reason = Some(reason.clone());
-                        action.next_retry_at_ns = None;
-                        self.finish_claimed(&action, ContainmentLifecycle::Pending, claimed_at_ns)?;
-                        return Err(ContainmentError::Enforcer(reason));
-                    }
-                }
+                self.enforcer.begin_transition(
+                    key,
+                    ReplacePolicy {
+                        expected: context.binding.clone(),
+                        source: ReplacementSource::Credential(source_policy_snapshot(&context)),
+                        replacement: ReplacementPolicy::Credential(request.clone()),
+                    },
+                )
+            }
+            Err(error) => Err(error),
+        };
+        let stamped = match stamped {
+            Ok(stamped) => stamped,
+            Err(ContainmentEnforcerError::Unavailable(message)) => {
+                return self.record_pending_unavailable(
+                    &mut action,
+                    claimed_at_ns,
+                    current_time_ns,
+                    message,
+                );
+            }
+            Err(ContainmentEnforcerError::Rejected(message)) => {
+                return self.fail_pending(action, claimed_at_ns, &message, false, current_time_ns);
+            }
+            Err(ContainmentEnforcerError::MissingTransition(_)) => {
+                return self.record_pending_unavailable(
+                    &mut action,
+                    claimed_at_ns,
+                    current_time_ns,
+                    "persisted policy transition disappeared".into(),
+                );
             }
         };
+        let (acknowledgement, activation_stamp) = stamped.into_parts();
         if !acknowledgement_matches(&acknowledgement, &request) {
             return self.fail_pending(
                 action,
@@ -306,41 +388,6 @@ impl Reconciler<'_> {
         Err(ContainmentError::Enforcer(reason))
     }
 
-    fn expire_pending_binding(
-        &self,
-        action: ContainmentAction,
-        claimed_at_ns: u64,
-        current_time_ns: u64,
-    ) -> Result<(), ContainmentError> {
-        let Some(mut cleanup) = self.store.begin_containment_cleanup(
-            &action,
-            ContainmentLifecycle::Pending,
-            claimed_at_ns,
-            current_time_ns,
-            "expired pending containment binding requires detachment".into(),
-        )?
-        else {
-            return Err(ContainmentError::ClaimLost(action.action_id));
-        };
-        let cleanup_claim_ns = cleanup.updated_at_ns;
-        match self.enforcer.detach(action.binding_id) {
-            Ok(()) => {
-                cleanup.lifecycle_state = ContainmentLifecycle::Expired;
-                cleanup.failure_stage = None;
-                cleanup.failure_reason = None;
-                cleanup.next_retry_at_ns = None;
-                self.finish_claimed(&cleanup, ContainmentLifecycle::Expiring, cleanup_claim_ns)
-            }
-            Err(message) => self.record_detach_failure(
-                &mut cleanup,
-                ContainmentLifecycle::Expiring,
-                cleanup_claim_ns,
-                current_time_ns,
-                sanitize_failure(&message),
-            ),
-        }
-    }
-
     fn fail_pending(
         &self,
         mut action: ContainmentAction,
@@ -351,50 +398,7 @@ impl Reconciler<'_> {
     ) -> Result<(), ContainmentError> {
         let reason = sanitize_failure(reason);
         if cleanup_binding {
-            let Some(mut cleanup) = self.store.begin_containment_cleanup(
-                &action,
-                ContainmentLifecycle::Pending,
-                claimed_at_ns,
-                current_time_ns,
-                reason.clone(),
-            )?
-            else {
-                return Err(ContainmentError::ClaimLost(action.action_id));
-            };
-            let cleanup_claim_ns = cleanup.updated_at_ns;
-            return match self.enforcer.detach(action.binding_id) {
-                Ok(()) => {
-                    cleanup.lifecycle_state = ContainmentLifecycle::Failed;
-                    cleanup.failure_stage = Some(ContainmentFailureStage::Reconcile);
-                    cleanup.failure_reason = Some(reason.clone());
-                    cleanup.next_retry_at_ns = None;
-                    self.finish_claimed(
-                        &cleanup,
-                        ContainmentLifecycle::Expiring,
-                        cleanup_claim_ns,
-                    )?;
-                    Err(ContainmentError::RecoveryFailed {
-                        action_id: cleanup.action_id,
-                        reason,
-                    })
-                }
-                Err(message) => {
-                    let detach_reason =
-                        sanitize_failure(&format!("{reason}; detach failed: {message}"));
-                    self.record_detach_failure(
-                        &mut cleanup,
-                        ContainmentLifecycle::Expiring,
-                        cleanup_claim_ns,
-                        current_time_ns,
-                        detach_reason.clone(),
-                    )?;
-                    Err(ContainmentError::CleanupRequired {
-                        action_id: cleanup.action_id,
-                        binding_id: cleanup.binding_id,
-                        reason: detach_reason,
-                    })
-                }
-            };
+            return self.restore_failed_pending(action, claimed_at_ns, current_time_ns, reason);
         }
         action.lifecycle_state = ContainmentLifecycle::Failed;
         action.failure_stage = Some(ContainmentFailureStage::Reconcile);
@@ -405,52 +409,6 @@ impl Reconciler<'_> {
             action_id: action.action_id,
             reason,
         })
-    }
-
-    fn reconcile_detach(
-        &self,
-        mut action: ContainmentAction,
-        current_time_ns: u64,
-    ) -> Result<(), ContainmentError> {
-        let claimed_at_ns = action.updated_at_ns;
-        match self.enforcer.detach(action.binding_id) {
-            Ok(()) => {
-                action.lifecycle_state = ContainmentLifecycle::Expired;
-                action.failure_stage = None;
-                action.failure_reason = None;
-                action.next_retry_at_ns = None;
-                self.finish_claimed(&action, ContainmentLifecycle::Expiring, claimed_at_ns)
-            }
-            Err(message) => self.record_detach_failure(
-                &mut action,
-                ContainmentLifecycle::Expiring,
-                claimed_at_ns,
-                current_time_ns,
-                sanitize_failure(&message),
-            ),
-        }
-    }
-
-    fn record_detach_failure(
-        &self,
-        action: &mut ContainmentAction,
-        claimed_lifecycle: ContainmentLifecycle,
-        claimed_at_ns: u64,
-        current_time_ns: u64,
-        reason: String,
-    ) -> Result<(), ContainmentError> {
-        action.attempt_count = action.attempt_count.saturating_add(1);
-        action.failure_stage = Some(ContainmentFailureStage::Detach);
-        action.failure_reason = Some(reason);
-        if action.attempt_count >= DETACH_MAX_RETRIES {
-            action.lifecycle_state = ContainmentLifecycle::Failed;
-            action.next_retry_at_ns = None;
-        } else {
-            action.lifecycle_state = ContainmentLifecycle::Expiring;
-            action.next_retry_at_ns =
-                Some(current_time_ns.saturating_add(retry_delay_ns(action.attempt_count)));
-        }
-        self.finish_claimed(action, claimed_lifecycle, claimed_at_ns)
     }
 
     fn finish_claimed(
@@ -467,15 +425,4 @@ impl Reconciler<'_> {
         }
         Err(ContainmentError::ClaimLost(action.action_id))
     }
-}
-
-fn exact_binding(bindings: &[Binding], binding_id: uuid::Uuid) -> Result<Option<Binding>, ()> {
-    let mut matching = bindings
-        .iter()
-        .filter(|binding| binding.request.binding_id == binding_id);
-    let first = matching.next().cloned();
-    if matching.next().is_some() {
-        return Err(());
-    }
-    Ok(first)
 }

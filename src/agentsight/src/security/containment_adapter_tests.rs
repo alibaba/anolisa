@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -5,14 +6,17 @@ use std::thread;
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, EventIdentity, FileAction, SecurityEvent, SecurityEventKind,
+    CredentialExfiltrationPolicy, CredentialPolicySnapshot, DestinationScope, EventIdentity,
+    FileAction, PolicyMode, ReplacePolicy, ReplacementPolicy, SecurityEvent, SecurityEventKind,
 };
 
 use super::enforcer::{
     ContainmentReadinessLease, ContainmentReadinessStamp, StampedBinding, StampedBindings,
 };
 use super::*;
-use crate::enforcement::{ApplyPolicy, Binding, BindingState, read_process_start_time};
+use crate::enforcement::{
+    ApplyPolicy, Binding, BindingState, TransitionDirection, TransitionKey, read_process_start_time,
+};
 use crate::security::{ContainmentLifecycle, RiskCase, RiskSeverity};
 
 const SECOND_NS: u64 = 1_000_000_000;
@@ -70,6 +74,8 @@ struct ApplyingGenerationEnforcer {
     generation: Mutex<u64>,
     stamped_generation: Mutex<u64>,
     bindings: Mutex<Vec<Binding>>,
+    source_policy_snapshot: Mutex<Option<CredentialPolicySnapshot>>,
+    transitions: Mutex<HashMap<TransitionKey, (ReplacePolicy, Binding)>>,
     lease_pause: Mutex<Option<LeasePause>>,
     apply_calls: AtomicUsize,
     detach_calls: AtomicUsize,
@@ -81,10 +87,18 @@ impl ContainmentReadinessLease for TestReadinessLease {}
 
 impl ApplyingGenerationEnforcer {
     fn new(source: Binding) -> Self {
+        let source_policy_snapshot = CredentialPolicySnapshot::capture(credential_policy(
+            "/root/secret.txt",
+            300,
+            PolicyMode::Audit,
+        ))
+        .expect("source policy should be valid");
         Self {
             generation: Mutex::new(1),
             stamped_generation: Mutex::new(1),
             bindings: Mutex::new(vec![source]),
+            source_policy_snapshot: Mutex::new(Some(source_policy_snapshot)),
+            transitions: Mutex::new(HashMap::new()),
             lease_pause: Mutex::new(None),
             apply_calls: AtomicUsize::new(0),
             detach_calls: AtomicUsize::new(0),
@@ -107,6 +121,13 @@ impl ApplyingGenerationEnforcer {
         let mut generation = self.generation.lock().expect("generation should lock");
         *generation = generation.saturating_add(1);
     }
+
+    fn remove_source_policy_snapshot(&self) {
+        *self
+            .source_policy_snapshot
+            .lock()
+            .expect("source snapshot should lock") = None;
+    }
 }
 
 impl ContainmentEnforcer for ApplyingGenerationEnforcer {
@@ -114,23 +135,85 @@ impl ContainmentEnforcer for ApplyingGenerationEnforcer {
         Duration::from_secs(20)
     }
 
-    fn apply_credential_policy(
+    fn begin_transition(
         &self,
-        request: ApplyCredentialPolicy,
+        key: TransitionKey,
+        transition: ReplacePolicy,
     ) -> Result<StampedBinding, ContainmentEnforcerError> {
         self.stamp();
         self.apply_calls.fetch_add(1, Ordering::AcqRel);
-        let binding = binding(
-            request.binding_id,
-            request.root_pid,
-            request.process_start_time,
-            enforce_policy(&request.policy.source_patterns[0]),
-        );
-        self.bindings
+        let binding = match transition.replacement.clone() {
+            ReplacementPolicy::Credential(request) => binding(
+                request.binding_id,
+                request.root_pid,
+                request.process_start_time,
+                enforce_policy(&request.policy.source_patterns[0]),
+            ),
+            ReplacementPolicy::Generic(request) => Binding {
+                request,
+                state: BindingState::Enforced,
+                message: None,
+                domain_id: transition.expected.domain_id.or(Some(1)),
+            },
+        };
+        let mut bindings = self.bindings.lock().expect("bindings should lock");
+        for existing in bindings.iter_mut() {
+            if existing.request.binding_id == transition.expected.request.binding_id {
+                existing.state = BindingState::Detached;
+                existing.domain_id = None;
+            }
+        }
+        match bindings
+            .iter_mut()
+            .find(|existing| existing.request.binding_id == binding.request.binding_id)
+        {
+            Some(existing) => *existing = binding.clone(),
+            None => bindings.push(binding.clone()),
+        }
+        drop(bindings);
+        self.transitions
             .lock()
-            .expect("bindings should lock")
-            .push(binding.clone());
+            .expect("transitions should lock")
+            .insert(key, (transition, binding.clone()));
         Ok(StampedBinding::stable(binding))
+    }
+
+    fn resume_transition(
+        &self,
+        key: &TransitionKey,
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        self.stamp();
+        self.transitions
+            .lock()
+            .expect("transitions should lock")
+            .get(key)
+            .map(|(_, binding)| binding.clone())
+            .map(StampedBinding::stable)
+            .ok_or(ContainmentEnforcerError::MissingTransition(key.action_id))
+    }
+
+    fn begin_reverse_transition(
+        &self,
+        action_id: Uuid,
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        let forward_key = TransitionKey {
+            action_id,
+            direction: TransitionDirection::Forward,
+        };
+        let (request, acknowledgement) = self
+            .transitions
+            .lock()
+            .expect("transitions should lock")
+            .get(&forward_key)
+            .cloned()
+            .ok_or(ContainmentEnforcerError::MissingTransition(action_id))?;
+        self.begin_transition(
+            TransitionKey {
+                action_id,
+                direction: TransitionDirection::Reverse,
+            },
+            request.reverse(acknowledgement),
+        )
     }
 
     fn detach(&self, _: Uuid) -> Result<(), String> {
@@ -143,6 +226,17 @@ impl ContainmentEnforcer for ApplyingGenerationEnforcer {
         Ok(StampedBindings::stable(
             self.bindings.lock().expect("bindings should lock").clone(),
         ))
+    }
+
+    fn credential_policy_snapshot(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<CredentialPolicySnapshot>, ContainmentEnforcerError> {
+        Ok(self
+            .source_policy_snapshot
+            .lock()
+            .expect("source snapshot should lock")
+            .clone())
     }
 
     fn lease_ready(
@@ -213,6 +307,29 @@ fn apply_ack_from_generation_a_cannot_activate_under_generation_b() {
     assert_pending(&security_store, case_id, &action);
     assert_eq!(enforcer.apply_calls.load(Ordering::Acquire), 1);
     assert_eq!(enforcer.detach_calls.load(Ordering::Acquire), 0);
+    let transition = enforcer
+        .transitions
+        .lock()
+        .expect("transitions should lock")
+        .values()
+        .next()
+        .expect("forward transition should be durable")
+        .0
+        .clone();
+    assert_eq!(
+        transition
+            .source
+            .credential_snapshot()
+            .expect("source snapshot should be captured")
+            .policy()
+            .expect("source snapshot should validate")
+            .taint_ttl_secs,
+        300
+    );
+    let ReplacementPolicy::Credential(target_policy) = transition.replacement else {
+        panic!("containment should remain a structured credential policy");
+    };
+    assert_eq!(target_policy.policy.taint_ttl_secs, 300);
 
     containment
         .reconcile_once(1_000 + SECOND_NS)
@@ -222,6 +339,38 @@ fn apply_ack_from_generation_a_cannot_activate_under_generation_b() {
     assert_eq!(enforcer.detach_calls.load(Ordering::Acquire), 0);
     target.kill().expect("live test target should stop");
     target.wait().expect("live test target should be reaped");
+}
+
+#[test]
+fn missing_source_policy_snapshot_retains_the_audit_binding() {
+    let source_binding_id = Uuid::new_v4();
+    let source = binding(
+        source_binding_id,
+        999_999,
+        42,
+        audit_policy("/root/secret.txt"),
+    );
+    let enforcer = Arc::new(ApplyingGenerationEnforcer::new(source.clone()));
+    enforcer.remove_source_policy_snapshot();
+    let (security_store, case_id, _) =
+        security_fixture(source_binding_id, Uuid::new_v4(), 999_999, 42);
+    let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer.clone();
+    let containment = ContainmentCoordinator::new(security_store, enforcer_trait);
+
+    assert!(matches!(
+        containment.plan(case_id, Vec::new()),
+        Err(ContainmentError::SourcePolicyUnavailable(id)) if id == case_id
+    ));
+    assert_eq!(
+        enforcer
+            .bindings
+            .lock()
+            .expect("bindings should lock")
+            .as_slice(),
+        &[source]
+    );
+    assert_eq!(enforcer.apply_calls.load(Ordering::Acquire), 0);
+    assert_eq!(enforcer.detach_calls.load(Ordering::Acquire), 0);
 }
 
 fn security_fixture(
@@ -237,7 +386,13 @@ fn security_fixture(
     store
         .upsert_case(&risk_case(case_id), &[event.event_id])
         .expect("case should persist");
-    let action = pending_action(case_id, action_binding_id, pid, process_start_time);
+    let action = pending_action(
+        case_id,
+        source_binding_id,
+        action_binding_id,
+        pid,
+        process_start_time,
+    );
     store
         .insert_containment_action(&action)
         .expect("action should persist");
@@ -283,6 +438,7 @@ fn binding(
             policy_id: "credential-exfiltration".into(),
             policy_revision: "3".into(),
             policy_dsl,
+            policy_mode: None,
         },
         state: BindingState::Enforced,
         message: None,
@@ -302,6 +458,23 @@ fn compiled_policy(action: &str, source: &str) -> String {
     format!(
         "source AGENT = exec \"**\"\nsource CREDENTIAL = file \"{source}\"\nrule agentsight-credential-exfiltration:\n  {action} connect endpoint \"*\" if CREDENTIAL unless target \"trusted.example:443\"\n  because \"credential-derived data reached an untrusted network target\"\n"
     )
+}
+
+fn credential_policy(
+    source: &str,
+    taint_ttl_secs: u64,
+    mode: PolicyMode,
+) -> CredentialExfiltrationPolicy {
+    CredentialExfiltrationPolicy {
+        policy_id: "credential-exfiltration".into(),
+        revision: 3,
+        source_patterns: vec![source.into()],
+        trusted_endpoints: vec!["trusted.example:443".into()],
+        taint_label: "CREDENTIAL".into(),
+        taint_ttl_secs,
+        destination_scope: DestinationScope::PublicIpv4,
+        mode,
+    }
 }
 
 fn evidence(binding_id: Uuid, pid: i32, process_start_time: u64) -> SecurityEvent {
@@ -357,6 +530,7 @@ fn risk_case(case_id: Uuid) -> RiskCase {
 
 fn pending_action(
     case_id: Uuid,
+    source_binding_id: Uuid,
     binding_id: Uuid,
     root_pid: i32,
     process_start_time: u64,
@@ -365,6 +539,7 @@ fn pending_action(
         action_id: Uuid::new_v4(),
         case_id,
         binding_id,
+        source_binding_id: Some(source_binding_id),
         agent_id: "hermes-test".into(),
         root_pid,
         process_start_time,

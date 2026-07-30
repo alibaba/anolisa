@@ -57,6 +57,7 @@ impl EnforcerFixture {
             policy_id: "credential-exfiltration".into(),
             policy_revision: "3".into(),
             policy_dsl: "mode audit".into(),
+            policy_mode: Some(PolicyMode::Audit),
         }
     }
 

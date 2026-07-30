@@ -1,17 +1,22 @@
 //! Generation-stamped enforcement boundary used by containment activation.
 
-use agentsight_enforcement_protocol::{ApplyCredentialPolicy, Binding};
+use std::time::Duration;
+
+use agentsight_enforcement_protocol::{Binding, CredentialPolicySnapshot, ReplacePolicy};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::enforcement::{
-    EnforcementCoordinator, EnforcementCoordinatorError, EnforcementError,
-    IngestionGenerationLease, IngestionLease,
+    EnforcementCoordinator, EnforcementCoordinatorError, EnforcementError, EnforcementStoreError,
+    IngestionGenerationLease, IngestionLease, PolicyTransition, TransitionKey, TransitionPhase,
 };
 
 /// Typed failures returned by the containment enforcement boundary.
 #[derive(Debug, Error)]
 pub enum ContainmentEnforcerError {
+    /// No durable transition exists for this containment action and direction.
+    #[error("policy transition for action {0} does not exist")]
+    MissingTransition(Uuid),
     /// Readiness, transport, or local enforcement state is temporarily unavailable.
     #[error("{0}")]
     Unavailable(String),
@@ -98,15 +103,31 @@ pub fn stable_readiness_lease() -> Box<dyn ContainmentReadinessLease> {
 pub trait ContainmentEnforcer: Send + Sync {
     /// Bounds foreground apply ownership before restart reconciliation may take over.
     fn foreground_claim_lease(&self) -> Duration;
-    /// Compiles and applies one product-level credential policy.
-    fn apply_credential_policy(
+    /// Persists and executes one atomic policy ownership transition.
+    fn begin_transition(
         &self,
-        request: ApplyCredentialPolicy,
+        key: TransitionKey,
+        request: ReplacePolicy,
+    ) -> Result<StampedBinding, ContainmentEnforcerError>;
+    /// Resumes one exact durable transition without caller-supplied policy state.
+    fn resume_transition(
+        &self,
+        key: &TransitionKey,
+    ) -> Result<StampedBinding, ContainmentEnforcerError>;
+    /// Builds and executes the reverse transition from durable forward state.
+    fn begin_reverse_transition(
+        &self,
+        action_id: Uuid,
     ) -> Result<StampedBinding, ContainmentEnforcerError>;
     /// Detaches a previously applied binding.
     fn detach(&self, binding_id: Uuid) -> Result<(), String>;
     /// Lists persisted enforcement bindings.
     fn bindings(&self) -> Result<StampedBindings, ContainmentEnforcerError>;
+    /// Reads immutable structured provenance for one credential binding.
+    fn credential_policy_snapshot(
+        &self,
+        binding_id: Uuid,
+    ) -> Result<Option<CredentialPolicySnapshot>, ContainmentEnforcerError>;
     /// Leases the stamped ready generation for a short activation transaction.
     fn lease_ready(
         &self,
@@ -125,15 +146,38 @@ impl ContainmentEnforcer for EnforcementCoordinator {
         self.credential_apply_claim_lease()
     }
 
-    fn apply_credential_policy(
+    fn begin_transition(
         &self,
-        request: ApplyCredentialPolicy,
+        key: TransitionKey,
+        request: ReplacePolicy,
     ) -> Result<StampedBinding, ContainmentEnforcerError> {
         let stamp = current_stamp(self)?;
-        let binding = EnforcementCoordinator::apply_credential_policy(self, request)
+        let transition = EnforcementCoordinator::begin_transition(self, key, request)
             .map_err(containment_enforcer_error)?;
         ensure_current_stamp(self, &stamp)?;
-        Ok(StampedBinding::new(binding, stamp))
+        stamped_completed_transition(transition, stamp)
+    }
+
+    fn resume_transition(
+        &self,
+        key: &TransitionKey,
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        let stamp = current_stamp(self)?;
+        let transition = EnforcementCoordinator::resume_transition(self, key)
+            .map_err(containment_enforcer_error)?;
+        ensure_current_stamp(self, &stamp)?;
+        stamped_completed_transition(transition, stamp)
+    }
+
+    fn begin_reverse_transition(
+        &self,
+        action_id: Uuid,
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        let stamp = current_stamp(self)?;
+        let transition = EnforcementCoordinator::begin_reverse_transition(self, action_id)
+            .map_err(containment_enforcer_error)?;
+        ensure_current_stamp(self, &stamp)?;
+        stamped_completed_transition(transition, stamp)
     }
 
     fn detach(&self, binding_id: Uuid) -> Result<(), String> {
@@ -149,6 +193,14 @@ impl ContainmentEnforcer for EnforcementCoordinator {
             EnforcementCoordinator::bindings(self).map_err(containment_enforcer_error)?;
         ensure_current_stamp(self, &stamp)?;
         Ok(StampedBindings::new(bindings, stamp))
+    }
+
+    fn credential_policy_snapshot(
+        &self,
+        binding_id: Uuid,
+    ) -> Result<Option<CredentialPolicySnapshot>, ContainmentEnforcerError> {
+        EnforcementCoordinator::credential_policy_snapshot(self, binding_id)
+            .map_err(containment_enforcer_error)
     }
 
     fn lease_ready(
@@ -194,20 +246,40 @@ fn ingestion_changed() -> ContainmentEnforcerError {
 }
 
 fn containment_enforcer_error(error: EnforcementCoordinatorError) -> ContainmentEnforcerError {
+    if let EnforcementCoordinatorError::Store(EnforcementStoreError::MissingTransition(action_id)) =
+        &error
+    {
+        return ContainmentEnforcerError::MissingTransition(*action_id);
+    }
     let unavailable = matches!(
         &error,
         EnforcementCoordinatorError::IngestionUnavailable
             | EnforcementCoordinatorError::EnforcementUnavailable(_)
+            | EnforcementCoordinatorError::TransitionUnavailable
             | EnforcementCoordinatorError::Store(_)
             | EnforcementCoordinatorError::Thread(_)
             | EnforcementCoordinatorError::Client(
                 EnforcementError::Io(_) | EnforcementError::Disconnected
             )
     );
-    let message = error.to_string();
+    log::error!("containment enforcement operation failed: {error}");
     if unavailable {
-        ContainmentEnforcerError::Unavailable(message)
+        ContainmentEnforcerError::Unavailable("enforcement service is unavailable".into())
     } else {
-        ContainmentEnforcerError::Rejected(message)
+        ContainmentEnforcerError::Rejected("enforcement operation was rejected".into())
     }
+}
+
+fn stamped_completed_transition(
+    transition: PolicyTransition,
+    stamp: ContainmentReadinessStamp,
+) -> Result<StampedBinding, ContainmentEnforcerError> {
+    if transition.phase == TransitionPhase::Completed
+        && let Some(binding) = transition.acknowledgement
+    {
+        return Ok(StampedBinding::new(binding, stamp));
+    }
+    Err(ContainmentEnforcerError::Rejected(
+        "policy replacement retained the source audit binding".into(),
+    ))
 }

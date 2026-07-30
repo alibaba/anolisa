@@ -467,6 +467,10 @@ impl EnforcementBackend for ActPlaneBackend {
     fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
         self.state.security_events.subscribe()
     }
+
+    fn record_security_delivery_loss(&self, count: u64) {
+        self.state.security_events.record_delivery_loss(count);
+    }
 }
 
 fn prepare_runtime(
@@ -479,6 +483,24 @@ fn prepare_runtime(
 
 impl Drop for ActPlaneBackend {
     fn drop(&mut self) {
+        let active = self
+            .state
+            .bindings()
+            .iter()
+            .map(|(domain_id, binding)| (*domain_id, binding.clone()))
+            .collect::<Vec<_>>();
+        for (domain_id, binding) in active {
+            let errors = self.cleanup_binding(&binding.binding.request, domain_id);
+            if errors.is_empty() {
+                self.state.bindings().remove(&domain_id);
+            } else {
+                eprintln!(
+                    "agentsight-enforcer could not clear binding {} during shutdown: {}",
+                    binding.binding.request.binding_id,
+                    errors.join("; ")
+                );
+            }
+        }
         self.stop.store(true, Ordering::Release);
         let poller = self
             .poller
@@ -590,6 +612,7 @@ fn credential_apply_request(
             policy_id: policy.policy_id.clone(),
             policy_revision: policy.revision.to_string(),
             policy_dsl,
+            policy_mode: Some(policy.mode),
         },
         policy,
     ))
@@ -610,13 +633,11 @@ fn validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode
     match error {
         ReplaceValidationError::CredentialPolicy(_)
         | ReplaceValidationError::SourcePolicySnapshot(_) => ReplaceFailureCode::CompileFailure,
-        ReplaceValidationError::ProcessStartTimeMismatch => ReplaceFailureCode::StaleProcess,
         ReplaceValidationError::SameBindingId
         | ReplaceValidationError::SourceNotEnforced
         | ReplaceValidationError::SourceDomainMissing
         | ReplaceValidationError::AgentMismatch
         | ReplaceValidationError::SessionMismatch
-        | ReplaceValidationError::RootPidMismatch
         | ReplaceValidationError::SourcePolicyMismatch
         | ReplaceValidationError::TargetAcknowledgementMismatch
         | ReplaceValidationError::RuntimeDomainMismatch => ReplaceFailureCode::BindingConflict,
@@ -1101,6 +1122,7 @@ mod tests {
                     policy_id: "policy-1".into(),
                     policy_revision: "revision-1".into(),
                     policy_dsl: "fixture".into(),
+                    policy_mode: Some(PolicyMode::Audit),
                 },
                 state: BindingState::Enforced,
                 message: None,

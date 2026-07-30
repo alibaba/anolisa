@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  containmentTargetCandidates,
   containSecurityCase,
+  defaultContainmentTargetPid,
   enforcementSupportsContainment,
   fetchEnforcementHealth,
   fetchContainmentPlan,
@@ -131,11 +133,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
         const nextPlan = response.data;
         setPlan(nextPlan);
         setEnforcementHealth(health);
-        setSelectedPid(
-          nextPlan.original_target_valid && nextPlan.original_target
-            ? nextPlan.original_target.root_pid
-            : null,
-        );
+        setSelectedPid(defaultContainmentTargetPid(nextPlan, health));
       })
       .catch((nextError) => {
         if (requestVersion.current === version) setError(safeErrorMessage(nextError));
@@ -181,10 +179,13 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
 
   if (!open) return null;
 
+  const targetCandidates = plan
+    ? containmentTargetCandidates(plan, enforcementHealth)
+    : [];
   const canSubmit = Boolean(
     plan
-      && plan.original_target_valid
-      && selectedPid === plan.original_target?.root_pid
+      && selectedPid !== null
+      && targetCandidates.some((candidate) => candidate.root_pid === selectedPid)
       && containmentAvailable
       && !loading
       && !submitting
@@ -223,8 +224,8 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
   const submit = async () => {
     if (
       !plan
-      || !plan.original_target_valid
-      || selectedPid !== plan.original_target?.root_pid
+      || selectedPid === null
+      || !targetCandidates.some((candidate) => candidate.root_pid === selectedPid)
       || !containmentAvailable
       || loading
       || submitting
@@ -329,13 +330,40 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                 </div>
               )}
 
-              {!liveExistingAction && (targetStale ? (
-                <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                  原始进程身份已失效。为避免将拦截规则重定向到不同进程，当前案件不能选择替代 PID。
-                </p>
-              ) : originalTarget && (
+              {!liveExistingAction && (!targetStale && originalTarget ? (
                 <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
                   进程身份有效：PID {originalTarget.root_pid}
+                </p>
+              ) : targetCandidates.length > 0 ? (
+                <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <label htmlFor="containment-target" className="block text-sm font-medium text-amber-900">
+                    选择同一 Agent 的在线进程
+                  </label>
+                  <select
+                    id="containment-target"
+                    value={selectedPid ?? ''}
+                    onChange={(event) => {
+                      setSelectedPid(event.target.value === '' ? null : Number(event.target.value));
+                    }}
+                    className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-gray-900"
+                  >
+                    <option value="">请选择在线 Agent</option>
+                    {targetCandidates.map((candidate) => (
+                      <option
+                        key={`${candidate.root_pid}:${candidate.process_start_time}`}
+                        value={candidate.root_pid}
+                      >
+                        {candidate.display_name} · PID {candidate.root_pid}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-amber-800">
+                    原始 PID 已失效；服务端会在下发前再次校验所选进程的启动时间与 Agent 身份。
+                  </p>
+                </div>
+              ) : (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  原始进程身份已失效，且当前未发现执行器允许的同一 Agent 在线进程。
                 </p>
               ))}
 

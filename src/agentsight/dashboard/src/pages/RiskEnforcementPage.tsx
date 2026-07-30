@@ -31,7 +31,7 @@ function policyFilePath(policyDsl: string): string {
   return matches.length === 1 ? matches[0][1] : '—';
 }
 
-function bindingMode(policyDsl: string): EnforcementPolicyMode {
+function legacyBindingMode(policyDsl: string): EnforcementPolicyMode {
   if (/\bblock connect endpoint\b/.test(policyDsl) || /\bblock open file\b/.test(policyDsl)) return 'enforce';
   if (/\bnotify connect endpoint\b/.test(policyDsl)) return 'audit';
   return 'observe';
@@ -134,8 +134,15 @@ export const RiskEnforcementPage: React.FC = () => {
   const supportsMode = (candidate: EnforcementPolicyMode): boolean => (
     enforcementSupportsMode(health, candidate)
   );
+  const maxActiveBindings = health?.capabilities.max_active_bindings;
+  const bindingLimitReached = typeof maxActiveBindings === 'number'
+    && activeBindings.length >= maxActiveBindings;
   const canCreate = Boolean(
-    health?.ready === true && !submitting && !detachingId && supportsMode(mode),
+    health?.ready === true
+      && !submitting
+      && !detachingId
+      && supportsMode(mode)
+      && !bindingLimitReached,
   );
   const canDetach = !detachingId;
   const newestViolations = [...violations]
@@ -279,7 +286,7 @@ export const RiskEnforcementPage: React.FC = () => {
                       {policyFilePath(binding.request.policy_dsl)}
                     </td>
                     <td className="px-4 py-3 text-gray-700">
-                      <div>{modeLabels[bindingMode(binding.request.policy_dsl)]}</div>
+                      <div>{modeLabels[binding.request.policy_mode ?? legacyBindingMode(binding.request.policy_dsl)]}</div>
                       <div className="text-xs text-gray-500">修订 #{binding.request.policy_revision}</div>
                     </td>
                     <td className="px-4 py-3 text-gray-700">
@@ -389,6 +396,11 @@ export const RiskEnforcementPage: React.FC = () => {
               {health?.ready === false
                 ? '当前执行器尚未就绪，无法下发策略。'
                 : '当前执行器未声明此模式的能力，无法下发策略。'}
+            </p>
+          )}
+          {bindingLimitReached && (
+            <p className="mt-2 text-xs text-amber-700">
+              当前 ActPlane 后端最多支持 {maxActiveBindings} 条生效策略；请先解除现有策略后再下发。
             </p>
           )}
           <p aria-live="polite" className="mt-3 min-h-5 text-sm text-gray-700">{operationResult}</p>

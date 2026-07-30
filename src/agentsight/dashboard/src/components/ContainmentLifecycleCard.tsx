@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { SecurityContainmentAction } from '../utils/apiClient';
+import { containmentLifecyclePresentation } from '../utils/containmentLifecycle';
 
 interface ContainmentLifecycleCardProps {
   action: SecurityContainmentAction | null;
@@ -38,28 +39,6 @@ function formatRemaining(expiresAtNs: number, nowMs: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
 }
 
-function lifecyclePresentation(action: SecurityContainmentAction): {
-  label: string;
-  detail: string;
-  style: string;
-} {
-  if (action.blocked_at_ns !== null) {
-    return { label: '已遏制', detail: '内核已确认阻断', style: 'bg-red-100 text-red-700' };
-  }
-  switch (action.lifecycle_state) {
-    case 'pending':
-      return { label: '等待执行', detail: '策略已提交，等待执行器确认', style: 'bg-amber-100 text-amber-700' };
-    case 'active':
-      return { label: '策略生效', detail: '等待首次内核阻断', style: 'bg-blue-100 text-blue-700' };
-    case 'expiring':
-      return { label: '正在解除', detail: '执行器正在清理策略', style: 'bg-amber-100 text-amber-700' };
-    case 'expired':
-      return { label: '已到期', detail: '临时策略已解除', style: 'bg-gray-100 text-gray-700' };
-    case 'failed':
-      return { label: '执行失败', detail: '可在确认运行状态后重新下发', style: 'bg-red-100 text-red-700' };
-  }
-}
-
 export const ContainmentLifecycleCard: React.FC<ContainmentLifecycleCardProps> = ({
   action,
   loading,
@@ -87,7 +66,7 @@ export const ContainmentLifecycleCard: React.FC<ContainmentLifecycleCardProps> =
   }, [expiryMs]);
 
   const presentation = useMemo(() => (
-    action ? lifecyclePresentation(action) : null
+    action ? containmentLifecyclePresentation(action) : null
   ), [action]);
   const mayRetry = action?.lifecycle_state === 'failed' || action?.lifecycle_state === 'expired';
 

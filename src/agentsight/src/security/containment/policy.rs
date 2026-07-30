@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationScope,
-    PolicyMode, SecurityEventKind,
+    ApplyCredentialPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
+    CredentialPolicySnapshot, DestinationScope, PolicyMode, SecurityEventKind,
 };
 use uuid::Uuid;
 
@@ -21,7 +21,6 @@ const RULE: &str = "rule agentsight-credential-exfiltration:";
 const SINK: &str = " connect endpoint \"*\" if CREDENTIAL";
 const TRUSTED: &str = " unless target \"";
 const REASON: &str = "  because \"credential-derived data reached an untrusted network target\"";
-const CREDENTIAL_TAINT_TTL_SECS: u64 = 900;
 
 pub(super) fn validate_process_identity(
     pid: i32,
@@ -37,24 +36,72 @@ pub(super) struct ResolvedPolicy {
     pub(super) detail: RiskCaseDetail,
     pub(super) binding: Binding,
     pub(super) source_path: String,
-    pub(super) trusted_endpoints: Vec<String>,
+    pub(super) source_policy_snapshot: CredentialPolicySnapshot,
+}
+
+pub(super) fn exact_binding(bindings: &[Binding], binding_id: Uuid) -> Result<Option<Binding>, ()> {
+    let mut matching = bindings
+        .iter()
+        .filter(|binding| binding.request.binding_id == binding_id);
+    let first = matching.next().cloned();
+    if matching.next().is_some() {
+        return Err(());
+    }
+    Ok(first)
 }
 
 pub(super) fn resolve_policy(
     detail: RiskCaseDetail,
     bindings: Vec<Binding>,
+    source_policy_snapshot: Option<CredentialPolicySnapshot>,
+) -> Option<ResolvedPolicy> {
+    let source_binding_id = detail.evidence.first()?.identity.binding_id;
+    resolve_policy_binding(
+        detail,
+        bindings,
+        source_binding_id,
+        source_policy_snapshot,
+        false,
+    )
+}
+
+pub(super) fn resolve_transition_policy(
+    detail: RiskCaseDetail,
+    bindings: Vec<Binding>,
+    source_binding_id: Uuid,
+    source_policy_snapshot: Option<CredentialPolicySnapshot>,
+) -> Option<ResolvedPolicy> {
+    resolve_policy_binding(
+        detail,
+        bindings,
+        source_binding_id,
+        source_policy_snapshot,
+        true,
+    )
+}
+
+fn resolve_policy_binding(
+    detail: RiskCaseDetail,
+    bindings: Vec<Binding>,
+    source_binding_id: Uuid,
+    source_policy_snapshot: Option<CredentialPolicySnapshot>,
+    allow_detached: bool,
 ) -> Option<ResolvedPolicy> {
     let evidence = detail.evidence.first()?;
+    if evidence.identity.binding_id != source_binding_id {
+        return None;
+    }
     let file_action = match &evidence.kind {
         SecurityEventKind::FileAction(action) => action,
         _ => return None,
     };
     let mut matching = bindings
         .into_iter()
-        .filter(|binding| binding.request.binding_id == evidence.identity.binding_id);
+        .filter(|binding| binding.request.binding_id == source_binding_id);
     let binding = matching.next().filter(|_| matching.next().is_none())?;
     let request = &binding.request;
-    if binding.state != BindingState::Enforced
+    if !(binding.state == BindingState::Enforced
+        || (allow_detached && binding.state == BindingState::Detached))
         || request.agent_id != detail.case.agent_id
         || request.agent_id != evidence.identity.agent_id
         || request.session_id != detail.case.session_id
@@ -67,11 +114,22 @@ pub(super) fn resolve_policy(
         return None;
     }
     let compiled = parse_compiled_policy(&request.policy_dsl, CompiledMode::Audit)?;
+    let source_policy_snapshot = source_policy_snapshot?;
+    let source_policy = source_policy_snapshot.policy().ok()?;
+    if source_policy.mode != PolicyMode::Audit
+        || source_policy.policy_id != request.policy_id
+        || source_policy.revision.to_string() != request.policy_revision
+        || source_policy.taint_label != "CREDENTIAL"
+        || source_policy.source_patterns.as_slice() != [compiled.source_path.as_str()]
+        || source_policy.trusted_endpoints != compiled.trusted_endpoints
+    {
+        return None;
+    }
     Some(ResolvedPolicy {
         detail,
         binding,
         source_path: compiled.source_path,
-        trusted_endpoints: compiled.trusted_endpoints,
+        source_policy_snapshot,
     })
 }
 
@@ -81,17 +139,7 @@ pub(super) fn enforce_request(
     root_pid: i32,
     process_start_time: u64,
 ) -> Option<ApplyCredentialPolicy> {
-    let policy = CredentialExfiltrationPolicy {
-        policy_id: context.binding.request.policy_id.clone(),
-        revision: context.binding.request.policy_revision.parse().ok()?,
-        source_patterns: vec![context.source_path.clone()],
-        trusted_endpoints: context.trusted_endpoints.clone(),
-        taint_label: "CREDENTIAL".into(),
-        taint_ttl_secs: CREDENTIAL_TAINT_TTL_SECS,
-        destination_scope: DestinationScope::PublicIpv4,
-        mode: PolicyMode::Enforce,
-    };
-    policy.validate().ok()?;
+    let policy = credential_policy(context, PolicyMode::Enforce)?;
     Some(ApplyCredentialPolicy {
         binding_id,
         agent_id: context.binding.request.agent_id.clone(),
@@ -100,6 +148,20 @@ pub(super) fn enforce_request(
         process_start_time,
         policy,
     })
+}
+
+pub(super) fn source_policy_snapshot(context: &ResolvedPolicy) -> CredentialPolicySnapshot {
+    context.source_policy_snapshot.clone()
+}
+
+fn credential_policy(
+    context: &ResolvedPolicy,
+    mode: PolicyMode,
+) -> Option<CredentialExfiltrationPolicy> {
+    let mut policy = context.source_policy_snapshot.policy().ok()?.clone();
+    policy.mode = mode;
+    policy.validate().ok()?;
+    Some(policy)
 }
 
 pub(super) fn live_candidates(

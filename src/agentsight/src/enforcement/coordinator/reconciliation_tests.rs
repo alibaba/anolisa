@@ -217,6 +217,7 @@ fn request(id: &str) -> ApplyPolicy {
         policy_id: "reconciliation-policy".into(),
         policy_revision: "revision-1".into(),
         policy_dsl: "label AGENT".into(),
+        policy_mode: None,
     }
 }
 
@@ -272,6 +273,7 @@ fn credential_binding(request: &ApplyCredentialPolicy, domain_id: u32) -> Bindin
                 "mode audit ttl {}\nsource CREDENTIAL = file \"/tmp/credential\"",
                 request.policy.taint_ttl_secs
             ),
+            policy_mode: Some(request.policy.mode),
         },
         domain_id,
     )

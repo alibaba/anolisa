@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,8 +9,9 @@ use actix_web::http::StatusCode;
 use actix_web::test as awtest;
 use actix_web::{App, web};
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, Binding, BindingState, EventIdentity, FileAction, SecurityEvent,
-    SecurityEventKind,
+    Binding, BindingState, CredentialExfiltrationPolicy, CredentialPolicySnapshot,
+    DestinationScope, EventIdentity, FileAction, PolicyMode, ReplacePolicy, ReplacementPolicy,
+    SecurityEvent, SecurityEventKind,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -20,7 +22,9 @@ use super::{
     case_detail_view, failure_summary, start_reconciler, stop_reconciler, trusted_candidates,
 };
 use crate::config::ServerAuthConfig;
-use crate::enforcement::{ApplyPolicy, read_process_start_time};
+use crate::enforcement::{
+    ApplyPolicy, TransitionDirection, TransitionKey, read_process_start_time,
+};
 use crate::grader::EvaluationStore;
 use crate::health::store::AgentRole;
 use crate::health::{AgentHealthState, AgentHealthStatus, HealthStore};
@@ -34,6 +38,8 @@ use crate::security::{
 #[derive(Default)]
 struct FakeEnforcer {
     bindings: Mutex<Vec<Binding>>,
+    policy_snapshots: Mutex<HashMap<Uuid, CredentialPolicySnapshot>>,
+    transitions: Mutex<HashMap<TransitionKey, (ReplacePolicy, Binding)>>,
     apply_count: AtomicUsize,
 }
 
@@ -42,32 +48,112 @@ impl ContainmentEnforcer for FakeEnforcer {
         std::time::Duration::from_secs(20)
     }
 
-    fn apply_credential_policy(
+    fn begin_transition(
         &self,
-        request: ApplyCredentialPolicy,
+        key: TransitionKey,
+        transition: ReplacePolicy,
     ) -> Result<StampedBinding, ContainmentEnforcerError> {
         self.apply_count.fetch_add(1, Ordering::AcqRel);
-        let source = request
-            .policy
-            .source_patterns
-            .first()
-            .cloned()
-            .unwrap_or_default();
-        Ok(StampedBinding::stable(Binding {
-            request: ApplyPolicy {
-                binding_id: request.binding_id,
-                agent_id: request.agent_id,
-                session_id: request.session_id,
-                root_pid: request.root_pid,
-                process_start_time: request.process_start_time,
-                policy_id: request.policy.policy_id,
-                policy_revision: request.policy.revision.to_string(),
-                policy_dsl: policy("block", &source),
+        let binding = match transition.replacement.clone() {
+            ReplacementPolicy::Credential(request) => {
+                self.policy_snapshots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        request.binding_id,
+                        CredentialPolicySnapshot::capture(request.policy.clone())
+                            .expect("fixture target policy should be valid"),
+                    );
+                let source = request
+                    .policy
+                    .source_patterns
+                    .first()
+                    .cloned()
+                    .unwrap_or_default();
+                Binding {
+                    request: ApplyPolicy {
+                        binding_id: request.binding_id,
+                        agent_id: request.agent_id,
+                        session_id: request.session_id,
+                        root_pid: request.root_pid,
+                        process_start_time: request.process_start_time,
+                        policy_id: request.policy.policy_id,
+                        policy_revision: request.policy.revision.to_string(),
+                        policy_dsl: policy("block", &source),
+                        policy_mode: Some(request.policy.mode),
+                    },
+                    state: BindingState::Enforced,
+                    message: None,
+                    domain_id: Some(1),
+                }
+            }
+            ReplacementPolicy::Generic(request) => Binding {
+                request,
+                state: BindingState::Enforced,
+                message: None,
+                domain_id: transition.expected.domain_id.or(Some(1)),
             },
-            state: BindingState::Enforced,
-            message: None,
-            domain_id: Some(1),
-        }))
+        };
+        let mut bindings = self
+            .bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for existing in bindings.iter_mut() {
+            if existing.request.binding_id == transition.expected.request.binding_id {
+                existing.state = BindingState::Detached;
+                existing.domain_id = None;
+            }
+        }
+        match bindings
+            .iter_mut()
+            .find(|existing| existing.request.binding_id == binding.request.binding_id)
+        {
+            Some(existing) => *existing = binding.clone(),
+            None => bindings.push(binding.clone()),
+        }
+        drop(bindings);
+        self.transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, (transition, binding.clone()));
+        Ok(StampedBinding::stable(binding))
+    }
+
+    fn resume_transition(
+        &self,
+        key: &TransitionKey,
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        self.transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .map(|(_, binding)| binding.clone())
+            .map(StampedBinding::stable)
+            .ok_or(ContainmentEnforcerError::MissingTransition(key.action_id))
+    }
+
+    fn begin_reverse_transition(
+        &self,
+        action_id: Uuid,
+    ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        let forward_key = TransitionKey {
+            action_id,
+            direction: TransitionDirection::Forward,
+        };
+        let (request, acknowledgement) = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&forward_key)
+            .cloned()
+            .ok_or(ContainmentEnforcerError::MissingTransition(action_id))?;
+        self.begin_transition(
+            TransitionKey {
+                action_id,
+                direction: TransitionDirection::Reverse,
+            },
+            request.reverse(acknowledgement),
+        )
     }
 
     fn detach(&self, _: Uuid) -> Result<(), String> {
@@ -81,6 +167,18 @@ impl ContainmentEnforcer for FakeEnforcer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
         ))
+    }
+
+    fn credential_policy_snapshot(
+        &self,
+        binding_id: Uuid,
+    ) -> Result<Option<CredentialPolicySnapshot>, ContainmentEnforcerError> {
+        Ok(self
+            .policy_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&binding_id)
+            .cloned())
     }
 
     fn lease_ready(
@@ -126,6 +224,15 @@ impl ApiFixture {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(source_binding(source_binding_id));
+        enforcer
+            .policy_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                source_binding_id,
+                CredentialPolicySnapshot::capture(source_policy())
+                    .expect("fixture source policy should be valid"),
+            );
         let event = evidence(source_binding_id);
         store.insert_event(&event).expect("evidence should persist");
         let mut process_event = evidence(Uuid::new_v4());
@@ -593,6 +700,7 @@ fn action_with_failure(
         action_id: Uuid::new_v4(),
         case_id: Uuid::nil(),
         binding_id: Uuid::new_v4(),
+        source_binding_id: Some(Uuid::new_v4()),
         agent_id: "hermes-test".into(),
         root_pid: 42,
         process_start_time: 7,
@@ -659,10 +767,24 @@ fn source_binding(binding_id: Uuid) -> Binding {
             policy_id: "credential-exfiltration".into(),
             policy_revision: "3".into(),
             policy_dsl: policy("notify", "/root/secret.txt"),
+            policy_mode: Some(PolicyMode::Audit),
         },
         state: BindingState::Enforced,
         message: None,
         domain_id: Some(1),
+    }
+}
+
+fn source_policy() -> CredentialExfiltrationPolicy {
+    CredentialExfiltrationPolicy {
+        policy_id: "credential-exfiltration".into(),
+        revision: 3,
+        source_patterns: vec!["/root/secret.txt".into()],
+        trusted_endpoints: vec!["trusted.example:443".into()],
+        taint_label: "CREDENTIAL".into(),
+        taint_ttl_secs: 300,
+        destination_scope: DestinationScope::PublicIpv4,
+        mode: PolicyMode::Audit,
     }
 }
 

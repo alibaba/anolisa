@@ -4,33 +4,35 @@ pub(super) mod enforcer;
 mod pending;
 mod policy;
 mod reconciler;
+mod rollback;
 mod worker;
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use agentsight_enforcement_protocol::{ReplacePolicy, ReplacementPolicy, ReplacementSource};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use self::enforcer::{ContainmentEnforcer, ContainmentEnforcerError};
-use self::pending::{record_attach_failed, record_direct_pending_unavailable};
+use self::pending::{now_ns, record_attach_failed, record_direct_pending_unavailable};
 use self::policy::{
-    ResolvedPolicy, acknowledgement_matches, enforce_request, existing_action, live_candidates,
-    live_lifecycle, resolve_policy, sanitize_failure, select_candidate, validate_duration,
-    validate_process_identity, validate_requested_by,
+    ResolvedPolicy, acknowledgement_matches, enforce_request, exact_binding, existing_action,
+    live_candidates, live_lifecycle, resolve_policy, resolve_transition_policy, sanitize_failure,
+    select_candidate, source_policy_snapshot, validate_duration, validate_process_identity,
+    validate_requested_by,
 };
 use super::{
     ContainmentAction, ContainmentActivationResult, ContainmentClaimResult,
     ContainmentFailureStage, ContainmentLifecycle, RiskCaseDetail, RiskCaseStatus, SecurityStore,
     SecurityStoreError,
 };
-use crate::enforcement::read_process_start_time;
+use crate::enforcement::{TransitionDirection, TransitionKey, read_process_start_time};
 
 const DEFAULT_DURATION_SECS: u64 = 900;
 const MIN_DURATION_SECS: u64 = 60;
 const MAX_DURATION_SECS: u64 = 86_400;
-const CLEANUP_RETRY_DELAY_NS: u64 = 1_000_000_000;
 
 /// User-selected process and duration for one containment request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,8 +252,14 @@ impl ContainmentCoordinator {
             return existing_action(existing, &request, process_start_time);
         }
         let context = self.context_from_detail(detail)?;
-        let process_start_time = if request.root_pid == context.binding.request.root_pid {
-            validate_process_identity(request.root_pid, context.binding.request.process_start_time)?
+        let process_start_time = if request.root_pid == context.binding.request.root_pid
+            && validate_process_identity(
+                request.root_pid,
+                context.binding.request.process_start_time,
+            )
+            .is_ok()
+        {
+            context.binding.request.process_start_time
         } else {
             select_candidate(&context.detail.case.agent_id, request.root_pid, candidates)?
                 .process_start_time
@@ -262,6 +270,7 @@ impl ContainmentCoordinator {
         let binding_id = Uuid::new_v4();
         let apply = enforce_request(&context, binding_id, request.root_pid, process_start_time)
             .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
+        let source_policy = source_policy_snapshot(&context);
         let expires_at_ns = request
             .duration_secs
             .map(|duration| now.saturating_add(duration.saturating_mul(1_000_000_000)));
@@ -269,6 +278,7 @@ impl ContainmentCoordinator {
             action_id: Uuid::new_v4(),
             case_id,
             binding_id,
+            source_binding_id: Some(context.binding.request.binding_id),
             agent_id: context.detail.case.agent_id.clone(),
             root_pid: request.root_pid,
             process_start_time,
@@ -295,8 +305,27 @@ impl ContainmentCoordinator {
             }
         }
 
-        let stamped = match self.enforcer.apply_credential_policy(apply.clone()) {
+        let transition_key = TransitionKey {
+            action_id: action.action_id,
+            direction: TransitionDirection::Forward,
+        };
+        let stamped = match self.enforcer.begin_transition(
+            transition_key,
+            ReplacePolicy {
+                expected: context.binding.clone(),
+                source: ReplacementSource::Credential(source_policy),
+                replacement: ReplacementPolicy::Credential(apply.clone()),
+            },
+        ) {
             Ok(stamped) => stamped,
+            Err(ContainmentEnforcerError::MissingTransition(_)) => {
+                return record_direct_pending_unavailable(
+                    &self.store,
+                    action,
+                    now_ns(),
+                    "persisted policy transition disappeared",
+                );
+            }
             Err(ContainmentEnforcerError::Unavailable(message)) => {
                 return record_direct_pending_unavailable(&self.store, action, now_ns(), &message);
             }
@@ -359,6 +388,54 @@ impl ContainmentCoordinator {
         }
     }
 
+    /// Restores the audit policy before removing one live containment binding.
+    ///
+    /// Returns `false` when the binding does not belong to a live containment
+    /// action, allowing the generic enforcement endpoint to handle it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence, ownership, or privileged-enforcer failure.
+    pub fn remove_binding(&self, binding_id: Uuid) -> Result<bool, ContainmentError> {
+        let Some(action) = self.store.containment_action_by_binding(binding_id)? else {
+            return Ok(false);
+        };
+        if action.lifecycle_state == ContainmentLifecycle::Expired {
+            return Ok(true);
+        }
+        if action.lifecycle_state == ContainmentLifecycle::Failed {
+            return Err(ContainmentError::CleanupRequired {
+                action_id: action.action_id,
+                binding_id,
+                reason: action
+                    .failure_reason
+                    .unwrap_or_else(|| "audit restoration exhausted its retry budget".into()),
+            });
+        }
+        let current_time_ns = now_ns();
+        if !self
+            .store
+            .request_containment_expiry(binding_id, current_time_ns)?
+        {
+            return Err(ContainmentError::ClaimLost(action.action_id));
+        }
+        self.reconcile_action(action.action_id, current_time_ns)?;
+        let restored = self
+            .store
+            .containment_action(action.action_id)?
+            .ok_or(ContainmentError::ClaimLost(action.action_id))?;
+        if restored.lifecycle_state != ContainmentLifecycle::Expired {
+            return Err(ContainmentError::CleanupRequired {
+                action_id: action.action_id,
+                binding_id,
+                reason: restored.failure_reason.unwrap_or_else(|| {
+                    "requested containment action did not restore audit ownership".into()
+                }),
+            });
+        }
+        Ok(true)
+    }
+
     fn case_context(&self, case_id: Uuid) -> Result<ResolvedPolicy, ContainmentError> {
         let detail = self.case_detail(case_id)?;
         self.context_from_detail(detail)
@@ -394,92 +471,22 @@ impl ContainmentCoordinator {
             .bindings()
             .map_err(|error| ContainmentError::Enforcer(sanitize_failure(&error.to_string())))?;
         let (bindings, _) = snapshot.into_parts();
-        resolve_policy(detail, bindings).ok_or(ContainmentError::SourcePolicyUnavailable(case_id))
-    }
-
-    fn detach_and_fail(
-        &self,
-        action: &mut ContainmentAction,
-        stage: ContainmentFailureStage,
-        message: &str,
-    ) -> Result<(), ContainmentError> {
-        let reason = sanitize_failure(message);
-        let claimed_at_ns = action.updated_at_ns;
-        let current_time_ns = now_ns();
-        let Some(mut cleanup) = self.store.begin_containment_cleanup(
-            action,
-            ContainmentLifecycle::Pending,
-            claimed_at_ns,
-            current_time_ns,
-            reason.clone(),
-        )?
-        else {
-            return Err(ContainmentError::ClaimLost(action.action_id));
-        };
-        let cleanup_claim_ns = cleanup.updated_at_ns;
-        match self.enforcer.detach(action.binding_id) {
-            Ok(()) => {
-                cleanup.lifecycle_state = ContainmentLifecycle::Failed;
-                cleanup.failure_stage = Some(stage);
-                cleanup.failure_reason = Some(reason);
-                cleanup.next_retry_at_ns = None;
-                cleanup.updated_at_ns = now_ns().max(cleanup_claim_ns.saturating_add(1));
-                self.finish_direct_claim(
-                    &cleanup,
-                    ContainmentLifecycle::Expiring,
-                    cleanup_claim_ns,
-                )?;
-                *action = cleanup;
-                Ok(())
-            }
-            Err(error) => {
-                let reason = sanitize_failure(&format!("{message}; detach failed: {error}"));
-                cleanup.failure_reason = Some(reason.clone());
-                cleanup.attempt_count = cleanup.attempt_count.saturating_add(1);
-                cleanup.next_retry_at_ns =
-                    Some(current_time_ns.saturating_add(CLEANUP_RETRY_DELAY_NS));
-                cleanup.updated_at_ns = now_ns().max(cleanup_claim_ns.saturating_add(1));
-                self.finish_direct_claim(
-                    &cleanup,
-                    ContainmentLifecycle::Expiring,
-                    cleanup_claim_ns,
-                )?;
-                *action = cleanup;
-                Err(ContainmentError::CleanupRequired {
-                    action_id: action.action_id,
-                    binding_id: action.binding_id,
-                    reason,
-                })
-            }
-        }
-    }
-
-    fn finish_direct_claim(
-        &self,
-        action: &ContainmentAction,
-        claimed_lifecycle: ContainmentLifecycle,
-        claimed_at_ns: u64,
-    ) -> Result<(), ContainmentError> {
-        if self
-            .store
-            .finish_containment_reconciliation(action, claimed_lifecycle, claimed_at_ns)?
-        {
-            return Ok(());
-        }
-        Err(ContainmentError::ClaimLost(action.action_id))
+        let source_binding_id = detail
+            .evidence
+            .first()
+            .map(|event| event.identity.binding_id)
+            .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))?;
+        let source_policy_snapshot = self
+            .enforcer
+            .credential_policy_snapshot(source_binding_id)
+            .map_err(|error| ContainmentError::Enforcer(sanitize_failure(&error.to_string())))?;
+        resolve_policy(detail, bindings, source_policy_snapshot)
+            .ok_or(ContainmentError::SourcePolicyUnavailable(case_id))
     }
 }
 
 fn duration_ns(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-}
-
-fn now_ns() -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    u64::try_from(nanos).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

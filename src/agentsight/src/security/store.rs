@@ -232,6 +232,7 @@ impl SecurityStore {
                 action_id TEXT PRIMARY KEY,
                 case_id TEXT NOT NULL,
                 binding_id TEXT NOT NULL UNIQUE,
+                source_binding_id TEXT,
                 agent_id TEXT NOT NULL,
                 root_pid INTEGER NOT NULL,
                 process_start_time INTEGER NOT NULL,
@@ -256,6 +257,7 @@ impl SecurityStore {
                 ON containment_actions(case_id)
                 WHERE lifecycle_state IN ('pending', 'active', 'expiring');",
         )?;
+        ensure_containment_source_binding_column(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -668,6 +670,26 @@ fn open_connection(path: &Path) -> Result<Connection, SecurityStoreError> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.busy_timeout(std::time::Duration::from_millis(500))?;
     Ok(conn)
+}
+
+fn ensure_containment_source_binding_column(
+    connection: &Connection,
+) -> Result<(), SecurityStoreError> {
+    let exists = {
+        let mut statement = connection.prepare("PRAGMA table_info(containment_actions)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut exists = false;
+        for column in columns {
+            exists |= column? == "source_binding_id";
+        }
+        exists
+    };
+    if exists {
+        return Ok(());
+    }
+    connection
+        .execute_batch("ALTER TABLE containment_actions ADD COLUMN source_binding_id TEXT;")?;
+    Ok(())
 }
 
 impl SecurityEventStore for SecurityStore {

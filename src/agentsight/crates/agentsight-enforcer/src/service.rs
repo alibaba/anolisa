@@ -30,6 +30,9 @@ pub enum ServiceError {
     /// Socket or filesystem setup failed.
     #[error("enforcer service I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    /// Backend cleanup failed during controlled shutdown.
+    #[error("enforcer backend shutdown failed: {0}")]
+    Backend(#[from] BackendError),
 }
 
 /// Local UDS server around one enforcement backend.
@@ -103,6 +106,7 @@ impl<B: EnforcementBackend> EnforcerService<B> {
                 Err(error) => return Err(ServiceError::Io(error)),
             }
         }
+        self.backend.shutdown()?;
         Ok(())
     }
 }
@@ -378,10 +382,18 @@ fn handle_connection<B: EnforcementBackend>(
                 &success_response(request.request_id, ResponseBody::Subscribed),
             )?;
             while let Ok(event) = receiver.recv() {
-                write_frame(
+                if write_frame(
                     &mut stream,
                     &success_response(request.request_id, ResponseBody::SecurityEvent(event)),
-                )?;
+                )
+                .is_err()
+                {
+                    let queued_events = receiver
+                        .try_iter()
+                        .fold(0_u64, |count, _| count.saturating_add(1));
+                    backend.record_security_delivery_loss(queued_events.saturating_add(1));
+                    return Ok(());
+                }
             }
             return Ok(());
         }
@@ -605,10 +617,10 @@ fn rollback_replacement<B: EnforcementBackend>(
         };
     };
     let reverse = request.reverse(target.clone());
+    let expected = reverse.clone();
     match backend.replace(reverse)? {
         ReplaceOutcome::Applied(restored)
-            if restored.request == request.expected.request
-                && restored.state == agentsight_enforcement_protocol::BindingState::Enforced =>
+            if expected.validate_acknowledgement(&restored).is_ok() =>
         {
             Ok(())
         }
@@ -711,6 +723,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::MockBackend;
 
     struct DetachRaceBackend {
         active: Arc<AtomicBool>,
@@ -746,6 +759,7 @@ mod tests {
             policy_id: "fixture-audit".into(),
             policy_revision: "1".into(),
             policy_dsl: "label AGENT".into(),
+            policy_mode: Some(PolicyMode::Audit),
         };
         let mut target = source.clone();
         target.binding_id = Uuid::new_v4();
@@ -760,6 +774,33 @@ mod tests {
             source: ReplacementSource::Generic,
             replacement: ReplacementPolicy::Generic(target),
         }
+    }
+
+    #[test]
+    fn controlled_service_shutdown_detaches_active_bindings() {
+        let backend = Arc::new(MockBackend::new());
+        let request = replacement_policy().expected.request;
+        backend
+            .apply(request)
+            .expect("fixture binding should become active");
+        let socket_path = std::env::temp_dir().join(format!(
+            "as-shutdown-{}.sock",
+            &Uuid::new_v4().to_string()[..8]
+        ));
+        let service = EnforcerService::bind(&socket_path, Arc::clone(&backend), None)
+            .expect("fixture service should bind");
+        let stop = AtomicBool::new(true);
+
+        service
+            .serve_until(&stop)
+            .expect("controlled shutdown should clean the backend");
+
+        assert!(
+            EnforcementBackend::bindings(backend.as_ref())
+                .expect("bindings should remain queryable")
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(socket_path);
     }
 
     impl EnforcementBackend for DetachRaceBackend {
@@ -817,6 +858,8 @@ mod tests {
         fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
             mpsc::sync_channel(1).1
         }
+
+        fn record_security_delivery_loss(&self, _count: u64) {}
     }
 
     #[test]
@@ -972,5 +1015,39 @@ mod tests {
             result,
             Err(error) if error.code == REQUIRED_SUBSCRIPTION_UNAVAILABLE
         ));
+    }
+
+    #[test]
+    fn replacement_rollback_accepts_a_restored_live_process_identity() {
+        let backend = crate::MockBackend::new();
+        let source_request = replacement_policy().expected.request;
+        let source = backend
+            .apply(source_request.clone())
+            .expect("source policy should apply");
+        let mut target_request = source_request;
+        target_request.binding_id = Uuid::new_v4();
+        target_request.policy_id = "fixture-enforce".into();
+        target_request.root_pid = 77;
+        target_request.process_start_time = 123;
+        let replacement = ReplacePolicy {
+            expected: source,
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(target_request),
+        };
+        let outcome = backend
+            .replace(replacement.clone())
+            .expect("replacement should apply");
+
+        rollback_replacement(&backend, &replacement, &outcome)
+            .expect("rollback should accept the restored live process identity");
+
+        let restored = backend
+            .bindings()
+            .expect("bindings should load")
+            .into_iter()
+            .find(|binding| binding.request.binding_id == replacement.expected.request.binding_id)
+            .expect("source policy should be restored");
+        assert_eq!(restored.request.root_pid, 77);
+        assert_eq!(restored.request.process_start_time, 123);
     }
 }

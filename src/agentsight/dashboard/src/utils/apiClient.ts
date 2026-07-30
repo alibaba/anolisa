@@ -127,6 +127,7 @@ export interface EnforcementHealth {
 }
 
 export interface EnforcementCapabilities {
+  max_active_bindings?: number | null;
   credential_observe: boolean;
   credential_audit: boolean;
   credential_enforce: boolean;
@@ -145,6 +146,7 @@ export interface EnforcementBinding {
     policy_id: string;
     policy_revision: string;
     policy_dsl: string;
+    policy_mode?: EnforcementPolicyMode | null;
   };
   state: 'pending' | 'enforced' | 'failed' | 'degraded' | 'detaching' | 'detached';
   message: string | null;
@@ -1082,6 +1084,9 @@ export interface SecuritySummary {
   by_result: Record<string, number>;
   affected_sessions: number;
   affected_runs: number;
+  risk_cases_total?: number;
+  risk_cases_open?: number;
+  risk_cases_blocked?: number;
   latest_events: SecurityEventRecord[];
   [key: string]: unknown;
 }
@@ -1270,6 +1275,30 @@ export interface SecurityContainmentPlan {
   min_duration_secs: number;
   max_duration_secs: number;
   existing_action: SecurityContainmentAction | null;
+}
+
+export function containmentTargetCandidates(
+  plan: SecurityContainmentPlan,
+  health: EnforcementHealth | null,
+): SecurityContainmentCandidate[] {
+  if (plan.original_target_valid && plan.original_target) {
+    return [plan.original_target];
+  }
+  if (
+    health?.ready !== true
+    || health.capabilities.alternate_pid_retarget !== true
+  ) {
+    return [];
+  }
+  return plan.candidates;
+}
+
+export function defaultContainmentTargetPid(
+  plan: SecurityContainmentPlan,
+  health: EnforcementHealth | null,
+): number | null {
+  const candidates = containmentTargetCandidates(plan, health);
+  return candidates.length === 1 ? candidates[0].root_pid : null;
 }
 
 export interface SecurityContainmentRequest {
@@ -1606,6 +1635,10 @@ export async function reviewSecurityCase(
       body: JSON.stringify({ status }),
     },
   );
+  if (response.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
   const body = await response.json().catch(() => null) as SecurityApiResponse<SecurityRiskCase> | {
     error?: SecurityRestError;
   } | null;

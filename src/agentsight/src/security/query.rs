@@ -213,6 +213,9 @@ pub struct ContainmentAction {
     pub case_id: Uuid,
     /// Enforcement binding created for this action.
     pub binding_id: Uuid,
+    /// Exact audit binding replaced by this action, absent only for legacy rows.
+    #[serde(default)]
+    pub source_binding_id: Option<Uuid>,
     /// Product Agent identity used for correlation.
     pub agent_id: String,
     /// Selected process-tree root.

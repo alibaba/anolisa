@@ -386,19 +386,21 @@ impl EnforcementBackend for MockBackend {
     fn subscribe_security_events(&self) -> Receiver<SecurityEvent> {
         self.security_events.subscribe()
     }
+
+    fn record_security_delivery_loss(&self, count: u64) {
+        self.security_events.record_delivery_loss(count);
+    }
 }
 
 fn mock_validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode {
     match error {
         ReplaceValidationError::CredentialPolicy(_)
         | ReplaceValidationError::SourcePolicySnapshot(_) => ReplaceFailureCode::CompileFailure,
-        ReplaceValidationError::ProcessStartTimeMismatch => ReplaceFailureCode::StaleProcess,
         ReplaceValidationError::SameBindingId
         | ReplaceValidationError::SourceNotEnforced
         | ReplaceValidationError::SourceDomainMissing
         | ReplaceValidationError::AgentMismatch
         | ReplaceValidationError::SessionMismatch
-        | ReplaceValidationError::RootPidMismatch
         | ReplaceValidationError::SourcePolicyMismatch
         | ReplaceValidationError::TargetAcknowledgementMismatch
         | ReplaceValidationError::RuntimeDomainMismatch => ReplaceFailureCode::BindingConflict,
@@ -443,6 +445,7 @@ fn mock_credential_request(
             policy_id: policy.policy_id.clone(),
             policy_revision: policy.revision.to_string(),
             policy_dsl,
+            policy_mode: Some(policy.mode),
         },
         policy,
     ))
@@ -528,6 +531,7 @@ mod tests {
             policy_id: "policy".into(),
             policy_revision: "revision".into(),
             policy_dsl: "label AGENT".into(),
+            policy_mode: None,
         }
     }
 
@@ -582,6 +586,24 @@ mod tests {
             vec![applied]
         );
         assert_ne!(source.request.binding_id, target.binding_id);
+    }
+
+    #[test]
+    fn replace_retargets_runtime_ownership_to_an_alternate_process() {
+        let backend = MockBackend::new();
+        let source = backend.apply(request()).expect("source should apply");
+        let mut target = request();
+        target.root_pid = 77;
+        target.process_start_time = 123;
+
+        let outcome = backend
+            .replace(replacement(source, target.clone()))
+            .expect("alternate process replacement should complete");
+
+        let ReplaceOutcome::Applied(applied) = outcome else {
+            panic!("alternate process should own the runtime");
+        };
+        assert_eq!(applied.request, target);
     }
 
     #[test]

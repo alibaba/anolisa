@@ -1,11 +1,21 @@
 //! Shared persistence for retryable Pending containment actions.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use super::{
     ContainmentAction, ContainmentError, ContainmentFailureStage, ContainmentLifecycle,
     SecurityStore, sanitize_failure,
 };
 
 const SECOND_NS: u64 = 1_000_000_000;
+
+pub(super) fn now_ns() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    u64::try_from(nanos).unwrap_or(u64::MAX)
+}
 
 pub(super) fn record_pending_unavailable(
     store: &SecurityStore,

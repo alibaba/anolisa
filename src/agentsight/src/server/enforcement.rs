@@ -3,6 +3,7 @@
 #[cfg(test)]
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use actix_web::{HttpResponse, delete, get, post, web};
 use agentsight_enforcement_protocol::{
@@ -130,7 +131,40 @@ pub(super) async fn apply_credential_binding(
             );
         }
     };
+    let audit_service = Arc::clone(&data.audit_service);
+    let policy = request.policy.clone();
+    let registered =
+        web::block(move || audit_service.register_policy_revision(&policy, unix_epoch_ns())).await;
+    match registered {
+        Ok(Ok(())) => {}
+        Ok(Err(agentsight_audit::AuditError::PolicyRevisionConflict { .. })) => {
+            return error_response(
+                actix_web::http::StatusCode::CONFLICT,
+                "policy_revision_conflict",
+                "policy revision already exists with different contents",
+                false,
+            );
+        }
+        Ok(Err(error)) => {
+            log::error!("credential policy revision persistence failed: {error}");
+            return error_response(
+                actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+                "policy_revision_store_unavailable",
+                "policy revision could not be persisted",
+                true,
+            );
+        }
+        Err(error) => return blocking_error(error),
+    }
     run_binding(move || coordinator.apply_credential_policy(request)).await
+}
+
+fn unix_epoch_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 /// Lists AgentSight's persisted desired binding states.
@@ -154,10 +188,27 @@ pub(super) async fn detach_binding(
     data: web::Data<AppState>,
     binding_id: web::Path<Uuid>,
 ) -> HttpResponse {
+    let binding_id = binding_id.into_inner();
+    if let Some(containment) = data.containment.clone() {
+        match web::block(move || containment.remove_binding(binding_id)).await {
+            Ok(Ok(true)) => return HttpResponse::NoContent().finish(),
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => {
+                log::error!("containment binding restoration failed: {error}");
+                return error_response(
+                    actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "containment_restore_failed",
+                    "containment policy restoration failed",
+                    true,
+                );
+            }
+            Err(error) => return blocking_error(error),
+        }
+    }
     let Some(coordinator) = data.enforcement.clone() else {
         return unavailable();
     };
-    match web::block(move || coordinator.detach(binding_id.into_inner())).await {
+    match web::block(move || coordinator.detach(binding_id)).await {
         Ok(Ok(())) => HttpResponse::NoContent().finish(),
         Ok(Err(error)) => coordinator_error(error),
         Err(error) => blocking_error(error),
@@ -266,6 +317,7 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
         policy_id: format!("agentsight-file-open:{binding_id}"),
         policy_revision: FILE_POLICY_REVISION.into(),
         policy_dsl,
+        policy_mode: Some(PolicyMode::Enforce),
     })
 }
 
@@ -710,6 +762,7 @@ mod tests {
             policy_id: "policy-1".into(),
             policy_revision: "revision-1".into(),
             policy_dsl: "label AGENT".into(),
+            policy_mode: None,
         };
         let binding = public_binding(Binding {
             request,

@@ -130,6 +130,9 @@ pub struct ApplyPolicy {
     pub policy_revision: String,
     /// ActPlane DSL compiled only by the privileged adapter.
     pub policy_dsl: String,
+    /// Structured product mode retained for API consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_mode: Option<PolicyMode>,
 }
 
 /// Lifecycle state acknowledged for a binding.
@@ -178,6 +181,9 @@ pub enum Effect {
 /// Explicit operations supported by the selected enforcement backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnforcementCapabilities {
+    /// Maximum concurrently active bindings, or no advertised limit.
+    #[serde(default)]
+    pub max_active_bindings: Option<u32>,
     /// Whether credential policies may run without changing operations.
     pub credential_observe: bool,
     /// Whether credential policies may record matching decisions.
@@ -196,6 +202,7 @@ impl EnforcementCapabilities {
     /// Returns a safe fallback for peers that did not send capability metadata.
     pub const fn unsupported() -> Self {
         Self {
+            max_active_bindings: Some(0),
             credential_observe: false,
             credential_audit: false,
             credential_enforce: false,
@@ -208,6 +215,7 @@ impl EnforcementCapabilities {
     /// Returns the capabilities implemented by the production ActPlane adapter.
     pub const fn actplane() -> Self {
         Self {
+            max_active_bindings: Some(1),
             credential_observe: true,
             credential_audit: true,
             credential_enforce: false,
@@ -220,6 +228,7 @@ impl EnforcementCapabilities {
     /// Returns the capabilities implemented only by the mock test backend.
     pub const fn mock_development() -> Self {
         Self {
+            max_active_bindings: None,
             credential_observe: true,
             credential_audit: true,
             credential_enforce: true,
@@ -539,7 +548,20 @@ mod tests {
             policy_id: "credential-exfiltration".into(),
             policy_revision: "1".into(),
             policy_dsl: "label AGENT".into(),
+            policy_mode: None,
         }
+    }
+
+    #[test]
+    fn apply_policy_round_trip_preserves_structured_mode() {
+        let mut policy = replacement_apply(Uuid::new_v4());
+        policy.policy_mode = Some(PolicyMode::Observe);
+
+        let encoded = serde_json::to_vec(&policy).expect("policy should serialize");
+        let decoded: ApplyPolicy =
+            serde_json::from_slice(&encoded).expect("policy should deserialize");
+
+        assert_eq!(decoded.policy_mode, Some(PolicyMode::Observe));
     }
 
     fn replacement_credential(binding_id: Uuid) -> ApplyCredentialPolicy {
@@ -792,14 +814,12 @@ mod tests {
     }
 
     #[test]
-    fn replacement_requires_the_exact_source_process_identity() {
+    fn replacement_preserves_agent_scope_while_allowing_process_retarget() {
         let expected = replacement_binding(BindingState::Enforced);
         for mutate in [
             |target: &mut ApplyPolicy| target.agent_id = "other-agent".into(),
             |target: &mut ApplyPolicy| target.session_id = Some("other-session".into()),
-            |target: &mut ApplyPolicy| target.root_pid += 1,
-            |target: &mut ApplyPolicy| target.process_start_time += 1,
-        ] as [fn(&mut ApplyPolicy); 4]
+        ] as [fn(&mut ApplyPolicy); 2]
         {
             let mut target = replacement_apply(Uuid::new_v4());
             mutate(&mut target);
@@ -810,6 +830,16 @@ mod tests {
             };
             assert!(request.validate().is_err());
         }
+
+        let mut target = replacement_apply(Uuid::new_v4());
+        target.root_pid += 1;
+        target.process_start_time += 1;
+        let request = ReplacePolicy {
+            expected,
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(target),
+        };
+        assert_eq!(request.validate(), Ok(()));
     }
 
     #[test]
@@ -878,8 +908,11 @@ mod tests {
             ),
             replacement: ReplacementPolicy::Credential(target.clone()),
         };
+        let mut target_request = replacement_apply(target.binding_id);
+        target_request.root_pid = 77;
+        target_request.process_start_time = 202;
         let target_acknowledgement = Binding {
-            request: replacement_apply(target.binding_id),
+            request: target_request,
             state: BindingState::Enforced,
             message: None,
             domain_id: forward.expected.domain_id,
@@ -903,6 +936,11 @@ mod tests {
         assert_eq!(restored.policy, source_policy);
         assert_eq!(restored.policy.taint_ttl_secs, 300);
         assert_eq!(restored.binding_id, forward.expected.request.binding_id);
+        assert_eq!(restored.root_pid, reverse.expected.request.root_pid);
+        assert_eq!(
+            restored.process_start_time,
+            reverse.expected.request.process_start_time
+        );
     }
 
     #[test]
