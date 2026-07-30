@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 concurrency:
   group: agentsight-kernel-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
