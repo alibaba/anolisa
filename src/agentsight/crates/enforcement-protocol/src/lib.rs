@@ -223,7 +223,7 @@ impl EnforcementCapabilities {
             credential_observe: true,
             credential_audit: true,
             credential_enforce: true,
-            policy_handoff: false,
+            policy_handoff: true,
             alternate_pid_retarget: true,
             test_development: true,
         }

@@ -9,12 +9,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use actplane_ifc_compiler::compile_str;
+use actplane_ifc_compiler::{Compiled, compile_str};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
     DestinationClass, Effect, EnforcementCapabilities, EventIdentity, FileAction, HealthStatus,
-    NetworkAction, NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode, SecurityEvent,
-    SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
+    NetworkAction, NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode,
+    ReplaceFailureCode, ReplaceOutcome, ReplacePolicy, ReplaceValidationError, ReplacementPolicy,
+    SecurityEvent, SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
     classify_public_ipv4_destination,
 };
 use ebpf_ifc_engine::capability::{
@@ -38,6 +39,12 @@ struct ActiveBinding {
     reasons: Vec<String>,
     rule_names: Vec<String>,
     label_names: HashMap<u64, String>,
+}
+
+struct PreparedBinding {
+    request: ApplyPolicy,
+    credential_policy: Option<CredentialExfiltrationPolicy>,
+    compiled: Compiled,
 }
 
 struct RuntimeState {
@@ -153,29 +160,11 @@ impl ActPlaneBackend {
         errors
     }
 
-    fn apply_policy(
+    fn prepare_binding(
         &self,
         request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
-    ) -> Result<Binding, BackendError> {
-        let _lifecycle = self.lifecycle();
-        let mut bindings = self.state.bindings();
-        if let Some(existing) = bindings
-            .values()
-            .find(|active| active.binding.request.binding_id == request.binding_id)
-        {
-            return if existing.binding.request == request
-                && existing.credential_policy == credential_policy
-            {
-                Ok(existing.binding.clone())
-            } else {
-                Err(BackendError::BindingConflict(request.binding_id))
-            };
-        }
-        if !bindings.is_empty() {
-            return Err(BackendError::BindingConflict(request.binding_id));
-        }
-
+    ) -> Result<PreparedBinding, BackendError> {
         let actual_start = read_process_start_time(request.root_pid)?;
         if actual_start != request.process_start_time {
             return Err(BackendError::StaleProcess {
@@ -183,6 +172,34 @@ impl ActPlaneBackend {
             });
         }
         let compiled = compile_str(&request.policy_dsl).map_err(BackendError::CompileFailure)?;
+        if compiled
+            .labels
+            .get("COMMAND")
+            .or_else(|| compiled.labels.get("AGENT"))
+            .is_none()
+        {
+            return Err(BackendError::CompileFailure(
+                "policy must declare a COMMAND or AGENT source label".into(),
+            ));
+        }
+        Ok(PreparedBinding {
+            request,
+            credential_policy,
+            compiled,
+        })
+    }
+
+    fn install_prepared_locked(
+        &self,
+        bindings: &mut HashMap<u32, ActiveBinding>,
+        prepared: PreparedBinding,
+        runtime_domain: Option<u32>,
+    ) -> Result<Binding, BackendError> {
+        let PreparedBinding {
+            request,
+            credential_policy,
+            compiled,
+        } = prepared;
         let label = compiled
             .labels
             .get("COMMAND")
@@ -193,7 +210,7 @@ impl ActPlaneBackend {
                     "policy must declare a COMMAND or AGENT source label".into(),
                 )
             })?;
-        let id = domain_id(request.binding_id);
+        let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
         self.engine
             .seed_label_in_domain(request.root_pid, id, label)
             .map_err(|error| kernel_error("seed target process domain", error))?;
@@ -263,6 +280,52 @@ impl ActPlaneBackend {
         );
         Ok(binding)
     }
+
+    fn apply_policy(
+        &self,
+        request: ApplyPolicy,
+        credential_policy: Option<CredentialExfiltrationPolicy>,
+    ) -> Result<Binding, BackendError> {
+        let _lifecycle = self.lifecycle();
+        let mut bindings = self.state.bindings();
+        if let Some(existing) = bindings
+            .values()
+            .find(|active| active.binding.request.binding_id == request.binding_id)
+        {
+            return if existing.binding.request == request
+                && existing.credential_policy == credential_policy
+            {
+                Ok(existing.binding.clone())
+            } else {
+                Err(BackendError::BindingConflict(request.binding_id))
+            };
+        }
+        if !bindings.is_empty() {
+            return Err(BackendError::BindingConflict(request.binding_id));
+        }
+        let prepared = self.prepare_binding(request, credential_policy)?;
+        self.install_prepared_locked(&mut bindings, prepared, None)
+    }
+
+    fn detach_binding_locked(
+        &self,
+        bindings: &mut HashMap<u32, ActiveBinding>,
+        binding_id: Uuid,
+    ) -> Result<(), BackendError> {
+        let Some((id, active)) = bindings
+            .iter()
+            .find(|(_, active)| active.binding.request.binding_id == binding_id)
+            .map(|(id, active)| (*id, active.clone()))
+        else {
+            return Err(BackendError::MissingBinding(binding_id));
+        };
+        let cleanup = self.cleanup_binding(&active.binding.request, id);
+        if !cleanup.is_empty() {
+            return Err(BackendError::KernelFailure(cleanup.join("; ")));
+        }
+        bindings.remove(&id);
+        Ok(())
+    }
 }
 
 impl EnforcementBackend for ActPlaneBackend {
@@ -285,39 +348,97 @@ impl EnforcementBackend for ActPlaneBackend {
         &self,
         request: ApplyCredentialPolicy,
     ) -> Result<Binding, BackendError> {
-        let policy_dsl = compile_credential_exfiltration_policy(&request.policy)?;
-        let credential_policy = request.policy;
-        self.apply_policy(
-            ApplyPolicy {
-                binding_id: request.binding_id,
-                agent_id: request.agent_id,
-                session_id: request.session_id,
-                root_pid: request.root_pid,
-                process_start_time: request.process_start_time,
-                policy_id: credential_policy.policy_id.clone(),
-                policy_revision: credential_policy.revision.to_string(),
-                policy_dsl,
+        let (request, credential_policy) = credential_apply_request(request)?;
+        self.apply_policy(request, Some(credential_policy))
+    }
+
+    fn replace(&self, request: ReplacePolicy) -> Result<ReplaceOutcome, BackendError> {
+        let _lifecycle = self.lifecycle();
+        let bindings = self.state.bindings();
+        let actual = bindings.values().next().cloned();
+
+        if let Err(error) = request.validate() {
+            let exact_source = actual
+                .as_ref()
+                .is_some_and(|active| active.binding == request.expected);
+            return Ok(if exact_source {
+                ReplaceOutcome::SourceRetained {
+                    binding: request.expected,
+                    code: validation_failure_code(&error),
+                }
+            } else {
+                ReplaceOutcome::Conflict {
+                    code: ReplaceFailureCode::BindingConflict,
+                }
+            });
+        }
+
+        let (target_request, target_policy) = match request.replacement.clone() {
+            ReplacementPolicy::Generic(target) => (target, None),
+            ReplacementPolicy::Credential(target) => match credential_apply_request(target) {
+                Ok((target, policy)) => (target, Some(policy)),
+                Err(error) => {
+                    return Ok(preparation_failure(
+                        actual.as_ref(),
+                        &request.expected,
+                        &error,
+                    ));
+                }
             },
-            Some(credential_policy),
-        )
+        };
+        if let Some(active) = actual.as_ref()
+            && active.binding.request == target_request
+        {
+            return if active.credential_policy == target_policy
+                && request.validate_acknowledgement(&active.binding).is_ok()
+            {
+                Ok(ReplaceOutcome::Applied(active.binding.clone()))
+            } else {
+                Ok(ReplaceOutcome::Conflict {
+                    code: ReplaceFailureCode::BindingConflict,
+                })
+            };
+        }
+        if let Some(active) = actual.as_ref()
+            && active.binding != request.expected
+        {
+            return Ok(ReplaceOutcome::Conflict {
+                code: ReplaceFailureCode::BindingConflict,
+            });
+        }
+        let Some(active) = actual.as_ref() else {
+            return Ok(ReplaceOutcome::Conflict {
+                code: ReplaceFailureCode::BindingConflict,
+            });
+        };
+        if active.credential_policy.as_ref()
+            != request
+                .source
+                .credential_snapshot()
+                .map(|snapshot| &snapshot.policy)
+        {
+            return Ok(ReplaceOutcome::SourceRetained {
+                binding: request.expected,
+                code: ReplaceFailureCode::BindingConflict,
+            });
+        }
+        let _prepared_target = match self.prepare_binding(target_request, target_policy) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(preparation_failure(
+                    actual.as_ref(),
+                    &request.expected,
+                    &error,
+                ));
+            }
+        };
+        Ok(unsupported_runtime_handoff(&request.expected))
     }
 
     fn detach(&self, binding_id: Uuid) -> Result<(), BackendError> {
         let _lifecycle = self.lifecycle();
         let mut bindings = self.state.bindings();
-        let Some((id, active)) = bindings
-            .iter()
-            .find(|(_, active)| active.binding.request.binding_id == binding_id)
-            .map(|(id, active)| (*id, active.clone()))
-        else {
-            return Err(BackendError::MissingBinding(binding_id));
-        };
-        let cleanup = self.cleanup_binding(&active.binding.request, id);
-        if !cleanup.is_empty() {
-            return Err(BackendError::KernelFailure(cleanup.join("; ")));
-        }
-        bindings.remove(&id);
-        Ok(())
+        self.detach_binding_locked(&mut bindings, binding_id)
     }
 
     fn bindings(&self) -> Result<Vec<Binding>, BackendError> {
@@ -452,6 +573,77 @@ fn read_process_start_time(pid: i32) -> Result<u64, BackendError> {
         .map_err(|error| BackendError::KernelFailure(format!("read /proc/{pid}/stat: {error}")))?;
     parse_process_start_time(&stat)
         .map_err(|error| BackendError::KernelFailure(format!("parse /proc/{pid}/stat: {error}")))
+}
+
+fn credential_apply_request(
+    request: ApplyCredentialPolicy,
+) -> Result<(ApplyPolicy, CredentialExfiltrationPolicy), BackendError> {
+    let policy_dsl = compile_credential_exfiltration_policy(&request.policy)?;
+    let policy = request.policy;
+    Ok((
+        ApplyPolicy {
+            binding_id: request.binding_id,
+            agent_id: request.agent_id,
+            session_id: request.session_id,
+            root_pid: request.root_pid,
+            process_start_time: request.process_start_time,
+            policy_id: policy.policy_id.clone(),
+            policy_revision: policy.revision.to_string(),
+            policy_dsl,
+        },
+        policy,
+    ))
+}
+
+fn replacement_failure_code(error: &BackendError) -> ReplaceFailureCode {
+    match error {
+        BackendError::BindingConflict(_) | BackendError::MissingBinding(_) => {
+            ReplaceFailureCode::BindingConflict
+        }
+        BackendError::StaleProcess { .. } => ReplaceFailureCode::StaleProcess,
+        BackendError::CompileFailure(_) => ReplaceFailureCode::CompileFailure,
+        BackendError::KernelFailure(_) => ReplaceFailureCode::KernelFailure,
+    }
+}
+
+fn validation_failure_code(error: &ReplaceValidationError) -> ReplaceFailureCode {
+    match error {
+        ReplaceValidationError::CredentialPolicy(_)
+        | ReplaceValidationError::SourcePolicySnapshot(_) => ReplaceFailureCode::CompileFailure,
+        ReplaceValidationError::ProcessStartTimeMismatch => ReplaceFailureCode::StaleProcess,
+        ReplaceValidationError::SameBindingId
+        | ReplaceValidationError::SourceNotEnforced
+        | ReplaceValidationError::SourceDomainMissing
+        | ReplaceValidationError::AgentMismatch
+        | ReplaceValidationError::SessionMismatch
+        | ReplaceValidationError::RootPidMismatch
+        | ReplaceValidationError::SourcePolicyMismatch
+        | ReplaceValidationError::TargetAcknowledgementMismatch
+        | ReplaceValidationError::RuntimeDomainMismatch => ReplaceFailureCode::BindingConflict,
+    }
+}
+
+fn preparation_failure(
+    actual: Option<&ActiveBinding>,
+    expected: &Binding,
+    error: &BackendError,
+) -> ReplaceOutcome {
+    let code = replacement_failure_code(error);
+    if actual.is_some_and(|active| active.binding == *expected) {
+        ReplaceOutcome::SourceRetained {
+            binding: expected.clone(),
+            code,
+        }
+    } else {
+        ReplaceOutcome::Indeterminate { code }
+    }
+}
+
+fn unsupported_runtime_handoff(source: &Binding) -> ReplaceOutcome {
+    ReplaceOutcome::SourceRetained {
+        binding: source.clone(),
+        code: ReplaceFailureCode::UnsupportedHandoff,
+    }
 }
 
 /// Translates the stable credential-exfiltration model into pinned ActPlane DSL.
@@ -1239,6 +1431,33 @@ mod tests {
             .expect("fixture UUID should parse");
         assert_eq!(domain_id(id), domain_id(id));
         assert_ne!(domain_id(id), 0);
+    }
+
+    #[test]
+    fn unsupported_runtime_handoff_retains_source_before_any_kernel_step() {
+        let source = active_binding().binding;
+        let before = source.clone();
+        let outcome = unsupported_runtime_handoff(&source);
+
+        assert_eq!(
+            outcome,
+            ReplaceOutcome::SourceRetained {
+                binding: source.clone(),
+                code: ReplaceFailureCode::UnsupportedHandoff,
+            }
+        );
+        assert_eq!(source, before, "fail-closed handoff must not touch runtime");
+    }
+
+    #[test]
+    fn unsupported_handoff_leaves_pid_reuse_and_concurrent_forks_under_source() {
+        let source = active_binding().binding;
+        let members = [(42, 101), (42, 999), (43, 102), (44, 103)];
+        let before = members;
+        let outcome = unsupported_runtime_handoff(&source);
+
+        assert!(matches!(outcome, ReplaceOutcome::SourceRetained { .. }));
+        assert_eq!(members, before);
     }
 
     #[test]

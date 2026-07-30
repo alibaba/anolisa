@@ -10,8 +10,8 @@ use std::thread;
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, BindingState, Command, Effect, Request, Response, ResponseBody, ViolationEvent,
-    read_frame, write_frame,
+    ApplyPolicy, BindingState, Command, Effect, ReplaceOutcome, ReplacePolicy, ReplacementPolicy,
+    ReplacementSource, Request, Response, ResponseBody, ViolationEvent, read_frame, write_frame,
 };
 use agentsight_enforcer::{BackendError, EnforcementBackend, EnforcerService, MockBackend};
 use uuid::Uuid;
@@ -190,13 +190,31 @@ fn uds_service_dispatches_lifecycle_and_streams_violations() {
     };
     assert_eq!(binding.state, BindingState::Enforced);
 
+    let mut replacement = fixture_apply_policy();
+    replacement.agent_id = apply.agent_id.clone();
+    replacement.session_id = apply.session_id.clone();
+    replacement.root_pid = apply.root_pid;
+    replacement.process_start_time = apply.process_start_time;
+    let replaced = fixture.call(Command::ReplacePolicyLeased {
+        request: ReplacePolicy {
+            expected: binding,
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(replacement.clone()),
+        },
+        required_subscription_id: subscription_id,
+    });
+    let Ok(ResponseBody::Replaced(ReplaceOutcome::Applied(binding))) = replaced.result else {
+        panic!("replace must transfer runtime ownership");
+    };
+    assert_eq!(binding.request, replacement);
+
     let listed = fixture.call(Command::ListBindings);
     let Ok(ResponseBody::Bindings(bindings)) = listed.result else {
         panic!("list must return bindings");
     };
-    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings, vec![binding]);
 
-    let violation = fixture_violation(&apply);
+    let violation = fixture_violation(&replacement);
     fixture
         .backend
         .publish_violation(violation.clone())
@@ -208,7 +226,7 @@ fn uds_service_dispatches_lifecycle_and_streams_violations() {
     assert_eq!(streamed.result, Ok(ResponseBody::Violation(violation)));
 
     let detached = fixture.call(Command::DetachAgent {
-        binding_id: apply.binding_id,
+        binding_id: replacement.binding_id,
     });
     assert!(matches!(detached.result, Ok(ResponseBody::Detached)));
     let listed = fixture.call(Command::ListBindings);

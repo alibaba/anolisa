@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, Command, FrameReader, HealthStatus, ProtocolError,
-    Request, Response, ResponseBody, SecurityEvent, ViolationEvent, read_frame, write_frame,
+    ReplaceOutcome, ReplacePolicy, Request, Response, ResponseBody, SecurityEvent, ViolationEvent,
+    read_frame, write_frame,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -127,6 +128,25 @@ impl EnforcementClient {
         })? {
             ResponseBody::Applied(binding) => Ok(binding),
             body => Err(unexpected("apply credential policy", &body)),
+        }
+    }
+
+    /// Replaces one exact active binding under a required evidence-stream lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, validation, backend, or response-shape error.
+    pub fn replace(
+        &self,
+        request: ReplacePolicy,
+        required_subscription_id: Uuid,
+    ) -> Result<ReplaceOutcome, EnforcementError> {
+        match self.call(Command::ReplacePolicyLeased {
+            request,
+            required_subscription_id,
+        })? {
+            ResponseBody::Replaced(outcome) => Ok(outcome),
+            body => Err(unexpected("replace", &body)),
         }
     }
 

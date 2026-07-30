@@ -14,8 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    Command, PROTOCOL_VERSION, ProtocolError, RemoteError, Request, Response, ResponseBody,
-    read_frame, write_frame,
+    Command, PROTOCOL_VERSION, ProtocolError, RemoteError, ReplaceOutcome, ReplacePolicy, Request,
+    Response, ResponseBody, read_frame, write_frame,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -557,6 +557,22 @@ fn dispatch<B: EnforcementBackend>(
                 )
                 .map(|(binding, _)| ResponseBody::Applied(binding))
         }
+        Command::ReplacePolicy(_) => Err(required_subscription_error(
+            "policy replacement requires a live required subscription lease",
+        )),
+        Command::ReplacePolicyLeased {
+            request,
+            required_subscription_id,
+        } => {
+            let rollback_request = request.clone();
+            required_subscriptions
+                .with_current(
+                    required_subscription_id,
+                    || backend.replace(request),
+                    |outcome| rollback_replacement(backend, &rollback_request, outcome),
+                )
+                .map(ResponseBody::Replaced)
+        }
         Command::DetachAgent { binding_id } => {
             required_subscriptions
                 .serialize_backend_operation(|| backend.detach(binding_id))
@@ -571,6 +587,34 @@ fn dispatch<B: EnforcementBackend>(
             Ok(ResponseBody::Subscribed)
         }
         Command::SubscribeSecurityEvents => Ok(ResponseBody::Subscribed),
+    }
+}
+
+fn rollback_replacement<B: EnforcementBackend>(
+    backend: &B,
+    request: &ReplacePolicy,
+    outcome: &ReplaceOutcome,
+) -> Result<(), BackendError> {
+    let ReplaceOutcome::Applied(target) = outcome else {
+        return if matches!(outcome, ReplaceOutcome::Indeterminate { .. }) {
+            Err(BackendError::KernelFailure(
+                "replacement ownership is indeterminate".into(),
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let reverse = request.reverse(target.clone());
+    match backend.replace(reverse)? {
+        ReplaceOutcome::Applied(restored)
+            if restored.request == request.expected.request
+                && restored.state == agentsight_enforcement_protocol::BindingState::Enforced =>
+        {
+            Ok(())
+        }
+        _ => Err(BackendError::KernelFailure(
+            "replacement rollback could not restore the source".into(),
+        )),
     }
 }
 
@@ -662,7 +706,8 @@ mod tests {
 
     use agentsight_enforcement_protocol::{
         ApplyCredentialPolicy, ApplyPolicy, Binding, CredentialExfiltrationPolicy,
-        DestinationScope, HealthStatus, PolicyMode, SecurityEvent, ViolationEvent,
+        DestinationScope, HealthStatus, PolicyMode, ReplacePolicy, ReplacementPolicy,
+        ReplacementSource, SecurityEvent, ViolationEvent,
     };
 
     use super::*;
@@ -691,6 +736,32 @@ mod tests {
         }
     }
 
+    fn replacement_policy() -> ReplacePolicy {
+        let source = ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "fixture-agent".into(),
+            session_id: None,
+            root_pid: 42,
+            process_start_time: 99,
+            policy_id: "fixture-audit".into(),
+            policy_revision: "1".into(),
+            policy_dsl: "label AGENT".into(),
+        };
+        let mut target = source.clone();
+        target.binding_id = Uuid::new_v4();
+        target.policy_id = "fixture-enforce".into();
+        ReplacePolicy {
+            expected: Binding {
+                request: source,
+                state: agentsight_enforcement_protocol::BindingState::Enforced,
+                message: None,
+                domain_id: Some(1),
+            },
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(target),
+        }
+    }
+
     impl EnforcementBackend for DetachRaceBackend {
         fn health(&self) -> Result<HealthStatus, BackendError> {
             Ok(HealthStatus {
@@ -714,6 +785,12 @@ mod tests {
         ) -> Result<Binding, BackendError> {
             Err(BackendError::KernelFailure(
                 "fixture does not apply credential policies".into(),
+            ))
+        }
+
+        fn replace(&self, _request: ReplacePolicy) -> Result<ReplaceOutcome, BackendError> {
+            Err(BackendError::KernelFailure(
+                "fixture does not replace policies".into(),
             ))
         }
 
@@ -877,6 +954,23 @@ mod tests {
         assert!(matches!(
             result,
             Err(error) if error.code == "required_subscription_unavailable"
+        ));
+    }
+
+    #[test]
+    fn unleased_replacement_is_rejected() {
+        let backend = crate::MockBackend::new();
+        let subscriptions = RequiredSubscriptions::default();
+
+        let result = dispatch(
+            &backend,
+            &subscriptions,
+            Command::ReplacePolicy(replacement_policy()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(error) if error.code == REQUIRED_SUBSCRIPTION_UNAVAILABLE
         ));
     }
 }

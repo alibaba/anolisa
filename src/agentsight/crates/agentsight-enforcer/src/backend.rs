@@ -3,7 +3,8 @@
 use std::sync::mpsc::Receiver;
 
 use agentsight_enforcement_protocol::{
-    ApplyCredentialPolicy, ApplyPolicy, Binding, HealthStatus, SecurityEvent, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, HealthStatus, ReplaceOutcome, ReplacePolicy,
+    SecurityEvent, ViolationEvent,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -58,6 +59,14 @@ pub trait EnforcementBackend: Send + Sync + 'static {
         &self,
         request: ApplyCredentialPolicy,
     ) -> Result<Binding, BackendError>;
+
+    /// Replaces one exact active binding under the backend lifecycle lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend error only when the replacement result cannot be
+    /// represented safely as a typed [`ReplaceOutcome`].
+    fn replace(&self, request: ReplacePolicy) -> Result<ReplaceOutcome, BackendError>;
 
     /// Detaches one binding.
     ///
