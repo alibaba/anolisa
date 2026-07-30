@@ -199,6 +199,20 @@ stored output/input content matches exactly, avoiding duplicate intermediate
 token counts. See the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#statistics--measurement)
 for options and measurement limits.
 
+### Database location
+
+Tokenless stores statistics and reversible-compression data in
+`~/.tokenless/stats.db` and `~/.tokenless/stash.db`. Set one directory for both:
+
+```bash
+export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
+```
+
+The directory must be an absolute path under the real user home. The existing
+`TOKENLESS_STATS_DB`, `TOKENLESS_STASH_DB`, and `--stash-db` overrides take
+precedence when only one database needs a custom path. Configuration remains
+at `~/.tokenless/config.json`.
+
 ## copilot-shell Hooks
 
 The adapter provides hooks that are auto-discovered by copilot-shell via the cosh extension manifest:

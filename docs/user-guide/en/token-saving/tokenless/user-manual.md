@@ -477,12 +477,24 @@ Priority: **env > config.json > default** (per toggle, independent). Empty value
 | `TOKENLESS_STATS_ENABLED` | Override `stats_enabled` | — |
 | `TOKENLESS_SLS_ENABLED` | Override `sls_enabled` | — |
 | `TOKENLESS_COMPRESSION_ENABLED` | Override `compression_enabled` (dry-run toggle) | — |
+| `TOKENLESS_DATA_DIR` | Directory containing `stats.db` and `stash.db` | Absolute path under the real user home |
 | `TOKENLESS_STATS_DB` | Custom stats DB path | Must be under the user's home dir, else ignored + warned |
+| `TOKENLESS_STASH_DB` | Custom stash DB path | Must be under the user's home dir, else ignored + warned |
 | `TOKENLESS_SLS_PATH` | Custom SLS JSONL path | Must be under `/var/log/` or `/tmp/`, else fallback |
 | `TOKENLESS_TOOL_READY_SPEC` | Custom tool-ready-spec path | Must pass trust-path check |
 | `TOKENLESS_ENV_FIX_SCRIPT` | Custom env-fix script path | Must pass trust-path check |
 | `TOKENLESS_PACKAGE_MANAGER` | Override package-manager detection (dnf/yum/apt/apk) | Testing |
 | `TOKENLESS_AGENT_ID` | Agent identity injected by hooks | Set automatically by cosh-extension.json |
+
+Database path priority is:
+
+- Stats: `TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
+- Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
+
+An empty value is treated as unset. `TOKENLESS_DATA_DIR` may name a directory
+that does not exist yet; Tokenless creates it after validating its nearest
+existing ancestor. It does not relocate `~/.tokenless/config.json` or the SLS
+JSONL output.
 
 ### OpenClaw plugin config (`openclaw.plugin.json`)
 
@@ -536,7 +548,7 @@ tokenless env-check --all --checklist
 | `JSON parse error` | Invalid JSON; validate with `jq . < input.json` |
 | Original emitted + stderr notice | No compression savings (`after >= before`); normal; not recorded |
 | dry-run notice | `TOKENLESS_COMPRESSION_ENABLED=0` or config `compression_enabled=false`; original emitted, prediction recorded |
-| `Failed to open database` | `~/.tokenless/` not writable, or `TOKENLESS_STATS_DB` rejected as outside home |
+| `Failed to open database` | Selected data directory not writable, or a database path override was rejected as outside home |
 | SLS JSONL not generated | Confirm `TOKENLESS_SLS_ENABLED` is not `0`; `TOKENLESS_SLS_PATH` must be under `/var/log/` or `/tmp/`; file must be pre-created by the anolisa SLS component |
 | cosh hook not firing | Confirm `cosh-extension.json` exists in `COSH_EXTENSION_DIR`; restart copilot-shell |
 | `jq not installed` | `dnf install jq` / `apt install jq` |
@@ -634,7 +646,7 @@ All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_uti
 ### Security model
 
 - **Unforgeable identity source**: home dir resolved via `getpwuid_r(getuid())` (passwd), **not** `$HOME`/`dirs::home_dir()` (user-controllable).
-- **Database path validation**: `TOKENLESS_STATS_DB` must canonicalize under the user's real home dir, else ignored + warned; empty home → `/dev/null/.tokenless/stats.db` (safe failure).
+- **Database path validation**: `TOKENLESS_DATA_DIR`, `TOKENLESS_STATS_DB`, and `TOKENLESS_STASH_DB` must resolve under the user's real home dir, else they are ignored + warned; empty home → stats writes fail safely and stash is disabled.
 - **SLS path validation**: `TOKENLESS_SLS_PATH` must be under `/var/log/` or `/tmp/` with no `..`; canonicalized check prevents symlink escape.
 - **Tool Ready trust path**: system prefixes (`/usr/share`, `/usr/libexec`, `/usr/lib/anolisa`, `/usr/local/share`) trusted unconditionally; other paths validate file/parent-dir ownership (current_uid or root) and reject world-writable bits. The shell equivalent in `tool_ready_hook.sh` is kept in sync.
 - **Config file permissions**: `~/.tokenless/config.json` is chmod 0600 after write.

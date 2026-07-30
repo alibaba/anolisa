@@ -472,12 +472,23 @@ RTK 源码由 justfile 从 GitHub 克隆（`v0.43.0`）并应用 tokenless 专�
 | `TOKENLESS_STATS_ENABLED` | 覆盖 `stats_enabled` | — |
 | `TOKENLESS_SLS_ENABLED` | 覆盖 `sls_enabled` | — |
 | `TOKENLESS_COMPRESSION_ENABLED` | 覆盖 `compression_enabled`（dry-run 开关） | — |
+| `TOKENLESS_DATA_DIR` | 存放 `stats.db` 和 `stash.db` 的目录 | 须为真实用户 home 下的绝对路径 |
 | `TOKENLESS_STATS_DB` | 自定义统计数据库路径 | 须位于用户 home 下，否则忽略并告警 |
+| `TOKENLESS_STASH_DB` | 自定义 stash 数据库路径 | 须位于用户 home 下，否则忽略并告警 |
 | `TOKENLESS_SLS_PATH` | 自定义 SLS JSONL 路径 | 须位于 `/var/log/` 或 `/tmp/` 下，否则回退默认 |
 | `TOKENLESS_TOOL_READY_SPEC` | 自定义 tool-ready-spec 路径 | 须通过信任路径校验 |
 | `TOKENLESS_ENV_FIX_SCRIPT` | 自定义 env-fix 脚本路径 | 须通过信任路径校验 |
 | `TOKENLESS_PACKAGE_MANAGER` | 覆盖包管理器探测（dnf/yum/apt/apk） | 测试用 |
 | `TOKENLESS_AGENT_ID` | hook 注入的 agent 标识 | 由 cosh-extension.json 自动设置 |
+
+数据库路径优先级如下：
+
+- 统计库：`TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
+- stash 库：`--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
+
+空值视为未设置。`TOKENLESS_DATA_DIR` 可以指向尚不存在的目录；Tokenless
+会先校验其最近的已存在父目录，再创建目标目录。该变量不会迁移
+`~/.tokenless/config.json` 或 SLS JSONL 输出。
 
 ### OpenClaw 插件配置（`openclaw.plugin.json`）
 
@@ -531,7 +542,7 @@ tokenless env-check --all --checklist
 | `JSON parse error` | 输入非合法 JSON；先用 `jq . < input.json` 校验 |
 | 压缩后输出原文 + stderr 提示 | 压缩无收益（`after >= before`），属正常；该次不记录统计 |
 | dry-run 模式提示 | `TOKENLESS_COMPRESSION_ENABLED=0` 或 config `compression_enabled=false`；输出原文但记录预测值 |
-| `Failed to open database` | `~/.tokenless/` 不可写或 `TOKENLESS_STATS_DB` 路径在 home 之外被拒 |
+| `Failed to open database` | 选定的数据目录不可写，或数据库路径覆盖项因位于 home 之外而被拒 |
 | SLS JSONL 未生成 | 确认 `TOKENLESS_SLS_ENABLED` 未设为 `0`；`TOKENLESS_SLS_PATH` 须在 `/var/log/` 或 `/tmp/` 下；文件须由 anolisa SLS 组件预建 |
 | cosh Hook 不触发 | 确认 `COSH_EXTENSION_DIR` 存在 `cosh-extension.json`；重启 copilot-shell |
 | `jq not installed` | `dnf install jq` / `apt install jq` |
@@ -629,7 +640,7 @@ make adapter-scan         # 查看已注册适配器能力
 ### 安全模型
 
 - **不可伪造的身份源**：home 目录通过 `getpwuid_r(getuid())` 查询 passwd，**不信任** `$HOME`/`dirs::home_dir()`（可被任意改写）。
-- **数据库路径校验**：`TOKENLESS_STATS_DB` 必须规范解析后位于用户真实 home 下，否则忽略并告警；home 为空时写入 `/dev/null/.tokenless/stats.db`（安全失败）。
+- **数据库路径校验**：`TOKENLESS_DATA_DIR`、`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB` 必须解析到用户真实 home 下，否则忽略并告警；home 为空时统计写入安全失败并禁用 stash。
 - **SLS 路径校验**：`TOKENLESS_SLS_PATH` 必须位于 `/var/log/` 或 `/tmp/` 前缀下且不含 `..`；canonicalize 后校验防符号链接逃逸。
 - **Tool Ready 信任路径**：系统前缀（`/usr/share`、`/usr/libexec`、`/usr/lib/anolisa`、`/usr/local/share`）直接信任；其他路径校验文件/父目录 owner（须为 current_uid 或 root）且非 world-writable。`tool_ready_hook.sh` 中的 shell 实现保持同步。
 - **配置文件权限**：`~/.tokenless/config.json` 写入后 chmod 0600。

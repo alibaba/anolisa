@@ -164,10 +164,19 @@ Each config field can be overridden via environment variables:
 - `TOKENLESS_STATS_ENABLED` — override `stats_enabled`
 - `TOKENLESS_SLS_ENABLED` — override `sls_enabled`
 - `TOKENLESS_COMPRESSION_ENABLED` — override `compression_enabled`
+- `TOKENLESS_DATA_DIR` — directory containing `stats.db` and `stash.db`
 
-### Statistics Database
+### Local Databases
 
-Local statistics are stored in `~/.tokenless/stats.db`.
+Local statistics and reversible-compression data default to
+`~/.tokenless/stats.db` and `~/.tokenless/stash.db`. To relocate both:
+
+```bash
+export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
+```
+
+The value must be an absolute path under the real user home. Per-file
+`TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` overrides take precedence.
 
 ---
 

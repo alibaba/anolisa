@@ -163,10 +163,19 @@ Total         21,392         56.1%
 - `TOKENLESS_STATS_ENABLED` — 覆盖 `stats_enabled`
 - `TOKENLESS_SLS_ENABLED` — 覆盖 `sls_enabled`
 - `TOKENLESS_COMPRESSION_ENABLED` — 覆盖 `compression_enabled`
+- `TOKENLESS_DATA_DIR` — 存放 `stats.db` 和 `stash.db` 的目录
 
-### 统计数据库
+### 本地数据库
 
-本地统计数据存储于 `~/.tokenless/stats.db`。
+本地统计数据和可逆压缩数据默认分别存储于 `~/.tokenless/stats.db` 和
+`~/.tokenless/stash.db`。如需同时迁移两者：
+
+```bash
+export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
+```
+
+该值必须是位于真实用户 home 下的绝对路径。单文件覆盖项
+`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB` 的优先级更高。
 
 ---
 

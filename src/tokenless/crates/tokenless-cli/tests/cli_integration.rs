@@ -65,6 +65,121 @@ impl Drop for TempStatsDb {
     }
 }
 
+struct TempDataDir {
+    root: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
+}
+
+impl TempDataDir {
+    fn new() -> Option<Self> {
+        let home = get_home_dir();
+        if home.is_empty() {
+            return None;
+        }
+        let unique = format!(
+            ".tokenless-data-dir-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos()
+        );
+        let root = std::path::PathBuf::from(home).join(unique);
+        std::fs::create_dir_all(&root).ok()?;
+        let data_dir = root.join("databases");
+        Some(Self { root, data_dir })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = tokenless_bin();
+        command
+            .env("TOKENLESS_DATA_DIR", &self.data_dir)
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB");
+        command
+    }
+}
+
+impl Drop for TempDataDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).ok();
+    }
+}
+
+#[test]
+fn data_dir_env_routes_stats_and_stash_databases() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    let stats_output = fixture
+        .command()
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+    assert!(
+        stats_output.status.success(),
+        "stats command failed: {}",
+        String::from_utf8_lossy(&stats_output.stderr)
+    );
+    assert!(fixture.data_dir.join("stats.db").is_file());
+
+    let stash_output = fixture
+        .command()
+        .args(["retrieve", "abcdef0123456789abcdef01"])
+        .output()
+        .unwrap();
+    assert!(!stash_output.status.success());
+    assert!(fixture.data_dir.join("stash.db").is_file());
+}
+
+#[test]
+fn stats_db_env_takes_precedence_over_data_dir() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let explicit_dir = fixture.root.join("explicit");
+    std::fs::create_dir_all(&explicit_dir).unwrap();
+    let explicit_db = explicit_dir.join("stats.db");
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STATS_DB", &explicit_db)
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stats command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(explicit_db.is_file());
+    assert!(!fixture.data_dir.join("stats.db").exists());
+}
+
+#[test]
+fn stash_db_env_takes_precedence_over_data_dir() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let explicit_dir = fixture.root.join("explicit");
+    std::fs::create_dir_all(&explicit_dir).unwrap();
+    let explicit_db = explicit_dir.join("stash.db");
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STASH_DB", &explicit_db)
+        .args(["retrieve", "abcdef0123456789abcdef01"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(explicit_db.is_file());
+    assert!(!fixture.data_dir.join("stash.db").exists());
+}
+
 #[test]
 fn compress_schema_from_stdin() {
     let schema = r#"{"function":{"name":"test","description":"A test function","parameters":{"type":"object","properties":{"x":{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}"#;

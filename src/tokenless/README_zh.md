@@ -96,6 +96,20 @@ diff。只有相邻 active 阶段的输出与输入内容完全一致时才会�
 从而避免重复计算中间阶段的 Token。完整选项和度量限制见
 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#统计与效果度量)。
 
+## 数据库位置
+
+Tokenless 默认将统计数据和可逆压缩数据分别存储在
+`~/.tokenless/stats.db` 与 `~/.tokenless/stash.db`。可为两个数据库统一
+指定目录：
+
+```bash
+export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
+```
+
+该目录必须是位于真实用户 home 下的绝对路径。若只需自定义一个数据库，
+现有的 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 和 `--stash-db` 覆盖项
+优先级更高。配置文件仍位于 `~/.tokenless/config.json`。
+
 ## 架构
 
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor

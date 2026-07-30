@@ -96,7 +96,13 @@ Configuration is managed through the `tokenless` CLI's environment and config fi
 | `TOKENLESS_AGENT_ID` | `codex` | Agent identifier for statistics |
 | `TOKENLESS_BIN` | (auto-detected) | Path to tokenless binary |
 | `TOKENLESS_STATS_ENABLED` | `1` | Enable statistics recording |
+| `TOKENLESS_DATA_DIR` | `~/.tokenless` | Directory for `stats.db` and `stash.db` |
 | `TOKENLESS_STATS_DB` | `~/.tokenless/stats.db` | Statistics database path |
+| `TOKENLESS_STASH_DB` | `~/.tokenless/stash.db` | Reversible stash database path |
+
+`TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` take precedence over
+`TOKENLESS_DATA_DIR`. Custom database paths must remain under the real user
+home.
 
 ### View Statistics
 
