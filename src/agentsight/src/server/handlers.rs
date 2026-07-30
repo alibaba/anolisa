@@ -1751,6 +1751,9 @@ mod tests {
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            enforcement: None,
+            containment: None,
+            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1774,6 +1777,9 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
+            containment: None,
+            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1835,6 +1841,9 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
+            containment: None,
+            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -2140,6 +2149,11 @@ mod tests {
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
                     interruption_store: Some(Arc::clone(&istore)),
                     evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
+                    enforcement: None,
+                    containment: None,
+                    security_store: Arc::new(
+                        crate::security::SecurityStore::open_in_memory().unwrap(),
+                    ),
                     security_observability: super::super::SecurityObservabilityConfig {
                         timeout_ms: 0,
                     },
@@ -2589,6 +2603,11 @@ mod tests {
                     interruption_store: None,
                     evaluation_store: Arc::new(
                         EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+                    ),
+                    enforcement: None,
+                    containment: None,
+                    security_store: Arc::new(
+                        crate::security::SecurityStore::open_in_memory().unwrap(),
                     ),
                     security_observability: super::super::SecurityObservabilityConfig {
                         timeout_ms: 0,

@@ -177,6 +177,8 @@ impl ApiFixture {
             security_store: Arc::clone(&self.store),
             security_observability: SecurityObservabilityConfig::default(),
             auth: Arc::clone(&self.auth),
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
 
