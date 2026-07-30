@@ -82,6 +82,25 @@ impl ShellAuditRecorder {
         recorder
     }
 
+    /// Test-only recorder in `Required` mode with no usable writer: every
+    /// governed boundary fails closed, letting production-chain tests
+    /// assert that blocked approvals never reach an execution path.
+    #[cfg(test)]
+    pub(crate) fn test_required_unavailable(shell_session_id: impl Into<String>) -> Self {
+        Self {
+            writer: None,
+            writer_root: None,
+            mode: AuditMode::Required,
+            shell_session_id: shell_session_id.into(),
+            seen_events: 0,
+            hash_salt: "test-salt".to_string(),
+            degraded: true,
+            warning_emitted: false,
+            owned_approvals: std::collections::HashSet::new(),
+            command_refs: std::collections::HashMap::new(),
+        }
+    }
+
     /// Projects newly observed native command events exactly once.
     pub(crate) fn observe_shell_events(&mut self, events: &[ShellEvent]) {
         if self.seen_events > events.len() {

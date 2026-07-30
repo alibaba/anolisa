@@ -73,7 +73,16 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::PtyUserWrite {
                 generation,
                 line_submits,
-            } => prompt_replay.observe_user_write(generation, line_submits),
+            } => {
+                // Any user bytes reaching the PTY invalidate the
+                // prompt-cwd report: submit-detection is a documented
+                // heuristic (CR/LF/Ctrl-O only), so a custom
+                // `accept-line` binding must not slip past the
+                // barrier. The parser collapses consecutive writes
+                // into one event per prompt.
+                parser.push_shell_pty_input_event();
+                prompt_replay.observe_user_write(generation, line_submits)
+            }
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::SoftNewlineShortcutObserved => parser.push_soft_newline_shortcut_event(),

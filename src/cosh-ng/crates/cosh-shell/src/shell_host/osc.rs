@@ -84,6 +84,10 @@ pub(super) struct OscParser {
     /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
     /// relay; prompt_ready raises it, preexec lowers it.
     main_prompt_gate: crate::raw_input::MainPromptGate,
+    /// Collapses consecutive PTY input writes into one prompt-cwd
+    /// invalidation barrier; a fresh command-less prompt report
+    /// (`ShellReady`) re-arms it.
+    pty_input_barrier_pushed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +137,7 @@ impl OscParser {
             environment_observer: None,
             history_file_observer: None,
             main_prompt_gate: crate::raw_input::MainPromptGate::default(),
+            pty_input_barrier_pushed: false,
         }
     }
 
@@ -301,6 +306,10 @@ impl OscParser {
                     self.intervention_display_cuts
                         .push((self.display.len(), DisplayCutKind::PromptBoundary));
                     self.last_prompt_display_start = Some(self.display.len());
+                    // A fresh command-less prompt report re-arms the
+                    // PTY-input invalidation barrier: the cwd carried
+                    // here supersedes any earlier barrier.
+                    self.pty_input_barrier_pushed = false;
                     self.events.push(ShellEvent {
                         kind: ShellEventKind::ShellReady,
                         session_id,
@@ -725,6 +734,20 @@ impl OscParser {
             },
             None,
         );
+    }
+
+    /// User bytes were written to the shell's PTY: whatever the shell
+    /// does with them (a custom `accept-line` binding cannot be told
+    /// apart from editing keys in the byte stream), a previously
+    /// reported prompt cwd stops being provably current until a fresh
+    /// cwd-bearing marker arrives. Consecutive writes collapse into
+    /// one barrier event; a new prompt report re-arms it.
+    pub(super) fn push_shell_pty_input_event(&mut self) {
+        if self.pty_input_barrier_pushed {
+            return;
+        }
+        self.pty_input_barrier_pushed = true;
+        self.push_self_session_input_event("shell_pty_input", "write", None);
     }
 
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {

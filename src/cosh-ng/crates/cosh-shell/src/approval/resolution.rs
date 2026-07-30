@@ -160,7 +160,12 @@ fn finalize_approval_decision(
         let host_audit_result = state
             .audit
             .as_mut()
-            .map(|audit| audit.authorize_host_execution(approval_audit_input(&request)))
+            .map(|audit| {
+                audit.authorize_host_execution(
+                    approval_audit_input(&request),
+                    "shell_foreground_handoff",
+                )
+            })
             .transpose();
         if host_audit_result.is_err() {
             request.status = ApprovalRequestStatus::Blocked;

@@ -96,6 +96,19 @@ pub(crate) struct InlineState {
     pub(crate) evidence_requests: EvidenceRequestState,
     pub(crate) shell_evidence: ShellEvidenceState,
     pub(crate) session_blocks: Vec<CommandBlock>,
+    /// Whether any shell command activity (started/completed/failed
+    /// marker events) was observed this session, including activity
+    /// that produced ledger errors instead of command blocks (R9).
+    pub(crate) shell_command_activity_observed: bool,
+    /// The shell's own latest working-directory report from a prompt
+    /// marker (a precmd with no command in flight): positive evidence
+    /// of where the shell sits, refreshed at every command-less
+    /// prompt and invalidated by any PTY input write (the input may
+    /// submit a cwd-changing line through a binding the byte-stream
+    /// heuristic cannot see, while its markers are lost). `None`
+    /// until the marker channel has proven itself — a session without
+    /// any marker traffic never gets a value here.
+    pub(crate) shell_prompt_cwd: Option<String>,
     pub(crate) shell_session_id: Option<String>,
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,

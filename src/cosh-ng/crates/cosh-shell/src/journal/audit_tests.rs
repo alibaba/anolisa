@@ -144,19 +144,22 @@ fn required_core_host_execution_fails_before_handoff_boundary() {
         command_refs: std::collections::HashMap::new(),
     };
 
-    let result = recorder.authorize_host_execution(ShellApprovalAuditInput {
-        id: "approval-1",
-        audit_ref: None,
-        session_id: "session-1",
-        run_id: "run-1",
-        request_id: Some("request-1"),
-        tool_use_id: Some("tool-1"),
-        subject: "run_shell_command",
-        risk: "medium",
-        assessment: None,
-        preview: "$ echo ok",
-        status: "approved",
-    });
+    let result = recorder.authorize_host_execution(
+        ShellApprovalAuditInput {
+            id: "approval-1",
+            audit_ref: None,
+            session_id: "session-1",
+            run_id: "run-1",
+            request_id: Some("request-1"),
+            tool_use_id: Some("tool-1"),
+            subject: "run_shell_command",
+            risk: "medium",
+            assessment: None,
+            preview: "$ echo ok",
+            status: "approved",
+        },
+        "shell_foreground_handoff",
+    );
 
     assert!(result
         .unwrap_err()
@@ -180,19 +183,22 @@ fn core_host_execution_does_not_duplicate_the_approval_resolution() {
     };
 
     recorder
-        .authorize_host_execution(ShellApprovalAuditInput {
-            id: "approval-1",
-            audit_ref: Some("core-approval-event"),
-            session_id: "session-1",
-            run_id: "run-1",
-            request_id: Some("request-1"),
-            tool_use_id: Some("tool-1"),
-            subject: "run_shell_command",
-            risk: "medium",
-            assessment: None,
-            preview: "$ echo ok",
-            status: "approved",
-        })
+        .authorize_host_execution(
+            ShellApprovalAuditInput {
+                id: "approval-1",
+                audit_ref: Some("core-approval-event"),
+                session_id: "session-1",
+                run_id: "run-1",
+                request_id: Some("request-1"),
+                tool_use_id: Some("tool-1"),
+                subject: "run_shell_command",
+                risk: "medium",
+                assessment: None,
+                preview: "$ echo ok",
+                status: "approved",
+            },
+            "shell_foreground_handoff",
+        )
         .unwrap();
 
     drop(recorder);
@@ -217,19 +223,22 @@ fn shell_owned_approval_does_not_require_a_provider_tool_identity() {
         command_refs: std::collections::HashMap::new(),
     };
 
-    let result = recorder.authorize_host_execution(ShellApprovalAuditInput {
-        id: "approval-1",
-        audit_ref: None,
-        session_id: "session-1",
-        run_id: "run-1",
-        request_id: None,
-        tool_use_id: None,
-        subject: "Bash",
-        risk: "medium",
-        assessment: None,
-        preview: "$ echo ok",
-        status: "approved",
-    });
+    let result = recorder.authorize_host_execution(
+        ShellApprovalAuditInput {
+            id: "approval-1",
+            audit_ref: None,
+            session_id: "session-1",
+            run_id: "run-1",
+            request_id: None,
+            tool_use_id: None,
+            subject: "Bash",
+            risk: "medium",
+            assessment: None,
+            preview: "$ echo ok",
+            status: "approved",
+        },
+        "shell_foreground_handoff",
+    );
 
     assert!(result.is_ok());
 }
@@ -435,19 +444,22 @@ fn host_execution_boundary_claims_clean_redaction() {
     let root = private_root();
     let mut recorder = recording_recorder(&root);
     recorder
-        .authorize_host_execution(ShellApprovalAuditInput {
-            id: "approval-1",
-            audit_ref: Some("core-approval-event"),
-            session_id: "session-1",
-            run_id: "run-1",
-            request_id: Some("request-1"),
-            tool_use_id: Some("tool-1"),
-            subject: "run_shell_command",
-            risk: "medium",
-            assessment: None,
-            preview: "$ echo ok",
-            status: "approved",
-        })
+        .authorize_host_execution(
+            ShellApprovalAuditInput {
+                id: "approval-1",
+                audit_ref: Some("core-approval-event"),
+                session_id: "session-1",
+                run_id: "run-1",
+                request_id: Some("request-1"),
+                tool_use_id: Some("tool-1"),
+                subject: "run_shell_command",
+                risk: "medium",
+                assessment: None,
+                preview: "$ echo ok",
+                status: "approved",
+            },
+            "shell_foreground_handoff",
+        )
         .unwrap();
     drop(recorder);
 
