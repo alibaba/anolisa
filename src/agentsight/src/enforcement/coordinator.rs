@@ -1,21 +1,269 @@
 //! Desired-state coordinator between AgentSight, SQLite, and the enforcer.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use agentsight_enforcement_protocol::{ApplyPolicy, Binding, BindingState, ViolationEvent};
+use agentsight_enforcement_protocol::{
+    ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
 use super::{EnforcementClient, EnforcementError, EnforcementStore, EnforcementStoreError};
 
+const INGESTION_UNAVAILABLE_MESSAGE: &str = "violation ingestion is not subscribed";
+const DEGRADED_BINDING_MESSAGE: &str = "enforcement binding is degraded";
 const FAILED_BINDING_MESSAGE: &str = "enforcement binding failed";
+
+type WorkerTask = Box<dyn FnOnce() + Send + 'static>;
+
+struct WorkerToken {
+    _identity: (),
+}
+
+#[derive(Default)]
+struct IngestionState {
+    current: Option<Arc<WorkerToken>>,
+    subscription_id: Option<Uuid>,
+    ready: bool,
+    message: Option<String>,
+    generation: u64,
+}
+
+#[derive(Clone)]
+struct IngestionReadiness {
+    state: Arc<Mutex<IngestionState>>,
+}
+
+struct IngestionLease {
+    worker: Arc<WorkerToken>,
+    subscription_id: Uuid,
+    generation: u64,
+}
+
+impl IngestionReadiness {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(IngestionState::default())),
+        }
+    }
+
+    fn candidate(&self) -> Arc<WorkerToken> {
+        Arc::new(WorkerToken { _identity: () })
+    }
+
+    fn install(&self, worker: Arc<WorkerToken>) {
+        let mut state = self.state();
+        state.current = Some(worker);
+        state.subscription_id = None;
+        state.ready = false;
+        state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
+        advance_generation(&mut state);
+    }
+
+    fn stop(&self) {
+        let mut state = self.state();
+        state.current = None;
+        state.subscription_id = None;
+        state.ready = false;
+        state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
+        advance_generation(&mut state);
+    }
+
+    fn clear_if_current(&self, worker: &Arc<WorkerToken>) {
+        let mut state = self.state();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            state.current = None;
+            state.subscription_id = None;
+            state.ready = false;
+            state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
+            advance_generation(&mut state);
+        }
+    }
+
+    fn adopt_subscription(&self, worker: &Arc<WorkerToken>, subscription_id: Uuid) -> bool {
+        let mut state = self.state();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            if state.subscription_id != Some(subscription_id) {
+                state.subscription_id = Some(subscription_id);
+                advance_generation(&mut state);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_ready(&self, worker: &Arc<WorkerToken>, subscription_id: Uuid) -> bool {
+        let mut state = self.state();
+        if state.subscription_id == Some(subscription_id)
+            && state
+                .current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            if !state.ready || state.message.is_some() {
+                state.ready = true;
+                state.message = None;
+                advance_generation(&mut state);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_not_ready(&self, worker: &Arc<WorkerToken>) {
+        let mut state = self.state();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            if state.ready
+                || state.subscription_id.is_some()
+                || state.message.as_deref() != Some(INGESTION_UNAVAILABLE_MESSAGE)
+            {
+                state.ready = false;
+                state.subscription_id = None;
+                state.message = Some(INGESTION_UNAVAILABLE_MESSAGE.into());
+                advance_generation(&mut state);
+            }
+        }
+    }
+
+    fn mark_unavailable(&self, worker: &Arc<WorkerToken>, message: String) {
+        let mut state = self.state();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            if state.ready || state.message.as_deref() != Some(message.as_str()) {
+                state.ready = false;
+                state.message = Some(message);
+                advance_generation(&mut state);
+            }
+        }
+    }
+
+    fn lease(&self) -> Option<IngestionLease> {
+        let state = self.state();
+        if !state.ready {
+            return None;
+        }
+        match (state.current.as_ref(), state.subscription_id) {
+            (Some(worker), Some(subscription_id)) => Some(IngestionLease {
+                worker: Arc::clone(worker),
+                subscription_id,
+                generation: state.generation,
+            }),
+            _ => None,
+        }
+    }
+
+    fn commit_if_current<E>(
+        &self,
+        lease: &IngestionLease,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let state = self.state();
+        if !lease.matches(&state) {
+            return Ok(false);
+        }
+        commit()?;
+        Ok(true)
+    }
+
+    fn invalidate_lease(&self, lease: &IngestionLease, message: String) {
+        let mut state = self.state();
+        if state.subscription_id == Some(lease.subscription_id)
+            && state
+                .current
+                .as_ref()
+                .is_some_and(|worker| Arc::ptr_eq(worker, &lease.worker))
+        {
+            state.ready = false;
+            state.subscription_id = None;
+            state.message = Some(message);
+            advance_generation(&mut state);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_ready(&self) -> bool {
+        self.state().ready
+    }
+
+    fn status(&self) -> (bool, Option<String>) {
+        let state = self.state();
+        (state.ready, state.message.clone())
+    }
+
+    fn is_current(&self, worker: &Arc<WorkerToken>) -> bool {
+        self.state()
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+    }
+
+    fn is_subscription_current(&self, worker: &Arc<WorkerToken>, subscription_id: Uuid) -> bool {
+        let state = self.state();
+        state.subscription_id == Some(subscription_id)
+            && state
+                .current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, worker))
+    }
+
+    fn state(&self) -> MutexGuard<'_, IngestionState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl IngestionLease {
+    fn is_current(&self, readiness: &IngestionReadiness) -> bool {
+        let state = readiness.state();
+        self.matches(&state)
+    }
+
+    fn matches(&self, state: &IngestionState) -> bool {
+        state.ready
+            && state.generation == self.generation
+            && state.subscription_id == Some(self.subscription_id)
+            && state
+                .current
+                .as_ref()
+                .is_some_and(|worker| Arc::ptr_eq(worker, &self.worker))
+    }
+}
+
+fn advance_generation(state: &mut IngestionState) {
+    state.generation = state.generation.wrapping_add(1);
+}
 
 /// Coordination failures across the UDS and persistence boundaries.
 #[derive(Debug, Error)]
 pub enum EnforcementCoordinatorError {
+    /// A violation subscriber has not completed its acknowledgement handshake.
+    #[error("{INGESTION_UNAVAILABLE_MESSAGE}")]
+    IngestionUnavailable,
+    /// Combined backend or ingestion health cannot guarantee violation evidence.
+    #[error("enforcement unavailable: {0}")]
+    EnforcementUnavailable(String),
     /// The privileged service call failed.
     #[error(transparent)]
     Client(#[from] EnforcementError),
@@ -31,7 +279,8 @@ pub enum EnforcementCoordinatorError {
 pub struct EnforcementCoordinator {
     client: EnforcementClient,
     store: EnforcementStore,
-    stop: Arc<AtomicBool>,
+    ingestion_readiness: IngestionReadiness,
+    lifecycle: Arc<Mutex<()>>,
 }
 
 impl EnforcementCoordinator {
@@ -40,7 +289,8 @@ impl EnforcementCoordinator {
         Self {
             client,
             store,
-            stop: Arc::new(AtomicBool::new(false)),
+            ingestion_readiness: IngestionReadiness::new(),
+            lifecycle: Arc::new(Mutex::new(())),
         }
     }
 
@@ -49,25 +299,103 @@ impl EnforcementCoordinator {
     /// # Errors
     ///
     /// Returns a persistence error or the enforcer rejection after recording a
-    /// sanitized failed state.
+    /// sanitized failed state. Returns an availability error before persisting
+    /// when combined backend and violation-ingestion health is not ready.
     pub fn apply(&self, request: ApplyPolicy) -> Result<Binding, EnforcementCoordinatorError> {
-        self.store.upsert_binding(&Binding {
+        let _lifecycle = self.lifecycle();
+        if let Some(existing) = self.store.binding(request.binding_id)?
+            && existing.request == request
+            && matches!(
+                existing.state,
+                BindingState::Detaching | BindingState::Detached
+            )
+        {
+            return Ok(existing);
+        }
+        let lease = self
+            .ingestion_readiness
+            .lease()
+            .ok_or(EnforcementCoordinatorError::IngestionUnavailable)?;
+        let health = combine_health(self.client.health()?, &self.ingestion_readiness);
+        if !health.ready {
+            return Err(unavailable_from_health(health));
+        }
+        let pending = Binding {
             request: request.clone(),
             state: BindingState::Pending,
             message: None,
             domain_id: None,
-        })?;
-        match self.client.apply(request.clone()) {
+        };
+        if let Err(error) = self.store.upsert_binding(&pending) {
+            return match error {
+                EnforcementStoreError::BindingConflict(binding_id) => {
+                    Err(EnforcementError::Remote {
+                        code: "binding_conflict".into(),
+                        message: format!(
+                            "binding {binding_id} conflicts with persisted desired state"
+                        ),
+                    }
+                    .into())
+                }
+                error => Err(error.into()),
+            };
+        }
+        match self.client.apply(request.clone(), lease.subscription_id) {
             Ok(binding) => {
-                self.store.upsert_binding(&binding)?;
-                Ok(binding)
+                let post_apply_health = self
+                    .client
+                    .health()
+                    .map(|health| combine_health(health, &self.ingestion_readiness));
+                match post_apply_health {
+                    Ok(health) if health.ready => {
+                        if self
+                            .ingestion_readiness
+                            .commit_if_current(&lease, || self.store.upsert_binding(&binding))?
+                        {
+                            Ok(binding)
+                        } else {
+                            let message =
+                                "violation ingestion readiness changed during policy apply";
+                            self.persist_degraded_binding(binding, message)?;
+                            Err(EnforcementCoordinatorError::EnforcementUnavailable(
+                                message.into(),
+                            ))
+                        }
+                    }
+                    Ok(health) => {
+                        let detail = health_message(&health);
+                        log::error!("enforcement became unavailable after policy apply: {detail}");
+                        self.persist_degraded_binding(binding, &detail)?;
+                        Err(EnforcementCoordinatorError::EnforcementUnavailable(detail))
+                    }
+                    Err(error) => {
+                        log::error!("enforcement health check failed after policy apply: {error}");
+                        self.persist_degraded_binding(binding, DEGRADED_BINDING_MESSAGE)?;
+                        Err(error.into())
+                    }
+                }
+            }
+            Err(EnforcementError::Remote { code, message })
+                if code == "required_subscription_unavailable" =>
+            {
+                log::error!("required violation subscription unavailable: {message}");
+                self.ingestion_readiness
+                    .invalidate_lease(&lease, INGESTION_UNAVAILABLE_MESSAGE.into());
+                self.store.upsert_binding(&Binding {
+                    request,
+                    state: BindingState::Degraded,
+                    message: Some(DEGRADED_BINDING_MESSAGE.into()),
+                    domain_id: None,
+                })?;
+                Err(EnforcementCoordinatorError::EnforcementUnavailable(
+                    INGESTION_UNAVAILABLE_MESSAGE.into(),
+                ))
             }
             Err(error) => {
-                log::error!("enforcement policy apply failed: {error}");
                 self.store.upsert_binding(&Binding {
                     request,
                     state: BindingState::Failed,
-                    message: Some(FAILED_BINDING_MESSAGE.into()),
+                    message: Some(error.to_string()),
                     domain_id: None,
                 })?;
                 Err(error.into())
@@ -81,10 +409,14 @@ impl EnforcementCoordinator {
     ///
     /// Returns a missing-binding, persistence, or enforcer error.
     pub fn detach(&self, binding_id: Uuid) -> Result<(), EnforcementCoordinatorError> {
+        let _lifecycle = self.lifecycle();
         let mut binding = self
             .store
             .binding(binding_id)?
             .ok_or(EnforcementStoreError::MissingBinding(binding_id))?;
+        if binding.state == BindingState::Detached {
+            return Ok(());
+        }
         binding.state = BindingState::Detaching;
         self.store.upsert_binding(&binding)?;
         match self.client.detach(binding_id) {
@@ -94,10 +426,15 @@ impl EnforcementCoordinator {
                 self.store.upsert_binding(&binding)?;
                 Ok(())
             }
+            Err(EnforcementError::Remote { code, .. }) if code == "missing_binding" => {
+                binding.state = BindingState::Detached;
+                binding.message = None;
+                binding.domain_id = None;
+                self.store.upsert_binding(&binding)?;
+                Ok(())
+            }
             Err(error) => {
-                binding.state = BindingState::Degraded;
-                log::error!("enforcement detach failed: {error}");
-                binding.message = Some(FAILED_BINDING_MESSAGE.into());
+                binding.message = Some(error.to_string());
                 self.store.upsert_binding(&binding)?;
                 Err(error.into())
             }
@@ -129,24 +466,52 @@ impl EnforcementCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns an I/O error when the worker thread cannot be spawned.
+    /// Returns an I/O error when the worker thread cannot be spawned or activated.
     pub fn start_ingestion(&self) -> Result<JoinHandle<()>, EnforcementCoordinatorError> {
-        self.stop.store(false, Ordering::Release);
+        self.start_ingestion_with(|worker| {
+            thread::Builder::new()
+                .name("agentsight-enforcement-ingestion".into())
+                .spawn(worker)
+        })
+    }
+
+    fn start_ingestion_with<F>(
+        &self,
+        spawn: F,
+    ) -> Result<JoinHandle<()>, EnforcementCoordinatorError>
+    where
+        F: FnOnce(WorkerTask) -> Result<JoinHandle<()>, std::io::Error>,
+    {
+        let worker = self.ingestion_readiness.candidate();
         let client = self.client.clone();
         let store = self.store.clone();
-        let stop = Arc::clone(&self.stop);
-        thread::Builder::new()
-            .name("agentsight-enforcement-ingestion".into())
-            .spawn(move || ingest_loop(client, store, stop))
-            .map_err(Into::into)
+        let ingestion_readiness = self.ingestion_readiness.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let worker_token = Arc::clone(&worker);
+        let (activate, activation) = mpsc::sync_channel(0);
+        let task = Box::new(move || {
+            if activation.recv().is_ok() {
+                ingest_loop(client, store, ingestion_readiness, lifecycle, worker_token);
+            }
+        });
+        let handle = spawn(task)?;
+        self.ingestion_readiness.install(Arc::clone(&worker));
+        if activate.send(()).is_err() {
+            self.ingestion_readiness.clear_if_current(&worker);
+            return Err(EnforcementCoordinatorError::Thread(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "activate enforcement ingestion worker",
+            )));
+        }
+        Ok(handle)
     }
 
     /// Requests the ingestion worker to stop at its next bounded read interval.
     pub fn stop_ingestion(&self) {
-        self.stop.store(true, Ordering::Release);
+        self.ingestion_readiness.stop();
     }
 
-    /// Queries current enforcer readiness directly.
+    /// Queries backend readiness and requires an acknowledged violation subscriber.
     ///
     /// # Errors
     ///
@@ -154,29 +519,140 @@ impl EnforcementCoordinator {
     pub fn health(
         &self,
     ) -> Result<agentsight_enforcement_protocol::HealthStatus, EnforcementCoordinatorError> {
-        Ok(self.client.health()?)
+        Ok(combine_health(
+            self.client.health()?,
+            &self.ingestion_readiness,
+        ))
+    }
+
+    fn lifecycle(&self) -> MutexGuard<'_, ()> {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn persist_degraded_binding(
+        &self,
+        mut binding: Binding,
+        message: &str,
+    ) -> Result<(), EnforcementStoreError> {
+        binding.state = BindingState::Degraded;
+        binding.message = Some(message.into());
+        self.store.upsert_binding(&binding)
     }
 }
 
-fn ingest_loop(client: EnforcementClient, store: EnforcementStore, stop: Arc<AtomicBool>) {
+fn unavailable_from_health(health: HealthStatus) -> EnforcementCoordinatorError {
+    EnforcementCoordinatorError::EnforcementUnavailable(health_message(&health))
+}
+
+fn health_message(health: &HealthStatus) -> String {
+    health
+        .message
+        .clone()
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| format!("{} backend is not ready", health.backend))
+}
+
+fn combine_health(
+    mut health: HealthStatus,
+    ingestion_readiness: &IngestionReadiness,
+) -> HealthStatus {
+    let (ingestion_ready, ingestion_message) = ingestion_readiness.status();
+    health.ready &= ingestion_ready;
+    if ingestion_ready {
+        return health;
+    }
+
+    let ingestion_message =
+        ingestion_message.unwrap_or_else(|| INGESTION_UNAVAILABLE_MESSAGE.into());
+    health.message = Some(match health.message.take() {
+        Some(backend_message)
+            if !backend_message.is_empty() && backend_message != ingestion_message =>
+        {
+            format!("{backend_message}; {ingestion_message}")
+        }
+        Some(backend_message) if !backend_message.is_empty() => backend_message,
+        _ => ingestion_message,
+    });
+    health
+}
+
+fn ingest_loop(
+    client: EnforcementClient,
+    store: EnforcementStore,
+    ingestion_readiness: IngestionReadiness,
+    lifecycle: Arc<Mutex<()>>,
+    worker: Arc<WorkerToken>,
+) {
     let mut backoff = Duration::from_millis(100);
-    while !stop.load(Ordering::Acquire) {
-        match client.subscribe() {
+    while ingestion_readiness.is_current(&worker) {
+        ingestion_readiness.mark_not_ready(&worker);
+        match client.subscribe_required() {
             Ok(mut subscription) => {
+                let subscription_id = subscription.subscription_id();
+                if !ingestion_readiness.is_current(&worker) {
+                    break;
+                }
+                let reconciliation = {
+                    let _lifecycle = lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !ingestion_readiness.adopt_subscription(&worker, subscription_id) {
+                        break;
+                    }
+                    match reconcile_desired_state(&client, &store, subscription_id) {
+                        Ok(()) if ingestion_readiness.mark_ready(&worker, subscription_id) => {
+                            Ok(())
+                        }
+                        Ok(()) => break,
+                        Err(error) => Err(error),
+                    }
+                };
+                if let Err(error) = reconciliation {
+                    if ingestion_readiness.is_current(&worker) {
+                        eprintln!("AgentSight enforcement reconciliation failed: {error}");
+                        if let Err(store_error) =
+                            store.mark_active_degraded(DEGRADED_BINDING_MESSAGE)
+                        {
+                            eprintln!(
+                                "AgentSight could not persist enforcement degradation: {store_error}"
+                            );
+                        }
+                    }
+                    sleep_until_superseded(&ingestion_readiness, &worker, backoff);
+                    backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
+                    continue;
+                }
                 backoff = Duration::from_millis(100);
-                while !stop.load(Ordering::Acquire) {
+                while ingestion_readiness.is_subscription_current(&worker, subscription_id) {
                     match subscription.next_event() {
                         Ok(Some(event)) => {
-                            if let Err(error) = store.insert_violation(&event) {
-                                eprintln!(
-                                    "AgentSight could not persist enforcement event: {error}"
-                                );
+                            if !ingestion_readiness
+                                .is_subscription_current(&worker, subscription_id)
+                            {
+                                break;
+                            }
+                            if !persist_violation_until_stored(
+                                &store,
+                                &ingestion_readiness,
+                                &worker,
+                                subscription_id,
+                                &event,
+                            ) {
+                                break;
                             }
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            let message = format!("enforcement subscription lost: {error}");
-                            if let Err(store_error) = store.mark_active_degraded(&message) {
+                            ingestion_readiness.mark_not_ready(&worker);
+                            if !ingestion_readiness.is_current(&worker) {
+                                break;
+                            }
+                            eprintln!("AgentSight enforcement subscription lost: {error}");
+                            if let Err(store_error) =
+                                store.mark_active_degraded(DEGRADED_BINDING_MESSAGE)
+                            {
                                 eprintln!(
                                     "AgentSight could not persist enforcement degradation: {store_error}"
                                 );
@@ -187,26 +663,287 @@ fn ingest_loop(client: EnforcementClient, store: EnforcementStore, stop: Arc<Ato
                 }
             }
             Err(error) => {
-                let message = format!("enforcement unavailable: {error}");
-                if let Err(store_error) = store.mark_active_degraded(&message) {
-                    eprintln!(
-                        "AgentSight could not persist enforcement unavailability: {store_error}"
-                    );
+                ingestion_readiness.mark_not_ready(&worker);
+                if ingestion_readiness.is_current(&worker) {
+                    eprintln!("AgentSight enforcement unavailable: {error}");
+                    if let Err(store_error) = store.mark_active_degraded(DEGRADED_BINDING_MESSAGE) {
+                        eprintln!(
+                            "AgentSight could not persist enforcement unavailability: {store_error}"
+                        );
+                    }
                 }
             }
         }
-        sleep_until_stop(&stop, backoff);
+        ingestion_readiness.mark_not_ready(&worker);
+        sleep_until_superseded(&ingestion_readiness, &worker, backoff);
         backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
+    }
+    ingestion_readiness.mark_not_ready(&worker);
+}
+
+fn persist_violation_until_stored(
+    store: &EnforcementStore,
+    ingestion_readiness: &IngestionReadiness,
+    worker: &Arc<WorkerToken>,
+    subscription_id: Uuid,
+    event: &ViolationEvent,
+) -> bool {
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        if !ingestion_readiness.is_current(worker) {
+            return false;
+        }
+        match store.insert_violation(event) {
+            Ok(_) => return ingestion_readiness.mark_ready(worker, subscription_id),
+            Err(error) => {
+                ingestion_readiness.mark_unavailable(worker, INGESTION_UNAVAILABLE_MESSAGE.into());
+                eprintln!("AgentSight could not persist enforcement event: {error}");
+                sleep_until_superseded(ingestion_readiness, worker, backoff);
+                backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
+            }
+        }
     }
 }
 
-fn sleep_until_stop(stop: &AtomicBool, duration: Duration) {
+fn reconcile_desired_state(
+    client: &EnforcementClient,
+    store: &EnforcementStore,
+    subscription_id: Uuid,
+) -> Result<(), EnforcementCoordinatorError> {
+    let desired = store.bindings()?;
+    let actual = client.bindings()?;
+    let desired_by_id: HashMap<_, _> = desired
+        .iter()
+        .map(|binding| (binding.request.binding_id, binding))
+        .collect();
+    let mut retained_actual = HashMap::new();
+
+    for binding in actual {
+        let binding_id = binding.request.binding_id;
+        let matches_active_desired = desired_by_id.get(&binding_id).is_some_and(|desired| {
+            is_active_desired(desired.state) && desired.request == binding.request
+        });
+        if matches_active_desired {
+            retained_actual.insert(binding_id, binding);
+        } else {
+            client.detach(binding_id)?;
+        }
+    }
+
+    for mut binding in desired {
+        let binding_id = binding.request.binding_id;
+        if is_active_desired(binding.state) {
+            let acknowledged = match retained_actual.remove(&binding_id) {
+                Some(actual) => actual,
+                None => client.apply(binding.request.clone(), subscription_id)?,
+            };
+            store.upsert_binding(&acknowledged)?;
+        } else if binding.state == BindingState::Detaching {
+            binding.state = BindingState::Detached;
+            binding.message = None;
+            binding.domain_id = None;
+            store.upsert_binding(&binding)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_active_desired(state: BindingState) -> bool {
+    matches!(
+        state,
+        BindingState::Pending | BindingState::Enforced | BindingState::Degraded
+    )
+}
+
+fn sleep_until_superseded(
+    ingestion_readiness: &IngestionReadiness,
+    worker: &Arc<WorkerToken>,
+    duration: Duration,
+) {
     let step = Duration::from_millis(50);
     let mut elapsed = Duration::ZERO;
-    while elapsed < duration && !stop.load(Ordering::Acquire) {
+    while elapsed < duration && ingestion_readiness.is_current(worker) {
         let remaining = duration.saturating_sub(elapsed);
         let sleep = remaining.min(step);
         thread::sleep(sleep);
         elapsed += sleep;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ready(readiness: &IngestionReadiness, worker: &Arc<WorkerToken>) -> Uuid {
+        let subscription_id = Uuid::new_v4();
+        assert!(readiness.adopt_subscription(worker, subscription_id));
+        assert!(readiness.mark_ready(worker, subscription_id));
+        subscription_id
+    }
+
+    #[test]
+    fn failed_start_does_not_supersede_ready_worker() {
+        let coordinator = EnforcementCoordinator::new(
+            EnforcementClient::new("/tmp/unused-enforcement.sock"),
+            EnforcementStore::open(":memory:").expect("test store should open"),
+        );
+        let active = coordinator.ingestion_readiness.candidate();
+        coordinator.ingestion_readiness.install(Arc::clone(&active));
+        make_ready(&coordinator.ingestion_readiness, &active);
+
+        let result = coordinator
+            .start_ingestion_with(|_| Err(std::io::Error::other("fixture thread spawn failure")));
+
+        assert!(matches!(
+            result,
+            Err(EnforcementCoordinatorError::Thread(_))
+        ));
+        assert!(coordinator.ingestion_readiness.is_current(&active));
+        assert!(coordinator.ingestion_readiness.is_ready());
+    }
+
+    #[test]
+    fn ancient_worker_never_becomes_current_after_replacements() {
+        let readiness = IngestionReadiness::new();
+        let ancient = readiness.candidate();
+        readiness.install(Arc::clone(&ancient));
+        make_ready(&readiness, &ancient);
+
+        for _ in 0..10_000 {
+            let current = readiness.candidate();
+            readiness.install(Arc::clone(&current));
+            assert!(!readiness.is_current(&ancient));
+            assert!(!readiness.mark_ready(&ancient, Uuid::new_v4()));
+            make_ready(&readiness, &current);
+        }
+    }
+
+    #[test]
+    fn superseded_worker_cannot_publish_or_revoke_current_readiness() {
+        let readiness = IngestionReadiness::new();
+        let first = readiness.candidate();
+        readiness.install(Arc::clone(&first));
+        make_ready(&readiness, &first);
+
+        let second = readiness.candidate();
+        readiness.install(Arc::clone(&second));
+        assert!(!readiness.is_ready());
+        assert!(!readiness.mark_ready(&first, Uuid::new_v4()));
+        make_ready(&readiness, &second);
+        readiness.mark_not_ready(&first);
+        assert!(readiness.is_ready());
+
+        readiness.stop();
+        assert!(!readiness.mark_ready(&second, Uuid::new_v4()));
+        assert!(!readiness.is_ready());
+    }
+
+    #[test]
+    fn readiness_lease_is_invalidated_by_disconnect_and_reacknowledgement() {
+        let readiness = IngestionReadiness::new();
+        let worker = readiness.candidate();
+        readiness.install(Arc::clone(&worker));
+        make_ready(&readiness, &worker);
+        let first_lease = readiness.lease().expect("ready worker should lease");
+
+        readiness.mark_not_ready(&worker);
+        assert!(!first_lease.is_current(&readiness));
+        assert!(!readiness.mark_ready(&worker, Uuid::new_v4()));
+        make_ready(&readiness, &worker);
+        assert!(!first_lease.is_current(&readiness));
+        assert!(
+            readiness
+                .lease()
+                .is_some_and(|lease| lease.is_current(&readiness))
+        );
+    }
+
+    #[test]
+    fn rejected_subscription_cannot_restore_readiness_from_a_buffered_event() {
+        let readiness = IngestionReadiness::new();
+        let worker = readiness.candidate();
+        readiness.install(Arc::clone(&worker));
+        let rejected_subscription_id = make_ready(&readiness, &worker);
+        let lease = readiness.lease().expect("ready worker should lease");
+
+        readiness.invalidate_lease(&lease, "remote lease rejected".into());
+
+        assert!(!readiness.mark_ready(&worker, rejected_subscription_id));
+        assert!(!readiness.is_subscription_current(&worker, rejected_subscription_id));
+        assert!(!readiness.is_ready());
+        make_ready(&readiness, &worker);
+        assert!(readiness.is_ready());
+    }
+
+    #[test]
+    fn readiness_transition_cannot_interleave_a_leased_commit() {
+        let readiness = IngestionReadiness::new();
+        let worker = readiness.candidate();
+        readiness.install(Arc::clone(&worker));
+        make_ready(&readiness, &worker);
+        let lease = readiness.lease().expect("ready worker should lease");
+        let (commit_entered, entered) = mpsc::channel();
+        let (release_commit, released) = mpsc::channel();
+        let committing_readiness = readiness.clone();
+        let commit = thread::spawn(move || {
+            committing_readiness
+                .commit_if_current(&lease, || {
+                    commit_entered
+                        .send(())
+                        .expect("test receiver should remain");
+                    released.recv().expect("commit should be released");
+                    Ok::<(), ()>(())
+                })
+                .expect("fixture commit should succeed")
+        });
+        entered.recv().expect("commit should enter");
+
+        let transition_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let transitioned = Arc::clone(&transition_done);
+        let (transition_started, started) = mpsc::channel();
+        let transitioning_readiness = readiness.clone();
+        let transition = thread::spawn(move || {
+            transition_started
+                .send(())
+                .expect("test receiver should remain");
+            transitioning_readiness.mark_not_ready(&worker);
+            transitioned.store(true, std::sync::atomic::Ordering::Release);
+        });
+        started.recv().expect("transition should start");
+        thread::sleep(Duration::from_millis(50));
+        assert!(!transition_done.load(std::sync::atomic::Ordering::Acquire));
+
+        release_commit.send(()).expect("commit should be released");
+        assert!(commit.join().expect("commit worker should stop"));
+        transition.join().expect("transition worker should stop");
+        assert!(!readiness.is_ready());
+    }
+
+    #[test]
+    fn health_combines_backend_and_ingestion_failures() {
+        let readiness = IngestionReadiness::new();
+        let worker = readiness.candidate();
+        readiness.install(Arc::clone(&worker));
+        readiness.mark_unavailable(
+            &worker,
+            "violation persistence failed: database is locked".into(),
+        );
+
+        let health = combine_health(
+            agentsight_enforcement_protocol::HealthStatus {
+                ready: false,
+                backend: "actplane".into(),
+                message: Some("violation event buffer overflow: dropped_events=1".into()),
+            },
+            &readiness,
+        );
+
+        assert!(!health.ready);
+        assert_eq!(
+            health.message.as_deref(),
+            Some(
+                "violation event buffer overflow: dropped_events=1; violation persistence failed: database is locked"
+            )
+        );
     }
 }

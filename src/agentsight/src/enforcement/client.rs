@@ -89,8 +89,15 @@ impl EnforcementClient {
     /// # Errors
     ///
     /// Returns a transport, protocol, remote, or response-shape error.
-    pub fn apply(&self, request: ApplyPolicy) -> Result<Binding, EnforcementError> {
-        match self.call(Command::ApplyPolicy(request))? {
+    pub fn apply(
+        &self,
+        request: ApplyPolicy,
+        required_subscription_id: Uuid,
+    ) -> Result<Binding, EnforcementError> {
+        match self.call(Command::ApplyPolicyLeased {
+            request,
+            required_subscription_id,
+        })? {
             ResponseBody::Applied(binding) => Ok(binding),
             body => Err(unexpected("apply", &body)),
         }
@@ -120,13 +127,38 @@ impl EnforcementClient {
         }
     }
 
-    /// Opens an independent violation stream.
+    /// Opens an independent best-effort violation observer.
     ///
     /// # Errors
     ///
     /// Returns a transport, protocol, remote, or response-shape error.
     pub fn subscribe(&self) -> Result<ViolationSubscription, EnforcementError> {
-        let request = Request::new(Command::SubscribeViolations);
+        let subscription_id = Uuid::new_v4();
+        self.open_subscription(
+            Command::SubscribeViolations { subscription_id },
+            subscription_id,
+        )
+    }
+
+    /// Opens the required evidence stream used to authorize policy applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, protocol, remote, or response-shape error.
+    pub fn subscribe_required(&self) -> Result<ViolationSubscription, EnforcementError> {
+        let subscription_id = Uuid::new_v4();
+        self.open_subscription(
+            Command::SubscribeRequiredViolations { subscription_id },
+            subscription_id,
+        )
+    }
+
+    fn open_subscription(
+        &self,
+        command: Command,
+        subscription_id: Uuid,
+    ) -> Result<ViolationSubscription, EnforcementError> {
+        let request = Request::new(command);
         let mut stream = self.connect()?;
         stream.set_read_timeout(Some(Duration::from_millis(250)))?;
         write_frame(&mut stream, &request)?;
@@ -136,6 +168,7 @@ impl EnforcementClient {
             ResponseBody::Subscribed => Ok(ViolationSubscription {
                 reader: FrameReader::new(reader),
                 request_id: request.request_id,
+                subscription_id,
             }),
             body => Err(unexpected("subscribe", &body)),
         }
@@ -160,9 +193,15 @@ impl EnforcementClient {
 pub struct ViolationSubscription {
     reader: FrameReader<BufReader<UnixStream>>,
     request_id: Uuid,
+    subscription_id: Uuid,
 }
 
 impl ViolationSubscription {
+    /// Returns this stream's generation identity.
+    pub fn subscription_id(&self) -> Uuid {
+        self.subscription_id
+    }
+
     /// Waits briefly for the next violation.
     ///
     /// `Ok(None)` means the bounded read interval elapsed, allowing callers to

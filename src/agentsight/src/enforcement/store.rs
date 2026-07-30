@@ -4,10 +4,43 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 use agentsight_enforcement_protocol::{Binding, BindingState, ViolationEvent};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
+
+const MIN_REASONABLE_UNIX_EPOCH_NS: u64 = 946_684_800_000_000_000;
+const MAX_STORED_VIOLATIONS: usize = 100_000;
+
+#[cfg(test)]
+type DegradationHook = Box<dyn FnOnce()>;
+
+#[cfg(test)]
+thread_local! {
+    static DEGRADATION_HOOK: RefCell<Option<DegradationHook>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_degradation_hook(hook: impl FnOnce() + 'static) {
+    DEGRADATION_HOOK.with(|slot| {
+        assert!(
+            slot.borrow_mut().replace(Box::new(hook)).is_none(),
+            "degradation hook must be consumed before replacement"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_degradation_hook() {
+    DEGRADATION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
 
 /// Persistence failures for enforcement state.
 #[derive(Debug, Error)]
@@ -27,6 +60,9 @@ pub enum EnforcementStoreError {
     /// A requested binding is not persisted.
     #[error("binding {0} is not persisted")]
     MissingBinding(Uuid),
+    /// A stable idempotency key names a different desired request.
+    #[error("binding conflict for {0}")]
+    BindingConflict(Uuid),
 }
 
 /// Thread-safe local enforcement state.
@@ -40,10 +76,10 @@ impl EnforcementStore {
     ///
     /// # Errors
     ///
-    /// Returns a SQLite error when the file or schema cannot be initialized.
+    /// Returns a SQLite or JSON error when initialization or legacy migration fails.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EnforcementStoreError> {
         let path = path.as_ref();
-        let connection = if path == Path::new(":memory:") {
+        let mut connection = if path == Path::new(":memory:") {
             Connection::open_in_memory()?
         } else {
             crate::storage::sqlite::create_connection(path)
@@ -83,6 +119,7 @@ impl EnforcementStore {
              CREATE INDEX IF NOT EXISTS idx_enforcement_violations_time
                 ON enforcement_violations(occurred_at_ns DESC);",
         )?;
+        migrate_legacy_violation_timestamps(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -92,10 +129,26 @@ impl EnforcementStore {
     ///
     /// # Errors
     ///
-    /// Returns a mutex, serialization, or SQLite error.
+    /// Returns a mutex, serialization, SQLite, or immutable-request conflict error.
     pub fn upsert_binding(&self, binding: &Binding) -> Result<(), EnforcementStoreError> {
         let json = serde_json::to_string(binding)?;
-        self.connection()?.execute(
+        let connection = self.connection()?;
+        let existing_json: Option<String> = connection
+            .query_row(
+                "SELECT desired_json FROM enforcement_bindings WHERE binding_id = ?1",
+                params![binding.request.binding_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing_json) = existing_json {
+            let existing: Binding = serde_json::from_str(&existing_json)?;
+            if existing.request != binding.request {
+                return Err(EnforcementStoreError::BindingConflict(
+                    binding.request.binding_id,
+                ));
+            }
+        }
+        connection.execute(
             "INSERT INTO enforcement_bindings
                (binding_id, desired_json, state, message, domain_id, updated_at_ns)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -158,7 +211,17 @@ impl EnforcementStore {
     ///
     /// Returns a mutex, serialization, or SQLite error.
     pub fn insert_violation(&self, event: &ViolationEvent) -> Result<bool, EnforcementStoreError> {
-        let changed = self.connection()?.execute(
+        self.insert_violation_with_limit(event, MAX_STORED_VIOLATIONS)
+    }
+
+    fn insert_violation_with_limit(
+        &self,
+        event: &ViolationEvent,
+        limit: usize,
+    ) -> Result<bool, EnforcementStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
             "INSERT OR IGNORE INTO enforcement_violations
                (event_id, binding_id, occurred_at_ns, event_json)
              VALUES (?1, ?2, ?3, ?4)",
@@ -169,6 +232,16 @@ impl EnforcementStore {
                 serde_json::to_string(event)?,
             ],
         )?;
+        transaction.execute(
+            "DELETE FROM enforcement_violations
+             WHERE event_id IN (
+                 SELECT event_id FROM enforcement_violations
+                 ORDER BY occurred_at_ns DESC, event_id DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            params![i64::try_from(limit.max(1)).unwrap_or(i64::MAX)],
+        )?;
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
@@ -199,17 +272,26 @@ impl EnforcementStore {
     ///
     /// Returns a mutex, deserialization, serialization, or SQLite error.
     pub fn mark_active_degraded(&self, message: &str) -> Result<(), EnforcementStoreError> {
-        let mut bindings = self.bindings()?;
-        for binding in &mut bindings {
-            if matches!(
-                binding.state,
-                BindingState::Pending | BindingState::Enforced | BindingState::Detaching
-            ) {
-                binding.state = BindingState::Degraded;
-                binding.message = Some(message.to_string());
-                self.upsert_binding(binding)?;
-            }
-        }
+        #[cfg(test)]
+        run_degradation_hook();
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let updated_at_ns = now_ns();
+        transaction.execute(
+            "UPDATE enforcement_bindings
+             SET desired_json = json_set(
+                    desired_json,
+                    '$.state', 'degraded',
+                    '$.message', ?1
+                 ),
+                 state = 'degraded',
+                 message = ?1,
+                 updated_at_ns = ?2
+             WHERE state IN ('pending', 'enforced', 'degraded')",
+            params![message, sqlite_i64(updated_at_ns)],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -218,6 +300,54 @@ impl EnforcementStore {
             .lock()
             .map_err(|_| EnforcementStoreError::Poisoned)
     }
+}
+
+fn migrate_legacy_violation_timestamps(
+    connection: &mut Connection,
+) -> Result<(), EnforcementStoreError> {
+    let transaction = connection.transaction()?;
+    let candidates = {
+        let mut statement = transaction.prepare(
+            "SELECT event_id, event_json FROM enforcement_violations
+             WHERE occurred_at_ns < ?1",
+        )?;
+        let rows = statement
+            .query_map(params![sqlite_i64(MIN_REASONABLE_UNIX_EPOCH_NS)], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            candidates.push(row?);
+        }
+        candidates
+    };
+
+    for (event_id, event_json) in candidates {
+        let mut event: ViolationEvent = serde_json::from_str(&event_json)?;
+        if event.occurred_at_ns >= MIN_REASONABLE_UNIX_EPOCH_NS
+            || !is_reasonable_unix_epoch_ns(event.observed_at_ns)
+        {
+            continue;
+        }
+        event.occurred_at_ns = event.observed_at_ns;
+        transaction.execute(
+            "UPDATE enforcement_violations
+             SET occurred_at_ns = ?1, event_json = ?2
+             WHERE event_id = ?3 AND occurred_at_ns < ?4",
+            params![
+                event.observed_at_ns as i64,
+                serde_json::to_string(&event)?,
+                event_id,
+                sqlite_i64(MIN_REASONABLE_UNIX_EPOCH_NS),
+            ],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn is_reasonable_unix_epoch_ns(value: u64) -> bool {
+    (MIN_REASONABLE_UNIX_EPOCH_NS..=i64::MAX as u64).contains(&value)
 }
 
 fn state_name(state: BindingState) -> &'static str {
@@ -241,4 +371,140 @@ fn now_ns() -> u64 {
 
 fn sqlite_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use agentsight_enforcement_protocol::Effect;
+
+    use super::*;
+
+    const LEGACY_OCCURRED_AT_NS: u64 = 270_000_000_000_000;
+    const LEGACY_OBSERVED_AT_NS: u64 = 1_784_000_000_000_000_000;
+    const VALID_OCCURRED_AT_NS: u64 = 1_783_000_000_000_000_000;
+
+    struct TestDatabase {
+        path: PathBuf,
+    }
+
+    impl TestDatabase {
+        fn new() -> Self {
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "agentsight-enforcement-store-{}.db",
+                    Uuid::new_v4()
+                )),
+            }
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+            let _ = fs::remove_file(format!("{}-wal", self.path.display()));
+            let _ = fs::remove_file(format!("{}-shm", self.path.display()));
+        }
+    }
+
+    fn violation(occurred_at_ns: u64, observed_at_ns: u64) -> ViolationEvent {
+        ViolationEvent {
+            event_id: Uuid::new_v4(),
+            binding_id: Uuid::new_v4(),
+            agent_id: "test-agent".into(),
+            session_id: Some("test-session".into()),
+            policy_id: "test-policy".into(),
+            policy_revision: "revision-1".into(),
+            pid: 42,
+            ppid: Some(1),
+            process_start_time: 99,
+            operation: "open".into(),
+            target: "/tmp/secret".into(),
+            effect: Effect::Block,
+            blocked: true,
+            killed: false,
+            rule_id: Some("block-secret".into()),
+            reason: Some("test fixture".into()),
+            occurred_at_ns,
+            observed_at_ns,
+            actplane_revision: "test-revision".into(),
+        }
+    }
+
+    fn raw_violation(path: &Path, event_id: Uuid) -> (i64, String) {
+        Connection::open(path)
+            .expect("test database should open")
+            .query_row(
+                "SELECT occurred_at_ns, event_json
+                 FROM enforcement_violations WHERE event_id = ?1",
+                params![event_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("test violation should exist")
+    }
+
+    #[test]
+    fn open_migrates_legacy_violation_idempotently_and_repairs_ordering() {
+        let database = TestDatabase::new();
+        let legacy = violation(LEGACY_OCCURRED_AT_NS, LEGACY_OBSERVED_AT_NS);
+        let valid = violation(VALID_OCCURRED_AT_NS, VALID_OCCURRED_AT_NS + 10);
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        store
+            .insert_violation(&legacy)
+            .expect("legacy violation should insert");
+        store
+            .insert_violation(&valid)
+            .expect("valid violation should insert");
+        drop(store);
+
+        let valid_before = raw_violation(&database.path, valid.event_id);
+        let reopened = EnforcementStore::open(&database.path).expect("test store should reopen");
+        let events = reopened
+            .violations(10)
+            .expect("migrated violations should load");
+        assert_eq!(events[0].event_id, legacy.event_id);
+        assert_eq!(events[0].occurred_at_ns, LEGACY_OBSERVED_AT_NS);
+        assert_eq!(events[1], valid);
+        drop(reopened);
+
+        let legacy_after_first_open = raw_violation(&database.path, legacy.event_id);
+        assert_eq!(legacy_after_first_open.0, LEGACY_OBSERVED_AT_NS as i64);
+        let migrated_json: ViolationEvent = serde_json::from_str(&legacy_after_first_open.1)
+            .expect("migrated event JSON should deserialize");
+        assert_eq!(migrated_json.occurred_at_ns, LEGACY_OBSERVED_AT_NS);
+        assert_eq!(raw_violation(&database.path, valid.event_id), valid_before);
+
+        drop(EnforcementStore::open(&database.path).expect("test store should reopen twice"));
+        assert_eq!(
+            raw_violation(&database.path, legacy.event_id),
+            legacy_after_first_open
+        );
+        assert_eq!(raw_violation(&database.path, valid.event_id), valid_before);
+    }
+
+    #[test]
+    fn open_propagates_malformed_legacy_event_json() {
+        let database = TestDatabase::new();
+        let legacy = violation(LEGACY_OCCURRED_AT_NS, LEGACY_OBSERVED_AT_NS);
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        store
+            .insert_violation(&legacy)
+            .expect("legacy violation should insert");
+        drop(store);
+        Connection::open(&database.path)
+            .expect("test database should open")
+            .execute(
+                "UPDATE enforcement_violations SET event_json = '{' WHERE event_id = ?1",
+                params![legacy.event_id.to_string()],
+            )
+            .expect("legacy JSON should be corrupted");
+
+        match EnforcementStore::open(&database.path) {
+            Err(EnforcementStoreError::Json(_)) => {}
+            Err(error) => panic!("expected JSON error, got {error}"),
+            Ok(_) => panic!("malformed legacy JSON should fail store open"),
+        }
+    }
 }

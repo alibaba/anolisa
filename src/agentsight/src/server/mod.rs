@@ -248,6 +248,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 // AgentSight-owned enforcement API routes
                 .service(enforcement::health)
                 .service(enforcement::apply_binding)
+                .service(enforcement::apply_file_binding)
                 .service(enforcement::list_bindings)
                 .service(enforcement::detach_binding)
                 .service(enforcement::list_violations)
@@ -549,6 +550,16 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/file-bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[actix_web::test]
