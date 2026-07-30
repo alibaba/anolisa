@@ -129,7 +129,7 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 
 - [工作区快照](user-guide/zh/runtime/ws-ckpt.md)
 - [技能文件系统](user-guide/zh/runtime/skillfs.md)
-- [Token 优化](user-guide/zh/token-saving/tokenless.md)
+- [Token 优化](user-guide/zh/token-saving/tokenless/QUICKSTART.md)
 - [Agent 记忆](user-guide/zh/token-saving/agent-memory.md)
 
 ### 可观测性与安全

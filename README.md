@@ -92,7 +92,7 @@ Savings apply to the tool responses entering the context, not to the whole
 session bill — the [Token-less README](src/tokenless/README.md) explains how to
 estimate the effect for a given workload.
 
-[Read the Token-less user manual →](docs/user-guide/en/token-saving/tokenless.md)
+[Read the Token-less user manual →](docs/user-guide/en/token-saving/tokenless/user-manual.md)
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
 
