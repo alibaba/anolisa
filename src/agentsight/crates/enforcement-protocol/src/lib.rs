@@ -7,11 +7,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod replacement;
 pub mod security;
+pub use replacement::*;
 pub use security::*;
 
 /// Wire protocol version implemented by this crate.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Maximum JSON payload size accepted for one NDJSON frame.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -38,7 +40,7 @@ impl Request {
     }
 }
 
-/// Operations supported by protocol version 3.
+/// Operations supported by protocol version 4.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", content = "params", rename_all = "snake_case")]
 pub enum Command {
@@ -59,6 +61,15 @@ pub enum Command {
     ApplyCredentialPolicyLeased {
         /// Product-level credential policy compiled by the privileged adapter.
         request: ApplyCredentialPolicy,
+        /// Required violation subscription proving evidence delivery is live.
+        required_subscription_id: Uuid,
+    },
+    /// Legacy unleased replacement retained only for an explicit fail-closed response.
+    ReplacePolicy(ReplacePolicy),
+    /// Replaces one exact binding while the required evidence stream is live.
+    ReplacePolicyLeased {
+        /// Compare-and-replace request.
+        request: ReplacePolicy,
         /// Required violation subscription proving evidence delivery is live.
         required_subscription_id: Uuid,
     },
@@ -293,7 +304,7 @@ pub struct Response {
     pub result: Result<ResponseBody, RemoteError>,
 }
 
-/// Successful response payloads supported by protocol version 3.
+/// Successful response payloads supported by protocol version 4.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "response", content = "data", rename_all = "snake_case")]
 pub enum ResponseBody {
@@ -301,6 +312,8 @@ pub enum ResponseBody {
     Health(HealthStatus),
     /// Binding returned after apply.
     Applied(Binding),
+    /// Typed result of an atomic policy-ownership handoff.
+    Replaced(ReplaceOutcome),
     /// Successful detach acknowledgement.
     Detached,
     /// Current backend bindings.
@@ -516,6 +529,48 @@ mod tests {
 
     use super::*;
 
+    fn replacement_apply(binding_id: Uuid) -> ApplyPolicy {
+        ApplyPolicy {
+            binding_id,
+            agent_id: "agent-1".into(),
+            session_id: Some("session-1".into()),
+            root_pid: 42,
+            process_start_time: 101,
+            policy_id: "credential-exfiltration".into(),
+            policy_revision: "1".into(),
+            policy_dsl: "label AGENT".into(),
+        }
+    }
+
+    fn replacement_credential(binding_id: Uuid) -> ApplyCredentialPolicy {
+        ApplyCredentialPolicy {
+            binding_id,
+            agent_id: "agent-1".into(),
+            session_id: Some("session-1".into()),
+            root_pid: 42,
+            process_start_time: 101,
+            policy: CredentialExfiltrationPolicy {
+                policy_id: "credential-exfiltration".into(),
+                revision: 1,
+                source_patterns: vec!["/tmp/credential".into()],
+                trusted_endpoints: Vec::new(),
+                taint_label: "CREDENTIAL".into(),
+                taint_ttl_secs: 900,
+                destination_scope: DestinationScope::PublicIpv4,
+                mode: PolicyMode::Audit,
+            },
+        }
+    }
+
+    fn replacement_binding(state: BindingState) -> Binding {
+        Binding {
+            request: replacement_apply(Uuid::new_v4()),
+            state,
+            message: None,
+            domain_id: Some(7),
+        }
+    }
+
     struct InterruptingReader {
         steps: VecDeque<io::Result<Vec<u8>>>,
     }
@@ -679,5 +734,279 @@ mod tests {
             .expect("fixture should decode")
             .expect("frame should exist");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn replacement_policy_round_trips_both_target_kinds() {
+        for replacement in [
+            ReplacementPolicy::Generic(replacement_apply(Uuid::new_v4())),
+            ReplacementPolicy::Credential(replacement_credential(Uuid::new_v4())),
+        ] {
+            let request = ReplacePolicy {
+                expected: replacement_binding(BindingState::Enforced),
+                source: ReplacementSource::Generic,
+                replacement,
+            };
+            let bytes = serde_json::to_vec(&request).expect("replacement should encode");
+            let decoded =
+                serde_json::from_slice::<ReplacePolicy>(&bytes).expect("replacement should decode");
+            assert_eq!(decoded, request);
+        }
+    }
+
+    #[test]
+    fn replacement_outcomes_expose_only_stable_failure_codes() {
+        let outcome = ReplaceOutcome::SourceRestored {
+            binding: replacement_binding(BindingState::Enforced),
+            code: ReplaceFailureCode::KernelFailure,
+        };
+
+        let json = serde_json::to_string(&outcome).expect("outcome should encode");
+
+        assert!(!json.contains("/root/"));
+        assert_eq!(
+            serde_json::from_str::<ReplaceOutcome>(&json).expect("outcome should decode"),
+            outcome
+        );
+    }
+
+    #[test]
+    fn replacement_rejects_equal_ids_and_non_enforced_sources() {
+        let expected = replacement_binding(BindingState::Enforced);
+        let equal = ReplacePolicy {
+            replacement: ReplacementPolicy::Generic(replacement_apply(expected.request.binding_id)),
+            expected,
+            source: ReplacementSource::Generic,
+        };
+        assert_eq!(equal.validate(), Err(ReplaceValidationError::SameBindingId));
+
+        let detached = ReplacePolicy {
+            expected: replacement_binding(BindingState::Detached),
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(replacement_apply(Uuid::new_v4())),
+        };
+        assert_eq!(
+            detached.validate(),
+            Err(ReplaceValidationError::SourceNotEnforced)
+        );
+    }
+
+    #[test]
+    fn replacement_requires_the_exact_source_process_identity() {
+        let expected = replacement_binding(BindingState::Enforced);
+        for mutate in [
+            |target: &mut ApplyPolicy| target.agent_id = "other-agent".into(),
+            |target: &mut ApplyPolicy| target.session_id = Some("other-session".into()),
+            |target: &mut ApplyPolicy| target.root_pid += 1,
+            |target: &mut ApplyPolicy| target.process_start_time += 1,
+        ] as [fn(&mut ApplyPolicy); 4]
+        {
+            let mut target = replacement_apply(Uuid::new_v4());
+            mutate(&mut target);
+            let request = ReplacePolicy {
+                expected: expected.clone(),
+                source: ReplacementSource::Generic,
+                replacement: ReplacementPolicy::Generic(target),
+            };
+            assert!(request.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn replacement_acknowledgement_must_preserve_source_domain() {
+        let expected = replacement_binding(BindingState::Enforced);
+        let target = replacement_apply(Uuid::new_v4());
+        let request = ReplacePolicy {
+            expected: expected.clone(),
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Generic(target.clone()),
+        };
+        let mut acknowledgement = Binding {
+            request: target,
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: Some(expected.domain_id.expect("source domain should exist") + 1),
+        };
+
+        assert_eq!(
+            request.validate_acknowledgement(&acknowledgement),
+            Err(ReplaceValidationError::RuntimeDomainMismatch)
+        );
+        acknowledgement.domain_id = expected.domain_id;
+        assert_eq!(request.validate_acknowledgement(&acknowledgement), Ok(()));
+    }
+
+    #[test]
+    fn replacement_round_trip_preserves_source_policy_snapshot() {
+        let mut source_policy = replacement_credential(Uuid::new_v4()).policy;
+        source_policy.taint_ttl_secs = 300;
+        let request = ReplacePolicy {
+            expected: replacement_binding(BindingState::Enforced),
+            source: ReplacementSource::Credential(
+                CredentialPolicySnapshot::capture(source_policy.clone())
+                    .expect("valid policy should be captured"),
+            ),
+            replacement: ReplacementPolicy::Credential(replacement_credential(Uuid::new_v4())),
+        };
+
+        let bytes = serde_json::to_vec(&request).expect("replacement should encode");
+        assert!(String::from_utf8_lossy(&bytes).contains("\"version\":1"));
+        let decoded: ReplacePolicy =
+            serde_json::from_slice(&bytes).expect("replacement should decode");
+
+        assert_eq!(
+            decoded
+                .source
+                .credential_snapshot()
+                .expect("source snapshot should survive")
+                .policy()
+                .expect("source snapshot should validate"),
+            &source_policy
+        );
+    }
+
+    #[test]
+    fn reverse_reconstructs_both_structured_policy_provenances() {
+        let mut source_policy = replacement_credential(Uuid::new_v4()).policy;
+        source_policy.taint_ttl_secs = 300;
+        let target = replacement_credential(Uuid::new_v4());
+        let forward = ReplacePolicy {
+            expected: replacement_binding(BindingState::Enforced),
+            source: ReplacementSource::Credential(
+                CredentialPolicySnapshot::capture(source_policy.clone())
+                    .expect("valid source policy should be captured"),
+            ),
+            replacement: ReplacementPolicy::Credential(target.clone()),
+        };
+        let target_acknowledgement = Binding {
+            request: replacement_apply(target.binding_id),
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: forward.expected.domain_id,
+        };
+
+        let reverse = forward.reverse(target_acknowledgement.clone());
+
+        assert_eq!(reverse.expected, target_acknowledgement);
+        assert_eq!(
+            reverse
+                .source
+                .credential_snapshot()
+                .expect("target snapshot should be captured")
+                .policy()
+                .expect("target snapshot should validate"),
+            &target.policy
+        );
+        let ReplacementPolicy::Credential(restored) = reverse.replacement else {
+            panic!("structured source policy should be restored as a credential policy");
+        };
+        assert_eq!(restored.policy, source_policy);
+        assert_eq!(restored.policy.taint_ttl_secs, 300);
+        assert_eq!(restored.binding_id, forward.expected.request.binding_id);
+    }
+
+    #[test]
+    fn credential_policy_snapshot_rejects_unknown_versions() {
+        let policy = replacement_credential(Uuid::new_v4()).policy;
+        let json = serde_json::json!({ "version": 99, "policy": policy });
+        let snapshot: CredentialPolicySnapshot =
+            serde_json::from_value(json).expect("unknown snapshot should decode structurally");
+
+        assert_eq!(
+            snapshot.policy(),
+            Err(CredentialPolicySnapshotError::UnsupportedVersion(99))
+        );
+    }
+
+    #[test]
+    fn legacy_unversioned_source_policy_fails_closed() {
+        let source_policy = replacement_credential(Uuid::new_v4()).policy;
+        let json = serde_json::json!({
+            "expected": replacement_binding(BindingState::Enforced),
+            "source_credential_policy": source_policy,
+            "replacement": ReplacementPolicy::Credential(
+                replacement_credential(Uuid::new_v4())
+            )
+        });
+
+        assert!(serde_json::from_value::<ReplacePolicy>(json).is_err());
+    }
+
+    #[test]
+    fn replacement_without_explicit_source_kind_fails_closed() {
+        let json = serde_json::json!({
+            "expected": replacement_binding(BindingState::Enforced),
+            "replacement": ReplacementPolicy::Credential(
+                replacement_credential(Uuid::new_v4())
+            )
+        });
+
+        assert!(serde_json::from_value::<ReplacePolicy>(json).is_err());
+    }
+
+    #[test]
+    fn credential_snapshot_rejects_unknown_nested_policy_fields() {
+        let policy = replacement_credential(Uuid::new_v4()).policy;
+        let mut json = serde_json::json!({ "version": 1, "policy": policy });
+        json["policy"]["future_semantic_mode"] = serde_json::json!("silent");
+
+        assert!(serde_json::from_value::<CredentialPolicySnapshot>(json).is_err());
+    }
+
+    #[test]
+    fn replacement_rejects_invalid_credential_scope() {
+        let mut target = replacement_credential(Uuid::new_v4());
+        target.policy.destination_scope = DestinationScope::PublicIp;
+        let request = ReplacePolicy {
+            expected: replacement_binding(BindingState::Enforced),
+            source: ReplacementSource::Generic,
+            replacement: ReplacementPolicy::Credential(target),
+        };
+
+        assert!(matches!(
+            request.validate(),
+            Err(ReplaceValidationError::CredentialPolicy(
+                PolicyValidationError::UnsupportedDestinationScope
+            ))
+        ));
+    }
+
+    #[test]
+    fn leased_replacement_command_round_trips_as_one_frame() {
+        let request = Request::new(Command::ReplacePolicyLeased {
+            request: ReplacePolicy {
+                expected: replacement_binding(BindingState::Enforced),
+                source: ReplacementSource::Generic,
+                replacement: ReplacementPolicy::Credential(replacement_credential(Uuid::new_v4())),
+            },
+            required_subscription_id: Uuid::new_v4(),
+        });
+        let mut bytes = Vec::new();
+
+        write_frame(&mut bytes, &request).expect("fixture should encode");
+        let decoded: Request = read_frame(&mut BufReader::new(Cursor::new(bytes)))
+            .expect("fixture should decode")
+            .expect("frame should exist");
+
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn protocol_v3_is_rejected_after_replacement_upgrade() {
+        let mut request = Request::new(Command::Health);
+        request.protocol_version = 3;
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request).expect("fixture should encode");
+
+        let error = read_frame::<_, Request>(&mut BufReader::new(Cursor::new(bytes)))
+            .expect_err("protocol v3 must be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::UnsupportedVersion {
+                expected: PROTOCOL_VERSION,
+                actual: 3,
+            }
+        ));
     }
 }
