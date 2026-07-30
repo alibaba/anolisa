@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -32,7 +31,11 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
 
     // Build and validate the complete runtime before authentication so invalid
     // tool selections fail without entering the interactive auth protocol.
-    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // Use the workspace passed from the shell host (e.g. cosh-shell) so tools
+    // such as MCP filesystem servers resolve the user's project root, not the
+    // cosh-core process cwd. The helper absolutizes relative paths and treats
+    // empty --workspace "" as missing.
+    let project_root = args.workspace_root();
     let mut ext_manager = ExtensionManager::new(project_root.clone());
     if !args.bare {
         ext_manager.refresh();
@@ -472,11 +475,7 @@ struct SessionRuntime {
 
 impl SessionRuntime {
     fn initialize(args: &CliArgs, config: &CoreConfig) -> Result<Self, SessionError> {
-        let workspace = args
-            .workspace
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let workspace = args.workspace_root();
         let store = match SessionStore::for_workspace(&config.session.persist_dir, &workspace) {
             Ok(store) => Some(store),
             // Resume cannot proceed without the store, but a fresh turn can:

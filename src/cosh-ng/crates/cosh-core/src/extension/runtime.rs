@@ -120,7 +120,12 @@ impl<'a> RuntimeSnapshotBuilder<'a> {
 
         let mut tools = ToolRegistry::with_defaults(skill_manager);
         let mut tool_registration_healthy = true;
-        crate::tool::mcp::register_configured_tools(&mut tools, &self.config.mcp.servers).await;
+        crate::tool::mcp::register_configured_tools(
+            &mut tools,
+            &self.config.mcp.servers,
+            &self.project_root,
+        )
+        .await;
         if let Err(error) = mcp.register_tools(&mut tools) {
             tool_registration_healthy = false;
             diagnostics.push(ExtensionDiagnostic::new(error.code(), error.to_string()));

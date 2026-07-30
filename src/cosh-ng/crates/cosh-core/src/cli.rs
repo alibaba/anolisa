@@ -175,6 +175,37 @@ impl CliArgs {
     pub fn is_compact(&self) -> bool {
         self.compact
     }
+
+    /// Resolves the workspace root for this process.
+    ///
+    /// The explicit `--workspace` argument is preferred. Empty strings are
+    /// treated as missing so that shells passing `--workspace ""` do not
+    /// create an empty workspace scope. Relative paths are absolutized against
+    /// the process current directory. The absolute path is then canonicalized
+    /// so that `..` components follow filesystem semantics around symlinks.
+    /// If the workspace does not exist, the absolute path is kept as-is
+    /// instead of lexically collapsing `..`, which would mis-handle symlinks.
+    /// Falls back to the process cwd when no workspace is supplied.
+    pub fn workspace_root(&self) -> std::path::PathBuf {
+        self.workspace
+            .as_deref()
+            .filter(|workspace| !workspace.is_empty())
+            .map(std::path::PathBuf::from)
+            .and_then(|path| {
+                let absolute = if path.is_absolute() {
+                    path
+                } else {
+                    std::env::current_dir().ok()?.join(path)
+                };
+                // Prefer canonicalize for filesystem-correct symlink/..
+                // semantics. If the workspace does not exist, fall back to
+                // the absolute path without lexical normalization.
+                Some(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+            })
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -296,5 +327,105 @@ mod tests {
         let args = CliArgs::try_parse_from(["cosh-core", "summarize this"]).unwrap();
         assert_eq!(args.prompt.as_deref(), Some("summarize this"));
         assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn workspace_root_falls_back_to_cwd_when_missing() {
+        let args = CliArgs::try_parse_from(["cosh-core"]).unwrap();
+        let cwd = std::env::current_dir().expect("cwd is available");
+        assert_eq!(args.workspace_root(), cwd);
+    }
+
+    #[test]
+    fn workspace_root_treats_empty_string_as_missing() {
+        let args = CliArgs::try_parse_from(["cosh-core", "--workspace", ""]).unwrap();
+        let cwd = std::env::current_dir().expect("cwd is available");
+        assert_eq!(args.workspace_root(), cwd);
+    }
+
+    #[test]
+    fn workspace_root_absolutizes_relative_path() {
+        let args = CliArgs::try_parse_from(["cosh-core", "--workspace", "./relative"]).unwrap();
+        assert!(args.workspace_root().is_absolute());
+    }
+
+    #[test]
+    fn workspace_root_canonicalizes_existing_absolute_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("workspace");
+        std::fs::create_dir(&dir).unwrap();
+        let args =
+            CliArgs::try_parse_from(["cosh-core", "--workspace", dir.to_str().unwrap()]).unwrap();
+        assert_eq!(args.workspace_root(), std::fs::canonicalize(&dir).unwrap());
+    }
+
+    #[test]
+    fn workspace_root_keeps_nonexistent_absolute_path_as_is() {
+        let args = CliArgs::try_parse_from([
+            "cosh-core",
+            "--workspace",
+            "/tmp/absolute-workspace-does-not-exist",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.workspace_root(),
+            std::path::PathBuf::from("/tmp/absolute-workspace-does-not-exist")
+        );
+    }
+
+    #[test]
+    fn workspace_root_canonicalizes_dot_to_cwd() {
+        let args = CliArgs::try_parse_from(["cosh-core", "--workspace", "."]).unwrap();
+        let cwd = std::env::current_dir().expect("cwd is available");
+        assert_eq!(args.workspace_root(), std::fs::canonicalize(&cwd).unwrap());
+    }
+
+    #[test]
+    fn workspace_root_canonicalizes_dotdot_to_parent() {
+        let args = CliArgs::try_parse_from(["cosh-core", "--workspace", ".."]).unwrap();
+        let cwd = std::env::current_dir().expect("cwd is available");
+        let parent = cwd.parent().unwrap_or(&cwd);
+        assert_eq!(
+            args.workspace_root(),
+            std::fs::canonicalize(parent).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_root_resolves_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let args =
+            CliArgs::try_parse_from(["cosh-core", "--workspace", link.to_str().unwrap()]).unwrap();
+        assert_eq!(
+            args.workspace_root(),
+            std::fs::canonicalize(&target).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_root_resolves_symlink_with_parent_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let actual = temp.path().join("actual");
+        let link = temp.path().join("link");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let workspace = link.join("..").join("actual");
+        let args =
+            CliArgs::try_parse_from(["cosh-core", "--workspace", workspace.to_str().unwrap()])
+                .unwrap();
+        assert_eq!(
+            args.workspace_root(),
+            std::fs::canonicalize(&actual).unwrap()
+        );
     }
 }

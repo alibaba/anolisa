@@ -31,7 +31,6 @@ mod truncator;
 
 use clap::Parser;
 use cosh_core::provider;
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
@@ -137,11 +136,7 @@ async fn run() {
     if args.is_session_control() {
         std::process::exit(session_control::run());
     }
-    let workspace = args
-        .workspace
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let workspace = args.workspace_root();
     let config = if args.bare {
         CoreConfig::load_bare()
     } else {
@@ -153,7 +148,7 @@ async fn run() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-core starting");
 
     if let Some(cli::Command::Mcp(mcp)) = args.command {
-        if let Err(error) = tool::mcp::run_command(mcp, &config).await {
+        if let Err(error) = tool::mcp::run_command(mcp, &config, &workspace).await {
             eprintln!("MCP command failed: {error}");
             std::process::exit(1);
         }
