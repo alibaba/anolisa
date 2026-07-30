@@ -9,6 +9,9 @@ mod command_risk_parser;
 mod command_risk_tests;
 pub mod display;
 pub(crate) mod guarded_diagnostic;
+pub(crate) mod readonly_compound;
+#[cfg(test)]
+mod readonly_compound_tests;
 pub(crate) mod readonly_pipeline;
 pub(crate) mod readonly_rules;
 
