@@ -76,7 +76,6 @@ impl DiffRecords {
     }
 }
 
-
 /// Serializable report for a record, session, or tool-use diff.
 #[derive(Debug, Serialize)]
 pub struct DiffReport {
