@@ -34,6 +34,7 @@ mod tests {
             label: id.to_string(),
             description: description.map(str::to_string),
             description_zh_cn: None,
+            builtin_base_url: None,
             fields: Vec::new(),
         }
     }

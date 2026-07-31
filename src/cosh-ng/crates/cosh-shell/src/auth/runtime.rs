@@ -461,10 +461,11 @@ fn handle_auth_answer<W: std::io::Write>(
                     let template_idx = auth
                         .providers
                         .iter()
-                        .position(|p| match provider_type {
-                            "dashscope" => p.id == "dashscope",
-                            "aliyun" => p.id == "aliyun",
-                            _ => p.id == "openai_compat",
+                        .position(|provider| provider.id == provider_type)
+                        .or_else(|| {
+                            auth.providers
+                                .iter()
+                                .position(|provider| provider.id == "openai_compat")
                         })
                         .unwrap_or(0);
 

@@ -25,6 +25,7 @@ fn template(id: &str) -> AuthProviderInfo {
         label: id.to_string(),
         description: None,
         description_zh_cn: None,
+        builtin_base_url: None,
         fields: Vec::new(),
     }
 }

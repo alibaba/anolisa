@@ -234,6 +234,7 @@ max_disk_bytes = 1073741824
 | `COSH_AI_PROVIDER` | Override active provider | `ai.active_provider` |
 | `COSH_OUTPUT_LANGUAGE` | Output language | `ai.output_language` |
 | `COSH_MAX_TURNS` | Maximum turns | `agent.max_turns` |
+| `COSH_SERVICE_SITE` | Built-in Coding Plan and Token Plan endpoint catalog | — |
 | `COSH_LOG` | Log level (global) | `logging.level` |
 | `RUST_LOG` | Rust log filter | — |
 | `COSH_SHELL_ADAPTER` | Shell adapter | `shell.adapter_default` |
@@ -243,6 +244,13 @@ max_disk_bytes = 1073741824
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | Alibaba Cloud AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Alibaba Cloud SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | Provider resolution chain |
+
+`COSH_SERVICE_SITE` accepts `china`/`cn` and
+`international`/`intl`/`global`. An unset or unrecognized value uses the
+China catalog. It changes the built-in endpoints offered by `/auth`; it does
+not rewrite saved provider URLs. Legacy OpenAI-compatible plan providers are
+restored to a plan-specific edit form only when their endpoint matches the
+selected catalog, ignoring a trailing slash.
 
 ## Log Level Priority
 

@@ -87,7 +87,7 @@ impl ProviderProfile for DeepSeekProfile {
 
 pub fn profile_from_name(name: &str) -> Box<dyn ProviderProfile> {
     match name {
-        "dashscope" => Box::new(DashScopeProfile),
+        "dashscope" | "coding_plan" | "token_plan" => Box::new(DashScopeProfile),
         "openai" => Box::new(OpenAIProfile),
         "deepseek" => Box::new(DeepSeekProfile),
         _ => Box::new(GenericProfile),
@@ -144,6 +144,8 @@ mod tests {
     #[test]
     fn profile_from_name_routing() {
         assert_eq!(profile_from_name("dashscope").name(), "dashscope");
+        assert_eq!(profile_from_name("coding_plan").name(), "dashscope");
+        assert_eq!(profile_from_name("token_plan").name(), "dashscope");
         assert_eq!(profile_from_name("openai").name(), "openai");
         assert_eq!(profile_from_name("deepseek").name(), "deepseek");
         assert_eq!(profile_from_name("unknown").name(), "generic");

@@ -11,8 +11,110 @@ pub(crate) use exchange::request_validated_auth;
 pub(crate) use validation::AuthConfigValidationError;
 use validation::{validate_auth_response, validate_base_url};
 
+const DEFAULT_PLAN_MODEL: &str = "qwen3.7-plus";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceSite {
+    China,
+    International,
+}
+
+impl ServiceSite {
+    fn from_env() -> Self {
+        std::env::var("COSH_SERVICE_SITE")
+            .ok()
+            .and_then(|value| Self::parse(&value))
+            .unwrap_or(Self::China)
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "china" | "cn" => Some(Self::China),
+            "international" | "intl" | "global" => Some(Self::International),
+            _ => None,
+        }
+    }
+}
+
+struct PlanEndpoint {
+    base_url: &'static str,
+    api_key_url: &'static str,
+}
+
+fn coding_plan_endpoint(site: ServiceSite) -> PlanEndpoint {
+    match site {
+        ServiceSite::China => PlanEndpoint {
+            base_url: "https://coding.dashscope.aliyuncs.com/v1",
+            api_key_url:
+                "https://bailian.console.aliyun.com/?tab=coding-plan#/efm/coding-plan-detail",
+        },
+        ServiceSite::International => PlanEndpoint {
+            base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
+            api_key_url:
+                "https://modelstudio.console.alibabacloud.com/?tab=dashboard#/efm/coding_plan",
+        },
+    }
+}
+
+fn token_plan_endpoint(site: ServiceSite) -> PlanEndpoint {
+    match site {
+        ServiceSite::China => PlanEndpoint {
+            base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            api_key_url:
+                "https://bailian.console.aliyun.com/?tab=plan#/efm/subscription/token-plan",
+        },
+        ServiceSite::International => PlanEndpoint {
+            base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            api_key_url: "https://www.alibabacloud.com/help/en/model-studio/token-plan-quickstart",
+        },
+    }
+}
+
+fn plan_auth_provider(
+    id: &str,
+    label: &str,
+    description: &str,
+    description_zh_cn: &str,
+    endpoint: PlanEndpoint,
+) -> AuthProvider {
+    AuthProvider {
+        id: id.to_string(),
+        label: label.to_string(),
+        description: Some(description.to_string()),
+        description_zh_cn: Some(description_zh_cn.to_string()),
+        fields: vec![
+            AuthField {
+                name: "api_key".to_string(),
+                label: "API Key".to_string(),
+                hint: Some(format!(
+                    "Plan keys start with sk-sp-. Get yours: {}",
+                    endpoint.api_key_url
+                )),
+                secret: true,
+                required: true,
+                placeholder: None,
+            },
+            AuthField {
+                name: "model".to_string(),
+                label: "Model".to_string(),
+                hint: Some(format!("Default: {DEFAULT_PLAN_MODEL}")),
+                secret: false,
+                required: false,
+                placeholder: Some(DEFAULT_PLAN_MODEL.to_string()),
+            },
+        ],
+        builtin_base_url: Some(endpoint.base_url.to_string()),
+        builtin_provider_type: id.to_string(),
+        builtin_default_model: Some(DEFAULT_PLAN_MODEL.to_string()),
+    }
+}
+
 /// Returns the builtin provider templates for the auth UI.
 pub fn builtin_auth_providers() -> Vec<AuthProvider> {
+    builtin_auth_providers_for_site(ServiceSite::from_env())
+}
+
+fn builtin_auth_providers_for_site(site: ServiceSite) -> Vec<AuthProvider> {
     vec![
         AuthProvider {
             id: "aliyun".to_string(),
@@ -49,6 +151,20 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
             builtin_provider_type: "aliyun".to_string(),
             builtin_default_model: Some("qwen3.7-plus".to_string()),
         },
+        plan_auth_provider(
+            "coding_plan",
+            "Coding Plan",
+            "For individual developers • Weekly quota included",
+            "面向个人开发者 • 包含每周额度",
+            coding_plan_endpoint(site),
+        ),
+        plan_auth_provider(
+            "token_plan",
+            "Token Plan",
+            "For teams and companies • Usage-based billing with dedicated capacity",
+            "面向团队和企业 • 按用量计费，提供专属容量",
+            token_plan_endpoint(site),
+        ),
         AuthProvider {
             id: "dashscope".to_string(),
             label: "DashScope (百炼)".to_string(),
@@ -308,10 +424,85 @@ mod tests {
     #[test]
     fn builtin_providers_have_correct_ids() {
         let providers = builtin_auth_providers();
-        assert_eq!(providers.len(), 3);
+        assert_eq!(providers.len(), 5);
         assert_eq!(providers[0].id, "aliyun");
-        assert_eq!(providers[1].id, "dashscope");
-        assert_eq!(providers[2].id, "openai_compat");
+        assert_eq!(providers[1].id, "coding_plan");
+        assert_eq!(providers[2].id, "token_plan");
+        assert_eq!(providers[3].id, "dashscope");
+        assert_eq!(providers[4].id, "openai_compat");
+    }
+
+    #[test]
+    fn plan_endpoints_match_service_site() {
+        let coding_cn = coding_plan_endpoint(ServiceSite::China);
+        let coding_intl = coding_plan_endpoint(ServiceSite::International);
+        let token_cn = token_plan_endpoint(ServiceSite::China);
+        let token_intl = token_plan_endpoint(ServiceSite::International);
+
+        assert_eq!(
+            coding_cn.base_url,
+            "https://coding.dashscope.aliyuncs.com/v1"
+        );
+        assert_eq!(
+            coding_intl.base_url,
+            "https://coding-intl.dashscope.aliyuncs.com/v1"
+        );
+        assert_eq!(
+            token_cn.base_url,
+            "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            token_intl.base_url,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        );
+    }
+
+    #[test]
+    fn international_site_builds_plan_templates_with_international_urls() {
+        let providers = builtin_auth_providers_for_site(ServiceSite::International);
+        let coding_plan = providers
+            .iter()
+            .find(|provider| provider.id == "coding_plan")
+            .unwrap();
+        let token_plan = providers
+            .iter()
+            .find(|provider| provider.id == "token_plan")
+            .unwrap();
+
+        assert_eq!(
+            coding_plan.builtin_base_url.as_deref(),
+            Some("https://coding-intl.dashscope.aliyuncs.com/v1")
+        );
+        assert_eq!(
+            coding_plan.description_zh_cn.as_deref(),
+            Some("面向个人开发者 • 包含每周额度")
+        );
+        assert_eq!(
+            coding_plan.description.as_deref(),
+            Some("For individual developers • Weekly quota included")
+        );
+        assert_eq!(
+            token_plan.builtin_base_url.as_deref(),
+            Some("https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")
+        );
+        assert_eq!(
+            token_plan.description.as_deref(),
+            Some("For teams and companies • Usage-based billing with dedicated capacity")
+        );
+        assert_eq!(
+            token_plan.description_zh_cn.as_deref(),
+            Some("面向团队和企业 • 按用量计费，提供专属容量")
+        );
+    }
+
+    #[test]
+    fn service_site_accepts_packaging_aliases() {
+        assert_eq!(ServiceSite::parse("cn"), Some(ServiceSite::China));
+        assert_eq!(
+            ServiceSite::parse("global"),
+            Some(ServiceSite::International)
+        );
+        assert_eq!(ServiceSite::parse("unknown"), None);
     }
 
     #[test]
@@ -361,6 +552,27 @@ mod tests {
         );
         assert_eq!(p.provider_type.as_deref(), Some("dashscope"));
         assert_eq!(p.model.as_deref(), Some("qwen3.7-plus"));
+    }
+
+    #[test]
+    fn apply_coding_plan_credentials_uses_preset_endpoint() {
+        let mut config = CoreConfig::default();
+        let response = AuthResponse {
+            provider_id: "coding-plan".to_string(),
+            provider_type: Some("coding_plan".to_string()),
+            values: HashMap::from([("api_key".to_string(), "sk-sp-test".to_string())]),
+            persist: true,
+        };
+
+        apply_auth_credentials(&mut config, &response).unwrap();
+
+        let provider = config.ai.providers.get("coding-plan").unwrap();
+        assert_eq!(provider.provider_type.as_deref(), Some("coding_plan"));
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://coding.dashscope.aliyuncs.com/v1")
+        );
+        assert_eq!(provider.model.as_deref(), Some(DEFAULT_PLAN_MODEL));
     }
 
     #[test]

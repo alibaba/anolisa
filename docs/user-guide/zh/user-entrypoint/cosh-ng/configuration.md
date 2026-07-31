@@ -217,6 +217,7 @@ max_disk_bytes = 1073741824
 | `COSH_AI_PROVIDER` | 覆盖活跃提供商 | `ai.active_provider` |
 | `COSH_OUTPUT_LANGUAGE` | 输出语言 | `ai.output_language` |
 | `COSH_MAX_TURNS` | 最大轮次 | `agent.max_turns` |
+| `COSH_SERVICE_SITE` | Coding Plan 和 Token Plan 的内置 endpoint 目录 | — |
 | `COSH_LOG` | 日志级别（全局） | `logging.level` |
 | `RUST_LOG` | Rust 日志过滤 | — |
 | `COSH_SHELL_ADAPTER` | Shell 适配器 | `shell.adapter_default` |
@@ -226,6 +227,12 @@ max_disk_bytes = 1073741824
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | 阿里云 AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | 阿里云 SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | provider 解析链 |
+
+`COSH_SERVICE_SITE` 支持 `china`/`cn` 和
+`international`/`intl`/`global`。未设置或无法识别时使用中国站目录。该变量只
+改变 `/auth` 提供的内置 endpoint，不会改写已保存的 provider URL。旧版
+OpenAI-compatible Plan provider 仅在 endpoint 与当前站点目录匹配时恢复为 Plan
+专用编辑表单，匹配时忽略末尾斜杠。
 
 ## 日志级别优先级
 

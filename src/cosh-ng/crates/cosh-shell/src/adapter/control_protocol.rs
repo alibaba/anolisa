@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 use crate::tools::is_shell_tool_name;
 use crate::types::{AgentEvent, QuestionSelectionMode};
 
+mod auth;
 mod serialization;
 
+use auth::parse_auth_provider;
 pub use serialization::{
     serialize_answer, serialize_auth_response, serialize_claude_allow, serialize_co_allow,
     serialize_deny, serialize_host_executed_shell_result, serialize_initialize,
@@ -102,6 +104,9 @@ pub struct AuthProviderInfo {
     /// Simplified Chinese guidance supplied by the provider registry.
     #[serde(default)]
     pub description_zh_cn: Option<String>,
+    /// Fixed endpoint used to recognize preset-backed saved providers.
+    #[serde(default)]
+    pub builtin_base_url: Option<String>,
     pub fields: Vec<AuthFieldInfo>,
 }
 
@@ -438,65 +443,7 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
             let providers = request
                 .get("providers")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let id = item.get("id")?.as_str()?.to_string();
-                            let label = item.get("label")?.as_str()?.to_string();
-                            let description = item
-                                .get("description")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string);
-                            let description_zh_cn = item
-                                .get("description_zh_cn")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string);
-                            let fields = item
-                                .get("fields")
-                                .and_then(|v| v.as_array())
-                                .map(|farr| {
-                                    farr.iter()
-                                        .filter_map(|f| {
-                                            let name = f.get("name")?.as_str()?.to_string();
-                                            let label = f.get("label")?.as_str()?.to_string();
-                                            let hint = f
-                                                .get("hint")
-                                                .and_then(|v| v.as_str())
-                                                .map(|s| s.to_string());
-                                            let secret = f
-                                                .get("secret")
-                                                .and_then(|v| v.as_bool())
-                                                .unwrap_or(false);
-                                            let required = f
-                                                .get("required")
-                                                .and_then(|v| v.as_bool())
-                                                .unwrap_or(true);
-                                            let placeholder = f
-                                                .get("placeholder")
-                                                .and_then(|v| v.as_str())
-                                                .map(|s| s.to_string());
-                                            Some(AuthFieldInfo {
-                                                name,
-                                                label,
-                                                hint,
-                                                secret,
-                                                required,
-                                                placeholder,
-                                            })
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            Some(AuthProviderInfo {
-                                id,
-                                label,
-                                description,
-                                description_zh_cn,
-                                fields,
-                            })
-                        })
-                        .collect()
-                })
+                .map(|arr| arr.iter().filter_map(parse_auth_provider).collect())
                 .unwrap_or_default();
             Some(ControlRequest::AuthRequired {
                 request_id,

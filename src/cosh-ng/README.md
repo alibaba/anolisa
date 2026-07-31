@@ -100,6 +100,13 @@ the same provider conversation. Override the budget with `agent.max_turns` or
 `COSH_MAX_TURNS`; see the
 [configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#agent-turn-budget).
 
+The `/auth` picker includes Coding Plan and Token Plan. Their built-in
+endpoints default to the China service site; set
+`COSH_SERVICE_SITE=international` for the international endpoint catalog.
+See the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#environment-variable-overrides)
+for accepted aliases and fallback behavior.
+
 Core and Shell also write a redacted, versioned audit timeline under
 `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. The existing
 SLS/metrics export is unchanged. See the

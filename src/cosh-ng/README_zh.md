@@ -94,6 +94,11 @@ shell 会请求批准，并在同一个 provider 对话中追加同等预算。�
 `agent.max_turns` 或 `COSH_MAX_TURNS` 覆盖该预算，详见
 [配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#agent-轮次预算)。
 
+`/auth` 选择器包含 Coding Plan 和 Token Plan。内置 endpoint 默认使用中国站；
+国际站设置 `COSH_SERVICE_SITE=international` 后使用国际站 endpoint 目录。
+可选别名和 fallback 行为见
+[配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#环境变量覆盖)。
+
 Core 和 Shell 还会把脱敏、版本化的审计时间线写入
 `$XDG_STATE_HOME/cosh/audit` 或 `~/.local/state/cosh/audit`。既有
 SLS/metrics 导出保持不变。配置、保留、追踪和事故导出方法见

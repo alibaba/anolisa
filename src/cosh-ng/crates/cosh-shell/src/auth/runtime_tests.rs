@@ -12,6 +12,7 @@ fn provider(id: &str, label: &str) -> AuthProviderInfo {
         label: label.into(),
         description: None,
         description_zh_cn: None,
+        builtin_base_url: None,
         fields: Vec::new(),
     }
 }

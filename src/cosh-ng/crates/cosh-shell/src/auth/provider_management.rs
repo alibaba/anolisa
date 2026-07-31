@@ -79,6 +79,8 @@ fn secret_mask(len: usize) -> String {
 fn label_for_provider_type(provider_type: &str) -> &'static str {
     match provider_type {
         "dashscope" => "DashScope (\u{767e}\u{70bc})",
+        "coding_plan" => "Coding Plan",
+        "token_plan" => "Token Plan",
         "aliyun" => "Aliyun Authentication",
         _ => "OpenAI Compatible",
     }
@@ -111,6 +113,31 @@ impl From<CoreSavedProvider> for ExistingProvider {
     }
 }
 
+fn restore_plan_template(provider: &mut ExistingProvider, templates: &[AuthProviderInfo]) {
+    if !matches!(
+        provider.provider_type.as_str(),
+        "openai_compat" | "openai" | "generic" | "dashscope"
+    ) {
+        return;
+    }
+    let Some(base_url) = provider.base_url.as_deref() else {
+        return;
+    };
+    let Some(template) = templates.iter().find(|template| {
+        matches!(template.id.as_str(), "coding_plan" | "token_plan")
+            && template
+                .builtin_base_url
+                .as_deref()
+                .is_some_and(|template_url| {
+                    template_url.trim_end_matches('/') == base_url.trim_end_matches('/')
+                })
+    }) else {
+        return;
+    };
+    provider.provider_type.clone_from(&template.id);
+    provider.label = label_for_provider_type(&template.id).to_string();
+}
+
 pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAuthState, String> {
     let value = cosh_core.registry_query("auth", "state", Value::Null)?;
     let state: RegistryAuthState =
@@ -118,7 +145,11 @@ pub(super) fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAu
     let mut existing_providers: Vec<ExistingProvider> = state
         .saved_providers
         .into_iter()
-        .map(ExistingProvider::from)
+        .map(|provider| {
+            let mut provider = ExistingProvider::from(provider);
+            restore_plan_template(&mut provider, &state.templates);
+            provider
+        })
         .collect();
     existing_providers.sort_by(|left, right| {
         right
@@ -236,7 +267,58 @@ pub(super) fn provider_action_choice(
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_action_choice, provider_action_options, ProviderAction};
+    use super::{
+        label_for_provider_type, provider_action_choice, provider_action_options,
+        restore_plan_template, ExistingProvider, ProviderAction,
+    };
+    use crate::runtime::prelude::AuthProviderInfo;
+
+    #[test]
+    fn labels_plan_provider_types() {
+        assert_eq!(label_for_provider_type("coding_plan"), "Coding Plan");
+        assert_eq!(label_for_provider_type("token_plan"), "Token Plan");
+    }
+
+    #[test]
+    fn restores_plan_only_for_the_selected_site_endpoint() {
+        let templates = vec![AuthProviderInfo {
+            id: "coding_plan".to_string(),
+            label: "Coding Plan".to_string(),
+            description: None,
+            description_zh_cn: None,
+            builtin_base_url: Some("https://coding.dashscope.aliyuncs.com/v1".to_string()),
+            fields: Vec::new(),
+        }];
+        let mut china = existing_openai_provider("https://coding.dashscope.aliyuncs.com/v1/");
+        let mut international =
+            existing_openai_provider("https://coding-intl.dashscope.aliyuncs.com/v1");
+
+        restore_plan_template(&mut china, &templates);
+        restore_plan_template(&mut international, &templates);
+
+        assert_eq!(china.provider_type, "coding_plan");
+        assert_eq!(china.label, "Coding Plan");
+        assert_eq!(international.provider_type, "openai");
+        assert_eq!(international.label, "OpenAI Compatible");
+    }
+
+    fn existing_openai_provider(base_url: &str) -> ExistingProvider {
+        ExistingProvider {
+            name: "legacy".to_string(),
+            provider_type: "openai".to_string(),
+            label: "OpenAI Compatible".to_string(),
+            model: "qwen3.7-plus".to_string(),
+            is_active: false,
+            editable: true,
+            source: "user".to_string(),
+            base_url: Some(base_url.to_string()),
+            api_key_mask: None,
+            access_key_id_mask: None,
+            access_key_secret_mask: None,
+            security_token_mask: None,
+            auth_source: None,
+        }
+    }
 
     #[test]
     fn user_provider_actions_include_delete() {
