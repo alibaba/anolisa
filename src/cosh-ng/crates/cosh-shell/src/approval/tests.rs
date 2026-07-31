@@ -1565,3 +1565,35 @@ fn always_trust_on_medium_risk_request_still_persists_key() {
         .session_trusted_commands()
         .contains("npm test"));
 }
+
+/// End-to-end wiring pin (#2064 review follow-up): a real classifier
+/// verdict, summarized exactly as the runtime does it, must trip the
+/// panel's irrecoverable flag — including the sudo-wrapped form whose
+/// system-control reason is not the primary one in the trace.
+#[test]
+fn classifier_verdict_wires_irrecoverable_panel_flag() {
+    use crate::approval::panel::assessment_is_irrecoverable;
+    use crate::approval::requests::runtime_assessment_summary;
+    use crate::tools::command_risk::{assess_shell_command, AssessmentPolicy, AssessmentSource};
+
+    for command in ["reboot", "sudo reboot", "shutdown -r now"] {
+        let assessment = assess_shell_command(
+            command,
+            AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
+        );
+        let summary = runtime_assessment_summary(&assessment);
+        assert!(
+            assessment_is_irrecoverable(&summary),
+            "{command}: reason_trace={}",
+            summary.reason_trace
+        );
+    }
+
+    let benign = assess_shell_command(
+        "npm test",
+        AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
+    );
+    assert!(!assessment_is_irrecoverable(&runtime_assessment_summary(
+        &benign
+    )));
+}

@@ -1048,3 +1048,181 @@ fn shell_request(
         hook_warnings: Vec::new(),
     }
 }
+
+fn replayed_shell_request(tool_use_id: Option<&str>) -> RuntimeApprovalRequest {
+    RuntimeApprovalRequest {
+        id: "req-replay".to_string(),
+        audit_ref: None,
+        run_id: "run-1".to_string(),
+        origin: AgentRunOrigin::Standard,
+        session_id: "sess-1".to_string(),
+        cwd: "/tmp".to_string(),
+        source: "provider-tool-call",
+        provider_shell_request_kind: ProviderShellRequestKind::StreamedToolCallFallback,
+        kind: ApprovalRequestKind::Tool,
+        subject: "run_shell_command".to_string(),
+        preview: "$ reboot".to_string(),
+        risk: "high",
+        request_id: None,
+        tool_use_id: tool_use_id.map(str::to_string),
+        tool_input: None,
+        original_user_request: None,
+        status: ApprovalRequestStatus::Pending,
+        execution_path: None,
+        command_block_id: None,
+        redaction_status: None,
+        assessment: None,
+        hook_requires_approval: false,
+        hook_warnings: Vec::new(),
+    }
+}
+
+fn journal_entry_for(
+    request: &RuntimeApprovalRequest,
+    actor: &'static str,
+) -> RuntimeApprovalJournalEntry {
+    RuntimeApprovalJournalEntry {
+        id: "req-1".to_string(),
+        audit_ref: None,
+        run_id: request.run_id.clone(),
+        source: request.source,
+        kind: request.kind,
+        subject: request.subject.clone(),
+        preview: request.preview.clone(),
+        preview_hash: String::new(),
+        risk: request.risk,
+        request_id: None,
+        tool_use_id: request.tool_use_id.clone(),
+        actor,
+        decision: ApprovalRequestStatus::Approved,
+        execution_path: None,
+        command_block_id: None,
+        redaction_status: None,
+        assessment: None,
+    }
+}
+
+/// Replay receipts echo the actual resolution (#2064): a manual Allow
+/// reads Approved, turn consent reads the turn title, and without a
+/// matching journal record the title falls back to Auto-approved.
+#[test]
+fn replayed_shell_receipt_title_reflects_actual_resolution() {
+    let request = replayed_shell_request(Some("toolu-1"));
+
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .journal
+        .push(journal_entry_for(&request, "user"));
+    assert_eq!(
+        completed_provider_native_shell_title(&state, &request),
+        MessageId::ApprovalResolutionApprovedTitle
+    );
+
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .journal
+        .push(journal_entry_for(&request, "batch_consent"));
+    assert_eq!(
+        completed_provider_native_shell_title(&state, &request),
+        MessageId::ApprovalResolutionTurnApprovedTitle
+    );
+
+    // agent-auto resolution and empty journal both stay Auto-approved.
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .journal
+        .push(journal_entry_for(&request, "agent-auto"));
+    assert_eq!(
+        completed_provider_native_shell_title(&state, &request),
+        MessageId::ApprovalResolutionAutoApprovedTitle
+    );
+    assert_eq!(
+        completed_provider_native_shell_title(&InlineState::default(), &request),
+        MessageId::ApprovalResolutionAutoApprovedTitle
+    );
+
+    // Without tool ids the preview anchors the match.
+    let request = replayed_shell_request(None);
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .journal
+        .push(journal_entry_for(&request, "user"));
+    assert_eq!(
+        completed_provider_native_shell_title(&state, &request),
+        MessageId::ApprovalResolutionApprovedTitle
+    );
+}
+
+#[test]
+fn carried_system_control_defeats_trust_key_and_trust_mode() {
+    // #2064 rounds 6-7: a payload hiding a system-control program —
+    // carried (`sh -c 'sudo reboot'`), a whole-machine systemctl verb,
+    // or an opaque carried construct that fails closed as Unresolved
+    // (`sh -c 'echo $(reboot)'`) — must hit the gate on every dispatch.
+    // A session trust key minted for the exact form, and Trust mode,
+    // both leave a pending card, and a repeat dispatch prompts again
+    // instead of running silently through the key.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    for command in [
+        "sh -c 'sudo reboot'",
+        "systemctl reboot",
+        "sh -c 'echo $(reboot)'",
+    ] {
+        for (approval_mode, label) in [
+            (CoshApprovalMode::Auto, "auto"),
+            (CoshApprovalMode::Trust, "trust"),
+        ] {
+            let mut state = InlineState {
+                approval_mode,
+                ..InlineState::default()
+            };
+            state.control.trust.trust_session_command(
+                crate::approval::handoff::trust_key_from_command(command).expect("trust key"),
+            );
+            let governed = [GovernedEvent {
+                decision: GovernanceDecision::Display,
+                policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+                event: AgentEvent::ToolCall {
+                    run_id: "run-1".to_string(),
+                    tool_id: None,
+                    name: "Bash".to_string(),
+                    input: format!(r#"{{"command":"{command}"}}"#),
+                },
+                reason: "irrecoverable command".to_string(),
+                display_text: "irrecoverable command".to_string(),
+                auto_execute: false,
+            }];
+            for dispatch in 0..2 {
+                let mut output = Vec::new();
+                crate::agent::events::render_agent_structured_events(
+                    &mut state,
+                    &governed,
+                    None,
+                    AgentRunOrigin::Standard,
+                    &mut output,
+                    &adapter,
+                )
+                .expect("render carried system-control dispatch");
+                assert_eq!(
+                    state.approvals.requests.len(),
+                    1,
+                    "{command}: {label} dispatch {dispatch}"
+                );
+                assert_eq!(
+                    state.approvals.requests[0].status,
+                    ApprovalRequestStatus::Pending,
+                    "{command}: {label} dispatch {dispatch}"
+                );
+                assert_eq!(state.approvals.requests[0].risk, "high");
+                assert!(
+                    state.control.shell_handoff().approved_is_empty(),
+                    "{command}: {label} dispatch {dispatch}"
+                );
+            }
+        }
+    }
+}

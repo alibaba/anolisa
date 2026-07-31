@@ -1,5 +1,18 @@
 use crate::runtime::prelude::*;
 
+/// Irrecoverable warning trigger (#2064): anchored on the classifier
+/// verdict (`system-control` in the assessment reason trace), never on
+/// command-name matching in the render layer. Trims each code so a
+/// future separator change in `reason_trace` cannot silently disable
+/// the warning. Wiring pinned end-to-end by
+/// `classifier_verdict_wires_irrecoverable_panel_flag`.
+pub(crate) fn assessment_is_irrecoverable(assessment: &RuntimeCommandAssessmentSummary) -> bool {
+    assessment
+        .reason_trace
+        .split(',')
+        .any(|reason| reason.trim() == "system-control")
+}
+
 /// Single source of truth for which action list an approval request offers
 /// (issue #1773): hook requests keep the hook list; a request whose run
 /// already has ≥ 2 approval requests (queued or resolved) offers turn-scope
@@ -111,8 +124,19 @@ pub(crate) fn render_current_approval_request<W: Write>(
         .filter(|action| action_set.action_index(*action).is_some())
         .unwrap_or(ApprovalPanelAction::Approve);
     let expanded = state.approvals.expanded_cards.contains(&request.id);
-    let turn_consent = action_set == ApprovalActionSet::TurnConsent;
+    let turn_consent = matches!(
+        action_set,
+        ApprovalActionSet::TurnConsent | ApprovalActionSet::TurnConsentHighRisk
+    );
     let turn_extension = action_set == ApprovalActionSet::TurnExtension;
+    let deny_always_trust = matches!(
+        action_set,
+        ApprovalActionSet::StandardHighRisk | ApprovalActionSet::TurnConsentHighRisk
+    );
+    let irrecoverable = request
+        .assessment
+        .as_ref()
+        .is_some_and(assessment_is_irrecoverable);
     // Card-facing reason policy (ARP): only High risk with a whitelisted
     // primary reason yields a natural-language phrase; everything else is
     // fail-quiet. Raw codes stay in details/journal only.
@@ -138,6 +162,8 @@ pub(crate) fn render_current_approval_request<W: Write>(
                 expanded,
                 turn_consent,
                 turn_extension,
+                deny_always_trust,
+                irrecoverable,
                 hook_warnings: request
                     .hook_warnings
                     .iter()

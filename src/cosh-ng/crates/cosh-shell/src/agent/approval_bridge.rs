@@ -334,19 +334,43 @@ fn shell_command_from_request_preview(request: &RuntimeApprovalRequest) -> &str 
         .unwrap_or(request.preview.as_str())
 }
 
+/// Receipt title for a provider replay of an already-executed shell tool
+/// (issue #2064): echo how the request was actually resolved instead of
+/// hard-coding "Auto-approved" — a manual Allow reads Approved, a
+/// turn-scope consent reads the turn title, and only genuinely automatic
+/// approvals (or no matching journal record: fail-safe) keep Auto-approved.
+pub(super) fn completed_provider_native_shell_title(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> MessageId {
+    let resolved = state.approvals.journal.iter().rev().find(|entry| {
+        entry.run_id == request.run_id
+            && entry.decision == ApprovalRequestStatus::Approved
+            && match (&entry.tool_use_id, &request.tool_use_id) {
+                (Some(journal_id), Some(request_id)) => journal_id == request_id,
+                _ => entry.preview == request.preview,
+            }
+    });
+    match resolved.map(|entry| entry.actor) {
+        Some("user") => MessageId::ApprovalResolutionApprovedTitle,
+        Some("user_batch") | Some("batch_consent") => {
+            MessageId::ApprovalResolutionTurnApprovedTitle
+        }
+        _ => MessageId::ApprovalResolutionAutoApprovedTitle,
+    }
+}
+
 fn render_completed_provider_native_shell_request<W: Write>(
     state: &mut InlineState,
     request: RuntimeApprovalRequest,
     output: &mut W,
 ) -> std::io::Result<()> {
+    // Resolve the title before recording: recording journals this replay
+    // as agent-auto, which would shadow the user's original decision.
+    let title = completed_provider_native_shell_title(state, &request);
     let mut request = record_auto_approved_request(state, request);
     mark_provider_native_shell_execution(state, &mut request);
-    render_approval_resolution(
-        state,
-        &request,
-        MessageId::ApprovalResolutionAutoApprovedTitle,
-        output,
-    )
+    render_approval_resolution(state, &request, title, output)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

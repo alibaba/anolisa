@@ -426,7 +426,9 @@ fn shell_command_assessment(command: &str) -> CommandAssessment {
     )
 }
 
-fn runtime_assessment_summary(assessment: &CommandAssessment) -> RuntimeCommandAssessmentSummary {
+pub(super) fn runtime_assessment_summary(
+    assessment: &CommandAssessment,
+) -> RuntimeCommandAssessmentSummary {
     RuntimeCommandAssessmentSummary {
         impact: assessment.impact.legacy_risk(),
         execution: execution_label(assessment.execution),
