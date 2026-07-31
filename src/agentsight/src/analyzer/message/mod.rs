@@ -119,7 +119,10 @@ impl MessageParser {
             return Some(parsed);
         }
 
-        log::warn!("Path '{path}' does not match any known LLM API endpoint");
+        // The analyzer pre-filters non-LLM paths before calling in, so
+        // reaching this point is unexpected but harmless — keep it at debug
+        // as a last-resort diagnostic rather than a per-request alert.
+        log::debug!("Path '{path}' does not match any known LLM API endpoint");
         None
     }
 

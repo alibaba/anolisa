@@ -547,6 +547,14 @@ impl Analyzer {
 
     /// Extract parsed API message from HTTP request/response bodies
     fn extract_message_from_http(&self, result: &AggregatedResult) -> Option<AnalysisResult> {
+        // eBPF capture feeds every HTTPS connection through this pipeline, so
+        // non-LLM traffic (e.g. MCP server requests) lands here too.
+        // parse_by_path would reject it anyway, but only after logging a
+        // per-request diagnostic; filter up front to keep such traffic out of
+        // the message parse path entirely.
+        if !Self::should_parse_message(result) {
+            return None;
+        }
         match result {
             AggregatedResult::HttpComplete(pair) => {
                 let req_body = pair.request.json_body();
@@ -584,6 +592,33 @@ impl Analyzer {
             AggregatedResult::ResponseOnly { .. }
             | AggregatedResult::ProcessComplete(_)
             | AggregatedResult::Http2Frames { .. } => None,
+        }
+    }
+
+    /// Whether the aggregated result's request path belongs to a known LLM
+    /// provider and is therefore worth message parsing.
+    ///
+    /// Unlike `GenAIBuilder::build_llm_call`, no `is_sse` exception is needed
+    /// here: this predicate is exactly the OR of the per-provider
+    /// `matches_path` checks that gate `parse_by_path` itself, so any SSE
+    /// stream it rejects could never have produced a parsed message. The
+    /// genai SSE fallback consumes the `HttpRecord` built elsewhere in
+    /// `analyze_aggregated` and is unaffected by this filter.
+    fn should_parse_message(result: &AggregatedResult) -> bool {
+        match result {
+            AggregatedResult::HttpComplete(pair) | AggregatedResult::SseComplete(pair) => {
+                MessageParser::is_llm_api_path(&pair.request.path)
+            }
+            AggregatedResult::RequestOnly { request, .. } => {
+                MessageParser::is_llm_api_path(&request.path)
+            }
+            AggregatedResult::Http2StreamComplete(stream) => {
+                MessageParser::is_llm_api_path(&stream.path())
+            }
+            // Variants without a request path never reach message parsing.
+            AggregatedResult::ResponseOnly { .. }
+            | AggregatedResult::ProcessComplete(_)
+            | AggregatedResult::Http2Frames { .. } => false,
         }
     }
 
@@ -1597,6 +1632,38 @@ mod tests {
             }
             other => panic!("expected SysomMessage with response, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_should_parse_message_rejects_non_llm_path() {
+        // MCP servers stream JSON-RPC over percent-encoded paths like the one
+        // below. The discriminating point is the pre-filter branch itself:
+        // parse_by_path returned None for such paths even before the filter
+        // existed, so only a direct assertion on should_parse_message can
+        // fail if the filter is removed.
+        let analyzer = Analyzer::new();
+        let request_body = br#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#;
+        let chunk = serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        let stream = build_sse_http2_stream(
+            "/@modelcontextprotocol%2fserver-everything",
+            request_body,
+            &chunk,
+        );
+        let agg = AggregatedResult::Http2StreamComplete(stream);
+
+        assert!(!Analyzer::should_parse_message(&agg));
+        assert!(analyzer.extract_message_from_http(&agg).is_none());
+
+        // Positive control: the same filter must pass LLM paths (SSE
+        // included), otherwise it would silently drop provider traffic.
+        let llm_stream = build_sse_http2_stream(
+            "/v1/chat/completions",
+            br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+            &serde_json::json!({"id": "chatcmpl-1"}),
+        );
+        assert!(Analyzer::should_parse_message(
+            &AggregatedResult::Http2StreamComplete(llm_stream)
+        ));
     }
 
     #[test]
