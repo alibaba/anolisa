@@ -99,4 +99,5 @@ collect_message_ids!([
     capture_notice_ids,
     agent_recovery_reason_ids,
     auth_ids,
+    agent_recovery_retry_ids,
 ],);

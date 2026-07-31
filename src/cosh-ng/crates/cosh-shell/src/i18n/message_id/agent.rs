@@ -127,3 +127,15 @@ macro_rules! agent_recovery_reason_ids {
         );
     };
 }
+
+// #2031 trailing segment: appended after every earlier segment so
+// pre-existing discriminants never shift.
+macro_rules! agent_recovery_retry_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentRecoverySameSessionRetryLine,
+        );
+    };
+}

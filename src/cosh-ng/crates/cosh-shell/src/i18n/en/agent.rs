@@ -10,6 +10,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::AgentRecoveryContinuityBody => "Provider session continuity may be degraded.",
         MessageId::AgentRecoveryTriggerLine => "Recovery trigger: {reason}",
+        MessageId::AgentRecoverySameSessionRetryLine => {
+            "Provider turn stalled; retrying with session history..."
+        }
         MessageId::AgentStatusTitle => "Agent",
         MessageId::AgentStillWorking => "Still working... {elapsed}s · {detail}",
         MessageId::AgentStatusFooter => "Ctrl+C cancels · [Cancel]",

@@ -152,16 +152,22 @@ mod tests {
             MessageId::AgentRecoveryTriggerLine as usize,
             MessageId::CaptureInputRejectedBody as usize + 1
         );
+        // The #2031 recovery-retry segment is the current tail; the tail
+        // ownership assertions move with each appended segment.
         assert_eq!(
             MessageId::AuthSelectProviderQuestion as usize,
             MessageId::AgentRecoveryTriggerLine as usize + 1
         );
         assert_eq!(
-            MessageId::AuthSelectProviderQuestion as usize,
+            MessageId::AgentRecoverySameSessionRetryLine as usize,
+            MessageId::AuthSelectProviderQuestion as usize + 1
+        );
+        assert_eq!(
+            MessageId::AgentRecoverySameSessionRetryLine as usize,
             MessageId::ALL.len() - 1
         );
         assert_eq!(
-            MessageId::AgentRecoveryTriggerLine as usize,
+            MessageId::AuthSelectProviderQuestion as usize,
             MessageId::ALL.len() - 2
         );
     }

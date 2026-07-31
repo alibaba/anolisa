@@ -8,6 +8,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentRecoveryFreshTurnBody => "正在使用新的 provider 轮次恢复 shell evidence。",
         MessageId::AgentRecoveryContinuityBody => "Provider 会话连续性可能降低。",
         MessageId::AgentRecoveryTriggerLine => "恢复触发原因：{reason}",
+        MessageId::AgentRecoverySameSessionRetryLine => "Provider 轮次无响应，正带会话历史重试...",
         MessageId::AgentStatusTitle => "Agent",
         MessageId::AgentStillWorking => "仍在处理... {elapsed}s · {detail}",
         MessageId::AgentStatusFooter => "Ctrl+C 取消 · [Cancel]",

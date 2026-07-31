@@ -138,7 +138,25 @@ impl AgentAdapter for FakeAgentAdapter {
                         max_turns: None,
                     }]);
                 }
+                // Times out for the T1 continuation only, so the T2
+                // same-session retry succeeds (T2-success presentation path).
+                // Checked before the plain "trigger resume timeout" branch
+                // because that trigger is a substring of this one.
+                if input.contains("trigger resume timeout once")
+                    && !request.context_hints.iter().any(|hint| {
+                        hint.contains("disable provider resume")
+                            || hint.contains("same-session retry")
+                    })
+                {
+                    return Ok(vec![AgentEvent::AgentFailed {
+                        run_id,
+                        error: "Agent timed out: No provider response within 20s".to_string(),
+                        error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
+                        max_turns: None,
+                    }]);
+                }
                 if input.contains("trigger resume timeout")
+                    && !input.contains("trigger resume timeout once")
                     && !request
                         .context_hints
                         .iter()

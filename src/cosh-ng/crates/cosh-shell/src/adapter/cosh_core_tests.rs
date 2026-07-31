@@ -433,6 +433,54 @@ fn prepare_invocation_does_not_resume_across_cwd_scope() {
     assert!(!inv.args.contains(&"prev-sess".to_string()));
 }
 
+// The same-session retry fallback (T2) carries no
+// "disable provider resume" hint, so it must resume the active session;
+// the final fresh safety net (T3) carries the hint and must not.
+#[test]
+fn prepare_invocation_same_session_retry_fallback_resumes_active_session() {
+    let adapter = CoshCoreAdapter::new("cosh-core", false);
+    *adapter.session.lock().unwrap() =
+        SessionRuntimeState::with_active("prev-sess", test_workspace_scope());
+    let mut request = test_request();
+    request.context_hints = vec![
+        "analysis-only continuation after foreground shell handoff".to_string(),
+        "shell handoff recovery owner: req-1/<none>/toolu-1".to_string(),
+        "same-session retry for shell handoff fallback".to_string(),
+    ];
+    let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
+    assert!(inv.args.contains(&"--resume".to_string()), "{:?}", inv.args);
+    assert!(
+        inv.args.contains(&"prev-sess".to_string()),
+        "{:?}",
+        inv.args
+    );
+}
+
+#[test]
+fn prepare_invocation_fresh_fallback_disables_resume() {
+    let adapter = CoshCoreAdapter::new("cosh-core", false);
+    *adapter.session.lock().unwrap() =
+        SessionRuntimeState::with_active("prev-sess", test_workspace_scope());
+    let mut request = test_request();
+    request.context_hints = vec![
+        "analysis-only continuation after foreground shell handoff".to_string(),
+        "shell handoff recovery owner: req-1/<none>/toolu-1".to_string(),
+        "same-session retry for shell handoff fallback".to_string(),
+        "disable provider resume for shell handoff fallback".to_string(),
+    ];
+    let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
+    assert!(
+        !inv.args.contains(&"--resume".to_string()),
+        "{:?}",
+        inv.args
+    );
+    assert!(
+        !inv.args.contains(&"prev-sess".to_string()),
+        "{:?}",
+        inv.args
+    );
+}
+
 #[test]
 fn prepare_invocation_ignores_failed_selected_session() {
     let adapter = test_adapter();

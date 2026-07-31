@@ -1,5 +1,5 @@
 use crate::agent::continuation::{
-    render_fresh_turn_recovery_notice, shell_handoff_recovery_approval_id,
+    render_fallback_recovery_notice, shell_handoff_recovery_approval_id,
     shell_handoff_resume_fallback_request,
 };
 use crate::agent::events::{
@@ -64,8 +64,9 @@ pub(crate) fn finish_active_agent_run<W: Write>(
             state.evidence.mark_recovery_reason(approval_id, reason);
         }
         render_recovery_context_before_notice(state, &active_run, output, adapter)?;
-        render_fresh_turn_recovery_notice(state, output, reason)?;
-        // Failed provider resume is retried once as an internal fresh fallback.
+        render_fallback_recovery_notice(state, &fallback, reason, output)?;
+        // Failed provider resume escalates through the tier chain: a
+        // same-session retry first, then one fresh fallback.
         start_agent_run_with_origin(
             &fallback,
             origin,
