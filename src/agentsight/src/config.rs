@@ -870,6 +870,11 @@ pub struct AgentsightConfig {
     /// Whether FFI mode emits raw HTTPS fallback events.
     /// This is configured only through the C API and is not part of agentsight.json.
     pub ffi_enable_raw_https: bool,
+    /// Whether FFI mode subscribes to normalized security audit events.
+    /// This is configured only through the C API and is not part of agentsight.json.
+    pub ffi_enable_security_audit: bool,
+    /// Local enforcer socket used by the optional FFI security subscription.
+    pub ffi_enforcer_socket: PathBuf,
 
     // --- Config File Path ---
     /// Path to JSON configuration file
@@ -958,6 +963,8 @@ impl Default for AgentsightConfig {
             https_rules: Vec::new(),
             http_targets: Vec::new(),
             ffi_enable_raw_https: false,
+            ffi_enable_security_audit: false,
+            ffi_enforcer_socket: PathBuf::from("/run/agentsight/enforcer.sock"),
 
             // Config file path default
             config_path: None,
