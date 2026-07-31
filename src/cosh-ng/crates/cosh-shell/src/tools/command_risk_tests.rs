@@ -350,6 +350,46 @@ fn null_redirection_keeps_remaining_command_risk_and_boundaries() {
 }
 
 #[test]
+fn null_redirection_preserves_quoted_arguments() {
+    // Regression test (SunnyQjm review): the lossy `stage.join(" ")` reconstruction
+    // would lose quotes from arguments like `find . -name "foo bar" 2>/dev/null`.
+    // The `strip_null_redirections` regex approach preserves the original command
+    // structure including quotes and escaping.
+    let find_quoted = ask(r#"find . -name "foo bar" 2>/dev/null"#);
+    // Should not be flagged as high risk (it's a readonly find command)
+    assert_ne!(
+        find_quoted.impact,
+        RiskImpact::High,
+        "{:?}",
+        find_quoted.reasons
+    );
+    assert!(
+        !find_quoted.reasons.contains(&"redirection-write"),
+        "{:?}",
+        find_quoted.reasons
+    );
+    assert!(
+        find_quoted.reasons.contains(&"output-suppressed"),
+        "{:?}",
+        find_quoted.reasons
+    );
+
+    // Pipeline with quoted pipe character should preserve the quote
+    let grep_quoted = ask(r#"grep "a | b" file 2>/dev/null"#);
+    assert_ne!(
+        grep_quoted.impact,
+        RiskImpact::High,
+        "{:?}",
+        grep_quoted.reasons
+    );
+    assert!(
+        grep_quoted.reasons.contains(&"output-suppressed"),
+        "{:?}",
+        grep_quoted.reasons
+    );
+}
+
+#[test]
 fn compound_high_risk_tails_survive_null_redirection_stripping() {
     // Design v3 §3: stripped compounds are assessed per segment with the
     // existing simple/pipeline rules and aggregated, so tails keep their

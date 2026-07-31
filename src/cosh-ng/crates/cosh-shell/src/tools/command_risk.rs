@@ -10,6 +10,23 @@ use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
 use super::readonly_pipeline::validate_readonly_pipeline;
 
+use regex::Regex;
+use std::sync::OnceLock;
+
+/// Strip null redirections (e.g., `2>/dev/null`, `>/dev/null`) from command text.
+///
+/// Uses regex to match and remove null redirection patterns, preserving the original
+/// command structure (including quotes and escaping) for validator consumption.
+fn strip_null_redirections(command: &str) -> String {
+    static NULL_REDIR_RE: OnceLock<Regex> = OnceLock::new();
+    let re = NULL_REDIR_RE.get_or_init(|| {
+        Regex::new(r"(?:\s+)?(?:[0-9]+)?>>?\s*/dev/null(?:\s+)?").expect("valid regex")
+    });
+    let stripped = re.replace_all(command, " ");
+    // Normalize whitespace
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub use super::command_risk_model::{
     is_high_risk_explanation, AssessmentConfidence, AssessmentPolicy, AssessmentSource,
     AssessmentSummary, AutoAllowEvidence, AutoExecutionPolicy, AutoExecutionRoute,
@@ -97,11 +114,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
         match parsed.shape {
             CommandShape::Simple | CommandShape::EnvSimple => {
                 let effective = if parsed.null_redirections > 0 {
-                    parsed
-                        .stages
-                        .first()
-                        .map(|stage| stage.join(" "))
-                        .unwrap_or_default()
+                    strip_null_redirections(command)
                 } else {
                     command.to_string()
                 };
@@ -109,12 +122,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             }
             CommandShape::Pipeline => {
                 let effective = if parsed.null_redirections > 0 {
-                    parsed
-                        .stages
-                        .iter()
-                        .map(|stage| stage.join(" "))
-                        .collect::<Vec<_>>()
-                        .join(" | ")
+                    strip_null_redirections(command)
                 } else {
                     command.to_string()
                 };
