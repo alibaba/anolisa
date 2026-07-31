@@ -143,17 +143,17 @@ mod tests {
             MessageId::ApprovalTurnExtensionUnavailableBody as usize,
             846
         );
-        // The #1913 capture-notice segment is the current tail; the tail
-        // ownership assertions move with each appended segment.
+        // The #1913 capture-notice segment remains pinned ahead of the
+        // appended shell-recovery reason message.
         assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
         assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
         assert_eq!(
-            MessageId::CaptureInputRejectedBody as usize,
-            MessageId::ALL.len() - 1
+            MessageId::AgentRecoveryTriggerLine as usize,
+            MessageId::CaptureInputRejectedBody as usize + 1
         );
         assert_eq!(
-            MessageId::CaptureInputRejectedTitle as usize,
-            MessageId::ALL.len() - 2
+            MessageId::AgentRecoveryTriggerLine as usize,
+            MessageId::ALL.len() - 1
         );
     }
 

@@ -73,6 +73,7 @@ impl EvidenceState {
             {
                 continue;
             }
+            evidence.recovery_reason = Some("evidence_idle_timeout");
             evidence.continuation_state = ShellEvidenceContinuationState::RecoveryQueued;
             requests.push(evidence.clone());
             break;
@@ -95,6 +96,20 @@ impl EvidenceState {
                 | ShellEvidenceContinuationState::RecoveryQueued
                 | ShellEvidenceContinuationState::Closed => {}
             }
+        }
+    }
+
+    pub(crate) fn mark_recovery_reason(&mut self, approval_id: &str, reason: &'static str) {
+        if let Some(evidence) = self
+            .shell_command_completed
+            .iter_mut()
+            .rev()
+            .find(|evidence| {
+                evidence.approval_id.as_deref() == Some(approval_id)
+                    && evidence.continuation_state == ShellEvidenceContinuationState::RecoveryQueued
+            })
+        {
+            evidence.recovery_reason = Some(reason);
         }
     }
 
@@ -402,6 +417,7 @@ mod tests {
         let first = state.claim_stalled_provider_shell_handoff_continuations();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].approval_id.as_deref(), Some("req-1"));
+        assert_eq!(first[0].recovery_reason, Some("evidence_idle_timeout"));
         assert_eq!(
             state.shell_command_completed[0].continuation_state,
             ShellEvidenceContinuationState::RecoveryQueued
@@ -414,6 +430,49 @@ mod tests {
         let second = state.claim_stalled_provider_shell_handoff_continuations();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].approval_id.as_deref(), Some("req-2"));
+    }
+
+    #[test]
+    fn recovery_paths_share_one_claim_per_evidence() {
+        let mut state = EvidenceState::default();
+        state.record_shell_command_completed(shell_evidence(
+            Some("req-1"),
+            true,
+            "delivered",
+            None,
+        ));
+
+        assert_eq!(
+            state
+                .claim_stalled_provider_shell_handoff_continuations()
+                .len(),
+            1
+        );
+        assert!(state.claim_pending_shell_handoff_continuations().is_empty());
+        assert!(state
+            .claim_stalled_provider_shell_handoff_continuations()
+            .is_empty());
+    }
+
+    #[test]
+    fn failed_resume_updates_claimed_evidence_reason() {
+        let mut state = EvidenceState::default();
+        state.record_shell_command_completed(shell_evidence(
+            Some("req-1"),
+            false,
+            "provider_run_not_active",
+            Some("provider run was not active"),
+        ));
+        assert_eq!(state.claim_pending_shell_handoff_continuations().len(), 1);
+
+        state.mark_recovery_reason("req-1", "resume_failed");
+
+        assert_eq!(
+            state
+                .latest_recovery()
+                .and_then(|item| item.recovery_reason),
+            Some("resume_failed")
+        );
     }
 
     fn shell_evidence(

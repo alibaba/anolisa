@@ -21,6 +21,7 @@ pub(crate) use shell_handoff::{NON_INTERACTIVE_PAGER_PREFIX, SHELL_HANDOFF_UNTRA
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PROVIDER_TIMEOUT_ERROR_CODE: &str = "provider_timeout";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

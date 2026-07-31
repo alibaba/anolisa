@@ -1,5 +1,5 @@
 use crate::evidence::{provider_safe_command_fact_line, terminal_output_id};
-use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode};
+use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode, PROVIDER_TIMEOUT_ERROR_CODE};
 
 use super::{AdapterError, AgentAdapter, AgentBackendCapabilities};
 use control_protocol::emit_fake_control_protocol_stream;
@@ -134,7 +134,7 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "Agent timed out: No provider response within 20s".to_string(),
-                        error_code: None,
+                        error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
                         max_turns: None,
                     }]);
                 }
@@ -147,7 +147,7 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "Agent timed out: No provider response within 20s".to_string(),
-                        error_code: None,
+                        error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
                         max_turns: None,
                     }]);
                 }

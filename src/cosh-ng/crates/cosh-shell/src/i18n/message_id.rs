@@ -95,4 +95,5 @@ collect_message_ids!([
     approval_foreground_interactive_ids,
     approval_turn_extension_ids,
     capture_notice_ids,
+    agent_recovery_reason_ids,
 ],);

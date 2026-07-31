@@ -32,6 +32,10 @@ fn raw_cli_shell_handoff_resume_timeout_retries_without_timeout_card() {
         output.contains("Provider session continuity may be degraded."),
         "{output}"
     );
+    assert!(
+        output.contains("Recovery trigger: provider_timeout"),
+        "{output}"
+    );
     assert!(!output.contains("Agent timed out:"), "{output}");
     assert!(
         !output.contains("No provider response within 20s"),
@@ -83,6 +87,11 @@ fn raw_cli_shell_handoff_resume_timeout_renders_structured_context_before_recove
         1,
         "{output}"
     );
+    assert_eq!(
+        count_occurrences(&output, "Recovery trigger: provider_timeout"),
+        1,
+        "{output}"
+    );
     assert!(!output.contains("Agent timed out:"), "{output}");
     assert!(
         !output.contains("No provider response within 20s"),
@@ -130,6 +139,10 @@ fn raw_cli_shell_handoff_recovery_uses_zh_language_env() {
         "{output}"
     );
     assert!(output.contains("Provider 会话连续性可能降低。"), "{output}");
+    assert!(
+        output.contains("恢复触发原因：provider_timeout"),
+        "{output}"
+    );
     assert!(
         !output.contains("Using a fresh provider turn for shell evidence recovery."),
         "{output}"

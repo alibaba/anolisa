@@ -1,13 +1,14 @@
-use std::time::Duration;
-
 use crate::agent::run::ActiveAgentRun;
 use crate::runtime::prelude::*;
+use crate::types::PROVIDER_TIMEOUT_ERROR_CODE;
 
 #[cfg(test)]
 const SHELL_HANDOFF_CONTINUATION_HINT: &str = crate::types::SHELL_HANDOFF_CONTINUATION_HINT;
 const SHELL_HANDOFF_RECOVERY_OWNER_HINT: &str = "shell handoff recovery owner:";
 const DISABLE_PROVIDER_RESUME_HINT: &str = "disable provider resume for shell handoff fallback";
-const SHELL_HANDOFF_FIRST_TEXT_TIMEOUT: Duration = Duration::from_secs(15);
+const SHELL_HANDOFF_FALLBACK_REASON_HINT: &str = "shell handoff fallback reason:";
+const RESUME_FAILED_REASON: &str = "resume_failed";
+const PROVIDER_TIMEOUT_REASON: &str = "provider_timeout";
 
 pub(crate) fn run_request_is_analysis_only_continuation(
     run_request: Option<&AgentRequest>,
@@ -55,10 +56,23 @@ fn run_request_is_shell_handoff_recovery_continuation(request: &AgentRequest) ->
             .any(|hint| hint.contains(SHELL_HANDOFF_RECOVERY_OWNER_HINT))
 }
 
+pub(crate) fn shell_handoff_recovery_approval_id(request: &AgentRequest) -> Option<&str> {
+    request.context_hints.iter().find_map(|hint| {
+        hint.strip_prefix(SHELL_HANDOFF_RECOVERY_OWNER_HINT)
+            .map(str::trim)
+            .and_then(|owner| owner.split('/').next())
+            .filter(|approval_id| !approval_id.is_empty())
+    })
+}
+
 pub(crate) fn render_fresh_turn_recovery_notice<W: Write>(
     state: &InlineState,
     output: &mut W,
+    reason: &str,
 ) -> std::io::Result<()> {
+    let reason_line = state
+        .i18n()
+        .format(MessageId::AgentRecoveryTriggerLine, &[("reason", reason)]);
     RatatuiInlineRenderer::for_terminal()
         .with_language(state.language)
         .write_notice_panel(
@@ -74,6 +88,7 @@ pub(crate) fn render_fresh_turn_recovery_notice<W: Write>(
                         .i18n()
                         .t(MessageId::AgentRecoveryContinuityBody)
                         .to_string(),
+                    reason_line,
                 ],
                 footer: None,
             },
@@ -82,23 +97,27 @@ pub(crate) fn render_fresh_turn_recovery_notice<W: Write>(
 
 pub(crate) fn shell_handoff_resume_fallback_request(
     active_run: &ActiveAgentRun,
-) -> Option<(AgentRequest, AgentRunOrigin)> {
-    let failed = active_run.governed_events.iter().any(|event| {
-        matches!(
-            &event.event,
-            AgentEvent::AgentFailed { .. } | AgentEvent::AgentCancelled { .. }
+) -> Option<(AgentRequest, AgentRunOrigin, &'static str)> {
+    let reason = active_run.governed_events.iter().rev().find_map(|event| {
+        let AgentEvent::AgentFailed { error_code, .. } = &event.event else {
+            return None;
+        };
+        Some(
+            if error_code.as_deref() == Some(PROVIDER_TIMEOUT_ERROR_CODE) {
+                PROVIDER_TIMEOUT_REASON
+            } else {
+                RESUME_FAILED_REASON
+            },
         )
     });
-    if !failed {
-        return None;
-    }
 
-    shell_handoff_resume_fallback_request_without_failure(active_run)
+    shell_handoff_resume_fallback_request_for_reason(active_run, reason?)
 }
 
-fn shell_handoff_resume_fallback_request_without_failure(
+fn shell_handoff_resume_fallback_request_for_reason(
     active_run: &ActiveAgentRun,
-) -> Option<(AgentRequest, AgentRunOrigin)> {
+    reason: &'static str,
+) -> Option<(AgentRequest, AgentRunOrigin, &'static str)> {
     if !run_request_is_shell_handoff_recovery_continuation(&active_run.request) {
         return None;
     }
@@ -119,20 +138,8 @@ fn shell_handoff_resume_fallback_request_without_failure(
         .push(DISABLE_PROVIDER_RESUME_HINT.to_string());
     request
         .context_hints
-        .push("fresh-turn fallback after shell handoff continuation resume failure".to_string());
-    Some((request, active_run.origin))
-}
-
-pub(crate) fn shell_handoff_first_text_fallback_request(
-    active_run: &ActiveAgentRun,
-) -> Option<(AgentRequest, AgentRunOrigin)> {
-    if active_run.has_visible_text_delta {
-        return None;
-    }
-    if active_run.started_at.elapsed() < SHELL_HANDOFF_FIRST_TEXT_TIMEOUT {
-        return None;
-    }
-    shell_handoff_resume_fallback_request_without_failure(active_run)
+        .push(format!("{SHELL_HANDOFF_FALLBACK_REASON_HINT} {reason}"));
+    Some((request, active_run.origin, reason))
 }
 
 #[cfg(test)]
@@ -171,7 +178,7 @@ mod tests {
             policy_decision: GovernancePolicyDecision::AuditOnly,
             event: AgentEvent::AgentFailed {
                 run_id: "run-1".to_string(),
-                error: "Agent timed out: resume failed".to_string(),
+                error: "provider resume session was rejected".to_string(),
                 error_code: None,
                 max_turns: None,
             },
@@ -180,15 +187,20 @@ mod tests {
             auto_execute: false,
         });
 
-        let (fallback, origin) =
+        let (fallback, origin, reason) =
             shell_handoff_resume_fallback_request(&active_run).expect("fallback request");
         assert_eq!(origin, AgentRunOrigin::InsightPrompt);
+        assert_eq!(reason, RESUME_FAILED_REASON);
         assert_eq!(fallback.id, "request-1-fresh");
         assert_eq!(fallback.command_block.id, "block-1-fresh");
         assert!(fallback
             .context_hints
             .iter()
             .any(|hint| hint.contains(DISABLE_PROVIDER_RESUME_HINT)));
+        assert!(fallback
+            .context_hints
+            .iter()
+            .any(|hint| hint == "shell handoff fallback reason: resume_failed"));
 
         let mut retry = test_active_run(fallback);
         retry.governed_events.push(GovernedEvent {
@@ -196,7 +208,7 @@ mod tests {
             policy_decision: GovernancePolicyDecision::AuditOnly,
             event: AgentEvent::AgentFailed {
                 run_id: "run-2".to_string(),
-                error: "Agent timed out again".to_string(),
+                error: "fresh provider turn failed".to_string(),
                 error_code: None,
                 max_turns: None,
             },
@@ -208,18 +220,43 @@ mod tests {
     }
 
     #[test]
-    fn shell_handoff_resume_fallback_ignores_successful_continuation() {
+    fn shell_handoff_active_continuation_age_does_not_trigger_fallback() {
         let mut request = test_request();
         request.context_hints = vec![
             SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
             format!("{SHELL_HANDOFF_RECOVERY_OWNER_HINT} req-1/toolu-1"),
         ];
-        let active_run = test_active_run(request);
+        let mut active_run = test_active_run(request);
+        active_run.started_at = Instant::now() - std::time::Duration::from_secs(60);
+        active_run.last_activity_at = Instant::now();
         assert!(shell_handoff_resume_fallback_request(&active_run).is_none());
     }
 
     #[test]
-    fn shell_handoff_first_text_timeout_retries_without_resume() {
+    fn shell_handoff_cancel_does_not_start_fresh_fallback() {
+        let mut request = test_request();
+        request.context_hints = vec![
+            SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
+            format!("{SHELL_HANDOFF_RECOVERY_OWNER_HINT} req-1/toolu-1"),
+        ];
+        let mut active_run = test_active_run(request);
+        active_run.governed_events.push(GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::AuditOnly,
+            event: AgentEvent::AgentCancelled {
+                run_id: "run-1".to_string(),
+                reason: "user requested cancellation".to_string(),
+            },
+            reason: "cancelled".to_string(),
+            display_text: "cancelled".to_string(),
+            auto_execute: false,
+        });
+
+        assert!(shell_handoff_resume_fallback_request(&active_run).is_none());
+    }
+
+    #[test]
+    fn shell_handoff_provider_timeout_records_trigger_reason() {
         let mut request = test_request();
         request.context_hints = vec![
             SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
@@ -227,40 +264,28 @@ mod tests {
         ];
         let mut active_run = test_active_run(request);
         active_run.origin = AgentRunOrigin::AutoFailure;
-        active_run.started_at = Instant::now() - SHELL_HANDOFF_FIRST_TEXT_TIMEOUT;
+        active_run.governed_events.push(GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::AuditOnly,
+            event: AgentEvent::AgentFailed {
+                run_id: "run-1".to_string(),
+                error: "watchdog expired".to_string(),
+                error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
+                max_turns: None,
+            },
+            reason: "failed".to_string(),
+            display_text: "failed".to_string(),
+            auto_execute: false,
+        });
 
-        let (fallback, origin) =
-            shell_handoff_first_text_fallback_request(&active_run).expect("fallback request");
+        let (fallback, origin, reason) =
+            shell_handoff_resume_fallback_request(&active_run).expect("fallback request");
         assert_eq!(origin, AgentRunOrigin::AutoFailure);
-        assert_eq!(fallback.id, "request-1-fresh");
+        assert_eq!(reason, PROVIDER_TIMEOUT_REASON);
         assert!(fallback
             .context_hints
             .iter()
-            .any(|hint| hint.contains(DISABLE_PROVIDER_RESUME_HINT)));
-    }
-
-    #[test]
-    fn shell_handoff_first_text_timeout_ignores_visible_text() {
-        let mut request = test_request();
-        request.context_hints = vec![
-            SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
-            format!("{SHELL_HANDOFF_RECOVERY_OWNER_HINT} req-1/toolu-1"),
-        ];
-        let mut active_run = test_active_run(request);
-        active_run.started_at = Instant::now() - SHELL_HANDOFF_FIRST_TEXT_TIMEOUT;
-        active_run.has_visible_text_delta = true;
-
-        assert!(shell_handoff_first_text_fallback_request(&active_run).is_none());
-    }
-
-    #[test]
-    fn shell_handoff_first_text_timeout_requires_recovery_owner() {
-        let mut request = test_request();
-        request.context_hints = vec![SHELL_HANDOFF_CONTINUATION_HINT.to_string()];
-        let mut active_run = test_active_run(request);
-        active_run.started_at = Instant::now() - SHELL_HANDOFF_FIRST_TEXT_TIMEOUT;
-
-        assert!(shell_handoff_first_text_fallback_request(&active_run).is_none());
+            .any(|hint| hint == "shell handoff fallback reason: provider_timeout"));
     }
 
     #[test]

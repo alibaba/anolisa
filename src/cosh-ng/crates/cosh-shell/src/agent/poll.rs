@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use crate::agent::continuation::{
-    render_fresh_turn_recovery_notice, run_request_is_analysis_only_continuation,
-    shell_handoff_first_text_fallback_request,
-};
+use crate::agent::continuation::run_request_is_analysis_only_continuation;
 use crate::agent::events::{
     active_run_has_unrendered_interaction, render_active_agent_event,
     render_new_agent_structured_events, state_has_pending_interaction, TextHoldReason,
@@ -49,7 +46,7 @@ fn poll_active_agent_run_with_policy<W: Write>(
     suppress_heartbeat: bool,
 ) -> std::io::Result<()> {
     let mut should_finish = false;
-    let mut first_text_fallback: Option<(AgentRequest, AgentRunOrigin, Option<usize>)> = None;
+    let mut stalled_shell_recovery: Option<(AgentRequest, AgentRunOrigin, Option<usize>)> = None;
     // cosh-core emits a versioned
     // `compaction_recommended_v1:<session>:<gen>:<rev>:<hist>:<usable>` status
     // at the idle boundary of a turn, delivered just before the turn's
@@ -138,21 +135,9 @@ fn poll_active_agent_run_with_policy<W: Write>(
             Ok(AgentRunPoll::Event(event)) => event,
             Ok(AgentRunPoll::Timeout) => {
                 if let Some((fallback, origin)) = stalled_provider_shell_fallback {
-                    first_text_fallback =
+                    stalled_shell_recovery =
                         Some((fallback, origin, active_run.selectable_after_event_index));
                     break;
-                }
-                if !pending_interaction_before_poll
-                    && !queued_before_held_text
-                    && !unrendered_interaction_pending
-                {
-                    if let Some((fallback, origin)) =
-                        shell_handoff_first_text_fallback_request(active_run)
-                    {
-                        first_text_fallback =
-                            Some((fallback, origin, active_run.selectable_after_event_index));
-                        break;
-                    }
                 }
                 if pending_interaction_before_poll
                     || queued_before_held_text
@@ -403,15 +388,14 @@ fn poll_active_agent_run_with_policy<W: Write>(
         crate::slash::session::note_compaction_recommendation(state, &payload);
     }
 
-    if let Some((fallback, origin, selectable_after_event_index)) = first_text_fallback {
+    if let Some((fallback, origin, selectable_after_event_index)) = stalled_shell_recovery {
         if let Some(mut active_run) = state.agent_run.active.take() {
             active_run.handle.cancel();
             active_run.status_animation.clear(output)?;
         }
         // Turn-scope batch consent never outlives its run (issue #1773).
         state.control.trust.clear_run_batch_consent();
-        render_fresh_turn_recovery_notice(state, output)?;
-        // Fresh-turn recovery is an internal fallback continuation.
+        // Evidence-idle recovery is an internal resumable continuation.
         start_agent_run_with_origin(
             &fallback,
             origin,

@@ -117,3 +117,13 @@ macro_rules! question_hardening_ids {
         );
     };
 }
+
+macro_rules! agent_recovery_reason_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentRecoveryTriggerLine,
+        );
+    };
+}

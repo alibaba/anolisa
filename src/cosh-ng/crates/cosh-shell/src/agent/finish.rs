@@ -1,5 +1,6 @@
 use crate::agent::continuation::{
-    render_fresh_turn_recovery_notice, shell_handoff_resume_fallback_request,
+    render_fresh_turn_recovery_notice, shell_handoff_recovery_approval_id,
+    shell_handoff_resume_fallback_request,
 };
 use crate::agent::events::{
     flush_cosh_request_filter_into_active_run, render_agent_structured_events,
@@ -15,6 +16,7 @@ use crate::runtime::evidence_requests::{
 };
 use crate::runtime::prelude::*;
 use crate::runtime::question_terminal::cleanup_question_for_terminal_owner;
+use crate::types::PROVIDER_TIMEOUT_ERROR_CODE;
 
 pub(crate) fn finish_active_agent_run<W: Write>(
     state: &mut InlineState,
@@ -56,15 +58,14 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     active_run.markdown_stream.finish(output, None)?;
     let provider_timed_out = active_run_provider_timed_out(&active_run);
     record_finished_agent_run(state, &active_run.request, &active_run.governed_events);
-    let resume_fallback = if provider_timed_out {
-        shell_handoff_resume_fallback_request(&active_run)
-    } else {
-        None
-    };
-    if let Some((fallback, origin)) = resume_fallback {
+    let resume_fallback = shell_handoff_resume_fallback_request(&active_run);
+    if let Some((fallback, origin, reason)) = resume_fallback {
+        if let Some(approval_id) = shell_handoff_recovery_approval_id(&active_run.request) {
+            state.evidence.mark_recovery_reason(approval_id, reason);
+        }
         render_recovery_context_before_notice(state, &active_run, output, adapter)?;
-        render_fresh_turn_recovery_notice(state, output)?;
-        // Provider-timeout resume is an internal fallback continuation.
+        render_fresh_turn_recovery_notice(state, output, reason)?;
+        // Failed provider resume is retried once as an internal fresh fallback.
         start_agent_run_with_origin(
             &fallback,
             origin,
@@ -250,7 +251,8 @@ fn render_recovery_context_before_notice<W: Write>(
 fn governed_event_is_provider_timeout(event: &GovernedEvent) -> bool {
     matches!(
         &event.event,
-        AgentEvent::AgentFailed { error, .. } if error.contains("Agent timed out:")
+        AgentEvent::AgentFailed { error_code, .. }
+            if error_code.as_deref() == Some(PROVIDER_TIMEOUT_ERROR_CODE)
     )
 }
 

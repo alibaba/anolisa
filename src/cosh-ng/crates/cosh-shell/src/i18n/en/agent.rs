@@ -9,6 +9,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Using a fresh provider turn for shell evidence recovery."
         }
         MessageId::AgentRecoveryContinuityBody => "Provider session continuity may be degraded.",
+        MessageId::AgentRecoveryTriggerLine => "Recovery trigger: {reason}",
         MessageId::AgentStatusTitle => "Agent",
         MessageId::AgentStillWorking => "Still working... {elapsed}s · {detail}",
         MessageId::AgentStatusFooter => "Ctrl+C cancels · [Cancel]",
