@@ -46,46 +46,57 @@ from typing import Any
 # symlink path; resolving .. from the adapter dir hits common/hooks.
 # Fallbacks: system and user FHS paths — needed when the plugin bundle is
 # *copied* into ~/.hermes/plugins/tokenless/ (e.g. by the anolisa driver)
-# instead of symlinked, so the relative path resolves nowhere.
+# instead of symlinked, so the relative path resolves nowhere.  User-scope
+# candidates honor XDG_DATA_HOME (anolisa FsLayout::user prefers it over
+# ~/.local/share).
 #
 # Trust model (aligned with codex/scripts/rewrite-hook, bash
 # is_trusted_file, and Rust is_trusted_path): system FHS paths are
-# unconditional; user paths use passwd DB home (NOT $HOME —
-# env-controllable) with ownership and parent-dir permission checks.
+# unconditional; elsewhere the hooks directory, its parent, and the
+# hook_utils.py file itself must be owned by the current user or root and
+# must not be world-writable.  A candidate that exists but is rejected or
+# incomplete does not stop the search — later candidates are still tried,
+# and every rejection reason is kept for the final diagnostic.
 _HERE = os.path.dirname(os.path.realpath(__file__))
 
 
-def _is_trusted_dir(path: str) -> bool:
-    """Check whether a directory is trusted for Python module imports.
+def _validate_hooks_dir(path: str) -> str | None:
+    """Validate a candidate hooks directory for importing hook_utils.
 
-    Callers must pass realpath-resolved paths so symlink targets are
-    validated before the trust check.
+    Returns None when the directory is trusted and contains an importable
+    hook_utils.py, otherwise a human-readable rejection reason.
     """
-    # System FHS prefixes are always trusted
+    if not path or not os.path.isabs(path):
+        return "not an absolute path"
+    real = os.path.realpath(path)
+    if not os.path.isdir(real):
+        return "directory does not exist"
+    module = os.path.join(real, "hook_utils.py")
+    if not os.path.isfile(module):
+        return "hook_utils.py missing (incomplete or residual install)"
+    # System FHS prefixes are always trusted (checked on the realpath so a
+    # symlink pointing outside a system prefix cannot bypass the check).
     for prefix in ("/usr/share/", "/usr/local/share/", "/usr/libexec/", "/usr/lib/anolisa/"):
-        if path.startswith(prefix):
-            return True
-    # Outside system prefixes: trust only if owned by current uid or root
-    # AND the parent directory is not world-writable.
-    try:
-        st = os.stat(path)
-    except OSError:
-        return False
-    if st.st_uid != os.getuid() and st.st_uid != 0:
-        return False
-    parent = os.path.dirname(path)
-    try:
-        pst = os.stat(parent)
-    except OSError:
-        return False
-    if pst.st_uid != os.getuid() and pst.st_uid != 0:
-        return False
-    if pst.st_mode & 0o002:  # world-writable
-        return False
-    return True
+        if real.startswith(prefix):
+            return None
+    # Outside system prefixes: the hooks dir, its parent, and the module
+    # file must be owned by the current uid or root and not world-writable
+    # (mirrors bash is_trusted_file / Rust is_trusted_path).
+    uid = os.getuid()
+    for p in (real, os.path.dirname(real), module):
+        try:
+            st = os.stat(p)
+        except OSError as exc:
+            return f"stat failed for {p}: {exc}"
+        if st.st_uid != uid and st.st_uid != 0:
+            return f"{p} not owned by current user or root (uid {st.st_uid})"
+        if st.st_mode & 0o002:
+            return f"{p} is world-writable"
+    return None
 
 
-# Resolve real home from passwd DB for user-install fallback path.
+# Resolve real home from passwd DB for user-install fallback path
+# (NOT $HOME — env-controllable).
 try:
     import pwd as _pwd
     _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
@@ -98,27 +109,38 @@ _HOOK_UTILS_CANDIDATES = [
     os.path.join(_HERE, "..", "common", "hooks"),                          # source-tree / symlink install
     "/usr/share/anolisa/adapters/tokenless/common/hooks",                  # RPM system
     "/usr/local/share/anolisa/adapters/tokenless/common/hooks",            # manual system
-    os.path.join(_REAL_HOME, ".local", "share",
-                 "anolisa", "adapters", "tokenless", "common", "hooks") if _REAL_HOME else "",  # user
 ]
+# XDG user data dir first (anolisa FsLayout::user precedence), then the
+# passwd-home default. XDG_DATA_HOME is env-controllable, but candidates
+# still pass the full ownership/permission validation above.
+_xdg_data = os.environ.get("XDG_DATA_HOME", "")
+if _xdg_data and os.path.isabs(_xdg_data):
+    _HOOK_UTILS_CANDIDATES.append(
+        os.path.join(_xdg_data, "anolisa", "adapters", "tokenless", "common", "hooks"))
+if _REAL_HOME:
+    _HOOK_UTILS_CANDIDATES.append(
+        os.path.join(_REAL_HOME, ".local", "share",
+                     "anolisa", "adapters", "tokenless", "common", "hooks"))
+
 _HOOK_UTILS_RESOLVED = ""
+_rejections: list[str] = []
 for _c in _HOOK_UTILS_CANDIDATES:
-    if not _c or not os.path.isdir(_c):
-        continue
-    _real = os.path.realpath(_c)
-    if _is_trusted_dir(_real):
-        _HOOK_UTILS_RESOLVED = _real
-        sys.path.insert(0, _real)
+    _reason = _validate_hooks_dir(_c)
+    if _reason is None:
+        _HOOK_UTILS_RESOLVED = os.path.realpath(_c)
+        sys.path.insert(0, _HOOK_UTILS_RESOLVED)
         break
+    _rejections.append(f"  - {_c}: {_reason}")
 
 if not _HOOK_UTILS_RESOLVED:
-    _tried = "\n".join(f"  - {c}" for c in _HOOK_UTILS_CANDIDATES if c)
     raise ImportError(
-        "tokenless: cannot locate shared hook_utils module (common/hooks/).\n"
-        "Searched (in order):\n" + _tried + "\n"
-        "Install the tokenless common hooks (anolisa install tokenless) or "
-        "re-run adapters/tokenless/hermes/scripts/install.sh from a complete "
-        "adapter tree."
+        "tokenless: no trusted shared hook_utils module (common/hooks/) found.\n"
+        "Candidates checked (in order):\n" + "\n".join(_rejections) + "\n"
+        "Note: a candidate may be rejected by the trust policy (ownership or "
+        "permissions) even though the path exists — see the reason next to "
+        "each path. Install the tokenless common hooks (anolisa install "
+        "tokenless) or re-run adapters/tokenless/hermes/scripts/install.sh "
+        "from a complete adapter tree."
     )
 
 from hook_utils import (
