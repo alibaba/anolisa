@@ -592,6 +592,7 @@ impl CoshCore {
                         prompt_tokens,
                         completion_tokens,
                         total_tokens,
+                        cached_tokens,
                     } => {
                         usage_info = Some((prompt_tokens, completion_tokens, total_tokens));
                         // Explicit hand-off: provider usage feeds compaction
@@ -601,6 +602,7 @@ impl CoshCore {
                         self.metrics.tokens_input += prompt_tokens as u64;
                         self.metrics.tokens_output += completion_tokens as u64;
                         self.metrics.tokens_total += total_tokens as u64;
+                        self.metrics.tokens_cached += cached_tokens as u64;
                     }
                     GenerateEvent::MessageEnd => {
                         self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;

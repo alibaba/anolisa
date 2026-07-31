@@ -214,6 +214,7 @@ pub enum GenerateEvent {
         prompt_tokens: u32,
         completion_tokens: u32,
         total_tokens: u32,
+        cached_tokens: u32,
     },
     MessageEnd,
     Cancelled,
@@ -241,6 +242,19 @@ impl GenerateEvent {
             _ => None,
         }
     }
+}
+
+/// Extract cached token count from a usage JSON object.
+///
+/// Lookup order: `prompt_tokens_details.cached_tokens` → top-level `cached_tokens`.
+/// Returns 0 when neither path is present.
+pub(crate) fn extract_cached_tokens(usage: &serde_json::Map<String, Value>) -> u32 {
+    usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0) as u32
 }
 
 pub type GenerateStream = Pin<Box<dyn Stream<Item = GenerateEvent> + Send>>;

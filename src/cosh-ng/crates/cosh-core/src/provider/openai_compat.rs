@@ -511,10 +511,12 @@ fn parse_sse_chunk_with_state(
             .get("total_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
+        let cached = super::extract_cached_tokens(usage);
         let usage_event = GenerateEvent::Usage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
+            cached_tokens: cached,
         };
         // Usage must precede MessageEnd; consumers stop reading at the end
         // marker and would otherwise drop the usage payload.
@@ -934,7 +936,8 @@ mod tests {
             GenerateEvent::Usage {
                 prompt_tokens: 100,
                 completion_tokens: 50,
-                total_tokens: 150
+                total_tokens: 150,
+                cached_tokens: 0
             }
         ));
     }
@@ -1061,5 +1064,101 @@ mod tests {
 
         assert!(payload.contains(secret), "{payload}");
         assert!(!payload.contains("<redacted>"), "{payload}");
+    }
+
+    #[test]
+    fn parse_sse_extracts_cached_tokens_from_prompt_tokens_details() {
+        let chunk = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "prompt_tokens_details": {
+                    "cached_tokens": 800
+                }
+            }
+        });
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
+        assert!(matches!(
+            &events[0],
+            GenerateEvent::Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                total_tokens: 1050,
+                cached_tokens: 800
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_sse_extracts_cached_tokens_from_top_level() {
+        let chunk = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "cached_tokens": 600
+            }
+        });
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
+        assert!(matches!(
+            &events[0],
+            GenerateEvent::Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                total_tokens: 1050,
+                cached_tokens: 600
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_sse_prefers_prompt_tokens_details_over_top_level_cached_tokens() {
+        let chunk = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "prompt_tokens_details": {
+                    "cached_tokens": 800
+                },
+                "cached_tokens": 600
+            }
+        });
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
+        assert!(matches!(
+            &events[0],
+            GenerateEvent::Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                total_tokens: 1050,
+                cached_tokens: 800
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_sse_defaults_cached_tokens_to_zero_when_absent() {
+        let chunk = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150
+            }
+        });
+        let events = parse_sse_chunk(&chunk, None, false).unwrap();
+        assert!(matches!(
+            &events[0],
+            GenerateEvent::Usage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+                cached_tokens: 0
+            }
+        ));
     }
 }

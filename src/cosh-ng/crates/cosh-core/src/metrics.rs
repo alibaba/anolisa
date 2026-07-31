@@ -11,6 +11,7 @@ pub struct TurnMetrics {
     pub tokens_input: u64,
     pub tokens_output: u64,
     pub tokens_total: u64,
+    pub tokens_cached: u64,
 
     // API statistics
     pub api_requests: u32,
