@@ -2402,6 +2402,74 @@ fn routing_c2_expansion_drift_and_matched_arguments_stay_native() {
 }
 
 #[test]
+fn routing_c2_long_mixed_language_prompts_route_to_agent() {
+    // Issue #2053: zsh preexec abbreviates its second argument for long
+    // inputs; comparing the canonicalized command against it produced a
+    // false expansion-drift signal that pushed long CJK/ASCII prompts to
+    // the native command-not-found path instead of the Agent. Cover both
+    // sides of the abbreviated-text boundary plus a Chinese/English space
+    // variation, and keep bash as the consistency control.
+    let inputs = [
+        // Above the abbreviation boundary (the original user report).
+        "刚才没有恢复，不过 macOS 显示管理器认为屏幕在线",
+        // Space removed at the Chinese/English boundary.
+        "刚才没有恢复，不过macOS 显示管理器认为屏幕在线",
+        // Below the abbreviation boundary.
+        "刚才没有恢复 请解释",
+    ];
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c2-long-nl-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let config = ShellHostConfig::new(format!("routing-c2-long-nl-{shell}"), &work_dir);
+        let steps = inputs
+            .iter()
+            .map(|input| ScriptedInput::user_line(*input))
+            .collect::<Vec<_>>();
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &steps)
+        } else {
+            run_scripted_zsh(&config, &steps)
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        for input in inputs {
+            let first_word = input.split_whitespace().next().expect("first word");
+            assert!(
+                !terminal.contains(&format!("command not found: {first_word}")),
+                "{shell}: {input:?} hit native command-not-found: {terminal}"
+            );
+            assert!(
+                output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                        && event.component.as_deref() == Some("natural_language")
+                }),
+                "{shell}: {input:?}: {:?}\n{terminal}",
+                output.events
+            );
+            assert!(
+                !output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::CommandFailed
+                        && event.command.as_deref() == Some(input)
+                        && event.exit_code == Some(127)
+                }),
+                "{shell}: {input:?} failed with exit 127: {:?}\n{terminal}",
+                output.events
+            );
+        }
+    }
+}
+
+#[test]
 fn routing_c2_nested_provenance_marks_only_the_outer_missing_command() {
     let input = "解释 \"$(解释)\"";
     for shell in ["bash", "zsh"] {

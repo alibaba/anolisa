@@ -481,7 +481,12 @@ command_not_found_handler() {
 }
 _cosh_preexec_marker() {
   local command="$1"
-  local expanded_command="${2:-$1}"
+  # zsh passes the abbreviated, size-limited form in $2 and the full text of
+  # the command being executed in $3. Long inputs truncate $2, so comparing
+  # against it produces a false expansion-drift signal that misroutes long
+  # natural-language prompts to the native command-not-found path (#2053).
+  # Prefer $3; keep $2/$1 as defensive fallbacks for hosts that omit it.
+  local expanded_command="${3:-${2:-$1}}"
   local canonical_command="${(j: :)${(z)command}}"
   local expansion_drift=0
   [[ "$canonical_command" != "$expanded_command" ]] && expansion_drift=1
