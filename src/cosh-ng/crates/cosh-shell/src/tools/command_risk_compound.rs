@@ -1,5 +1,5 @@
 use super::command_risk::{
-    assess_pipeline, assess_simple_command, insert_structural_reason, is_high_risk_explanation,
+    assess_simple_command, insert_structural_reason, is_high_risk_explanation,
     AssessmentConfidence, AssessmentPolicy, AutoAllowEvidence, CommandAssessment, CommandShape,
     ExecutionDecision, InteractionRequirement, OutputExposure, OutputStability, RiskImpact,
     SideEffectClass,
@@ -8,6 +8,7 @@ use super::command_risk_build::{
     dedupe_reasons, max_output_exposure, max_output_stability, min_confidence,
 };
 use super::command_risk_parser::ParsedCommand;
+use super::command_risk_pipeline::assess_pipeline;
 use super::readonly_compound::build_readonly_compound_plan;
 
 /// Returns the per-segment pipeline stages for all compound commands

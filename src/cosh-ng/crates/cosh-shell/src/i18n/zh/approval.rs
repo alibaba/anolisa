@@ -121,6 +121,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseFilesystemWrite => "文件系统写入",
         MessageId::ApprovalRiskPhrasePermissionChange => "权限变更",
         MessageId::ApprovalRiskPhraseProcessControl => "进程控制",
+        MessageId::ApprovalRiskPhraseSystemControl => "整机重启/关停",
+        MessageId::ApprovalIrrecoverableWarningLine => {
+            "不可逆操作：将重启/关停整机，SSH 会话断开，未保存工作丢失"
+        }
         MessageId::ApprovalRiskPhraseServiceControl => "服务控制",
         MessageId::ApprovalRiskPhraseServiceOrContainerControl => "服务/容器控制",
         MessageId::ApprovalRiskPhrasePackageManagerMutation => "软件包变更",

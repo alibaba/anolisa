@@ -1289,3 +1289,461 @@ fn compound_readonly_grant_preserves_aggregated_assessment_fields() {
         .collect();
     assert_eq!(allowed_rest, asked_rest);
 }
+
+// ─── System-control (irrecoverable) command family, issue #2064 ─────
+
+#[test]
+fn system_control_commands_are_high_risk_irrecoverable() {
+    for command in [
+        "reboot",
+        "poweroff",
+        "halt",
+        "telinit 6",
+        "shutdown -r now",
+        "shutdown -h +5",
+        "shutdown -c",
+        "init 0",
+        "init 6",
+        "init S",
+        "/usr/sbin/reboot",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"system-control"),
+            "{command}: reasons={:?}",
+            assessment.reasons
+        );
+    }
+}
+
+#[test]
+fn sudo_wrapped_system_control_keeps_irrecoverable_nature() {
+    for command in [
+        "sudo reboot",
+        "su -c reboot",
+        "sudo /usr/sbin/shutdown -h now",
+        "nohup sudo reboot",
+        // Option-arity forms (review round 2): declared value options
+        // consume their value, so the walk still reaches the payload.
+        "sudo -u root reboot",
+        "sudo -E reboot",
+        "sudo -E -u root reboot",
+        "sudo -ES reboot",
+        "sudo --user=root reboot",
+        "sudo -uroot reboot",
+        "sudo -- reboot",
+        "env sudo -u root reboot",
+        "su root -c reboot",
+        "su -c \"reboot -f\"",
+        "su - root -c reboot",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::PrivilegeEscalation),
+            "{command}"
+        );
+        assert!(assessment.reasons.contains(&"system-control"), "{command}");
+    }
+}
+
+/// Launcher wrappers must not mask the irrecoverable verdict (#2064
+/// review: these forms fell through to Medium/unknown-command, whose
+/// cards still offered "Always trust").
+#[test]
+fn launcher_wrapped_system_control_keeps_irrecoverable_nature() {
+    for command in [
+        "command reboot",
+        "command -p reboot",
+        "env reboot",
+        "env -i FOO=bar reboot",
+        "nohup reboot",
+        "setsid reboot",
+        "nice reboot",
+        "stdbuf -o0 reboot",
+        "busybox reboot",
+        "busybox poweroff",
+        "doas reboot",
+        "env nohup shutdown -h now",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"system-control"),
+            "{command}: reasons={:?}",
+            assessment.reasons
+        );
+    }
+
+    // Launchers forwarding benign programs keep their existing verdicts.
+    for command in [
+        "env ls",
+        "nohup sleep 5",
+        "command git status",
+        "timeout 5 ls",
+    ] {
+        let assessment = ask(command);
+        assert!(
+            !assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+    }
+}
+
+/// Option-arity and execution-carrier forms from review rounds 2-7:
+/// every declared value option consumes its value, `--` ends option
+/// scanning without ending positional consumption, exec/eval/time/
+/// shell-carrier prefixes resolve through to their payload, a carried
+/// command string is classified in full (compound segments, pipeline
+/// stages, nested launchers), and whole-machine systemctl verbs
+/// outrank the generic service-control entry — so the walk reaches
+/// the payload program instead of landing on the value token, the
+/// carrier itself, or the payload's first word and falling back to
+/// Medium/unknown — across simple, pipeline, and compound shapes.
+#[test]
+fn launcher_option_value_forms_still_reach_system_control() {
+    for command in [
+        "env -u FOO reboot",
+        "env -C /tmp reboot",
+        "nice -n 5 reboot",
+        "nice --adjustment=5 reboot",
+        "doas -u root reboot",
+        "stdbuf -o L reboot",
+        "stdbuf --output=L reboot",
+        "timeout 5 reboot",
+        "timeout -- 5 reboot",
+        "timeout -- 5 reboot | cat",
+        "true && timeout -- 5 reboot",
+        "timeout -k 1 5 reboot",
+        "timeout --preserve-status 5 reboot",
+        "xargs reboot",
+        "xargs -0 reboot",
+        "exec reboot",
+        "exec -l reboot",
+        "eval reboot",
+        "time reboot",
+        "time -p reboot",
+        "sh -c reboot",
+        "bash -c reboot",
+        "env sh -c reboot",
+        "busybox sh -c reboot",
+        "xargs sh -c reboot",
+        "sh -c 'echo ok; reboot'",
+        "sh -c 'sudo reboot'",
+        "sh -c 'cat /dev/null | reboot'",
+        "sh -c \"eval reboot\"",
+        "su -c 'echo ok; reboot'",
+        "eval 'reboot;'",
+        "eval 'sudo reboot'",
+        "eval -- reboot",
+        "bash -O extglob -c reboot",
+        "systemctl reboot",
+        "sudo systemctl poweroff",
+        "systemctl isolate reboot.target",
+        "systemctl halt",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"system-control"),
+            "{command}: reasons={:?}",
+            assessment.reasons
+        );
+    }
+    // Round-4 execution carriers resolving to an ordinary payload keep
+    // the caller's verdict: no SystemControl tag may leak from the
+    // carrier itself.
+    for command in [
+        "time ls",
+        "exec ls",
+        "sh -c 'ls'",
+        "sh -c 'echo ok; ls'",
+        "eval 'echo ok; ls'",
+    ] {
+        let assessment = ask(command);
+        assert!(
+            !assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+    }
+}
+
+/// Unresolvable launcher chains upgrade to High without ever tagging
+/// SystemControl (the payload is unconfirmed). High alone keeps
+/// "Always trust" off the approval card — the panel only offers it for
+/// non-high risk, pinned by `approval_action_set_matrix` — so the
+/// #2064 silent-approval defect cannot re-form through these forms.
+#[test]
+fn unresolvable_launcher_chain_upgrades_to_high_without_trust() {
+    for command in [
+        "sudo --frobnicate x reboot",
+        "sudo -u",
+        "sudo",
+        "su -c \"\"",
+        "su --command=",
+        "su -c \"  \"",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::PrivilegeEscalation),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            !assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"unresolvable-launcher-chain"),
+            "{command}: reasons={:?}",
+            assessment.reasons
+        );
+    }
+    for command in [
+        "env --frobnicate x reboot",
+        "env -u",
+        "env -S 'sudo reboot' x",
+        "env --split-string 'reboot' now",
+        "timeout",
+        "eval",
+        "sh -c",
+        "sh -ec reboot",
+        "eval --",
+        "sh -c 'echo $(reboot)'",
+        "sh -c 'if true; then reboot; fi'",
+        "eval 'reboot &'",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert!(
+            !assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"unresolvable-launcher-chain"),
+            "{command}: reasons={:?}",
+            assessment.reasons
+        );
+    }
+    // Pipeline stages share the simple path's parsing-certainty cap:
+    // the unresolved first stage contributes at most Medium, and the
+    // `cat` stage's own Low certainty pulls the aggregate lower.
+    let piped = ask("sudo --frobnicate x reboot | cat");
+    assert_eq!(piped.impact, RiskImpact::High);
+    assert_eq!(piped.confidence, AssessmentConfidence::Low);
+    assert!(piped.reasons.contains(&"unresolvable-launcher-chain"));
+}
+
+/// Query forms run no payload: `command -v` stays on the lookup path,
+/// and `sudo -l` keeps the plain sudo verdict — it must not pick up a
+/// SystemControl tag from the listed command (I4).
+#[test]
+fn launcher_query_forms_keep_wrapper_verdict() {
+    for command in ["command -v reboot", "command -V reboot"] {
+        let assessment = ask(command);
+        assert!(
+            !assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+    }
+    for command in ["sudo -l reboot", "sudo -l"] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::PrivilegeEscalation),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            !assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+    }
+}
+
+/// A chain resolving to a non-system-control high-risk payload keeps
+/// that payload's verdict, and escalation is never dropped once seen
+/// (I3): `env rm` is as destructive as bare `rm`, and `env sudo ls`
+/// stays a privilege-escalation command.
+#[test]
+fn launcher_chain_keeps_payload_high_risk_verdict_and_escalation() {
+    for command in ["env rm -rf /tmp/x", "busybox rm -rf /tmp/x"] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::FilesystemDelete),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+    }
+    let escalated_payload = ask("sudo rm /tmp/x");
+    assert!(
+        escalated_payload
+            .side_effects
+            .contains(&SideEffectClass::PrivilegeEscalation)
+            && escalated_payload
+                .side_effects
+                .contains(&SideEffectClass::FilesystemDelete),
+        "{:?}",
+        escalated_payload.side_effects
+    );
+    let escalated_benign = ask("env sudo ls");
+    assert_eq!(escalated_benign.impact, RiskImpact::High);
+    assert!(
+        escalated_benign
+            .side_effects
+            .contains(&SideEffectClass::PrivilegeEscalation),
+        "{:?}",
+        escalated_benign.side_effects
+    );
+    assert!(
+        !escalated_benign
+            .side_effects
+            .contains(&SideEffectClass::SystemControl),
+        "{:?}",
+        escalated_benign.side_effects
+    );
+    // Nested escalation through a command value (`su -c "sudo reboot"`)
+    // collapses to a single PrivilegeEscalation entry; the command value
+    // is judged by first word only, so SystemControl stays untagged.
+    let nested = ask("su -c \"sudo reboot\"");
+    assert_eq!(nested.impact, RiskImpact::High);
+    assert_eq!(
+        nested
+            .side_effects
+            .iter()
+            .filter(|effect| **effect == SideEffectClass::PrivilegeEscalation)
+            .count(),
+        1,
+        "{:?}",
+        nested.side_effects
+    );
+}
+
+#[test]
+fn system_control_negative_forms_keep_existing_verdicts() {
+    // Argument tokens are never programs: no SystemControl tagging.
+    for command in ["echo reboot", "grep reboot /var/log/messages"] {
+        let assessment = ask(command);
+        assert!(
+            !assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+    }
+
+    // Per-service systemctl verbs keep their ServiceControl
+    // classification; only whole-machine verbs upgrade to
+    // SystemControl (round 7).
+    let systemctl = ask("systemctl restart nginx");
+    assert_eq!(systemctl.impact, RiskImpact::High);
+    assert!(systemctl
+        .side_effects
+        .contains(&SideEffectClass::ServiceControl));
+    assert!(!systemctl
+        .side_effects
+        .contains(&SideEffectClass::SystemControl));
+}
+
+#[test]
+fn system_control_compound_stages_surface_in_overall_assessment() {
+    for command in ["true && reboot", "reboot && echo done", "echo hi; reboot"] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::SystemControl),
+            "{command}: side_effects={:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"system-control"),
+            "{command}: reasons={:?}",
+            assessment.reasons
+        );
+    }
+}

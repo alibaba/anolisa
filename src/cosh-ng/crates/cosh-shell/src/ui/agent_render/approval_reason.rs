@@ -33,6 +33,7 @@ fn phrase_message_id(code: &str) -> Option<crate::MessageId> {
         "filesystem-write" => ApprovalRiskPhraseFilesystemWrite,
         "permission-change" => ApprovalRiskPhrasePermissionChange,
         "process-control" => ApprovalRiskPhraseProcessControl,
+        "system-control" => ApprovalRiskPhraseSystemControl,
         "service-control" => ApprovalRiskPhraseServiceControl,
         "service-or-container-control" => ApprovalRiskPhraseServiceOrContainerControl,
         "package-manager-mutation" => ApprovalRiskPhrasePackageManagerMutation,

@@ -496,6 +496,13 @@ fn looks_like_remote_url(value: &str) -> bool {
     )
 }
 
+pub(super) fn basename(program: &str) -> &str {
+    program
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(program)
+}
+
 /// Post-processing for assessments whose command carried stripped
 /// null-suppression redirections (issue #1667): append the informational
 /// reason and keep the execution boundary unchanged. Risk itself is fully
@@ -507,33 +514,6 @@ pub(super) fn apply_null_redirection_policy(result: &mut CommandAssessment) {
         result.execution = ExecutionDecision::AskUser;
     }
     result.auto_allow = None;
-}
-
-pub(super) fn high_risk_program_assessment(
-    source: AssessmentSource,
-    command: &str,
-    shape: CommandShape,
-    program: &str,
-) -> Option<CommandAssessment> {
-    let (side_effect, reason, interaction) = high_risk_program(program)?;
-    Some(assessment(
-        source,
-        command,
-        shape,
-        ExecutionDecision::AskUser,
-        RiskImpact::High,
-        AssessmentConfidence::High,
-        interaction,
-        OutputStability::StableSnapshot,
-        if side_effect == SideEffectClass::CredentialAccess {
-            OutputExposure::MayContainSecrets
-        } else {
-            OutputExposure::Normal
-        },
-        vec![side_effect],
-        vec![reason],
-        None,
-    ))
 }
 
 pub(super) fn high_risk_program(
@@ -573,6 +553,14 @@ pub(super) fn high_risk_program(
         "kill" | "pkill" | "killall" => Some((
             SideEffectClass::ProcessControl,
             "process-control",
+            InteractionRequirement::None,
+        )),
+        // Whole-machine irrecoverable operations: strictly worse than
+        // service control (a service can restart; a rebooted host drops
+        // every SSH session and loses unsaved work). issue #2064.
+        "reboot" | "shutdown" | "poweroff" | "halt" | "init" | "telinit" => Some((
+            SideEffectClass::SystemControl,
+            "system-control",
             InteractionRequirement::None,
         )),
         "brew" | "apt" | "apt-get" | "dnf" | "yum" => Some((

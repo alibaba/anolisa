@@ -137,6 +137,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseFilesystemWrite => "filesystem write",
         MessageId::ApprovalRiskPhrasePermissionChange => "permission change",
         MessageId::ApprovalRiskPhraseProcessControl => "process control",
+        MessageId::ApprovalRiskPhraseSystemControl => "system reboot/halt",
+        MessageId::ApprovalIrrecoverableWarningLine => {
+            "irrecoverable: reboots/halts this machine; SSH sessions drop and unsaved work is lost"
+        }
         MessageId::ApprovalRiskPhraseServiceControl => "service control",
         MessageId::ApprovalRiskPhraseServiceOrContainerControl => "service/container control",
         MessageId::ApprovalRiskPhrasePackageManagerMutation => "package mutation",

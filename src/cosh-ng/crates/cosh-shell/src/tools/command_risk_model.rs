@@ -68,6 +68,10 @@ pub enum SideEffectClass {
     FilesystemDelete,
     PermissionChange,
     ProcessControl,
+    /// Whole-machine irrecoverable operations (reboot/shutdown/halt):
+    /// stricter than ServiceControl because the blast radius is the
+    /// entire host — SSH sessions drop and unsaved work is lost.
+    SystemControl,
     ServiceControl,
     PackageInstall,
     NetworkRead,
@@ -162,6 +166,7 @@ pub const HIGH_RISK_EXPLANATION_REASONS: &[&str] = &[
     "filesystem-write",
     "permission-change",
     "process-control",
+    "system-control",
     "service-control",
     "service-or-container-control",
     "package-manager-mutation",

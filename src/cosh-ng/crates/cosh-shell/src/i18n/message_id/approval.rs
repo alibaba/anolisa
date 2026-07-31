@@ -172,3 +172,16 @@ macro_rules! approval_turn_extension_ids {
         );
     };
 }
+
+// #2064 additions live in a trailing segment so the existing MessageId
+// discriminants (a registered stable runtime interface) never shift.
+macro_rules! approval_system_control_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ApprovalRiskPhraseSystemControl,
+            ApprovalIrrecoverableWarningLine,
+        );
+    };
+}

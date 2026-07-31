@@ -157,6 +157,8 @@ mod tests {
             MessageId::AuthSelectProviderQuestion as usize,
             MessageId::AgentRecoveryTriggerLine as usize + 1
         );
+        // The #2064 system-control segment is the current tail; the tail
+        // ownership assertions move with each appended segment.
         assert_eq!(
             MessageId::AgentRecoverySameSessionRetryLine as usize,
             MessageId::AuthSelectProviderQuestion as usize + 1
@@ -167,8 +169,19 @@ mod tests {
             MessageId::AgentGovernanceHookNotification as usize,
             MessageId::AgentRecoverySameSessionRetryLine as usize + 1
         );
+        // The #2064 system-control segment follows the hook-notification
+        // segment and keeps the tail; tail ownership assertions move with
+        // each appended segment.
         assert_eq!(
-            MessageId::AgentGovernanceHookDecisionUnspecified as usize,
+            MessageId::ApprovalRiskPhraseSystemControl as usize,
+            MessageId::AgentGovernanceHookDecisionUnspecified as usize + 1
+        );
+        assert_eq!(
+            MessageId::ApprovalRiskPhraseSystemControl as usize,
+            MessageId::ALL.len() - 2
+        );
+        assert_eq!(
+            MessageId::ApprovalIrrecoverableWarningLine as usize,
             MessageId::ALL.len() - 1
         );
     }
