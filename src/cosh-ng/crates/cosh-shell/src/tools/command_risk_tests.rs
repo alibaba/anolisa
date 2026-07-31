@@ -824,8 +824,7 @@ fn fd_duplication_is_not_redirection_write() {
     assert_eq!(multi_digit.shape, CommandShape::Simple);
     assert_eq!(multi_digit.stages, vec![vec!["ls".to_string()]]);
     // Multi-digit source prefixes fail closed AND keep the word as an
-    // ordinary argument, matching zsh which passes `10` to the command
-    //.
+    // ordinary argument, matching zsh which passes `10` to the command.
     let multi_src = super::command_risk_parser::parse_command("tee 10>&1");
     assert!(
         multi_src.stages[0].contains(&"10".to_string()),
