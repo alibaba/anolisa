@@ -1,4 +1,4 @@
-%define anolis_release 3
+%define anolis_release 1
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -446,6 +446,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Jul 31 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.4-1
+- feat(tokenless): distribute prebuilt binaries and adapters through npm for Linux and macOS x64/arm64
+- feat(tokenless): add `tokenless stats diff` reports for records, sessions, and tool uses
+- feat(tokenless): add `TOKENLESS_DATA_DIR` for shared statistics and stash database placement
+- fix(tokenless): declare the Qwencode `compress-toon` capability
+- fix(tokenless): resolve Hermes shared hooks from trusted system and user data paths
+
 * Thu Jul 16 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.7.0-3
 - fix(tokenless): declare all shipped adapters (claude-code, codex, cosh, qoder) in RPM component contract template; exclude generated component.toml from source tarball to prevent stale contracts (GH-1470)
 
