@@ -11,6 +11,7 @@ use crate::approval::provider::mark_provider_approval_resolved;
 use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::evidence_delivery::record_readonly_compound_completion;
 use crate::runtime::prelude::*;
+use crate::tools::command_risk::{RiskImpact, SideEffectClass};
 use crate::tools::readonly_compound::{build_readonly_compound_plan, run_readonly_compound};
 use crate::tools::{ReadonlyPipelineConfig, ReadonlyPipelineError, ReadonlyPipelineOutput};
 
@@ -99,12 +100,39 @@ pub(crate) fn render_trusted_tool<W: Write>(
     Ok(false)
 }
 
+/// Only the irrecoverable verdicts stall the auto-approval paths: a
+/// confirmed SystemControl assessment, or an unresolvable launcher chain
+/// that may hide one. Neither Trust mode nor a session trust key may
+/// approve those (#2064). Other High verdicts (shell-syntax risk,
+/// ordinary privilege escalation) keep each mode's existing contract, so
+/// Trust mode still auto-runs its supported flows.
+fn assessment_requires_interactive_approval(assessment: &CommandAssessment) -> bool {
+    if assessment.execution == ExecutionDecision::Block {
+        return true;
+    }
+    if assessment.impact != RiskImpact::High {
+        return false;
+    }
+    assessment
+        .side_effects
+        .contains(&SideEffectClass::SystemControl)
+        || assessment.reasons.contains(&"unresolvable-launcher-chain")
+}
+
 fn trust_mode_blocks_shell_request(
     request: &mut RuntimeApprovalRequest,
     source: AssessmentSource,
 ) -> bool {
     refresh_shell_request_assessment(request, AssessmentPolicy::ask(source))
-        .is_some_and(|assessment| assessment.execution == ExecutionDecision::Block)
+        .is_some_and(|assessment| assessment_requires_interactive_approval(&assessment))
+}
+
+fn shell_command_requires_interactive_approval(request: &mut RuntimeApprovalRequest) -> bool {
+    refresh_shell_request_assessment(
+        request,
+        AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
+    )
+    .is_some_and(|assessment| assessment_requires_interactive_approval(&assessment))
 }
 
 pub(crate) fn render_auto_approved_tool<W: Write>(
@@ -119,6 +147,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         return Ok(false);
     }
 
+    let mut blocked_approval_ids = Vec::new();
     for event in governed_events {
         let provider_tool_call_fallback = adapter.capabilities().control_protocol
             && matches!(event.event, AgentEvent::ToolCall { .. });
@@ -177,9 +206,24 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             .strip_prefix("$ ")
             .unwrap_or(&request.preview);
 
-        if request_is_executable_bash_tool(&request)
-            && command_matches_trust_key(raw_cmd, state.control.trust.session_trusted_commands())
-        {
+        let trust_key_match = request_is_executable_bash_tool(&request)
+            && command_matches_trust_key(raw_cmd, state.control.trust.session_trusted_commands());
+        if trust_key_match && shell_command_requires_interactive_approval(&mut request) {
+            // A trust key can never override the high-risk gate: config
+            // may preload `reboot` via `trusted_commands`, and a key
+            // minted before this guard would otherwise replay (#2064).
+            // Leave a pending card; the tail record pass ignores tool
+            // calls under control-protocol adapters, so record here.
+            blocked_approval_ids.extend(record_approval_requests(
+                state,
+                std::slice::from_ref(event),
+                run_request,
+                origin,
+                false,
+            ));
+            continue;
+        }
+        if trust_key_match {
             if defer_fallback_bash_tool(state, request.clone(), output)? {
                 return Ok(true);
             }
@@ -245,6 +289,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         }
     }
 
+    render_approval_requests(state, &blocked_approval_ids, output)?;
     Ok(false)
 }
 

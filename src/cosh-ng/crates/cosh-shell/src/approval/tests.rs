@@ -1484,3 +1484,84 @@ fn batch_drain_writes_drop_audit_before_responding() {
     assert!(content.contains("\"ctrl-drop\""), "{content}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ─── High-risk AlwaysTrust hard constraint (issue #2064) ────────────
+
+/// High-risk requests resolve to the AlwaysTrust-free action sets in
+/// both solo and turn-consent shapes; medium risk keeps the shortcut.
+#[test]
+fn high_risk_requests_never_offer_always_trust() {
+    let solo = vec![turn_request("req-1", "run-1", "reboot", "high")];
+    let set = approval_action_set_for(&solo[0], &solo);
+    assert_eq!(set, ApprovalActionSet::StandardHighRisk);
+
+    let queued = vec![
+        turn_request("req-1", "run-1", "reboot", "high"),
+        turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium"),
+    ];
+    assert_eq!(
+        approval_action_set_for(&queued[0], &queued),
+        ApprovalActionSet::TurnConsentHighRisk
+    );
+    // The medium-risk sibling in the same run keeps AlwaysTrust.
+    assert_eq!(
+        approval_action_set_for(&queued[1], &queued),
+        ApprovalActionSet::TurnConsent
+    );
+
+    for set in [
+        ApprovalActionSet::StandardHighRisk,
+        ApprovalActionSet::TurnConsentHighRisk,
+    ] {
+        assert!(
+            !set.descriptors()
+                .iter()
+                .any(|descriptor| descriptor.action == ApprovalPanelAction::AlwaysTrust),
+            "{set:?} must not offer AlwaysTrust"
+        );
+    }
+}
+
+/// Defense in depth: even if a CardAlwaysTrust event reaches a high-risk
+/// request (stale input, replay), no session trust key is minted and the
+/// receipt reads as a plain one-shot approval.
+#[test]
+fn always_trust_on_high_risk_request_does_not_mint_trust_key() {
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .requests
+        .push(turn_request("req-1", "run-1", "reboot", "high"));
+
+    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::AlwaysTrust)
+        .expect("approval decision");
+
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    assert_eq!(decision.title, MessageId::ApprovalResolutionApprovedTitle);
+    assert!(
+        state.control.trust.session_trusted_commands().is_empty(),
+        "high-risk AlwaysTrust must not persist a trust key"
+    );
+}
+
+/// Medium-risk AlwaysTrust behavior is unchanged: key persists and the
+/// receipt reads Trusted.
+#[test]
+fn always_trust_on_medium_risk_request_still_persists_key() {
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .requests
+        .push(turn_request("req-1", "run-1", "npm test", "medium"));
+
+    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::AlwaysTrust)
+        .expect("approval decision");
+
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    assert_eq!(decision.title, MessageId::ApprovalResolutionTrustedTitle);
+    assert!(state
+        .control
+        .trust
+        .session_trusted_commands()
+        .contains("npm test"));
+}

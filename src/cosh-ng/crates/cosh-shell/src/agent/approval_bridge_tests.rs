@@ -736,6 +736,149 @@ fn trust_mode_routes_blocked_shell_request_batch_to_approval() {
 }
 
 #[test]
+fn trust_mode_leaves_high_risk_shell_request_pending() {
+    // #2064: Trust mode auto-approves ordinary commands, but an
+    // irrecoverable one must still raise a per-dispatch approval card
+    // and execute nothing.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    let governed = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: None,
+            name: "Bash".to_string(),
+            input: r#"{"command":"reboot"}"#.to_string(),
+        },
+        reason: "irrecoverable command".to_string(),
+        display_text: "irrecoverable command".to_string(),
+        auto_execute: false,
+    }];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted approval");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    let request = &state.approvals.requests[0];
+    assert_eq!(request.status, ApprovalRequestStatus::Pending);
+    assert_eq!(request.risk, "high");
+    assert!(state.approvals.active_panel_id.is_some());
+    assert!(state.control.shell_handoff().approved_is_empty());
+
+    // A repeated dispatch of the same irrecoverable command must prompt
+    // again: the card stays pending, no trust key is minted, and nothing
+    // is queued for execution (#2064).
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render repeated trusted approval");
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert!(state.control.shell_handoff().approved_is_empty());
+
+    // High verdicts outside the irrecoverable class keep Trust mode's
+    // auto-approval contract (the raw-CLI evidence scenario runs
+    // `i=$((i+1))` under Trust mode; stalling it broke the flow).
+    let shell_syntax = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: None,
+            name: "Bash".to_string(),
+            input: r#"{"command":"i=$((i+1))"}"#.to_string(),
+        },
+        reason: "shell syntax".to_string(),
+        display_text: "shell syntax".to_string(),
+        auto_execute: false,
+    }];
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &shell_syntax,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render auto-approved shell syntax");
+    assert_eq!(state.approvals.requests.len(), 2);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert_eq!(
+        state.approvals.requests[1].status,
+        ApprovalRequestStatus::Approved
+    );
+}
+
+#[test]
+fn auto_mode_preloaded_trust_key_does_not_auto_approve_high_risk() {
+    // #2064: `trusted_commands` can preload a session trust key for an
+    // irrecoverable command; the high-risk gate must still win over
+    // the trust-key auto-approval branch.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Auto,
+        ..InlineState::default()
+    };
+    state.control.trust.trust_session_command(
+        crate::approval::handoff::trust_key_from_command("reboot").expect("trust key"),
+    );
+    let governed = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: None,
+            name: "Bash".to_string(),
+            input: r#"{"command":"reboot"}"#.to_string(),
+        },
+        reason: "irrecoverable command".to_string(),
+        display_text: "irrecoverable command".to_string(),
+        auto_execute: false,
+    }];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render auto approval");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    let request = &state.approvals.requests[0];
+    assert_eq!(request.status, ApprovalRequestStatus::Pending);
+    assert_eq!(request.risk, "high");
+    assert!(state.approvals.active_panel_id.is_some());
+    assert!(state.control.shell_handoff().approved_is_empty());
+}
+
+#[test]
 fn trust_mode_surfaces_hook_followup_approval_after_auto_approved_tool() {
     // #1920 regression: after the trust path auto-approves the shell
     // tool call, the sandbox-bypass follow-up approval reuses the same

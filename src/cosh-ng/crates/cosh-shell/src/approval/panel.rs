@@ -19,14 +19,20 @@ pub(crate) fn approval_action_set_for(
     if request.subject.contains("HOOK:") {
         return ApprovalActionSet::Hook;
     }
+    // High-risk requests never offer AlwaysTrust (issue #2064): an
+    // irrecoverable or otherwise high-impact command must be explicitly
+    // approved on every dispatch. Same predicate family as
+    // `batch_consent_covers_request` so the two consent gates can't drift.
+    let high_risk = request.risk == "high";
     let same_run = requests
         .iter()
         .filter(|other| other.run_id == request.run_id)
         .count();
-    if same_run >= 2 {
-        ApprovalActionSet::TurnConsent
-    } else {
-        ApprovalActionSet::Standard
+    match (same_run >= 2, high_risk) {
+        (true, true) => ApprovalActionSet::TurnConsentHighRisk,
+        (true, false) => ApprovalActionSet::TurnConsent,
+        (false, true) => ApprovalActionSet::StandardHighRisk,
+        (false, false) => ApprovalActionSet::Standard,
     }
 }
 
