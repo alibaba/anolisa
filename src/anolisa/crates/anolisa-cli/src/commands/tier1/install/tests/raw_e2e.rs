@@ -348,6 +348,198 @@ fn system_raw_install_rechecks_native_absence_under_lock() {
 }
 
 #[test]
+fn deb_host_raw_install_rechecks_native_absence_under_lock() {
+    // The deb-family relaxation covers a missing rpm binary only. With
+    // working tooling on a deb-family host the planning probe resolves a
+    // native package, so an RPM appearing between planning and placement
+    // must still trip the locked recheck — the family never mutes obtained
+    // presence evidence.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .package_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &RpmdbProbe::absent(),
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("an external RPM appearing before raw placement must block install");
+
+    assert!(err.reason().contains("appeared"), "got: {}", err.reason());
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn deb_host_tooling_appearing_under_lock_still_refuses() {
+    // The race the planning degrade must not hide: rpm tooling is missing
+    // while the deb-family plan resolves (CommandMissing degrades to
+    // NotProbed), then tooling plus an external same-named RPM appear
+    // before raw placement. The probe identity survives planning, so the
+    // locked recheck re-probes, obtains presence evidence, and refuses.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .tooling_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &RpmdbProbe::absent(),
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("presence evidence gained under the lock must block the raw install");
+
+    assert!(err.reason().contains("appeared"), "got: {}", err.reason());
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn deb_host_rpmdb_growing_under_lock_still_refuses() {
+    // The degraded CommandMissing policy is a planning-time snapshot: an
+    // external process may install RPMs with a binary this process cannot
+    // see (absolute path outside PATH), so its queries keep failing while
+    // an rpmdb grows on disk. The locked recheck must re-verify the
+    // filesystem evidence instead of trusting the captured verdict.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    // The rpmdb grows under the host probe root, deliberately separate
+    // from the install prefix: evidence follows the host, not the layout.
+    let host_root = tmp.path().join("host");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let rpmdb = RpmdbProbe::with_roots(host_root.clone(), None);
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .rpmdb_appears_under_lock(
+        layout.lock_file.clone(),
+        host_root.join("var/lib/rpm/rpmdb.sqlite"),
+    );
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &rpmdb,
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("an rpmdb appearing under the lock must block the raw install");
+
+    assert!(
+        err.reason().contains("rpm database appeared"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn deb_host_package_override_survives_planning_degrade() {
+    // Same race as above but with an explicit `--package` naming an RPM
+    // that differs from the component: the override is already the known
+    // probe identity, so the CommandMissing degrade must not collapse it
+    // to the component name. The locked recheck then probes the RPM the
+    // user named, sees it appeared with the tooling, and refuses.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    // The raw index is keyed by the backend-native package name, so the
+    // override needs an alternate publication of the same artifact under
+    // `custom-rpm` for the pre-lock artifact resolution to succeed.
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let index = std::fs::read_to_string(&index_path).expect("read index");
+    let alternate = index
+        .split("[[entries]]")
+        .nth(1)
+        .expect("fixture entry")
+        .replace("component = \"agentsight\"", "component = \"custom-rpm\"");
+    std::fs::write(index_path, format!("{index}\n[[entries]]{alternate}"))
+        .expect("write alternate publication");
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "custom-rpm",
+        pkg_info("custom-rpm", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .tooling_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.package = Some("custom-rpm".to_string());
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &RpmdbProbe::absent(),
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("the overridden RPM appearing under the lock must block the raw install");
+
+    assert!(
+        err.reason().contains("'custom-rpm' appeared"),
+        "the recheck must probe the --package identity, got: {}",
+        err.reason()
+    );
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
 fn prepare_raw_execution_resolves_declared_capabilities() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");

@@ -662,16 +662,25 @@ fn delegated_install_requires_configured_rpm_backend() {
 
 #[test]
 fn system_install_without_rpm_tooling_warns_and_exits() {
-    // System scope, fresh state: with rpm/dnf absent the probe cannot prove
-    // the component is not an unobserved system RPM (I3), so install refuses
-    // rather than silently placing raw files over one.
+    // Rpm-family host, system scope, fresh state: with rpm/dnf absent the
+    // probe cannot prove the component is not an unobserved system RPM
+    // (I3), so install refuses rather than silently placing raw files over
+    // one. The injected env pins the rpm family regardless of the runner;
+    // the deb-family degrade is asserted in
+    // `deb_host_missing_rpm_tooling_does_not_block_raw_install`.
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let q = FakeQuery {
         command_missing: true,
         ..Default::default()
     };
-    let err = handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-        .expect_err("missing rpm/dnf must abort, not fall back to raw");
+    let err = handle_one_with_query_env(
+        "copilot-shell".to_string(),
+        args("copilot-shell"),
+        &ctx,
+        &rpm_host_env(),
+        &q,
+    )
+    .expect_err("missing rpm/dnf must abort, not fall back to raw");
     assert_eq!(err.code(), "EXECUTION_FAILED");
     assert!(
         err.reason().contains("not found on PATH"),
@@ -688,7 +697,141 @@ fn system_install_without_rpm_tooling_warns_and_exits() {
 }
 
 #[test]
+fn unknown_host_missing_rpm_tooling_fails_closed() {
+    // A distro outside the known rpm/deb families cannot prove it has no
+    // rpmdb, so missing tooling keeps the hard I3 error.
+    let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+    let q = FakeQuery {
+        command_missing: true,
+        ..Default::default()
+    };
+    let err = handle_one_with_query_env(
+        "copilot-shell".to_string(),
+        args("copilot-shell"),
+        &ctx,
+        &unknown_host_env(),
+        &q,
+    )
+    .expect_err("an unclassified host must fail closed");
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(
+        err.reason().contains("not found on PATH"),
+        "got: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn deb_host_missing_rpm_tooling_does_not_block_raw_install() {
+    // A deb-family host (e.g. Ubuntu) has no rpmdb, so when rpm/dnf is
+    // missing the I3 presence probe degrades to NotProbed instead of
+    // blocking the raw install. The injected env pins the deb family
+    // regardless of the runner; rpm-family hosts assert the hard error in
+    // `system_install_without_rpm_tooling_warns_and_exits`.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let ctx = ctx_with_prefix(false, Some(prefix));
+    let q = FakeQuery {
+        command_missing: true,
+        ..Default::default()
+    };
+
+    handle_one_with_query_env("agentsight".to_string(), a, &ctx, &deb_host_env(), &q)
+        .expect("raw install must not require rpm tooling on a deb-family host");
+
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "agentsight")
+            .is_some(),
+        "raw install must be recorded"
+    );
+}
+
+#[test]
+fn deb_host_with_leftover_rpmdb_still_fails_closed() {
+    // The deb-family relaxation is an inference, not evidence: a host that
+    // installed RPMs before the rpm binary went away still owns a database
+    // the raw path could corrupt. An rpmdb on disk must keep the missing
+    // tooling fatal even though ID/ID_LIKE classify the host as deb.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    // The database lives under the host probe root, not the install
+    // prefix: host evidence must gate the degrade wherever ANOLISA is
+    // asked to place its own files.
+    let host_root = tmp.path().join("host");
+    let db = host_root.join("var/lib/rpm");
+    std::fs::create_dir_all(&db).expect("rpmdb dir");
+    std::fs::write(db.join("rpmdb.sqlite"), b"").expect("rpmdb file");
+    let rpmdb = RpmdbProbe::with_roots(host_root, None);
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let ctx = ctx_with_prefix(false, Some(prefix));
+    let q = FakeQuery {
+        command_missing: true,
+        ..Default::default()
+    };
+
+    let err = handle_one_with_query_env_rpmdb(
+        "agentsight".to_string(),
+        a,
+        &ctx,
+        &deb_host_env(),
+        &rpmdb,
+        &q,
+    )
+    .expect_err("an on-disk rpmdb must keep missing rpm tooling fatal");
+
+    assert!(
+        err.reason().contains("not found on PATH"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "the refused install must not write any state"
+    );
+}
+
+#[test]
+fn deb_host_present_system_rpm_still_points_at_adopt() {
+    // The deb-family relaxation only covers an unusable probe. When rpm
+    // tooling exists and reports the package as installed, the presence
+    // evidence must keep driving the I3 refusal even on a deb-family host.
+    let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+    let q = FakeQuery {
+        installed: vec![(
+            "copilot-shell".to_string(),
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )],
+        ..Default::default()
+    };
+    let err = handle_one_with_query_env(
+        "copilot-shell".to_string(),
+        args("copilot-shell"),
+        &ctx,
+        &deb_host_env(),
+        &q,
+    )
+    .expect_err("obtained RPM presence evidence must refuse on any host");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("adopt copilot-shell"),
+        "must point at adopt: {}",
+        err.reason()
+    );
+}
+
+#[test]
 fn explicit_rpm_without_tooling_warns_and_exits() {
+    // The deb-family degrade is raw-only: an explicit `--backend rpm`
+    // cannot run without the native tooling on any host, so the deb env is
+    // injected here to pin the strictest combination.
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let q = FakeQuery {
         command_missing: true,
@@ -696,7 +839,7 @@ fn explicit_rpm_without_tooling_warns_and_exits() {
     };
     let mut a = args("copilot-shell");
     a.backend = Some("rpm".to_string());
-    let err = handle_one_with_query("copilot-shell".to_string(), a, &ctx, &q)
+    let err = handle_one_with_query_env("copilot-shell".to_string(), a, &ctx, &deb_host_env(), &q)
         .expect_err("missing rpm/dnf must abort");
     assert_eq!(err.code(), "EXECUTION_FAILED");
     assert!(

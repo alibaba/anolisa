@@ -1180,6 +1180,7 @@ mod tests {
             kernel: Some("6.6.30".to_string()),
             pkg_base: None,
             os_id: Some("alinux".to_string()),
+            os_id_like: None,
             os_version: Some("4".to_string()),
             btf: None,
             cap_bpf: None,
