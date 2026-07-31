@@ -100,4 +100,5 @@ collect_message_ids!([
     agent_recovery_reason_ids,
     auth_ids,
     agent_recovery_retry_ids,
+    hook_notification_ids,
 ],);

@@ -70,6 +70,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentGovernanceToolSubject => "{tool} tool",
         MessageId::AgentGovernanceBlockedUserApprovalLine => "Blocked: user approval required",
         MessageId::AgentGovernanceQuestionLine => "Question: {question}",
+        MessageId::AgentGovernanceHookNotification => {
+            "Hook: {hook}\nMessage: {message}\nDecision: {decision}"
+        }
+        MessageId::AgentGovernanceHookUnknown => "unknown hook",
+        MessageId::AgentGovernanceHookNoMessage => "no message provided",
+        MessageId::AgentGovernanceHookDecisionUnspecified => "unspecified",
         MessageId::AgentRecommendedCommandsLabel => "recommended commands:",
         MessageId::InterceptNoticeTitle => "AI request",
         MessageId::InterceptNoticeBody => "Sending input to Agent: {input}",

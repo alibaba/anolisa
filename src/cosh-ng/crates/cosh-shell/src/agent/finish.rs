@@ -6,6 +6,7 @@ use crate::agent::events::{
     flush_cosh_request_filter_into_active_run, render_agent_structured_events,
     render_held_events_into_active_run, state_has_pending_interaction,
 };
+use crate::agent::governance::hook_notification_display_text;
 use crate::agent::run::{
     has_queued_run_before_held_text, start_agent_run_with_origin, start_pending_agent_run,
     ActiveAgentRun, PendingRequestClass,
@@ -88,7 +89,14 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     }
     // Drain any unconsumed pending hook notifications into deferred_events
     // (orphan case: hook returned block, so no ToolPermissionRequest was emitted)
+    let i18n = I18n::new(active_run.language);
     for notification in active_run.pending_hook_notifications.drain(..) {
+        let display_text = hook_notification_display_text(
+            &notification.hook_name,
+            &notification.message,
+            notification.decision.as_deref(),
+            &i18n,
+        );
         active_run.deferred_events.push(GovernedEvent {
             decision: GovernanceDecision::Display,
             policy_decision: GovernancePolicyDecision::DisplayOnly,
@@ -100,7 +108,7 @@ pub(crate) fn finish_active_agent_run<W: Write>(
                 decision: notification.decision,
             },
             reason: "orphan hook notification".to_string(),
-            display_text: String::new(),
+            display_text,
             auto_execute: false,
         });
     }
@@ -310,7 +318,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::agent::run::{PendingAgentRequest, PendingRequestClass};
+    use crate::agent::run::{PendingAgentRequest, PendingHookNotification, PendingRequestClass};
     use crate::runtime::state::InlineState;
     use crate::types::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
 
@@ -381,42 +389,38 @@ mod tests {
         assert!(rendered.contains("STALE ANSWER"), "{rendered}");
     }
 
+    #[test]
+    fn finish_renders_orphan_hook_notification_with_fallbacks() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        let mut active_run = active_run(&adapter, "run-1", Language::ZhCn);
+        active_run
+            .pending_hook_notifications
+            .push(PendingHookNotification {
+                tool_use_id: Some("tool-1".to_string()),
+                hook_name: "  ".to_string(),
+                message: String::new(),
+                decision: Some("\n".to_string()),
+            });
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("Hook: 未知 Hook"), "{rendered}");
+        assert!(rendered.contains("消息: 未提供消息"), "{rendered}");
+        assert!(rendered.contains("决策: 未指定"), "{rendered}");
+        assert!(!rendered.contains("unknown hook"), "{rendered}");
+    }
+
     // Finishes an active `run-1` holding one text delta, with an approved handoff
     // owned by `handoff_run_id` still outstanding. Returns what was rendered plus
     // the resulting state.
     fn finish_run_with_handoff_owned_by(handoff_run_id: &str) -> (String, InlineState) {
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState::default();
-        let run_request = request("run-1");
-        let handle = adapter.start_cancellable(run_request.clone(), CoshApprovalMode::Recommend);
-        let renderer = RatatuiInlineRenderer::for_terminal();
-        let mut active_run = ActiveAgentRun {
-            request: run_request,
-            origin: AgentRunOrigin::Standard,
-            handle,
-            provider_name: "fake",
-            language: Language::EnUs,
-            renderer: renderer.clone(),
-            status_animation: renderer.status_animation(),
-            markdown_stream: renderer.stream_markdown_agent(),
-            governed_events: Vec::new(),
-            deferred_events: Vec::new(),
-            held_events: Vec::new(),
-            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
-            pending_cosh_requests: Vec::new(),
-            pending_cosh_request_audits: Vec::new(),
-            rendered_governed_event_count: 0,
-            selectable_after_event_index: None,
-            started_at: Instant::now(),
-            last_activity_at: Instant::now(),
-            last_heartbeat_at: Instant::now(),
-            current_phase: String::new(),
-            current_message: String::new(),
-            has_visible_text_delta: false,
-            completed: true,
-            host_completed_tool_ids: Vec::new(),
-            pending_hook_notifications: Vec::new(),
-        };
+        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
         active_run.held_events.push(GovernedEvent {
             decision: GovernanceDecision::Display,
             policy_decision: GovernancePolicyDecision::DisplayOnly,
@@ -446,6 +450,39 @@ mod tests {
         finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
 
         (String::from_utf8_lossy(&output).to_string(), state)
+    }
+
+    fn active_run(adapter: &AdapterInstance, id: &str, language: Language) -> ActiveAgentRun {
+        let run_request = request(id);
+        let handle = adapter.start_cancellable(run_request.clone(), CoshApprovalMode::Recommend);
+        let renderer = RatatuiInlineRenderer::for_terminal().with_language(language);
+        ActiveAgentRun {
+            request: run_request,
+            origin: AgentRunOrigin::Standard,
+            handle,
+            provider_name: "fake",
+            language,
+            renderer: renderer.clone(),
+            status_animation: renderer.status_animation(),
+            markdown_stream: renderer.stream_markdown_agent(),
+            governed_events: Vec::new(),
+            deferred_events: Vec::new(),
+            held_events: Vec::new(),
+            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
+            pending_cosh_requests: Vec::new(),
+            pending_cosh_request_audits: Vec::new(),
+            rendered_governed_event_count: 0,
+            selectable_after_event_index: None,
+            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            last_heartbeat_at: Instant::now(),
+            current_phase: String::new(),
+            current_message: String::new(),
+            has_visible_text_delta: false,
+            completed: true,
+            host_completed_tool_ids: Vec::new(),
+            pending_hook_notifications: Vec::new(),
+        }
     }
 
     #[test]

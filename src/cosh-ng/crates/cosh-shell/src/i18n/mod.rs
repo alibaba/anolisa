@@ -145,15 +145,14 @@ mod tests {
             846
         );
         // The #1913 capture-notice segment remains pinned ahead of the
-        // appended shell-recovery reason and auth messages.
+        // appended shell-recovery, auth, and hook-notification messages.
         assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
         assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
         assert_eq!(
             MessageId::AgentRecoveryTriggerLine as usize,
             MessageId::CaptureInputRejectedBody as usize + 1
         );
-        // The #2031 recovery-retry segment is the current tail; the tail
-        // ownership assertions move with each appended segment.
+        // The #2031 recovery-retry segment remains pinned after auth.
         assert_eq!(
             MessageId::AuthSelectProviderQuestion as usize,
             MessageId::AgentRecoveryTriggerLine as usize + 1
@@ -162,13 +161,15 @@ mod tests {
             MessageId::AgentRecoverySameSessionRetryLine as usize,
             MessageId::AuthSelectProviderQuestion as usize + 1
         );
+        // Hook-notification messages are the current tail; tail ownership
+        // assertions move with each appended segment.
         assert_eq!(
-            MessageId::AgentRecoverySameSessionRetryLine as usize,
-            MessageId::ALL.len() - 1
+            MessageId::AgentGovernanceHookNotification as usize,
+            MessageId::AgentRecoverySameSessionRetryLine as usize + 1
         );
         assert_eq!(
-            MessageId::AuthSelectProviderQuestion as usize,
-            MessageId::ALL.len() - 2
+            MessageId::AgentGovernanceHookDecisionUnspecified as usize,
+            MessageId::ALL.len() - 1
         );
     }
 

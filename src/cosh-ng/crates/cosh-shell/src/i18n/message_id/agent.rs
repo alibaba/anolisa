@@ -139,3 +139,16 @@ macro_rules! agent_recovery_retry_ids {
         );
     };
 }
+
+macro_rules! hook_notification_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentGovernanceHookNotification,
+            AgentGovernanceHookUnknown,
+            AgentGovernanceHookNoMessage,
+            AgentGovernanceHookDecisionUnspecified,
+        );
+    };
+}

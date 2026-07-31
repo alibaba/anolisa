@@ -64,6 +64,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentGovernanceToolSubject => "{tool} tool",
         MessageId::AgentGovernanceBlockedUserApprovalLine => "已阻止: 需要用户审批",
         MessageId::AgentGovernanceQuestionLine => "问题: {question}",
+        MessageId::AgentGovernanceHookNotification => {
+            "Hook: {hook}\n消息: {message}\n决策: {decision}"
+        }
+        MessageId::AgentGovernanceHookUnknown => "未知 Hook",
+        MessageId::AgentGovernanceHookNoMessage => "未提供消息",
+        MessageId::AgentGovernanceHookDecisionUnspecified => "未指定",
         MessageId::AgentRecommendedCommandsLabel => "推荐命令:",
         MessageId::InterceptNoticeTitle => "AI 请求",
         MessageId::InterceptNoticeBody => "正在把输入交给 Agent: {input}",
