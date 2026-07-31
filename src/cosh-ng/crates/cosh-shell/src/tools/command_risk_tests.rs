@@ -337,9 +337,16 @@ fn null_redirection_keeps_remaining_command_risk_and_boundaries() {
     assert!(delete.reasons.contains(&"output-suppressed"));
 
     // V-M10: null redirections to safe sinks preserve auto-allow (#1752).
+    // Verify that the informational `output-suppressed` reason survives
+    // alongside the auto-allow evidence so audit visibility is maintained.
     let auto_policy = auto("ps aux 2>/dev/null");
     assert_eq!(auto_policy.execution, ExecutionDecision::AutoAllow);
     assert!(auto_policy.auto_allow.is_some());
+    assert!(
+        auto_policy.reasons.contains(&"output-suppressed"),
+        "auto-allowed null-redirected command must retain output-suppressed reason: {:?}",
+        auto_policy.reasons
+    );
 }
 
 #[test]
