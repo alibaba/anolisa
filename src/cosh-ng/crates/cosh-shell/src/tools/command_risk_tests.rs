@@ -651,7 +651,9 @@ fn complex_shapes_with_null_redirection_keep_pre_fix_classification() {
     }
 
     // Lexical fail-closed forms outside the strippable set (design v3 §1).
-    for command in ["ls >| out.txt", "echo hi >&2", "ls > /dev/nul*"] {
+    // `echo hi >&2` moved to the fd-duplication elision cases (issue
+    // #2054, spec shell-fd-dup-redirection-risk).
+    for command in ["ls >| out.txt", "ls > /dev/nul*"] {
         let assessment = ask(command);
         assert_eq!(assessment.impact, RiskImpact::High, "{command}");
         assert!(
@@ -684,20 +686,17 @@ fn redirection_fail_closed_paths_stay_high() {
         );
     }
 
-    // V-M9: fd duplication and `&>` are out of scope, behavior unchanged.
-    for command in ["ls 2>&1", "ls &>/dev/null"] {
-        let assessment = ask(command);
-        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
-        assert!(
-            assessment.reasons.contains(&"redirection-write"),
-            "{command}: {:?}",
-            assessment.reasons
-        );
-        assert!(
-            !assessment.reasons.contains(&"output-suppressed"),
-            "{command}"
-        );
-    }
+    // V-M9 (re-anchored by issue #2054): `&>` merges both streams into a
+    // file and stays High; `ls 2>&1` moved to the fd-duplication elision
+    // cases (spec shell-fd-dup-redirection-risk).
+    let amp_merge = ask("ls &>/dev/null");
+    assert_eq!(amp_merge.impact, RiskImpact::High);
+    assert!(
+        amp_merge.reasons.contains(&"redirection-write"),
+        "{:?}",
+        amp_merge.reasons
+    );
+    assert!(!amp_merge.reasons.contains(&"output-suppressed"));
 }
 
 #[test]
@@ -749,4 +748,198 @@ fn adjacent_words_before_null_redirection_use_default_fd() {
         "quoted argument must be preserved, got {:?}",
         parsed.stages
     );
+}
+
+#[test]
+fn fd_duplication_is_not_redirection_write() {
+    // V-F1/V-F2/V-F4 (spec shell-fd-dup-redirection-risk,
+    // issue #2054): `[N]>&1` / `[N]>&2` duplicate onto the
+    // conventional stdout/stderr streams without touching the
+    // filesystem in bash or zsh, and keep the stream visible, so the
+    // command keeps the risk of its remaining real shape with no
+    // suppression annotation. The trailing-space form exercises the
+    // word boundary at end of input.
+    for command in [
+        "ls 2>&1",
+        "ls 2>&1 ",
+        "cat f 2>&1",
+        "cosh --version 2>&1",
+        "echo hi >&2",
+        "ls 1>&2",
+        // Closing stdin or an auxiliary fd leaves visible output
+        // untouched (verified in bash and zsh), so these carry no
+        // suppression annotation either.
+        "ls 0>&-",
+        "ls 3>&-",
+    ] {
+        let assessment = ask(command);
+        assert_ne!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            !assessment.reasons.contains(&"redirection-write"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(
+            !assessment.reasons.contains(&"output-suppressed"),
+            "{command}: fd duplication is not output suppression"
+        );
+    }
+
+    // V-F5: close
+    // forms that hit an output stream (bare default, fd 1, fd 2)
+    // suppress user-visible output, so they join the issue #1667
+    // null-sink channel: still not a write, but annotated
+    // `output-suppressed` and never auto-allowed.
+    for command in ["ls 2>&-", "ls 1>&-", "ls >&-"] {
+        let assessment = ask(command);
+        assert_ne!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            !assessment.reasons.contains(&"redirection-write"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(
+            assessment.reasons.contains(&"output-suppressed"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        let auto_policy = auto(command);
+        assert_eq!(
+            auto_policy.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert!(auto_policy.auto_allow.is_none(), "{command}");
+    }
+
+    // I3: redirection syntax (IO_NUMBER prefix and `&M[-]` word) must not
+    // leak into argv, and ordinary arguments must be preserved.
+    let parsed = super::command_risk_parser::parse_command("ls 2>&1");
+    assert_eq!(parsed.shape, CommandShape::Simple);
+    assert_eq!(parsed.stages, vec![vec!["ls".to_string()]]);
+    let hi = super::command_risk_parser::parse_command("echo hi >&2");
+    assert_eq!(hi.shape, CommandShape::Simple);
+    assert_eq!(hi.stages, vec![vec!["echo".to_string(), "hi".to_string()]]);
+    let multi_digit = super::command_risk_parser::parse_command("ls 2>&1");
+    assert_eq!(multi_digit.shape, CommandShape::Simple);
+    assert_eq!(multi_digit.stages, vec![vec!["ls".to_string()]]);
+    // Multi-digit source prefixes fail closed AND keep the word as an
+    // ordinary argument, matching zsh which passes `10` to the command
+    //.
+    let multi_src = super::command_risk_parser::parse_command("tee 10>&1");
+    assert!(
+        multi_src.stages[0].contains(&"10".to_string()),
+        "zsh passes 10 as an argument, got {:?}",
+        multi_src.stages
+    );
+}
+
+#[test]
+fn fd_duplication_compound_and_pipeline_keep_segment_assessment() {
+    // V-F3: the issue #2054 field shape is assessed per segment via the
+    // issue #1785 aggregation path instead of failing closed to High.
+    let compound = ask("rtk ls -la /usr/share/x 2>&1 && echo --- && rtk ls -la /tmp/y 2>&1");
+    assert_eq!(compound.shape, CommandShape::AndOrList);
+    assert_ne!(compound.impact, RiskImpact::High, "{:?}", compound.reasons);
+    assert!(!compound.reasons.contains(&"redirection-write"));
+    assert_eq!(compound.execution, ExecutionDecision::AskUser);
+
+    // Boundary directly after the duplication word (no separating space).
+    let adjacent = ask("ls 2>&1&&echo ok");
+    assert_eq!(adjacent.shape, CommandShape::AndOrList);
+    assert_ne!(adjacent.impact, RiskImpact::High, "{:?}", adjacent.reasons);
+
+    // V-F8: pipeline stages keep their own assessment.
+    let piped = ask("ls 2>&1 | grep x");
+    assert_eq!(piped.shape, CommandShape::Pipeline);
+    assert_ne!(piped.impact, RiskImpact::High, "{:?}", piped.reasons);
+
+    // High-risk remaining commands are never masked by fd duplication.
+    let delete = ask("rm -rf /tmp/x 2>&1");
+    assert_eq!(delete.impact, RiskImpact::High);
+    assert!(delete.reasons.contains(&"filesystem-delete"));
+}
+
+#[test]
+fn fd_duplication_lookalikes_fail_closed_to_high() {
+    // M9-M13: anything but a strict cross-shell `[N]>&digits` /
+    // `[N]>&-` word up to a word boundary keeps the pre-fix
+    // RedirectionWrite path, so every blind spot stays conservative.
+    // Bash's move form `2>&1-` fails closed too: zsh parses it as a
+    // real redirection to a file named `1-`. `{`/`}` are not operators in the
+    // redirection-word position (both shells write a file named `1{`
+    // for `>&1{`), so they are not word boundaries either.
+    for command in [
+        "ls 2>&1x",
+        "ls 2>&x",
+        "ls 2>&$FD",
+        "ls 2>&\"1\"",
+        "ls 2>&\\1",
+        "ls 2>&1-",
+        "ls >&1{",
+        "ls >&1}",
+        "ls >&-{",
+        // Multi-digit SOURCE prefixes are shell-divergent: zsh only
+        // treats a lone digit before the operator as an fd, so
+        // `tee 10>&1` keeps `10` as an argument and creates a file
+        // named `10`.
+        "tee 10>&1",
+        "ls 10>&-",
+        // Arbitrary numeric TARGETS are state-dependent in the
+        // persistent foreground shell: after `exec 3>out`, both bash
+        // and zsh write `printf x >&3` into the file `out`; same for
+        // `2>&10` once fd 10 is bound.
+        "printf payload >&3",
+        "ls 2>&10",
+        "ls 2>&3",
+        // The fd 1/2 exemption's precondition: rebinding
+        // stdout/stderr requires an `exec [N]>file` style command,
+        // which is itself fail-closed High and user-approved before
+        // any `>&2` elision could matter.
+        "exec 2>out",
+        "exec 1>out",
+        "ls >&file",
+        "ls 2>&file",
+        "ls &>f",
+        "ls &>>f",
+        "ls &>&1",
+        "ls 2>& 1",
+        "ls 2>>&1",
+    ] {
+        let assessment = ask(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment.reasons.contains(&"redirection-write"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
+}
+
+#[test]
+fn fd_duplication_execution_boundary_stays_closed() {
+    // I2/R3.2: fd duplication never widens auto-execution; the hard
+    // gates keep rejecting the raw `>` byte in the original command.
+    assert!(can_run_approved_bash_tool("ls 2>&1").is_err());
+    assert!(validate_guarded_diagnostic("ps aux --sort=-%mem 2>&1").is_err());
+    assert!(validate_readonly_pipeline("ps aux 2>&1 | head -1").is_err());
+
+    let auto_policy = auto("ls 2>&1");
+    assert_eq!(auto_policy.execution, ExecutionDecision::AskUser);
+    assert!(auto_policy.auto_allow.is_none());
+}
+
+#[test]
+fn fd_duplication_and_null_suppression_compose_independently() {
+    // M16: both elisions apply on one command, still not a write.
+    let mixed = ask("ls 2>&1 >/dev/null");
+    assert_ne!(mixed.impact, RiskImpact::High, "{:?}", mixed.reasons);
+    assert!(!mixed.reasons.contains(&"redirection-write"));
+    assert!(mixed.reasons.contains(&"output-suppressed"));
+
+    // M15: the issue #1667 null-suppression path is untouched, and fd
+    // duplication alone never contributes an output-suppressed reason.
+    let null_only = ask("df -h 2>/dev/null");
+    assert!(null_only.reasons.contains(&"output-suppressed"));
+    assert!(!null_only.reasons.contains(&"redirection-write"));
 }

@@ -3,11 +3,17 @@ use super::command_risk::CommandShape;
 /// Non-persistent output-suppression sink allowlist (issue #1667
 /// implementation boundaries): a `[N]>` / `[N]>>` redirection is treated
 /// as output suppression instead of a filesystem write only when the
-/// target is an unquoted, non-expanded literal from this table. Every
-/// other form (regular files, quoted or expanded targets, `2>&1`, `&>`)
-/// keeps the fail-closed RedirectionWrite high-risk path. Extending this
-/// table requires revisiting the issue #1667 boundaries and the
-/// decision-matrix tests in `command_risk_tests.rs`.
+/// target is an unquoted, non-expanded literal from this table. The fd
+/// words `[N]>&1` / `[N]>&2` (duplication onto the conventional output
+/// targets) and `[N]>&-` (close) are exempted by policy as descriptor
+/// operations, not filesystem writes; see the fd word probe in
+/// `parse_command` for the policy rationale (issue #2054, spec
+/// `shell-fd-dup-redirection-risk`). Every other form (regular files,
+/// quoted or expanded targets, other numeric targets, `&>`, `>&file`,
+/// bash's move form `[N]>&M-`) keeps the fail-closed RedirectionWrite
+/// high-risk path. Extending this table requires revisiting the issue
+/// #1667 boundaries and the decision-matrix tests in
+/// `command_risk_tests.rs`.
 const SAFE_OUTPUT_SINKS: &[&str] = &["/dev/null"];
 
 #[derive(Debug, Clone)]
@@ -121,6 +127,99 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     && token.bytes().all(|byte| byte.is_ascii_digit());
                 if !fd_candidate {
                     push_token(&mut tokens, &mut token, &mut token_quoted);
+                }
+                // Fd word probe (issue #2054, spec
+                // `shell-fd-dup-redirection-risk`). Policy: exempt only
+                // the conventional output targets — `[N]>&1` / `[N]>&2`
+                // duplication and `[N]>&-` close. Rebinding fd 1/2 to a
+                // file (`exec 2>out`) is possible in the persistent
+                // foreground shell, but that rebinding command is itself
+                // fail-closed High (user-approved first), and once
+                // rebound the file receives output from commands with no
+                // redirection syntax at all, so this lexical classifier
+                // cannot defend that state either way. Auxiliary fds
+                // (`>&3`, `2>&10`) stay fail-closed: their bindings are
+                // only reachable through explicit fd syntax, where
+                // lexical rejection is effective. The source prefix must
+                // be a single digit (zsh treats only a lone digit as an
+                // fd; `tee 10>&1` passes `10` as an argument), and
+                // bash's move form `[N]>&M-` is excluded (zsh parses it
+                // as a redirection to a file named `M-`). Non-consuming
+                // and fail-closed: every rejected form falls through
+                // byte-for-byte to the pre-existing path. Full trade-off
+                // record: spec `shell-fd-dup-redirection-risk`
+                // design.md (matrix + invariant I0).
+                let single_digit_prefix = !fd_candidate || token.len() == 1;
+                if !guarded && single_digit_prefix && chars.peek().is_some_and(|next| *next == '&')
+                {
+                    let mut dup_lookahead = chars.clone();
+                    dup_lookahead.next();
+                    let mut dup_consumed = 1usize;
+                    let mut target_digit: Option<char> = None;
+                    if dup_lookahead
+                        .peek()
+                        .is_some_and(|next| next.is_ascii_digit())
+                    {
+                        target_digit = dup_lookahead.next();
+                        dup_consumed += 1;
+                    }
+                    // Only fd 1 and fd 2 are safe duplication targets; a
+                    // second digit (`2>&10`) or any other digit (`>&3`)
+                    // rejects the elision.
+                    let has_digit = matches!(target_digit, Some('1') | Some('2'))
+                        && !dup_lookahead
+                            .peek()
+                            .is_some_and(|next| next.is_ascii_digit());
+                    let mut has_dash = false;
+                    if target_digit.is_none()
+                        && dup_lookahead.peek().is_some_and(|next| *next == '-')
+                    {
+                        dup_lookahead.next();
+                        dup_consumed += 1;
+                        has_dash = true;
+                    }
+                    // Keep the workspace Rust 1.74 MSRV; `Option::is_none_or`
+                    // is newer.
+                    #[allow(clippy::unnecessary_map_or)]
+                    let boundary_ok = dup_lookahead.peek().map_or(true, |next| {
+                        // Word boundary = whitespace or a POSIX operator
+                        // character. `{`/`}` are NOT operators in the
+                        // redirection-word position: both bash and zsh
+                        // parse `: >&1{` as a redirection to a file named
+                        // `1{`, so they must reject
+                        // the elision and fail closed.
+                        matches!(
+                            next,
+                            ' ' | '\t' | '\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')'
+                        )
+                    });
+                    if (has_digit || has_dash) && boundary_ok {
+                        for _ in 0..dup_consumed {
+                            chars.next();
+                        }
+                        // Close forms (`[N]>&-`) suppress the stream from
+                        // the user's point of view only when they close an
+                        // output stream: the bare default (stdout), fd 1,
+                        // or fd 2. Closing stdin or an auxiliary fd
+                        // (`0>&-`, `3>&-`) leaves the visible output
+                        // untouched (verified in bash and zsh), so those
+                        // stay annotation-free like duplications.
+                        let closes_output_stream =
+                            has_dash && (!fd_candidate || token == "1" || token == "2");
+                        if fd_candidate {
+                            // The IO_NUMBER prefix (the `2` in `2>&1`)
+                            // belongs to the redirection syntax, not argv.
+                            token.clear();
+                            token_quoted = false;
+                        }
+                        // Output-closing forms join the issue #1667
+                        // null-sink channel (`output-suppressed` reason +
+                        // auto-allow fallback).
+                        if closes_output_stream {
+                            null_redirections += 1;
+                        }
+                        continue;
+                    }
                 }
                 // Non-consuming lookahead: on rejection fall back to a path
                 // that is byte-for-byte identical to the pre-fix behavior.
