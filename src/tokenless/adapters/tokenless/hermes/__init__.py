@@ -40,11 +40,87 @@ import subprocess
 import sys
 from typing import Any
 
-# Import shared FHS constants from hook_utils.
-# realpath needed because install.sh symlinks __init__.py into
-# ~/.hermes/plugins/, and plain __file__ points to the symlink
-# path — resolving .. from there hits a nonexistent directory.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "common", "hooks"))
+# Resolve shared hook utilities (common/hooks/) with FHS fallback paths.
+# Primary: relative path — realpath needed because install.sh symlinks
+# __init__.py into ~/.hermes/plugins/, and plain __file__ points to the
+# symlink path; resolving .. from the adapter dir hits common/hooks.
+# Fallbacks: system and user FHS paths — needed when the plugin bundle is
+# *copied* into ~/.hermes/plugins/tokenless/ (e.g. by the anolisa driver)
+# instead of symlinked, so the relative path resolves nowhere.
+#
+# Trust model (aligned with codex/scripts/rewrite-hook, bash
+# is_trusted_file, and Rust is_trusted_path): system FHS paths are
+# unconditional; user paths use passwd DB home (NOT $HOME —
+# env-controllable) with ownership and parent-dir permission checks.
+_HERE = os.path.dirname(os.path.realpath(__file__))
+
+
+def _is_trusted_dir(path: str) -> bool:
+    """Check whether a directory is trusted for Python module imports.
+
+    Callers must pass realpath-resolved paths so symlink targets are
+    validated before the trust check.
+    """
+    # System FHS prefixes are always trusted
+    for prefix in ("/usr/share/", "/usr/local/share/", "/usr/libexec/", "/usr/lib/anolisa/"):
+        if path.startswith(prefix):
+            return True
+    # Outside system prefixes: trust only if owned by current uid or root
+    # AND the parent directory is not world-writable.
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_uid != os.getuid() and st.st_uid != 0:
+        return False
+    parent = os.path.dirname(path)
+    try:
+        pst = os.stat(parent)
+    except OSError:
+        return False
+    if pst.st_uid != os.getuid() and pst.st_uid != 0:
+        return False
+    if pst.st_mode & 0o002:  # world-writable
+        return False
+    return True
+
+
+# Resolve real home from passwd DB for user-install fallback path.
+try:
+    import pwd as _pwd
+    _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
+except (ImportError, KeyError):
+    _REAL_HOME = ""
+if not os.path.isabs(_REAL_HOME):
+    _REAL_HOME = ""
+
+_HOOK_UTILS_CANDIDATES = [
+    os.path.join(_HERE, "..", "common", "hooks"),                          # source-tree / symlink install
+    "/usr/share/anolisa/adapters/tokenless/common/hooks",                  # RPM system
+    "/usr/local/share/anolisa/adapters/tokenless/common/hooks",            # manual system
+    os.path.join(_REAL_HOME, ".local", "share",
+                 "anolisa", "adapters", "tokenless", "common", "hooks") if _REAL_HOME else "",  # user
+]
+_HOOK_UTILS_RESOLVED = ""
+for _c in _HOOK_UTILS_CANDIDATES:
+    if not _c or not os.path.isdir(_c):
+        continue
+    _real = os.path.realpath(_c)
+    if _is_trusted_dir(_real):
+        _HOOK_UTILS_RESOLVED = _real
+        sys.path.insert(0, _real)
+        break
+
+if not _HOOK_UTILS_RESOLVED:
+    _tried = "\n".join(f"  - {c}" for c in _HOOK_UTILS_CANDIDATES if c)
+    raise ImportError(
+        "tokenless: cannot locate shared hook_utils module (common/hooks/).\n"
+        "Searched (in order):\n" + _tried + "\n"
+        "Install the tokenless common hooks (anolisa install tokenless) or "
+        "re-run adapters/tokenless/hermes/scripts/install.sh from a complete "
+        "adapter tree."
+    )
+
 from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_SHARE,
