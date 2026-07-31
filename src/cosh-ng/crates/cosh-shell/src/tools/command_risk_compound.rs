@@ -71,6 +71,7 @@ pub(super) fn assess_stripped_compound(
             },
             stages: segment.clone(),
             null_redirections: 0,
+            null_redirection_spans: Vec::new(),
             segments: Vec::new(),
         };
         let assessed = if segment.len() > 1 {

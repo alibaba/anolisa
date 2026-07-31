@@ -390,6 +390,41 @@ fn null_redirection_preserves_quoted_arguments() {
 }
 
 #[test]
+fn null_redirection_does_not_strip_quoted_literal_dev_null() {
+    // SunnyQjm review P2: regex-based stripping is not quote-aware, so
+    // `grep "2>/dev/null" f 2>/dev/null` would incorrectly strip the
+    // quoted literal as well. Parser-span-based stripping only removes
+    // the actual redirection at the end.
+    let grep_quoted = ask(r#"grep "2>/dev/null" file 2>/dev/null"#);
+    // The command has a null redirection and should be output-suppressed
+    assert!(
+        grep_quoted.reasons.contains(&"output-suppressed"),
+        "{:?}",
+        grep_quoted.reasons
+    );
+    // The quoted argument should NOT cause the command to be misclassified
+    // as a file write or pipe
+    assert!(
+        !grep_quoted.reasons.contains(&"redirection-write"),
+        "{:?}",
+        grep_quoted.reasons
+    );
+}
+
+#[test]
+fn null_redirection_preserves_partial_path_match() {
+    // SunnyQjm review P2: regex without token boundary would mis-strip
+    // `2>/dev/nullify` as `2>/dev/null` + leftover `ify`. The parser
+    // reads the full target token and only matches against the
+    // SAFE_OUTPUT_SINKS allowlist, so `/dev/nullify` is not recognised
+    // as a null redirection and stays as a write redirect.
+    let cmd = ask("echo hi 2>/dev/nullify");
+    assert_eq!(cmd.impact, RiskImpact::High, "{:?}", cmd.reasons);
+    assert!(cmd.reasons.contains(&"redirection-write"));
+    assert!(!cmd.reasons.contains(&"output-suppressed"));
+}
+
+#[test]
 fn compound_high_risk_tails_survive_null_redirection_stripping() {
     // Design v3 §3: stripped compounds are assessed per segment with the
     // existing simple/pipeline rules and aggregated, so tails keep their

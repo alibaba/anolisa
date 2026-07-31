@@ -15,6 +15,12 @@ pub(super) struct ParsedCommand {
     pub(super) shape: CommandShape,
     pub(super) stages: Vec<Vec<String>>,
     pub(super) null_redirections: usize,
+    /// Byte ranges `(start, end)` of null redirections in the original
+    /// command text, covering the fd prefix (if any), the `>` / `>>`
+    /// operator, any whitespace, and the target path. Used by
+    /// `strip_null_redirections()` in `command_risk.rs` to produce a
+    /// lossless command text for downstream validators.
+    pub(super) null_redirection_spans: Vec<(usize, usize)>,
     /// Command segments split at `&&`, `||`, `;`, and newlines; each
     /// segment holds its own pipeline stages. Only populated when the
     /// command contains segment separators (used by the stripped-compound
@@ -28,6 +34,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             shape: CommandShape::Empty,
             stages: Vec::new(),
             null_redirections: 0,
+            null_redirection_spans: Vec::new(),
             segments: Vec::new(),
         };
     }
@@ -36,6 +43,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
             null_redirections: 0,
+            null_redirection_spans: Vec::new(),
             segments: Vec::new(),
         };
     }
@@ -54,8 +62,11 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     // content; such tokens are ordinary arguments and never fd prefixes.
     let mut token_quoted = false;
     let mut chars = command.chars().peekable();
+    let mut byte_pos: usize = 0;
+    let mut null_redirection_spans: Vec<(usize, usize)> = Vec::new();
 
     while let Some(ch) = chars.next() {
+        byte_pos += ch.len_utf8();
         if let Some(quote_ch) = quote {
             if ch == quote_ch {
                 quote = None;
@@ -155,6 +166,17 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     consumed += 1;
                 }
                 if !guarded && literal && SAFE_OUTPUT_SINKS.contains(&target.as_str()) {
+                    // Record the byte span of this null redirection for
+                    // precise stripping (SunnyQjm review: avoids ad-hoc
+                    // regex reconstruction that loses quotes/escaping).
+                    let span_start = if fd_candidate {
+                        let fd_bytes: usize = token.chars().map(|c| c.len_utf8()).sum();
+                        byte_pos.saturating_sub(1 + fd_bytes)
+                    } else {
+                        byte_pos - 1
+                    };
+                    let consumed_bytes: usize =
+                        lookahead.clone().take(consumed).map(|c| c.len_utf8()).sum();
                     if fd_candidate {
                         token.clear();
                         token_quoted = false;
@@ -162,6 +184,8 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     for _ in 0..consumed {
                         chars.next();
                     }
+                    byte_pos += consumed_bytes;
+                    null_redirection_spans.push((span_start, byte_pos));
                     null_redirections += 1;
                 } else {
                     if fd_candidate {
@@ -205,6 +229,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
             null_redirections: 0,
+            null_redirection_spans: Vec::new(),
             segments: Vec::new(),
         };
     }
@@ -229,6 +254,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         segments: split_segments(&stages, &segment_marks),
         stages,
         null_redirections,
+        null_redirection_spans,
     }
 }
 
