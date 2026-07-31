@@ -148,10 +148,10 @@ pub(crate) fn record_approved_shell_handoff_blocks(
     let mut ids = Vec::new();
     while let Some(handoff) = state.control.shell_handoff().pending_front() {
         let request = handoff.request();
-        let Some(block) = blocks
-            .iter()
-            .find(|block| shell_handoff_block_matches_request(block, request))
-        else {
+        let Some(block) = blocks.iter().find(|block| {
+            !state.analyzed_blocks.contains(&block.id)
+                && shell_handoff_block_matches_request(block, request)
+        }) else {
             break;
         };
 
@@ -246,7 +246,11 @@ fn shell_handoff_block_matches_request(
     block: &CommandBlock,
     request: &ShellHandoffRequest,
 ) -> bool {
-    block.command == request.command && block.origin == expected_handoff_origin(request)
+    // Shell markers are second-granular, so compare representable seconds.
+    let started_at_or_after_request = block.started_at_ms / 1_000 >= request.created_at_ms / 1_000;
+    block.command == request.command
+        && block.origin == expected_handoff_origin(request)
+        && started_at_or_after_request
 }
 
 fn expected_handoff_origin(request: &ShellHandoffRequest) -> CommandOrigin {

@@ -211,15 +211,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         output,
         event_index_base,
     )?;
-    let card_capture_pending = pending_card_capture(state).is_some();
-    let activity_actions = ActivityConsumer::consume(
-        events,
-        &ledger.blocks,
-        adapter,
-        state,
-        output,
-        card_capture_pending,
-    )?;
+    let activity_actions = ActivityConsumer::consume(events, &ledger.blocks, state, output)?;
     RuntimeDispatcher::apply_actions(activity_actions, state);
     let findings = findings_from_blocks(&ledger.blocks);
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
@@ -333,10 +325,55 @@ fn render_inline_guidance_from_batch<W: Write>(
         poll_active_agent_run(state, output, adapter)?;
     }
     flush_held_agent_events(state, output)?;
+    // Shell-evidence recovery is scheduled only after this batch's final agent
+    // poll. Claiming it earlier sees a run that is about to finish inside that
+    // poll as still active, which skips the pending continuation for this batch;
+    // it would then only be picked up if some later shell event triggered
+    // another one.
+    start_pending_shell_handoff_continuations(adapter, state, output)?;
     poll_background_compaction(state, output, adapter, false)?;
     render_soft_newline_tip(events, state, output)?;
     render_owned_shell_prompt(state, output)?;
 
+    Ok(())
+}
+
+/// Starts the shell-evidence continuation whose delivery to the owning provider
+/// run failed. Reuses the existing `PendingRecovery` claim, so a given approval
+/// recovers at most once.
+///
+/// Claiming is a one-way move (`PendingRecovery` -> `RecoveryQueued`, plus a
+/// dedup entry keyed by approval id), so it must not happen unless the run can
+/// actually start: a pending or active compaction makes
+/// `start_agent_run_with_origin` drop this `InternalBestEffort` request, which
+/// would leave the evidence claimed and unrecoverable. Hence the gate check
+/// before claiming, and — because starting a run polls the provider and can
+/// itself surface a compaction recommendation — at most one recovery per
+/// boundary. Any remaining recoveries are claimed at the next idle boundary.
+fn start_pending_shell_handoff_continuations<W: Write>(
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if state.agent_run.active.is_some()
+        || pending_card_capture(state).is_some()
+        || crate::slash::session::compaction_pending_or_active(state)
+    {
+        return Ok(());
+    }
+    for (request, origin) in shell_handoff_continuation_requests(state) {
+        // Shell-handoff continuations are automatic conversation resumptions,
+        // not fresh user requests.
+        start_agent_run_with_origin(
+            &request,
+            origin,
+            AgentStartIntent::InternalBestEffort,
+            adapter,
+            state,
+            output,
+            None,
+        )?;
+    }
     Ok(())
 }
 
@@ -512,34 +549,20 @@ impl ActivityConsumer {
     pub(crate) fn consume<W: Write>(
         events: &[ShellEvent],
         blocks: &[CommandBlock],
-        adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
-        card_capture_pending: bool,
     ) -> std::io::Result<Vec<RuntimeAction>> {
         let mut handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
         // Fallback: close emitted handoffs that reached a prompt boundary
         // without ever producing command tracking (lost preexec marker).
         handoff_activity_ids.extend(close_untracked_shell_handoffs(state, events));
         render_activity_rows(state, &handoff_activity_ids, output)?;
-        if !card_capture_pending && state.agent_run.active.is_none() {
-            for (request, origin) in shell_handoff_continuation_requests(state) {
-                // Shell-handoff continuations are automatic conversation
-                // resumptions, not fresh user requests.
-                start_agent_run_with_origin(
-                    &request,
-                    origin,
-                    AgentStartIntent::InternalBestEffort,
-                    adapter,
-                    state,
-                    output,
-                    None,
-                )?;
-            }
-        }
         Ok(Vec::new())
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {

@@ -2204,7 +2204,7 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
         id: "cmd-stale".to_string(),
         session_id: "session-1".to_string(),
         command: "df -h".to_string(),
-        origin: Default::default(),
+        origin: CommandOrigin::ProviderTool,
         cwd: "/tmp".to_string(),
         end_cwd: "/tmp".to_string(),
         started_at_ms: 100,
@@ -2225,6 +2225,114 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
     assert!(ids.is_empty(), "{ids:?}");
     assert!(state.activity.rows.is_empty(), "{:?}", state.activity.rows);
     assert!(state.control.shell_handoff().pending_front().is_some());
+}
+
+#[test]
+fn repeated_shell_handoff_uses_the_unhandled_current_block() {
+    let mut state = InlineState::default();
+    let first_request = ShellHandoffRequest::new(
+        "./changing_metric.sh",
+        "$ ./changing_metric.sh",
+        "approved_provider_shell_tool",
+        "user",
+        "req-1",
+        "run-1",
+        1_100,
+    )
+    .expect("first handoff request");
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(first_request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit first handoff");
+    let first_block = CommandBlock {
+        id: "cmd-1".to_string(),
+        session_id: "session-1".to_string(),
+        command: "./changing_metric.sh".to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1_000,
+        ended_at_ms: 1_000,
+        duration_ms: 0,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: Some("/tmp/output-1001.txt".to_string()),
+            terminal_output_bytes: 20,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+    assert_eq!(
+        record_approved_shell_handoff_blocks(&mut state, std::slice::from_ref(&first_block)),
+        vec!["handoff-1"]
+    );
+
+    let second_request = ShellHandoffRequest::new(
+        "./changing_metric.sh",
+        "$ ./changing_metric.sh",
+        "approved_provider_shell_tool",
+        "user",
+        "req-2",
+        "run-2",
+        1_500,
+    )
+    .expect("second handoff request");
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(second_request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit second handoff");
+    let second_block = CommandBlock {
+        id: "cmd-2".to_string(),
+        session_id: "session-1".to_string(),
+        command: "./changing_metric.sh".to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1_000,
+        ended_at_ms: 1_000,
+        duration_ms: 0,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: Some("/tmp/output-1002.txt".to_string()),
+            terminal_output_bytes: 20,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+
+    assert_eq!(
+        record_approved_shell_handoff_blocks(&mut state, &[first_block, second_block]),
+        vec!["handoff-2"]
+    );
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == "handoff-2")
+        .expect("second handoff row");
+    assert!(
+        row.detail.contains("command_block: cmd-2"),
+        "{}",
+        row.detail
+    );
+    assert!(
+        row.detail
+            .contains("output_id: terminal-output://session-1/cmd-2"),
+        "{}",
+        row.detail
+    );
 }
 
 fn untracked_test_event(kind: ShellEventKind, command_id: Option<&str>) -> ShellEvent {
@@ -2523,13 +2631,27 @@ fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
             .expect("handoff row");
         assert_eq!(row.status, "completed_untracked");
     }
+    // Both closures produced recoverable evidence, and neither is lost: claims
+    // are handed out one per idle boundary, so two successive claims each yield
+    // exactly one.
     assert_eq!(
         state
             .evidence
             .claim_pending_shell_handoff_continuations()
             .len(),
-        2
+        1
     );
+    assert_eq!(
+        state
+            .evidence
+            .claim_pending_shell_handoff_continuations()
+            .len(),
+        1
+    );
+    assert!(state
+        .evidence
+        .claim_pending_shell_handoff_continuations()
+        .is_empty());
 }
 
 #[test]

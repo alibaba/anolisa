@@ -1,8 +1,8 @@
 use crate::runtime::approval_state::RuntimeApprovalRequest;
 use crate::runtime::prelude::{
-    redact_provider_command_text, AgentContextBinding, AgentMode, AgentRequest, AgentRunOrigin,
-    ApprovalDecision, ApprovalResponse, CommandBlock, CommandStatus, HostExecutedShellMetadata,
-    HostExecutedShellResult, OutputRefs, ShellHandoffRequest,
+    redact_provider_command_text, AgentContextBinding, AgentEvent, AgentMode, AgentRequest,
+    AgentRunOrigin, ApprovalDecision, ApprovalResponse, CommandBlock, CommandStatus,
+    HostExecutedShellMetadata, HostExecutedShellResult, OutputRefs, ShellHandoffRequest,
 };
 use crate::runtime::state::InlineState;
 
@@ -29,6 +29,7 @@ pub(crate) fn record_shell_handoff_completion(
         .unwrap_or_default();
     let mut evidence =
         RuntimeShellCommandCompleted::from_shell_handoff(handoff, block, status, origin);
+    discard_text_held_before_shell_result(state, &handoff.run_id);
     let delivery = deliver_host_executed_shell_result_if_supported(state, handoff, &evidence);
     if delivery.delivered {
         state.agent_run.native_prompt_after_run = true;
@@ -56,6 +57,25 @@ pub(crate) fn record_shell_handoff_completion(
         .evidence
         .record_shell_command_completed(evidence.clone());
     evidence
+}
+
+/// Drops the text `run_id` streamed before this shell result existed.
+///
+/// Such text cannot be based on the command's result, so it must never reach the
+/// terminal — whether it is still held by the owning run or was moved to the
+/// shell-wide hold when that run ended behind the approval card. Text the
+/// provider generates after the result is delivered arrives later and is
+/// unaffected; a failed delivery recovers through the shell-evidence
+/// continuation instead.
+fn discard_text_held_before_shell_result(state: &mut InlineState, run_id: &str) {
+    if let Some(active_run) = state.agent_run.active.as_mut() {
+        if active_run.request.id == run_id {
+            active_run.held_events.clear();
+        }
+    }
+    state.agent_run.held_events.retain(|event| {
+        !matches!(&event.event, AgentEvent::TextDelta { run_id: event_run_id, .. } if event_run_id == run_id)
+    });
 }
 
 pub(crate) fn shell_handoff_continuation_requests(

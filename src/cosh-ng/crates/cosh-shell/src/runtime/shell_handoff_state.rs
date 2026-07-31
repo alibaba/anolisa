@@ -44,6 +44,18 @@ impl ShellHandoffState {
         !self.approved.is_empty() || !self.pending.is_empty()
     }
 
+    /// Whether `run_id` still owns an approved-but-unfinished handoff.
+    ///
+    /// Callers that decide whether a specific run's output can already reflect
+    /// its command result must use this rather than [`Self::has_active_handoff`]:
+    /// a handoff belonging to some other run says nothing about this one.
+    pub(crate) fn has_active_handoff_for_run(&self, run_id: &str) -> bool {
+        self.approved
+            .iter()
+            .chain(self.pending.iter())
+            .any(|handoff| handoff.request.run_id == run_id)
+    }
+
     pub(crate) fn mark_timeout_interrupt_if_elapsed(&mut self, timeout: Duration) -> bool {
         let Some(handoff) = self.pending.front_mut() else {
             return false;

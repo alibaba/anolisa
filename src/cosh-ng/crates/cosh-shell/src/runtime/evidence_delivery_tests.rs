@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::runtime::prelude::{
-    AgentEvent, AgentRunHandle, AgentRunOrigin, AgentRunPoll, CoshApprovalMode, CoshCoreAdapter,
-    Language, OutputRefs, RatatuiInlineRenderer,
+    AgentRunHandle, AgentRunOrigin, AgentRunPoll, CoshApprovalMode, CoshCoreAdapter,
+    GovernanceDecision, GovernancePolicyDecision, GovernedEvent, Language, OutputRefs,
+    RatatuiInlineRenderer,
 };
 
 use crate::adapter::serialize_host_executed_shell_result;
@@ -608,6 +609,51 @@ fn closed_cosh_core_control_handle(request: &AgentRequest) -> AgentRunHandle {
     }
     std::thread::sleep(Duration::from_millis(200));
     handle
+}
+
+#[test]
+fn discarding_pre_result_text_only_drops_the_owning_run() {
+    let request = test_request();
+    let handle = closed_cosh_core_control_handle(&request);
+    let mut active_run = test_active_run(request, handle);
+    active_run.held_events.push(held_text("run-1", "stale"));
+    let mut state = InlineState::default();
+    state.agent_run.active = Some(active_run);
+    state.agent_run.held_events = vec![
+        held_text("run-1", "stale after the run ended"),
+        held_text("other-run", "unrelated text"),
+    ];
+
+    discard_text_held_before_shell_result(&mut state, "run-1");
+
+    assert!(state
+        .agent_run
+        .active
+        .as_ref()
+        .expect("active run")
+        .held_events
+        .is_empty());
+    let remaining = state
+        .agent_run
+        .held_events
+        .iter()
+        .map(|event| event.display_text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, ["unrelated text"]);
+}
+
+fn held_text(run_id: &str, text: &str) -> GovernedEvent {
+    GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
+        event: AgentEvent::TextDelta {
+            run_id: run_id.to_string(),
+            text: text.to_string(),
+        },
+        reason: "held".to_string(),
+        display_text: text.to_string(),
+        auto_execute: false,
+    }
 }
 
 fn test_active_run(request: AgentRequest, handle: AgentRunHandle) -> ActiveAgentRun {

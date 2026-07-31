@@ -18,6 +18,16 @@ impl EvidenceState {
         self.shell_command_completed.push(evidence);
     }
 
+    /// Claims **at most one** pending recovery, oldest first.
+    ///
+    /// A claim is irreversible — the evidence moves to `RecoveryQueued` and its
+    /// approval id enters the dedup set — so a caller may only claim what it can
+    /// start immediately. Starting one continuation polls the provider, which can
+    /// surface a compaction recommendation; every further internal run would then
+    /// be dropped by the start gate while already counting as claimed, losing
+    /// that recovery for good. One per idle boundary keeps claim and start
+    /// atomic; remaining recoveries are picked up at the next boundary. Same
+    /// contract as [`Self::claim_stalled_provider_shell_handoff_continuations`].
     pub(crate) fn claim_pending_shell_handoff_continuations(
         &mut self,
     ) -> Vec<RuntimeShellCommandCompleted> {
@@ -37,6 +47,7 @@ impl EvidenceState {
             }
             evidence.continuation_state = ShellEvidenceContinuationState::RecoveryQueued;
             requests.push(evidence.clone());
+            break;
         }
         requests
     }
@@ -268,6 +279,33 @@ mod tests {
 
         let second = state.claim_pending_shell_handoff_continuations();
         assert!(second.is_empty());
+    }
+
+    // Two handoffs can complete in one dispatch batch. Claiming both at once
+    // would gamble the second on a start path that may already be closed by the
+    // time it runs, and a lost claim can never be retried — so each boundary
+    // takes exactly one and the rest stay claimable.
+    #[test]
+    fn evidence_state_claims_one_pending_continuation_per_boundary() {
+        let mut state = EvidenceState::default();
+        for approval_id in ["req-1", "req-2"] {
+            state.record_shell_command_completed(shell_evidence(
+                Some(approval_id),
+                false,
+                "provider_run_not_active",
+                Some("provider run was not active"),
+            ));
+        }
+
+        let first = state.claim_pending_shell_handoff_continuations();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].approval_id.as_deref(), Some("req-1"));
+
+        let second = state.claim_pending_shell_handoff_continuations();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].approval_id.as_deref(), Some("req-2"));
+
+        assert!(state.claim_pending_shell_handoff_continuations().is_empty());
     }
 
     #[test]
