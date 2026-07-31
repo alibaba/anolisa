@@ -2,7 +2,8 @@
 // Copyright (c) 2025 AgentSight Project
 //
 // File write BPF program
-// Monitors vfs_write calls from traced processes writing to .jsonl files
+// Monitors vfs_write calls from traced processes writing to agent session
+// files (.jsonl and cosh-core atomic-write temp files)
 // Uses fentry (BPF trampoline) for minimal overhead on the hot vfs_write path
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
@@ -16,6 +17,8 @@
 #define UUID_LEN 36
 // Expected filename: <uuid>.jsonl = 36 + 6 = 42 chars
 #define UUID_JSONL_LEN (UUID_LEN + 6)
+// cosh-core atomic-write temp file: .<uuid>.<uuid>.tmp = 1 + 36 + 1 + 36 + 4 = 78 chars
+#define COSH_TMP_LEN (1 + UUID_LEN + 1 + UUID_LEN + 4)
 
 static __always_inline int is_hex(char c)
 {
@@ -64,7 +67,7 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     if (ret <= 0)
         return 0;
 
-    // We accept two filename shapes; both checks use only compile-time fixed
+    // We accept three filename shapes; all checks use only compile-time fixed
     // offsets, so the eBPF verifier doesn't have to track dynamic length math.
     //   1. `<UUID>.jsonl`              (exactly 42 chars + NUL = 43)
     //                                  OpenClaw / Cosh / Claude Code
@@ -72,6 +75,15 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
     //                                  Codex CLI rollouts; userspace
     //                                  extracts the trailing UUID via
     //                                  ResponseSessionMapper.
+    //   3. `.<UUID>.<UUID>.tmp`        (exactly 78 chars + NUL = 79)
+    //                                  cosh-core atomic session writes:
+    //                                  content goes to this temp file and is
+    //                                  then renamed to `<session-UUID>.json`,
+    //                                  so the rename target never reaches
+    //                                  vfs_write — the temp name is the only
+    //                                  chance to capture session content.
+    //                                  Userspace extracts the first UUID as
+    //                                  the session id.
     //
     // The rollout check is intentionally a *prefix* match (`rollout-`)
     // without verifying the `.jsonl` suffix: the eBPF verifier rejects
@@ -98,7 +110,19 @@ int BPF_PROG(trace_vfs_write, struct file *file, const char *buf, size_t count, 
         && fname[6] == 't'
         && fname[7] == '-';
 
-    if (!matched_strict && !matched_rollout)
+    // Strict full-pattern match (both UUIDs validated) so that generic
+    // dotfile temp names from other programs don't flood the ring buffer.
+    int matched_cosh_tmp = (ret == COSH_TMP_LEN + 1)
+        && fname[0] == '.'
+        && fname[1 + UUID_LEN] == '.'
+        && fname[2 + 2 * UUID_LEN] == '.'
+        && fname[3 + 2 * UUID_LEN] == 't'
+        && fname[4 + 2 * UUID_LEN] == 'm'
+        && fname[5 + 2 * UUID_LEN] == 'p'
+        && is_uuid(fname + 1)
+        && is_uuid(fname + 2 + UUID_LEN);
+
+    if (!matched_strict && !matched_rollout && !matched_cosh_tmp)
         return 0;
 
     // Reserve space in ring buffer
