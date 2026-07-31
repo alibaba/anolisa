@@ -124,6 +124,20 @@ fn bare_registry_reports_env_only_auth_as_satisfied() {
 }
 
 #[test]
+fn registry_auth_state_includes_localized_provider_guidance() {
+    let resp = run_registry_request("auth", "state", Value::Null);
+    let templates = resp["data"]["templates"]
+        .as_array()
+        .expect("auth templates");
+    let dashscope = templates
+        .iter()
+        .find(|provider| provider["id"] == "dashscope")
+        .expect("DashScope template");
+
+    assert_eq!(dashscope["description_zh_cn"], "使用现有的百炼 API Key");
+}
+
+#[test]
 fn bare_registry_does_not_discover_project_skills() {
     let home = tempfile::tempdir().expect("temp home");
     let project = tempfile::tempdir().expect("temp project");

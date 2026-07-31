@@ -28,6 +28,8 @@ mod question;
 mod approval;
 #[macro_use]
 mod session;
+#[macro_use]
+mod auth;
 
 macro_rules! define_message_id {
     ($($id:ident,)*) => {
@@ -96,4 +98,5 @@ collect_message_ids!([
     approval_turn_extension_ids,
     capture_notice_ids,
     agent_recovery_reason_ids,
+    auth_ids,
 ],);

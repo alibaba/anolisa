@@ -22,6 +22,8 @@ fn openai_compat_template() -> AuthProviderInfo {
     AuthProviderInfo {
         id: "openai_compat".to_string(),
         label: "OpenAI Compatible".to_string(),
+        description: None,
+        description_zh_cn: None,
         fields: vec![
             field("provider_id", false),
             field("base_url", false),

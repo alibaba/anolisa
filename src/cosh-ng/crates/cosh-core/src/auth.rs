@@ -15,69 +15,10 @@ use validation::{validate_auth_response, validate_base_url};
 pub fn builtin_auth_providers() -> Vec<AuthProvider> {
     vec![
         AuthProvider {
-            id: "dashscope".to_string(),
-            label: "DashScope (百炼)".to_string(),
-            fields: vec![
-                AuthField {
-                    name: "api_key".to_string(),
-                    label: "API Key".to_string(),
-                    hint: Some(
-                        "获取地址: https://bailian.console.aliyun.com/?tab=model#/api-key"
-                            .to_string(),
-                    ),
-                    secret: true,
-                    required: true,
-                    placeholder: None,
-                },
-                AuthField {
-                    name: "model".to_string(),
-                    label: "Model".to_string(),
-                    hint: Some("默认: qwen3.7-plus, e.g. qwen3.7-max, deepseek-v4-pro".to_string()),
-                    secret: false,
-                    required: false,
-                    placeholder: Some("qwen3.7-plus".to_string()),
-                },
-            ],
-            builtin_base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
-            builtin_provider_type: "dashscope".to_string(),
-            builtin_default_model: Some("qwen3.7-plus".to_string()),
-        },
-        AuthProvider {
-            id: "openai_compat".to_string(),
-            label: "OpenAI Compatible".to_string(),
-            fields: vec![
-                AuthField {
-                    name: "base_url".to_string(),
-                    label: "Base URL".to_string(),
-                    hint: Some("例如: https://api.openai.com/v1".to_string()),
-                    secret: false,
-                    required: true,
-                    placeholder: Some("https://api.openai.com/v1".to_string()),
-                },
-                AuthField {
-                    name: "api_key".to_string(),
-                    label: "API Key".to_string(),
-                    hint: Some("sk-...".to_string()),
-                    secret: true,
-                    required: true,
-                    placeholder: None,
-                },
-                AuthField {
-                    name: "model".to_string(),
-                    label: "Model".to_string(),
-                    hint: Some("e.g. qwen3.7-max, deepseek-v4-pro".to_string()),
-                    secret: false,
-                    required: true,
-                    placeholder: None,
-                },
-            ],
-            builtin_base_url: None,
-            builtin_provider_type: "openai".to_string(),
-            builtin_default_model: None,
-        },
-        AuthProvider {
             id: "aliyun".to_string(),
             label: "Aliyun Authentication".to_string(),
+            description: Some("Free with limited quota".to_string()),
+            description_zh_cn: Some("提供有限的免费额度".to_string()),
             fields: vec![
                 AuthField {
                     name: "access_key_id".to_string(),
@@ -107,6 +48,71 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
             builtin_base_url: None,
             builtin_provider_type: "aliyun".to_string(),
             builtin_default_model: Some("qwen3.7-plus".to_string()),
+        },
+        AuthProvider {
+            id: "dashscope".to_string(),
+            label: "DashScope (百炼)".to_string(),
+            description: Some("Connect with an existing Bailian API key".to_string()),
+            description_zh_cn: Some("使用现有的百炼 API Key".to_string()),
+            fields: vec![
+                AuthField {
+                    name: "api_key".to_string(),
+                    label: "API Key".to_string(),
+                    hint: Some(
+                        "获取地址: https://bailian.console.aliyun.com/?tab=model#/api-key"
+                            .to_string(),
+                    ),
+                    secret: true,
+                    required: true,
+                    placeholder: None,
+                },
+                AuthField {
+                    name: "model".to_string(),
+                    label: "Model".to_string(),
+                    hint: Some("默认: qwen3.7-plus, e.g. qwen3.7-max, deepseek-v4-pro".to_string()),
+                    secret: false,
+                    required: false,
+                    placeholder: Some("qwen3.7-plus".to_string()),
+                },
+            ],
+            builtin_base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+            builtin_provider_type: "dashscope".to_string(),
+            builtin_default_model: Some("qwen3.7-plus".to_string()),
+        },
+        AuthProvider {
+            id: "openai_compat".to_string(),
+            label: "OpenAI Compatible".to_string(),
+            description: Some("Use an existing OpenAI-compatible Base URL and API key".to_string()),
+            description_zh_cn: Some("使用现有的 OpenAI 兼容 Base URL 和 API Key".to_string()),
+            fields: vec![
+                AuthField {
+                    name: "base_url".to_string(),
+                    label: "Base URL".to_string(),
+                    hint: Some("例如: https://api.openai.com/v1".to_string()),
+                    secret: false,
+                    required: true,
+                    placeholder: Some("https://api.openai.com/v1".to_string()),
+                },
+                AuthField {
+                    name: "api_key".to_string(),
+                    label: "API Key".to_string(),
+                    hint: Some("sk-...".to_string()),
+                    secret: true,
+                    required: true,
+                    placeholder: None,
+                },
+                AuthField {
+                    name: "model".to_string(),
+                    label: "Model".to_string(),
+                    hint: Some("e.g. qwen3.7-max, deepseek-v4-pro".to_string()),
+                    secret: false,
+                    required: true,
+                    placeholder: None,
+                },
+            ],
+            builtin_base_url: None,
+            builtin_provider_type: "openai".to_string(),
+            builtin_default_model: None,
         },
     ]
 }
@@ -303,15 +309,18 @@ mod tests {
     fn builtin_providers_have_correct_ids() {
         let providers = builtin_auth_providers();
         assert_eq!(providers.len(), 3);
-        assert_eq!(providers[0].id, "dashscope");
-        assert_eq!(providers[1].id, "openai_compat");
-        assert_eq!(providers[2].id, "aliyun");
+        assert_eq!(providers[0].id, "aliyun");
+        assert_eq!(providers[1].id, "dashscope");
+        assert_eq!(providers[2].id, "openai_compat");
     }
 
     #[test]
     fn dashscope_has_builtin_base_url() {
         let providers = builtin_auth_providers();
-        let ds = &providers[0];
+        let ds = providers
+            .iter()
+            .find(|provider| provider.id == "dashscope")
+            .unwrap();
         assert!(ds.builtin_base_url.is_some());
         assert_eq!(ds.fields.len(), 2);
         assert_eq!(ds.fields[0].name, "api_key");
@@ -321,7 +330,10 @@ mod tests {
     #[test]
     fn openai_compat_has_no_builtin_base_url() {
         let providers = builtin_auth_providers();
-        let oc = &providers[1];
+        let oc = providers
+            .iter()
+            .find(|provider| provider.id == "openai_compat")
+            .unwrap();
         assert!(oc.builtin_base_url.is_none());
         assert_eq!(oc.fields.len(), 3);
         assert_eq!(oc.fields[0].name, "base_url");

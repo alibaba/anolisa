@@ -133,7 +133,7 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"auth-inline","mod
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"auth-inline","is_error":false,"result":"done"}'
 "#;
 
-/// The builtin template order cosh-core reports: DashScope, OpenAI Compatible, Aliyun.
+/// Legacy cosh-core template order used to verify shell-side compatibility.
 const AUTH_TEMPLATES: &str = r#"[{"id":"dashscope","label":"DashScope (百炼)","fields":[{"name":"api_key","label":"API Key","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":false,"placeholder":"qwen3.7-plus"}]},{"id":"openai_compat","label":"OpenAI Compatible","fields":[{"name":"base_url","label":"Base URL","hint":null,"secret":false,"required":true,"placeholder":null},{"name":"api_key","label":"API Key","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":true,"placeholder":null}]},{"id":"aliyun","label":"Aliyun Authentication","fields":[{"name":"access_key_id","label":"Access Key ID","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"access_key_secret","label":"Access Key Secret","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":false,"placeholder":"qwen3.7-plus"}]}]"#;
 
 const SAVED_NONE: &str = "[]";
@@ -279,9 +279,9 @@ fn raw_cli_auth_ecs_promotes_configured_ram_role_provider() {
     assert_eq!(action_count(&requests, "delete"), 0, "{requests}");
 }
 
-/// A non-ECS host keeps the template picker and its `dashscope, openai_compat, aliyun` order.
+/// A non-ECS host uses the same Aliyun-first order as an active-run auth request.
 #[test]
-fn raw_cli_auth_non_ecs_without_saved_providers_keeps_template_order() {
+fn raw_cli_auth_non_ecs_without_saved_providers_normalizes_template_order() {
     let (output, requests) = run_auth_menu_flow(
         "auth-non-ecs-no-saved",
         SAVED_NONE,
@@ -293,9 +293,9 @@ fn raw_cli_auth_non_ecs_without_saved_providers_keeps_template_order() {
     );
 
     let compact = compact_terminal_words(&output);
-    assert!(compact.contains("> [1] DashScope"), "{output}");
-    assert!(compact.contains("[2] OpenAI Compatible"), "{output}");
-    assert!(compact.contains("[3] Aliyun Authentication"), "{output}");
+    assert!(compact.contains("> [1] Aliyun Authentication"), "{output}");
+    assert!(compact.contains("[2] DashScope"), "{output}");
+    assert!(compact.contains("[3] OpenAI Compatible"), "{output}");
     assert!(!compact.contains("SysOM"), "{output}");
     assert!(!compact.contains("Provider Management"), "{output}");
     assert_eq!(action_count(&requests, "prepare"), 1, "{requests}");
@@ -427,7 +427,7 @@ fn raw_cli_auth_esc_walks_back_through_the_form_before_cancelling() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("Authentication Required", b"\x1b[C\n".as_slice()),
+            ("Authentication Required", b"\x1b[C\x1b[C\n".as_slice()),
             ("Enter Provider ID", b"qwen-prod\n".as_slice()),
             ("Enter Base URL", b"https://example.invalid/v1\n".as_slice()),
             // ESC on API Key returns to Base URL, which still carries the value just submitted.
@@ -451,13 +451,35 @@ fn raw_cli_auth_esc_walks_back_through_the_form_before_cancelling() {
         "stepping back lost the submitted Provider ID: {output}"
     );
     // The picker reopens on the template the form belonged to.
-    assert!(compact.contains("> [2] OpenAI Compatible"), "{output}");
+    assert!(compact.contains("> [3] OpenAI Compatible"), "{output}");
     // Only the last ESC cancels; the three before it are back-navigation.
     assert_eq!(
         count_occurrences(&compact, "Auth cancelled"),
         1,
         "an intermediate ESC cancelled the flow: {output}"
     );
+    assert_eq!(action_count(&requests, "configure"), 0, "{requests}");
+}
+
+#[test]
+fn raw_cli_auth_esc_preserves_picker_focus_for_the_next_arrow() {
+    let (output, requests) = run_auth_menu_flow(
+        "auth-esc-picker-focus",
+        SAVED_NONE,
+        MANUAL_PREPARE,
+        &[
+            ("cosh-osc$", b"/auth\n".as_slice()),
+            ("Authentication Required", b"\x1b[C\x1b[C\n".as_slice()),
+            ("Enter Provider ID", b"\x1b".as_slice()),
+            ("Authentication Required", b"\x1b[B".as_slice()),
+            ("> [4] DashScope", b"\x1b".as_slice()),
+            ("Auth cancelled", b"".as_slice()),
+        ],
+    );
+
+    let compact = compact_terminal_words(&output);
+    assert!(compact.contains("> [3] Token Plan"), "{output}");
+    assert!(compact.contains("> [4] DashScope"), "{output}");
     assert_eq!(action_count(&requests, "configure"), 0, "{requests}");
 }
 
@@ -471,7 +493,7 @@ fn raw_cli_auth_ctrl_c_mid_form_abandons_the_flow() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("Authentication Required", b"\x1b[C\n".as_slice()),
+            ("Authentication Required", b"\x1b[C\x1b[C\n".as_slice()),
             ("Enter Provider ID", b"qwen-prod\n".as_slice()),
             ("Enter Base URL", b"\x03".as_slice()),
             ("Auth cancelled", b"".as_slice()),
@@ -530,7 +552,7 @@ fn raw_cli_auth_non_ecs_aliyun_falls_back_to_manual_keys() {
         MANUAL_PREPARE,
         &[
             ("cosh-osc$", b"/auth\n".as_slice()),
-            ("Authentication Required", b"\x1b[C\x1b[C\n".as_slice()),
+            ("Authentication Required", b"\n".as_slice()),
             ("Enter Provider ID", b"aliyun-manual\n".as_slice()),
             ("Enter Access Key ID", b"AK-TEST-VALUE\n".as_slice()),
             ("Enter Access Key Secret", b"".as_slice()),

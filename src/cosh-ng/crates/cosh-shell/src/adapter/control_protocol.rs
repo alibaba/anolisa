@@ -96,6 +96,12 @@ impl ShellOutputDirection {
 pub struct AuthProviderInfo {
     pub id: String,
     pub label: String,
+    /// Short guidance shown under the provider label.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Simplified Chinese guidance supplied by the provider registry.
+    #[serde(default)]
+    pub description_zh_cn: Option<String>,
     pub fields: Vec<AuthFieldInfo>,
 }
 
@@ -437,6 +443,14 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                         .filter_map(|item| {
                             let id = item.get("id")?.as_str()?.to_string();
                             let label = item.get("label")?.as_str()?.to_string();
+                            let description = item
+                                .get("description")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string);
+                            let description_zh_cn = item
+                                .get("description_zh_cn")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string);
                             let fields = item
                                 .get("fields")
                                 .and_then(|v| v.as_array())
@@ -473,7 +487,13 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            Some(AuthProviderInfo { id, label, fields })
+                            Some(AuthProviderInfo {
+                                id,
+                                label,
+                                description,
+                                description_zh_cn,
+                                fields,
+                            })
                         })
                         .collect()
                 })

@@ -5,6 +5,7 @@ fn submitted_capture_preserves_same_read_suffix() {
     let capture = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -26,6 +27,7 @@ fn question_capture_custom_option_waits_for_text_before_submit() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 2,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -55,6 +57,7 @@ fn question_capture_clears_free_text_after_submit() {
     let capture = RawInputCapture::Question {
         id: "q-clear".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -98,6 +101,7 @@ fn question_capture_emits_one_submission_per_input_batch() {
     let capture = RawInputCapture::Question {
         id: "q-burst".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -125,6 +129,7 @@ fn question_capture_custom_option_empty_submit_emits_attempt() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 2,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -147,6 +152,7 @@ fn question_capture_multiple_empty_submit_emits_attempt() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 2,
+        selected: 0,
         allow_free_text: true,
         multiple: true,
         secret: false,
@@ -165,6 +171,7 @@ fn question_capture_strips_bracketed_paste_wrappers() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -192,6 +199,7 @@ fn secret_question_capture_marks_input_as_sensitive() {
     let capture = RawInputCapture::Question {
         id: "auth-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: true,
@@ -219,6 +227,7 @@ fn question_capture_strips_split_bracketed_paste_wrappers() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -247,6 +256,7 @@ fn question_capture_buffers_split_utf8_input() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -279,6 +289,7 @@ fn question_capture_ignores_tilde_control_sequences() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -301,6 +312,7 @@ fn question_capture_ignores_removed_answer_slash() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 2,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -340,6 +352,7 @@ fn question_capture_still_submits_selected_option() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 2,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -357,10 +370,33 @@ fn question_capture_still_submits_selected_option() {
 }
 
 #[test]
+fn question_capture_uses_initial_selected_option() {
+    let capture = RawInputCapture::Question {
+        id: "q-restored".to_string(),
+        option_count: 5,
+        selected: 2,
+        allow_free_text: false,
+        multiple: false,
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x1b[B\n"),
+        vec![
+            RawInputEvent::CardFocus("q-restored".to_string(), 3),
+            RawInputEvent::CardAnswer("4".to_string())
+        ]
+    );
+}
+
+#[test]
 fn question_capture_multiple_toggles_options_and_submits_indices() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 3,
+        selected: 0,
         allow_free_text: true,
         multiple: true,
         secret: false,
@@ -384,6 +420,7 @@ fn question_capture_multiple_marks_custom_only_answer() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 3,
+        selected: 0,
         allow_free_text: true,
         multiple: true,
         secret: false,
@@ -402,6 +439,7 @@ fn question_capture_multiple_preserves_checked_options_with_custom_answer() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 3,
+        selected: 0,
         allow_free_text: true,
         multiple: true,
         secret: false,
@@ -745,6 +783,7 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 2,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -774,6 +813,7 @@ fn question_capture_ctrl_c_stops_consuming_and_returns_the_rest() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 2,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -825,6 +865,7 @@ fn text_question(id: &str, secret: bool) -> RawInputCapture {
     RawInputCapture::Question {
         id: id.to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret,

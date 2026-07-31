@@ -34,6 +34,12 @@ pub struct AuthField {
 pub struct AuthProvider {
     pub id: String,
     pub label: String,
+    /// Short guidance shown under the provider label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Simplified Chinese guidance shown when the shell uses zh-CN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_zh_cn: Option<String>,
     pub fields: Vec<AuthField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builtin_base_url: Option<String>,

@@ -838,7 +838,7 @@ fn serialize_user_message_format() {
 
 #[test]
 fn parse_auth_required() {
-    let line = r#"{"type":"control_request","request_id":"auth-init","request":{"subtype":"auth_required","reason":"not_configured","providers":[{"id":"dashscope","label":"DashScope","fields":[{"name":"api_key","label":"API Key","hint":"get from console","secret":true,"required":true}]},{"id":"openai_compat","label":"OpenAI","fields":[{"name":"base_url","label":"Base URL","secret":false,"required":true,"placeholder":"https://api.openai.com/v1"},{"name":"api_key","label":"Key","secret":true,"required":true}]}]}}"#;
+    let line = r#"{"type":"control_request","request_id":"auth-init","request":{"subtype":"auth_required","reason":"not_configured","providers":[{"id":"dashscope","label":"DashScope","description":"Use a Bailian API key","description_zh_cn":"使用百炼 API Key","fields":[{"name":"api_key","label":"API Key","hint":"get from console","secret":true,"required":true}]},{"id":"openai_compat","label":"OpenAI","fields":[{"name":"base_url","label":"Base URL","secret":false,"required":true,"placeholder":"https://api.openai.com/v1"},{"name":"api_key","label":"Key","secret":true,"required":true}]}]}}"#;
     let req = parse_control_request(line).expect("should parse auth_required");
     match req {
         ControlRequest::AuthRequired {
@@ -853,6 +853,14 @@ fn parse_auth_required() {
             assert_eq!(providers.len(), 2);
             assert_eq!(providers[0].id, "dashscope");
             assert_eq!(providers[0].label, "DashScope");
+            assert_eq!(
+                providers[0].description.as_deref(),
+                Some("Use a Bailian API key")
+            );
+            assert_eq!(
+                providers[0].description_zh_cn.as_deref(),
+                Some("使用百炼 API Key")
+            );
             assert_eq!(providers[0].fields.len(), 1);
             assert_eq!(providers[0].fields[0].name, "api_key");
             assert!(providers[0].fields[0].secret);
@@ -862,6 +870,8 @@ fn parse_auth_required() {
                 Some("get from console")
             );
             assert_eq!(providers[1].id, "openai_compat");
+            assert!(providers[1].description.is_none());
+            assert!(providers[1].description_zh_cn.is_none());
             assert_eq!(providers[1].fields.len(), 2);
             assert_eq!(
                 providers[1].fields[0].placeholder.as_deref(),

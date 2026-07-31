@@ -51,6 +51,7 @@ mod tests {
         "activity",
         "agent",
         "approval",
+        "auth",
         "config",
         "debug",
         "health",
@@ -144,7 +145,7 @@ mod tests {
             846
         );
         // The #1913 capture-notice segment remains pinned ahead of the
-        // appended shell-recovery reason message.
+        // appended shell-recovery reason and auth messages.
         assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
         assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
         assert_eq!(
@@ -152,8 +153,16 @@ mod tests {
             MessageId::CaptureInputRejectedBody as usize + 1
         );
         assert_eq!(
-            MessageId::AgentRecoveryTriggerLine as usize,
+            MessageId::AuthSelectProviderQuestion as usize,
+            MessageId::AgentRecoveryTriggerLine as usize + 1
+        );
+        assert_eq!(
+            MessageId::AuthSelectProviderQuestion as usize,
             MessageId::ALL.len() - 1
+        );
+        assert_eq!(
+            MessageId::AgentRecoveryTriggerLine as usize,
+            MessageId::ALL.len() - 2
         );
     }
 

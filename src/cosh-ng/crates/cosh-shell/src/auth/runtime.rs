@@ -17,6 +17,7 @@ use crate::auth::menu::{
 };
 use crate::auth::navigation::{step_back, BackOutcome};
 use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
+use crate::auth::provider_display::auth_providers_for_display;
 use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
     ExistingProvider, ProviderAction,
@@ -169,7 +170,8 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         }
     };
 
-    let providers = providers_with_provider_id_field(core_state.templates);
+    let providers =
+        auth_providers_for_display(&providers_with_provider_id_field(core_state.templates));
     let request_id = format!(
         "slash-auth-{}",
         std::time::SystemTime::now()

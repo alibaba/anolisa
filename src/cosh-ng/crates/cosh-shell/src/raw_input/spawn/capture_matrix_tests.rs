@@ -45,6 +45,7 @@ fn question_capture(id: &str) -> RawInputCapture {
     RawInputCapture::Question {
         id: id.to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,

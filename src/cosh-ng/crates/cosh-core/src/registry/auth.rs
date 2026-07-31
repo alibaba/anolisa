@@ -17,6 +17,8 @@ pub(super) fn handle_auth(
                         "id": provider.id,
                         "provider_type": provider.id,
                         "label": provider.label,
+                        "description": provider.description,
+                        "description_zh_cn": provider.description_zh_cn,
                         "fields": provider.fields,
                         "builtin_base_url": provider.builtin_base_url,
                         "builtin_default_model": provider.builtin_default_model,
