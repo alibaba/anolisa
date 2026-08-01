@@ -109,6 +109,8 @@ const config: Config = {
           href: 'https://github.com/alibaba/anolisa',
           label: 'GitHub',
           position: 'right',
+          className: 'headerGithubLink',
+          'aria-label': 'ANOLISA GitHub repository',
         },
         {type: 'localeDropdown', position: 'right'},
       ],
