@@ -1,4 +1,5 @@
 pub(crate) mod ask_user_question;
+mod atomic_file;
 pub mod edit;
 mod file_patterns;
 mod glob;
