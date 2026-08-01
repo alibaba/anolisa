@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -11,6 +12,7 @@ use crate::metrics::TurnMetrics;
 use crate::protocol::{InputMessage, OutputMessage, ShellControlRequest};
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 use crate::sls;
+use crate::tool::SessionWorkspace;
 
 mod auth;
 
@@ -23,7 +25,12 @@ use auth::request_auth;
 /// transport we cannot write to would only reproduce the #1994 hang.
 const EXIT_CONTROL_TRANSPORT_FAILURE: i32 = 74;
 
-pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> {
+pub async fn run(
+    args: &CliArgs,
+    mut config: CoreConfig,
+    project_root: PathBuf,
+    workspace: SessionWorkspace,
+) -> Result<i32, String> {
     apply_cli_overrides(args, &mut config);
 
     let stdout = io::stdout();
@@ -42,7 +49,6 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     // such as MCP filesystem servers resolve the user's project root, not the
     // cosh-core process cwd. The helper absolutizes relative paths and treats
     // empty --workspace "" as missing.
-    let project_root = args.workspace_root();
     let mut ext_manager = ExtensionManager::new(project_root.clone());
     if !args.bare {
         ext_manager.refresh();
@@ -53,13 +59,17 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
             1
         },
     );
-    let snapshot =
-        RuntimeSnapshotBuilder::new(&mut ext_manager, &config, project_root, generation_id)
-            .with_shell_evidence(args.enable_shell_evidence_tool)
-            .with_skill_loading(!args.bare)
-            .with_tool_selection(args.tools.as_deref())
-            .build()
-            .await;
+    let snapshot = RuntimeSnapshotBuilder::new(
+        &mut ext_manager,
+        &config,
+        project_root.clone(),
+        generation_id,
+    )
+    .with_shell_evidence(args.enable_shell_evidence_tool)
+    .with_skill_loading(!args.bare)
+    .with_tool_selection(args.tools.as_deref())
+    .build()
+    .await;
     if let Some(diagnostic) = snapshot
         .diagnostics
         .iter()
@@ -117,6 +127,8 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
         provider,
         snapshot,
         session.record.session_id.to_string(),
+        project_root,
+        workspace,
     );
     let live_extension_runtime = crate::registry::LiveExtensionRuntime::new(
         engine.extension_generation.clone(),

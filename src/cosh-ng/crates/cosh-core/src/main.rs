@@ -137,11 +137,26 @@ async fn run() {
     if args.is_session_control() {
         std::process::exit(session_control::run());
     }
-    let workspace = args.workspace_root();
+    let agent_headless = is_agent_headless_mode(&args);
+    let (project_root, session_workspace) = if agent_headless {
+        let requested_root = args.workspace_path();
+        match tool::SessionWorkspace::try_new(&requested_root) {
+            Ok(workspace) => {
+                let project_root = workspace.root().to_path_buf();
+                (project_root, Some(workspace))
+            }
+            Err(error) => {
+                eprintln!("[cosh-core] {error}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        (args.workspace_root(), None)
+    };
     let config = if args.bare {
         CoreConfig::load_bare()
     } else {
-        CoreConfig::load_for_workspace(&workspace)
+        CoreConfig::load_for_workspace(&project_root)
     };
 
     let log_level = config.logging.effective_level(args.verbose);
@@ -149,7 +164,7 @@ async fn run() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-core starting");
 
     if let Some(cli::Command::Mcp(mcp)) = args.command {
-        if let Err(error) = tool::mcp::run_command(mcp, &config, &workspace).await {
+        if let Err(error) = tool::mcp::run_command(mcp, &config, &project_root).await {
             eprintln!("MCP command failed: {error}");
             std::process::exit(1);
         }
@@ -157,8 +172,12 @@ async fn run() {
         registry::run(&args, config).await;
     } else if args.is_compact() {
         std::process::exit(compaction::run_compact_cli(&args, config).await);
-    } else if args.is_headless() {
-        match headless::run(&args, config).await {
+    } else if agent_headless {
+        let Some(session_workspace) = session_workspace else {
+            eprintln!("[cosh-core] headless workspace was not initialized");
+            std::process::exit(2);
+        };
+        match headless::run(&args, config, project_root, session_workspace).await {
             Ok(0) => {}
             Ok(exit_code) => std::process::exit(exit_code),
             Err(error) => {
@@ -169,6 +188,10 @@ async fn run() {
     } else {
         interactive::run(&args, config).await;
     }
+}
+
+fn is_agent_headless_mode(args: &cli::CliArgs) -> bool {
+    args.command.is_none() && !args.is_registry() && !args.is_compact() && args.is_headless()
 }
 
 #[cfg(unix)]
@@ -195,6 +218,30 @@ mod tests {
     use super::*;
     use crate::config::{AiConfig, CoreConfig, ProviderConfig};
     use std::collections::HashMap;
+
+    fn parse_args(args: &[&str]) -> cli::CliArgs {
+        let mut full = vec!["cosh-core"];
+        full.extend_from_slice(args);
+        cli::CliArgs::try_parse_from(full).unwrap()
+    }
+
+    #[test]
+    fn only_agent_mode_initializes_the_headless_workspace() {
+        assert!(is_agent_headless_mode(&parse_args(&["--headless"])));
+        assert!(!is_agent_headless_mode(&parse_args(&[
+            "--headless",
+            "mcp",
+            "list"
+        ])));
+        assert!(!is_agent_headless_mode(&parse_args(&[
+            "--headless",
+            "--registry"
+        ])));
+        assert!(!is_agent_headless_mode(&parse_args(&[
+            "--headless",
+            "--compact"
+        ])));
+    }
 
     #[test]
     fn ecs_ram_role_aliyun_provider_does_not_need_static_auth() {

@@ -135,11 +135,11 @@ mod tests {
         mgr.refresh().await;
 
         let tool = SkillTool::new(mgr);
-        let ctx = ToolContext {
-            cwd: PathBuf::from("/nonexistent"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/nonexistent"),
-        };
+        let ctx = ToolContext::new(
+            PathBuf::from("/nonexistent"),
+            "test".to_string(),
+            PathBuf::from("/nonexistent"),
+        );
         let result = tool
             .invoke(serde_json::json!({"action": "list"}), &ctx)
             .await
@@ -155,11 +155,11 @@ mod tests {
         mgr.refresh().await;
 
         let tool = SkillTool::new(mgr);
-        let ctx = ToolContext {
-            cwd: PathBuf::from("/nonexistent"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/nonexistent"),
-        };
+        let ctx = ToolContext::new(
+            PathBuf::from("/nonexistent"),
+            "test".to_string(),
+            PathBuf::from("/nonexistent"),
+        );
         let result = tool
             .invoke(
                 serde_json::json!({"action": "invoke", "name": "missing"}),
@@ -188,11 +188,11 @@ mod tests {
         mgr.refresh().await;
 
         let tool = SkillTool::new(mgr);
-        let ctx = ToolContext {
-            cwd: dir.path().to_path_buf(),
-            session_id: "test".to_string(),
-            project_root: dir.path().to_path_buf(),
-        };
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
         let result = tool
             .invoke(
                 serde_json::json!({"action": "invoke", "name": "demo"}),
@@ -220,11 +220,11 @@ mod tests {
         mgr.refresh().await;
 
         let tool = SkillTool::new(mgr);
-        let ctx = ToolContext {
-            cwd: dir.path().to_path_buf(),
-            session_id: "test".to_string(),
-            project_root: dir.path().to_path_buf(),
-        };
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
         let result = tool
             .invoke(serde_json::json!({"action": "list"}), &ctx)
             .await

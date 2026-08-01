@@ -233,6 +233,40 @@ async fn project_context_reaches_the_provider_boundary() {
         .contains("## Project Context\nprovider-visible marker"));
 }
 
+#[test]
+fn shell_cwd_does_not_replace_the_fixed_project_root() {
+    let mut core = CoshCore::new(
+        CoreConfig::default(),
+        Box::new(MockProvider::new(Vec::new())),
+        ToolRegistry::new(),
+    );
+    let project_root = core.project_root.clone();
+    let directory = tempfile::tempdir().unwrap();
+
+    core.shell_context = Some(ShellContext {
+        cwd: directory.path().to_path_buf(),
+        env: std::collections::HashMap::new(),
+        last_exit_code: 0,
+    });
+
+    assert_eq!(core.project_root, project_root);
+    assert_eq!(core.cwd(), directory.path());
+}
+
+#[test]
+fn fixed_project_root_is_the_cwd_without_shell_context() {
+    let mut core = CoshCore::new(
+        CoreConfig::default(),
+        Box::new(MockProvider::new(Vec::new())),
+        ToolRegistry::new(),
+    );
+    let project_root = tempfile::tempdir().unwrap();
+    core.project_root = project_root.path().to_path_buf();
+    core.shell_context = None;
+
+    assert_eq!(core.cwd(), project_root.path());
+}
+
 #[tokio::test]
 async fn user_provided_secret_reaches_the_provider_boundary() {
     let captured = Arc::new(Mutex::new(Vec::new()));

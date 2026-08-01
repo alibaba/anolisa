@@ -145,11 +145,8 @@ mod tests {
     use tokio::sync::Barrier;
 
     fn test_ctx() -> ToolContext {
-        ToolContext {
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
-            session_id: "test".to_string(),
-            project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
-        }
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
+        ToolContext::new(root.clone(), "test".to_string(), root)
     }
 
     #[tokio::test]

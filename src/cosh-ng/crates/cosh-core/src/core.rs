@@ -24,7 +24,7 @@ use crate::provider::{
     ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
 };
 use crate::tool::ask_user_question;
-use crate::tool::{ToolContext, ToolKind, ToolRegistry, ToolResult};
+use crate::tool::{SessionWorkspace, ToolContext, ToolKind, ToolRegistry, ToolResult};
 use crate::truncator::OutputTruncator;
 
 use self::tool_execution::{
@@ -58,6 +58,8 @@ pub struct CoshCore {
     pub compaction: CompactionRuntime,
     pub model: String,
     pub shell_context: Option<ShellContext>,
+    project_root: PathBuf,
+    workspace: SessionWorkspace,
     pub extension_context: Option<String>,
     pub extra_params: Option<serde_json::Value>,
     pub hook_system: HookSystem,
@@ -192,7 +194,7 @@ impl CoshCore {
         self.shell_context
             .as_ref()
             .map(|ctx| ctx.cwd.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .unwrap_or_else(|| self.project_root.clone())
     }
 
     /// Conservative runtime-prefix (`P`) estimate for budget computations.
@@ -958,11 +960,12 @@ impl CoshCore {
             self.messages
                 .push(Message::assistant_with_tool_calls(&text_buf, tc_infos));
 
-            let ctx = ToolContext {
-                cwd: self.cwd(),
-                session_id: self.session_id.clone(),
-                project_root: self.cwd(),
-            };
+            let ctx = ToolContext::with_workspace(
+                self.cwd(),
+                self.session_id.clone(),
+                self.project_root.clone(),
+                self.workspace.clone(),
+            );
 
             let mut interrupted = false;
             // Set once a tool call ends the run. The error is returned only after

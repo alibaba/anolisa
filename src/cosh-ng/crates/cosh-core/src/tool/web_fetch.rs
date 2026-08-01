@@ -179,11 +179,11 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let ctx = ToolContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/tmp"),
-        };
+        let ctx = ToolContext::new(
+            PathBuf::from("/tmp"),
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+        );
 
         let result = WebFetchTool::new()
             .invoke(
@@ -201,11 +201,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_http_urls() {
-        let ctx = ToolContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/tmp"),
-        };
+        let ctx = ToolContext::new(
+            PathBuf::from("/tmp"),
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+        );
 
         let result = WebFetchTool::new()
             .invoke(serde_json::json!({"url": "file:///etc/passwd"}), &ctx)
@@ -231,11 +231,11 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let ctx = ToolContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/tmp"),
-        };
+        let ctx = ToolContext::new(
+            PathBuf::from("/tmp"),
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+        );
 
         let result = WebFetchTool::new()
             .invoke(
