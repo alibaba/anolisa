@@ -538,10 +538,25 @@ fn active_run_has_stalled_shell_evidence_delivery(active_run: &ActiveAgentRun) -
 }
 
 fn shell_evidence_idle_timeout() -> Duration {
-    Duration::from_secs(
+    shell_evidence_idle_timeout_from_config(
         std::env::var("COSH_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS")
             .ok()
+            .as_deref(),
+    )
+}
+
+// Resolve the idle window from its configured value, falling back to the
+// default when it is missing, malformed, or zero. Zero has to be rejected
+// rather than honoured: `elapsed() >= Duration::ZERO` holds on the very first
+// poll of a run, so a zero window would report every active run as stalled and
+// restart the fallback continuation on every poll cycle. Parsing is split out
+// of the env read so the boundaries stay testable without mutating the
+// process-global environment.
+fn shell_evidence_idle_timeout_from_config(configured: Option<&str>) -> Duration {
+    Duration::from_secs(
+        configured
             .and_then(|value| value.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
             .unwrap_or(DEFAULT_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS),
     )
 }

@@ -253,6 +253,45 @@ fn stalled_shell_evidence_delivery_uses_last_activity_idle_time() {
 }
 
 #[test]
+fn shell_evidence_idle_timeout_rejects_zero_and_keeps_valid_values() {
+    assert_eq!(
+        shell_evidence_idle_timeout_from_config(Some("30")),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        shell_evidence_idle_timeout_from_config(Some("1")),
+        Duration::from_secs(1)
+    );
+
+    let default = Duration::from_secs(DEFAULT_SHELL_EVIDENCE_IDLE_TIMEOUT_SECS);
+    // #2094: a configured `0` must fall back like a malformed value instead of
+    // becoming a zero idle window.
+    assert_eq!(shell_evidence_idle_timeout_from_config(Some("0")), default);
+    assert_eq!(shell_evidence_idle_timeout_from_config(Some("00")), default);
+    for malformed in ["", "-1", "abc", "1.5", "5s", " 5"] {
+        assert_eq!(
+            shell_evidence_idle_timeout_from_config(Some(malformed)),
+            default,
+            "malformed value {malformed:?} must fall back to the default"
+        );
+    }
+    assert_eq!(shell_evidence_idle_timeout_from_config(None), default);
+}
+
+#[test]
+fn resolved_shell_evidence_idle_timeout_is_never_zero() {
+    // `active_run_has_stalled_shell_evidence_delivery` compares against this
+    // window with `>=`, so a zero window would report every poll of every run
+    // as stalled and restart the fallback continuation in a loop.
+    for configured in [Some("0"), Some(""), Some("abc"), Some("-1"), None] {
+        assert!(
+            !shell_evidence_idle_timeout_from_config(configured).is_zero(),
+            "configuration {configured:?} must not resolve to a zero idle window"
+        );
+    }
+}
+
+#[test]
 fn stalled_shell_fallback_waits_for_pending_interaction_to_close() {
     assert!(!should_start_stalled_provider_shell_fallback(
         StalledProviderShellFallbackInputs {
