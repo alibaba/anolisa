@@ -258,7 +258,7 @@ html:has(.homePage) .footer {
 .heroPositioning p {
   margin: 0;
   color: var(--site-muted);
-  font-size: clamp(1.16rem, 1.65vw, 1.48rem);
+  font-size: clamp(1rem, 1.3vw, 1.3rem);
   line-height: 1.58;
 }
 
