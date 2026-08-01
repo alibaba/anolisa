@@ -2,6 +2,7 @@ import Head from '@docusaurus/Head';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
+import ThemedImage from '@theme/ThemedImage';
 import CopyCommand from '../components/CopyCommand';
 import SiteLink from '../components/SiteLink';
 import {installCommand, type Locale} from '../../content.config';
@@ -303,7 +304,8 @@ export default function Home() {
   const t = content[locale];
   const scenarioItems = scenarios[locale];
   const routeItems = routes[locale];
-  const heroGlyph = useBaseUrl('/img/brand/anolisa-glyph-signal.svg');
+  const lockupLight = useBaseUrl('/img/brand/anolisa-lockup-light.svg');
+  const lockupDark = useBaseUrl('/img/brand/anolisa-lockup-dark.svg');
 
   return (
     <Layout title={t.lead} description={`${t.hook} ${t.systemScope}`}>
@@ -318,10 +320,12 @@ export default function Home() {
                 <span aria-hidden="true" />
                 {t.badge}
               </div>
-              <div className="heroIdentity">
-                <img src={heroGlyph} alt="" aria-hidden="true" />
-                <h1>ANOLISA</h1>
-              </div>
+              <h1 className="heroWordmark">
+                <ThemedImage
+                  alt="ANOLISA"
+                  sources={{light: lockupLight, dark: lockupDark}}
+                />
+              </h1>
               <div className="heroPositioning">
                 <p>{t.lead}</p>
                 <p>{t.hook}</p>
