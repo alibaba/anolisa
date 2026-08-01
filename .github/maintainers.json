@@ -121,6 +121,22 @@
                     "github": "KaiLongZhou"
                 }
             ]
+        },
+        {
+            "label": "component:blaze",
+            "maintainers": [
+                {
+                    "github": "casparant"
+                }
+            ]
+        },
+        {
+            "label": "component:ktuner",
+            "maintainers": [
+                {
+                    "github": "jfeng18"
+                }
+            ]
         }
     ],
     "default": {
