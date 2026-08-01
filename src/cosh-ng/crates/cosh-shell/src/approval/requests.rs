@@ -332,10 +332,25 @@ pub(crate) fn record_auto_approved_request(
         }
     }
     state.approvals.requests.push(request.clone());
-    state
-        .approvals
-        .journal
-        .push(approval_journal_entry(&request, "agent-auto"));
+    // A late control-channel verdict converts the provisional
+    // staged_unresolved entry into the final approval instead of doubling
+    // the journal with a contradictory Blocked+Approved pair (#2156).
+    let reconciled = request.tool_use_id.as_deref().is_some_and(|tool_id| {
+        reconcile_staged_unresolved_entry(
+            state,
+            &request.run_id,
+            tool_id,
+            ApprovalRequestStatus::Approved,
+            "agent-auto",
+            "staged_resolved_late_verdict",
+        )
+    });
+    if !reconciled {
+        state
+            .approvals
+            .journal
+            .push(approval_journal_entry(&request, "agent-auto"));
+    }
     request
 }
 
@@ -353,6 +368,72 @@ pub(crate) fn record_deferred_fallback_request(
         .journal
         .push(approval_journal_entry(&request, "cosh-shell"));
     request
+}
+
+/// Journals a grace-released cosh-core ToolCall whose core verdict never
+/// became visible. M3 (#2067): such a call must not execute and must not be
+/// auto-approved — the journal entry is the audit trail, keyed
+/// `staged_unresolved` so a protocol desync stays distinguishable from a
+/// user or policy decision.
+pub(crate) fn record_staged_unresolved_request(
+    state: &mut InlineState,
+    mut request: RuntimeApprovalRequest,
+) {
+    // The journal source is `cosh-shell` because the protocol desync is
+    // detected shell-side, without any core verdict on the wire.
+    request.status = ApprovalRequestStatus::Blocked;
+    request.execution_path = Some("staged_unresolved");
+    state
+        .approvals
+        .journal
+        .push(approval_journal_entry(&request, "cosh-shell"));
+}
+
+/// A staged ToolCall whose hook verdict arrived inside the staging window
+/// as Block: the core released the provider-native error result, so the
+/// call never executed. Journal the rejection — never an auto-approval —
+/// so the audit trail reflects the hook verdict instead of claiming an
+/// approved provider-native execution (#2156). The journal source is
+/// `cosh-core` because the block verdict originates from the core's hook
+/// system; the shell only records it.
+pub(crate) fn record_hook_blocked_staged_request(
+    state: &mut InlineState,
+    mut request: RuntimeApprovalRequest,
+) {
+    request.status = ApprovalRequestStatus::Blocked;
+    request.execution_path = Some("hook_block");
+    state
+        .approvals
+        .journal
+        .push(approval_journal_entry(&request, "cosh-core"));
+}
+
+/// A `staged_unresolved` journal entry is provisional, not terminal
+/// (#2156): the grace timer fired before the core's verdict, so when the
+/// late verdict arrives — an approval resolution through the control
+/// channel, or a block-marked provider-native result — the provisional
+/// entry converts in place to the final state. Each tool_use_id ends with
+/// exactly one terminal journal entry consistent with what actually
+/// happened to the command.
+pub(crate) fn reconcile_staged_unresolved_entry(
+    state: &mut InlineState,
+    run_id: &str,
+    tool_use_id: &str,
+    decision: ApprovalRequestStatus,
+    actor: &'static str,
+    execution_path: &'static str,
+) -> bool {
+    let Some(entry) = state.approvals.journal.iter_mut().find(|entry| {
+        entry.run_id == run_id
+            && entry.tool_use_id.as_deref() == Some(tool_use_id)
+            && entry.execution_path == Some("staged_unresolved")
+    }) else {
+        return false;
+    };
+    entry.decision = decision;
+    entry.actor = actor;
+    entry.execution_path = Some(execution_path);
+    true
 }
 
 pub(crate) fn refresh_shell_request_assessment(

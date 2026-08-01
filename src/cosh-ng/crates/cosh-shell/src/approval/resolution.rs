@@ -9,6 +9,7 @@ use crate::approval::handoff::{
 };
 use crate::approval::journal::{approval_audit_input, approval_journal_entry};
 use crate::approval::provider::provider_approval_status;
+use crate::approval::requests::reconcile_staged_unresolved_entry;
 use crate::runtime::prelude::*;
 
 pub(crate) struct AppliedApprovalDecision {
@@ -198,10 +199,25 @@ fn finalize_approval_decision(
                 .grant_run_batch_consent(request.run_id.clone());
         }
     }
-    state
-        .approvals
-        .journal
-        .push(approval_journal_entry(&request, actor));
+    // A late verdict on a grace-released staged call converts the
+    // provisional staged_unresolved entry rather than adding a second,
+    // contradictory terminal record for the same tool_use_id (#2156).
+    let reconciled = request.tool_use_id.as_deref().is_some_and(|tool_id| {
+        reconcile_staged_unresolved_entry(
+            state,
+            &request.run_id,
+            tool_id,
+            request.status,
+            actor,
+            "staged_resolved_late_verdict",
+        )
+    });
+    if !reconciled {
+        state
+            .approvals
+            .journal
+            .push(approval_journal_entry(&request, actor));
+    }
     let run_approved_tool = request.status == ApprovalRequestStatus::Approved
         && request_is_executable_bash_tool(&request);
 

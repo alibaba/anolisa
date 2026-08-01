@@ -10,10 +10,10 @@ use crate::parser::{
 };
 use crate::types::{
     AgentEvent, CommandStatus, CoshApprovalMode, FindingKind, GovernanceDecision,
-    GovernancePolicyDecision, InterventionDecision, Policy, QuestionSelectionMode, ShellEvent,
-    ShellEventKind,
+    GovernancePolicyDecision, GovernedEvent, InterventionDecision, Policy, QuestionSelectionMode,
+    ShellEvent, ShellEventKind,
 };
-use crate::ui::render_transcript;
+use crate::ui::{render_transcript, RatatuiInlineRenderer};
 use crate::Language;
 
 fn failed_command_events() -> Vec<ShellEvent> {
@@ -569,4 +569,38 @@ fn claude_code_adapter_is_dry_run_by_default_and_governed() {
     assert_eq!(governed.events.len(), claude_events.len());
     assert_eq!(governed.audit.len(), claude_events.len());
     assert!(governed.events.iter().all(|event| !event.auto_execute));
+}
+
+#[test]
+fn write_governed_events_skips_empty_display_text() {
+    // F3 (#2067): a batch whose events carry no visible content must not
+    // render an empty titled card. Lives here instead of next to the
+    // renderer because the whole ui tree is shared between the lib shim and
+    // the bin target, and new tests must not grow the lib/bin overlap.
+    let event = GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
+        event: AgentEvent::HookNotification {
+            run_id: "run-1".to_string(),
+            hook_name: "guard".to_string(),
+            message: String::new(),
+            tool_use_id: Some("toolu-1".to_string()),
+            decision: None,
+        },
+        reason: "orphan".to_string(),
+        display_text: String::new(),
+        auto_execute: false,
+    };
+    let renderer = RatatuiInlineRenderer::with_width(80);
+    let mut output = Vec::new();
+
+    renderer
+        .write_governed_events(&mut output, &[event])
+        .unwrap();
+
+    assert!(
+        output.is_empty(),
+        "an empty display text must not render a card: {}",
+        String::from_utf8_lossy(&output)
+    );
 }

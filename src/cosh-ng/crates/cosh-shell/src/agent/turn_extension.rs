@@ -25,7 +25,7 @@ pub(crate) fn note_capped_run(
     active_run: &ActiveAgentRun,
     committed_provider_session: Option<String>,
 ) -> bool {
-    if active_run.provider_name != "cosh-core"
+    if active_run.provider_name != crate::adapter::COSH_CORE_PROVIDER_NAME
         || active_run.origin != AgentRunOrigin::Standard
         || state.agent_run.pending_turn_extension.is_some()
         || !state.agent_run.queued_requests.is_empty()

@@ -142,10 +142,17 @@ impl RatatuiInlineRenderer {
         output: &mut W,
         governed_events: &[GovernedEvent],
     ) -> io::Result<()> {
+        let lines = self.governed_event_lines(governed_events);
+        // An event batch without visible content (e.g. an orphan hook
+        // notification whose display text was never populated) must not
+        // render an empty titled card (#2067).
+        if lines.iter().all(|line| line.trim().is_empty()) {
+            return Ok(());
+        }
         self.write_block(
             output,
             self.i18n().t(crate::MessageId::AgentGovernanceTitle),
-            self.governed_event_lines(governed_events),
+            lines,
             None,
         )
     }

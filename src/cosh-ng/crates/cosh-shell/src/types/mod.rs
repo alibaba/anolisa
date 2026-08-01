@@ -458,6 +458,15 @@ pub enum AgentEvent {
         tool_id: String,
         status: String,
     },
+    /// The core's machine-readable hook verdict for a tool call (#2156).
+    /// Emitted only when the provider-native result carries the
+    /// `cosh_hook_verdict` wire marker; the bridge keys rejection semantics
+    /// on this event, never on user-controllable result text.
+    ToolHookVerdict {
+        run_id: String,
+        tool_id: String,
+        verdict: String,
+    },
     AgentCompleted {
         run_id: String,
         summary: String,

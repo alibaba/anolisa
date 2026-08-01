@@ -49,5 +49,7 @@ fn wait_for_cosh_core_session(
 mod approval_round_trip;
 #[path = "control/host_executed.rs"]
 mod host_executed;
+#[path = "control/initialize_wire.rs"]
+mod initialize_wire;
 #[path = "control/provider_modes.rs"]
 mod provider_modes;

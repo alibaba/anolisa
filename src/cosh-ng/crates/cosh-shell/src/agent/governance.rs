@@ -127,6 +127,16 @@ pub fn govern_agent_events_with_language(
                 ),
                 false,
             ),
+            AgentEvent::ToolHookVerdict { .. } => (
+                // The verdict marker is audit metadata; the rejection is
+                // already visible via the failed tool result and the
+                // governance hook panel.
+                GovernanceDecision::Display,
+                GovernancePolicyDecision::AuditOnly,
+                "hook verdict marker is audit-only".to_string(),
+                String::new(),
+                false,
+            ),
             AgentEvent::ToolCompleted {
                 tool_id, status, ..
             } => (

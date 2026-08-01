@@ -45,6 +45,7 @@ pub(super) fn should_render_governance_block(event: &GovernedEvent) -> bool {
         | AgentEvent::HookNotification { .. } => true,
         AgentEvent::ToolOutputDelta { .. }
         | AgentEvent::ToolCompleted { .. }
+        | AgentEvent::ToolHookVerdict { .. }
         | AgentEvent::TextDelta { .. }
         | AgentEvent::AgentCompleted { .. }
         | AgentEvent::AuthRequired { .. }

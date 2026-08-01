@@ -140,6 +140,9 @@ fn cancel_active_agent_run<W: Write>(
     active_run.deferred_events.clear();
     clear_active_run_request_buffers(&mut active_run);
     active_run.markdown_stream.finish(output, None)?;
+    // Surface unconsumed hook notifications before teardown; dropping them
+    // with the run is how block decisions went missing (#2067).
+    crate::agent::run::drain_pending_hook_notifications(&mut active_run, output)?;
     state.agent_run.held_events.clear();
     suppress_pending_work_after_agent_cancel(state);
     state.agent_run.needs_prompt_after_run = true;
@@ -511,5 +514,34 @@ mod tests {
             host_completed_tool_ids: Vec::new(),
             pending_hook_notifications: Vec::new(),
         }
+    }
+
+    // F2-ext (#2067): cancelling a run with a pending hook block
+    // notification must surface the decision through governance instead of
+    // dropping it with the run.
+    #[test]
+    fn cancel_surfaces_pending_hook_block_notification() {
+        let mut state = InlineState::default();
+        let mut active_run = test_active_run();
+        active_run
+            .pending_hook_notifications
+            .push(crate::agent::run::PendingHookNotification {
+                tool_use_id: Some("toolu-1".to_string()),
+                hook_name: "guard".to_string(),
+                message: "no touch".to_string(),
+                decision: Some("block".to_string()),
+            });
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        cancel_active_agent_run(&mut state, &mut output).expect("cancel run");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(
+            rendered.contains("Hook: guard")
+                && rendered.contains("Message: no touch")
+                && rendered.contains("Decision: block"),
+            "cancel must surface the pending block decision: {rendered}"
+        );
     }
 }

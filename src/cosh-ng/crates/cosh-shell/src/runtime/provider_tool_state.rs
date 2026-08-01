@@ -12,6 +12,10 @@ pub(crate) struct ProviderToolState {
     rendered_shell_transcript_outputs: HashSet<ProviderToolKey>,
     delivered_host_executed_shell_results: HashSet<String>,
     foreground_shell_commands: HashSet<String>,
+    /// Tool calls the core marked with the machine-readable hook verdict
+    /// (#2156): the only source the approval bridge may use to tell a hook
+    /// rejection apart from an executed command.
+    hook_blocked_results: HashSet<ProviderToolKey>,
 }
 
 impl ProviderToolState {
@@ -162,6 +166,16 @@ impl ProviderToolState {
     pub(crate) fn mark_shell_transcript_output(&mut self, run_id: &str, tool_id: &str) {
         self.rendered_shell_transcript_outputs
             .insert(ProviderToolKey::new(run_id, tool_id));
+    }
+
+    pub(crate) fn mark_hook_blocked_result(&mut self, run_id: &str, tool_id: &str) {
+        self.hook_blocked_results
+            .insert(ProviderToolKey::new(run_id, tool_id));
+    }
+
+    pub(crate) fn hook_result_is_blocked(&self, run_id: &str, tool_id: &str) -> bool {
+        self.hook_blocked_results
+            .contains(&ProviderToolKey::new(run_id, tool_id))
     }
 
     pub(crate) fn mark_shell_transcript_seen(&mut self, run_id: &str, tool_id: &str) {

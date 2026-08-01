@@ -322,6 +322,29 @@ pub(crate) fn record_activity_rows_with_policy(
                     Some(row)
                 }
             }
+            AgentEvent::ToolHookVerdict {
+                run_id,
+                tool_id,
+                verdict,
+            } => {
+                if verdict == "blocked" {
+                    state
+                        .control
+                        .mark_provider_hook_blocked_result(run_id, tool_id);
+                    // A block marker arriving after the staging grace converts
+                    // the provisional staged_unresolved journal entry into the
+                    // final rejection (#2156).
+                    crate::approval::requests::reconcile_staged_unresolved_entry(
+                        state,
+                        run_id,
+                        tool_id,
+                        ApprovalRequestStatus::Blocked,
+                        "cosh-core",
+                        "hook_block",
+                    );
+                }
+                None
+            }
             _ => None,
         };
         if let Some(row) = row {

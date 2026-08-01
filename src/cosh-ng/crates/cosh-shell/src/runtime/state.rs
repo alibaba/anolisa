@@ -669,6 +669,12 @@ impl ControlState {
         self.provider_tool
             .mark_shell_transcript_seen(run_id, tool_id);
     }
+    pub(crate) fn mark_provider_hook_blocked_result(&mut self, run_id: &str, tool_id: &str) {
+        self.provider_tool.mark_hook_blocked_result(run_id, tool_id);
+    }
+    pub(crate) fn provider_hook_result_is_blocked(&self, run_id: &str, tool_id: &str) -> bool {
+        self.provider_tool.hook_result_is_blocked(run_id, tool_id)
+    }
     pub(crate) fn provider_shell_transcript_output_seen(
         &self,
         run_id: &str,

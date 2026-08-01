@@ -66,9 +66,25 @@ pub(crate) fn render_trusted_tool<W: Write>(
         }
         if provider_tool_call_fallback
             && request_is_executable_bash_tool(&request)
+            && provider_native_shell_result_is_hook_block(state, &request)
+        {
+            // The core verdict arrived inside the staging window as a block:
+            // preserve the rejection instead of replaying an approval.
+            record_hook_blocked_staged_request(state, request);
+            continue;
+        }
+        if provider_tool_call_fallback
+            && request_is_executable_bash_tool(&request)
             && provider_native_shell_result_already_visible(state, &request)
         {
             render_completed_provider_native_shell_request(state, request, output)?;
+            continue;
+        }
+        if provider_tool_call_fallback && active_run_is_cosh_core(state) {
+            // M3 (#2067): a grace-released bare ToolCall has no core-visible
+            // verdict; executing it here is what bypassed hook blocks. Journal
+            // the desync and leave execution to the core-owned channels.
+            record_staged_unresolved_request(state, request);
             continue;
         }
         if !provider_tool_call_fallback && defer_fallback_bash_tool(state, request.clone(), output)?
@@ -134,6 +150,17 @@ fn assessment_requires_interactive_approval(assessment: &CommandAssessment) -> b
         || assessment.reasons.contains(&"unresolvable-launcher-chain")
 }
 
+/// M3 is scoped to the cosh-core driver: claude/qwen also report
+/// `control_protocol`, but they have no core-side verdict channel, so their
+/// grace-release fallback remains the only trust surface (I4/R4).
+fn active_run_is_cosh_core(state: &InlineState) -> bool {
+    state
+        .agent_run
+        .active
+        .as_ref()
+        .is_some_and(|run| run.provider_name == crate::adapter::COSH_CORE_PROVIDER_NAME)
+}
+
 fn trust_mode_blocks_shell_request(
     request: &mut RuntimeApprovalRequest,
     source: AssessmentSource,
@@ -194,9 +221,23 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         }
         if provider_tool_call_fallback
             && request_is_executable_bash_tool(&request)
+            && provider_native_shell_result_is_hook_block(state, &request)
+        {
+            record_hook_blocked_staged_request(state, request);
+            continue;
+        }
+        if provider_tool_call_fallback
+            && request_is_executable_bash_tool(&request)
             && provider_native_shell_result_already_visible(state, &request)
         {
             render_completed_provider_native_shell_request(state, request, output)?;
+            continue;
+        }
+        if provider_tool_call_fallback && active_run_is_cosh_core(state) {
+            // M3 (#2067): a grace-released bare ToolCall has no core-visible
+            // verdict; executing it here is what bypassed hook blocks. Journal
+            // the desync and leave execution to the core-owned channels.
+            record_staged_unresolved_request(state, request);
             continue;
         }
         if request_is_readonly_builtin_tool(&request) {
@@ -306,6 +347,27 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
 
     render_approval_requests(state, &blocked_approval_ids, output)?;
     Ok(false)
+}
+
+/// The core's machine-readable blocked verdict: the M2 hook-block release
+/// marks the provider-native result with `cosh_hook_verdict: "blocked"` on
+/// the wire, and the adapter surfaces it as a ToolHookVerdict event that
+/// sets this flag (#2156). Keying on the flag covers every fail-closed
+/// morphology (block/deny/reject, hook failure, message-less blocks) and —
+/// unlike result text — cannot be forged by the command's own output.
+fn provider_native_shell_result_is_hook_block(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> bool {
+    if request.provider_shell_request_kind.is_control_permission() {
+        return false;
+    }
+    let Some(tool_id) = request.tool_use_id.as_deref() else {
+        return false;
+    };
+    state
+        .control
+        .provider_hook_result_is_blocked(&request.run_id, tool_id)
 }
 
 fn provider_native_shell_result_already_visible(

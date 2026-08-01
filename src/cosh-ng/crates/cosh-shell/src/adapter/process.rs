@@ -488,6 +488,7 @@ pub(crate) fn agent_event_is_provider_progress(event: &AgentEvent) -> bool {
         | AgentEvent::ToolPermissionRequest { .. }
         | AgentEvent::ToolOutputDelta { .. }
         | AgentEvent::ToolCompleted { .. }
+        | AgentEvent::ToolHookVerdict { .. }
         | AgentEvent::AgentCompleted { .. }
         | AgentEvent::AgentFailed { .. }
         | AgentEvent::AgentCancelled { .. }

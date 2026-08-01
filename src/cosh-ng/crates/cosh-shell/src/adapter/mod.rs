@@ -36,6 +36,7 @@ pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
 pub use control_protocol::*;
 pub(crate) use cosh_core::max_turn_limit;
+pub(crate) use cosh_core::COSH_CORE_PROVIDER_NAME;
 pub use cosh_core::{
     CoshCoreAdapter, SessionClearFailure, SessionClearInterruption, SessionClearPlan,
     SessionClearResult, SessionErrorInfo, SessionHealth, SessionList, SessionManagementClient,

@@ -430,6 +430,13 @@ impl ClaudeStreamParser {
                 continue;
             }
             let status = result.status;
+            if let Some(verdict) = result.hook_verdict {
+                events.push(AgentEvent::ToolHookVerdict {
+                    run_id: self.run_id.clone(),
+                    tool_id: tool_id.clone(),
+                    verdict,
+                });
+            }
             for (stream, content) in result.outputs {
                 events.push(AgentEvent::ToolOutputDelta {
                     run_id: self.run_id.clone(),

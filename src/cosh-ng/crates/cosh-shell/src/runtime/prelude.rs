@@ -103,7 +103,8 @@ pub(crate) use crate::approval::handoff::{
 pub(crate) use crate::approval::panel::render_approval_requests;
 pub(crate) use crate::approval::requests::{
     approval_request_from_governed_event, record_approval_requests, record_auto_approved_request,
-    record_deferred_fallback_request, refresh_shell_request_assessment,
+    record_deferred_fallback_request, record_hook_blocked_staged_request,
+    record_staged_unresolved_request, refresh_shell_request_assessment,
 };
 pub(crate) use crate::approval::runtime::render_approval_resolution;
 pub(crate) use crate::question::runtime::{

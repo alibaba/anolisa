@@ -294,6 +294,11 @@ pub(super) struct ParsedToolResult {
     pub(super) tool_id: String,
     pub(super) status: String,
     pub(super) outputs: Vec<(String, String)>,
+    /// The core's machine-readable hook verdict marker (#2156), parsed from
+    /// the `cosh_hook_verdict` wire field. `Some("blocked")` means a hook
+    /// verdict rejected the call; `None` means any other outcome, including
+    /// a real command whose output merely mentions hook text.
+    pub(super) hook_verdict: Option<String>,
 }
 
 pub(super) fn tool_result_part(
@@ -306,6 +311,10 @@ pub(super) fn tool_result_part(
             .and_then(|value| value.as_str())
             .unwrap_or("tool-result")
             .to_string();
+        let hook_verdict = part
+            .get("cosh_hook_verdict")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
         return Some(ParsedToolResult {
             tool_id,
             status: tool_result_status(part),
@@ -313,6 +322,7 @@ pub(super) fn tool_result_part(
                 .into_iter()
                 .map(|(stream, text)| (stream.to_string(), text))
                 .collect(),
+            hook_verdict,
         });
     }
 
@@ -371,6 +381,7 @@ pub(super) fn tool_result_part(
         tool_id,
         status,
         outputs: vec![(stream.to_string(), bound_tool_output(output))],
+        hook_verdict: None,
     })
 }
 

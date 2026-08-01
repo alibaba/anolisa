@@ -27,6 +27,11 @@ pub use session::{
     SessionErrorInfo, SessionHealth, SessionList, SessionManagementClient, SessionSummary,
 };
 
+/// Provider name of the cosh-core driver. Verdict-channel behavior is keyed
+/// on this single constant so a provider rename or alias cannot silently
+/// disable the fail-closed guards (#2156).
+pub(crate) const COSH_CORE_PROVIDER_NAME: &str = "cosh-core";
+
 #[derive(Debug, Clone)]
 /// Adapter that delegates Agent turns and session ownership to cosh-core.
 pub struct CoshCoreAdapter {
@@ -320,7 +325,7 @@ impl CoshCoreAdapter {
 
 impl AgentAdapter for CoshCoreAdapter {
     fn name(&self) -> &'static str {
-        "cosh-core"
+        COSH_CORE_PROVIDER_NAME
     }
 
     fn capabilities(&self) -> AgentBackendCapabilities {
