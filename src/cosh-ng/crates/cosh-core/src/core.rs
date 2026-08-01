@@ -21,7 +21,9 @@ use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot}
 use crate::hook::{HookDecision, HookNotification, HookSystem, PreToolUseResult};
 use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
-use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
+use crate::protocol::{
+    ClientControlCapabilities, InputMessage, OutputMessage, ShellContext, ShellControlRequest,
+};
 use crate::provider::{
     ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
 };
@@ -84,6 +86,13 @@ pub struct CoshCore {
     request_counter: AtomicU32,
     truncator: OutputTruncator,
     loop_detector: LoopDetector,
+    /// Control capabilities the attached client declared at `initialize`.
+    ///
+    /// Defaults to "no capabilities" (headless or legacy clients), which
+    /// keeps trust-mode shell execution provider-native. A client declaring
+    /// both flags opts trust-mode shell commands into the core-issued
+    /// approval channel instead (#2067).
+    pub client_capabilities: ClientControlCapabilities,
     /// First control-transport failure of this process, if any.
     ///
     /// Set from `&self` paths (`handle_ask_user`, `handle_shell_evidence`), so
@@ -260,6 +269,17 @@ impl CoshCore {
         };
 
         if mode == ApprovalMode::Trust {
+            // A control client that can answer `can_use_tool` and execute the
+            // foreground handoff takes over trust-mode shell execution: the
+            // approval channel is the only path where a hook Block reaches a
+            // deterministic verdict instead of racing the shell-side staging
+            // grace window (#2067). Legacy clients keep local execution.
+            if self.client_capabilities.can_handle_can_use_tool
+                && self.client_capabilities.can_handle_host_executed_shell
+                && tool.kind() == ToolKind::ShellExec
+            {
+                return Outcome::RequireApproval;
+            }
             return Outcome::Allow;
         }
 
@@ -1230,6 +1250,13 @@ impl CoshCore {
                             &result.output,
                             result.is_error,
                         ));
+                        // Release the staged provider-native call on the
+                        // client: without this result event the shell can
+                        // only drop the staged call after its grace timeout,
+                        // which opened the block-bypass handoff race (#2067).
+                        // The machine-readable verdict marker lets the client
+                        // journal the rejection without trusting result text.
+                        self.emit_provider_native_hook_block_result(writer, &tc.id, &result);
                         self.audit.record_tool_terminal(
                             tool_scope,
                             &tc.name,
@@ -1288,6 +1315,10 @@ impl CoshCore {
                             &tc.name,
                             if hook_requires_approval {
                                 "hook_ask"
+                            } else if self.config.agent.approval_mode == ApprovalMode::Trust {
+                                // In trust mode a non-hook RequireApproval is
+                                // the capable-client shell handoff reroute.
+                                "trust_shell_handoff"
                             } else {
                                 "policy_approval"
                             },
@@ -1699,6 +1730,22 @@ impl CoshCore {
                 &result.output,
                 result.is_error,
             ),
+        );
+    }
+
+    /// The M2 hook-block release: emits the provider-native error result
+    /// with the machine-readable verdict marker so the client can tell a
+    /// hook rejection apart from an executed-but-failed command without
+    /// reading user-controlled text (#2156).
+    fn emit_provider_native_hook_block_result<W: Write>(
+        &self,
+        writer: &mut W,
+        tool_use_id: &str,
+        result: &ToolResult,
+    ) {
+        self.emit(
+            writer,
+            &OutputMessage::tool_result_hook_blocked(&self.session_id, tool_use_id, &result.output),
         );
     }
 

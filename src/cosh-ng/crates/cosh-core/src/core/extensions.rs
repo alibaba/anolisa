@@ -88,6 +88,7 @@ impl CoshCore {
             request_counter: AtomicU32::new(0),
             truncator: OutputTruncator::default(),
             loop_detector: LoopDetector::new(),
+            client_capabilities: crate::protocol::ClientControlCapabilities::default(),
             control_transport_failure: std::sync::OnceLock::new(),
         }
     }

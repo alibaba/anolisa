@@ -3930,3 +3930,200 @@ async fn audit_failure_after_transport_failure_still_pairs_the_history() {
         core.messages
     );
 }
+
+// ─── #2067: trust-mode shell handoff reroute & blocked-call release ───
+
+fn trust_shell_core(calls: Arc<AtomicUsize>, provider: MockProvider) -> CoshCore {
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = ApprovalMode::Trust;
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool { calls }));
+    CoshCore::new(config, Box::new(provider), tools)
+}
+
+fn fully_capable_client() -> ClientControlCapabilities {
+    ClientControlCapabilities {
+        can_handle_can_use_tool: true,
+        can_handle_host_executed_shell: true,
+    }
+}
+
+#[test]
+fn trust_classify_reroutes_shell_for_fully_capable_client() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut core = trust_shell_core(calls, MockProvider::new(vec![]));
+    core.client_capabilities = fully_capable_client();
+    assert!(matches!(
+        core.classify_tool("shell", &serde_json::json!({"command":"echo hi"})),
+        Outcome::RequireApproval
+    ));
+}
+
+#[test]
+fn trust_classify_keeps_shell_local_without_full_capabilities() {
+    let params = serde_json::json!({"command":"echo hi"});
+
+    // Legacy client: no initialize capabilities at all.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let core = trust_shell_core(calls, MockProvider::new(vec![]));
+    assert!(matches!(
+        core.classify_tool("shell", &params),
+        Outcome::Allow
+    ));
+
+    // Half-capable is not capable: both halves of the exchange are required.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut core = trust_shell_core(calls, MockProvider::new(vec![]));
+    core.client_capabilities = ClientControlCapabilities {
+        can_handle_can_use_tool: true,
+        can_handle_host_executed_shell: false,
+    };
+    assert!(matches!(
+        core.classify_tool("shell", &params),
+        Outcome::Allow
+    ));
+}
+
+#[test]
+fn trust_classify_keeps_non_shell_tools_local_for_capable_client() {
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = ApprovalMode::Trust;
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(ExternalTool));
+    let mut core = CoshCore::new(config, Box::new(MockProvider::new(vec![])), tools);
+    core.client_capabilities = fully_capable_client();
+    assert!(matches!(
+        core.classify_tool("example.ops/mcp/server/tool", &serde_json::json!({})),
+        Outcome::Allow
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn trust_capable_client_shell_call_requests_approval_without_any_hook() {
+    // No hooks configured: in trust mode the reroute alone must raise the
+    // approval request, and it must not be flagged as hook-driven.
+    let provider = approval_provider();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut core = trust_shell_core(Arc::clone(&calls), provider);
+    core.client_capabilities = fully_capable_client();
+
+    let (pipe_reader, pipe_writer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+    let mut writer = std::io::BufWriter::new(pipe_writer);
+    let mut reader = empty_reader().await;
+
+    core.handle_user_message("run echo hi", &mut reader, &mut writer)
+        .await
+        .expect("an unanswered approval ends the turn as interrupted, not as an error");
+
+    drop(writer);
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(pipe_reader));
+    let request = lines
+        .by_ref()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+        .find(|value| value["request"]["subtype"] == "can_use_tool")
+        .expect("trust-mode shell call must be rerouted to can_use_tool for a capable client");
+    assert_eq!(request["request"]["tool_name"], "shell");
+    assert_eq!(request["request"]["tool_use_id"], "call-1");
+    // `hook_requires_approval` skips serialization when false, so the wire
+    // field must be absent here: the reroute is policy-driven, not hook-driven.
+    assert!(request["request"]["hook_requires_approval"].is_null());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no decision arrived, so the tool must not have run"
+    );
+}
+
+#[tokio::test]
+async fn hook_block_releases_staged_call_with_provider_native_result() {
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-block".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"touch /tmp/should-not-exist"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("blocked acknowledged".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    // Hooks are bound into the HookSystem at construction time, so the block
+    // hook must be in the config handed to `CoshCore::new`.
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = ApprovalMode::Trust;
+    config.hooks = config::HooksConfig {
+        enabled: true,
+        pre_tool_use: vec![config::HookDefinition {
+            command: "echo '{\"decision\":\"block\",\"reason\":\"no touch\"}'".to_string(),
+            name: Some("block-shell".to_string()),
+            matcher: Some("shell".to_string()),
+            timeout: Some(5000),
+            sequential: None,
+            fail_open: false,
+            env: Default::default(),
+        }],
+        ..Default::default()
+    };
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+    core.handle_user_message("touch it", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a blocked command must never execute"
+    );
+    assert!(
+        output_str.contains(r#""type":"tool_result""#),
+        "the blocked call must be released with a provider-native tool result: {output_str}"
+    );
+    assert!(
+        output_str.contains(r#""tool_use_id":"call-block""#),
+        "{output_str}"
+    );
+    assert!(
+        output_str.contains("Blocked by hook: no touch"),
+        "{output_str}"
+    );
+    assert!(
+        output_str.contains(r#""cosh_hook_verdict":"blocked""#),
+        "the blocked release must carry the machine-readable verdict marker: {output_str}"
+    );
+    assert!(
+        !output_str.contains("can_use_tool"),
+        "a hook block is a verdict, not an approval request: {output_str}"
+    );
+    assert!(
+        output_str.contains("blocked acknowledged"),
+        "the turn must continue after the blocked result reaches the LLM: {output_str}"
+    );
+    let blocked_results = core
+        .messages
+        .iter()
+        .filter(|m| m.tool_call_id.as_deref() == Some("call-block"))
+        .count();
+    assert_eq!(
+        blocked_results, 1,
+        "the LLM must see the blocked result exactly once"
+    );
+}

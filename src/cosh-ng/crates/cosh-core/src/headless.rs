@@ -342,6 +342,7 @@ where
             ShellControlRequest::Initialize {
                 fire_session_start,
                 protocol_version,
+                capabilities,
             } => {
                 if let Some(received_version) = protocol_version {
                     if received_version != CONTROL_PROTOCOL_VERSION {
@@ -352,6 +353,7 @@ where
                         return InputLineResult::ProtocolMismatch;
                     }
                 }
+                engine.client_capabilities = capabilities;
                 engine.emit(
                     writer,
                     &OutputMessage::initialize_success(

@@ -117,6 +117,20 @@ pub struct ShellContext {
     pub last_exit_code: i32,
 }
 
+/// Control capabilities a client declares in its `initialize` request.
+///
+/// Every field defaults to `false` so a legacy client that predates this
+/// field keeps the pre-capability behavior exactly; the core only switches
+/// trust-mode shell execution onto the approval channel when the client has
+/// opted into both halves of that exchange (#2067).
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct ClientControlCapabilities {
+    #[serde(default)]
+    pub can_handle_can_use_tool: bool,
+    #[serde(default)]
+    pub can_handle_host_executed_shell: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "subtype")]
 pub enum ShellControlRequest {
@@ -132,6 +146,8 @@ pub enum ShellControlRequest {
         /// Missing or null only for legacy shells that predate negotiation.
         #[serde(default)]
         protocol_version: Option<u32>,
+        #[serde(default)]
+        capabilities: ClientControlCapabilities,
     },
 
     #[serde(rename = "interrupt")]
@@ -353,6 +369,13 @@ pub enum UserContentBlock {
         tool_use_id: String,
         is_error: bool,
         content: String,
+        /// Machine-readable hook terminal verdict (#2156), present only when
+        /// a hook blocked the call. Clients must key rejection semantics on
+        /// this marker instead of inferring from the result text, which the
+        /// command itself can control. Absent on every other result, so the
+        /// field is additive and absent-safe for older clients.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cosh_hook_verdict: Option<String>,
     },
 }
 
@@ -576,6 +599,25 @@ impl OutputMessage {
                     tool_use_id: tool_use_id.to_string(),
                     is_error,
                     content: content.to_string(),
+                    cosh_hook_verdict: None,
+                }],
+            },
+        }
+    }
+
+    /// A blocked tool result carrying the machine-readable hook verdict
+    /// marker (#2156). Only the M2 hook-block release uses this constructor;
+    /// every other result keeps the marker absent.
+    pub fn tool_result_hook_blocked(session_id: &str, tool_use_id: &str, content: &str) -> Self {
+        Self::User {
+            session_id: session_id.to_string(),
+            message: UserOutputMessage {
+                role: "user".to_string(),
+                content: vec![UserContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    is_error: true,
+                    content: content.to_string(),
+                    cosh_hook_verdict: Some("blocked".to_string()),
                 }],
             },
         }
@@ -903,13 +945,41 @@ mod tests {
                 request,
             } => {
                 assert_eq!(request_id, "init-1");
-                assert!(matches!(
-                    request,
+                match request {
                     ShellControlRequest::Initialize {
-                        fire_session_start: true,
-                        protocol_version: None,
+                        fire_session_start,
+                        protocol_version,
+                        capabilities,
+                    } => {
+                        assert!(fire_session_start);
+                        assert!(protocol_version.is_none());
+                        assert!(!capabilities.can_handle_can_use_tool);
+                        assert!(!capabilities.can_handle_host_executed_shell);
                     }
-                ));
+                    _ => panic!("expected Initialize variant"),
+                }
+            }
+            _ => panic!("expected ControlRequest variant"),
+        }
+    }
+
+    #[test]
+    fn parse_initialize_request_with_client_capabilities() {
+        let json = r#"{"request_id":"init-2","type":"control_request","request":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell":true}}}"#;
+        let msg: InputMessage = serde_json::from_str(json).expect("should parse initialize");
+        match msg {
+            InputMessage::ControlRequest {
+                request_id,
+                request,
+            } => {
+                assert_eq!(request_id, "init-2");
+                match request {
+                    ShellControlRequest::Initialize { capabilities, .. } => {
+                        assert!(capabilities.can_handle_can_use_tool);
+                        assert!(capabilities.can_handle_host_executed_shell);
+                    }
+                    _ => panic!("expected Initialize variant"),
+                }
             }
             _ => panic!("expected ControlRequest variant"),
         }
