@@ -1,8 +1,9 @@
 use super::broker::can_run_approved_bash_tool;
 use super::command_risk_build::{
-    apply_null_redirection_policy, assessment, dedupe_reasons, high_risk_program,
-    high_risk_program_assessment, high_shell_syntax, max_output_exposure, max_output_stability,
-    min_confidence,
+    apply_null_redirection_policy, assessment, command_requires_tty, dedupe_reasons,
+    downloaded_program_file, has_interpreter_inline_code, has_tty_arg, high_risk_program,
+    high_risk_program_assessment, high_shell_syntax, interpreter_consumes_stdin_as_program,
+    max_output_exposure, max_output_stability, min_confidence, network_download_effect,
 };
 use super::command_risk_compound::{assess_stripped_compound, compound_segments, finalize_complex};
 use super::command_risk_parser::{is_env_assignment, parse_command, ParsedCommand};
@@ -275,9 +276,10 @@ pub(super) fn assess_pipeline(
     let mut reasons = Vec::new();
     let mut any_unknown = false;
     let mut all_diagnostic = true;
-    let mut has_network_producer = false;
-    let mut has_shell_consumer = false;
 
+    let mut has_upstream_network_output = false;
+    let mut downloaded_files = Vec::new();
+    let mut has_downloaded_code_execution = false;
     for stage_tokens in &parsed.stages {
         let program = stage_tokens
             .iter()
@@ -304,11 +306,21 @@ pub(super) fn assess_pipeline(
             all_diagnostic = false;
             continue;
         }
-        if matches!(program.as_str(), "curl" | "wget") {
-            has_network_producer = true;
+        if has_upstream_network_output
+            && (matches!(program.as_str(), "sh" | "bash" | "zsh" | "fish")
+                || interpreter_consumes_stdin_as_program(&program, stage_tokens))
+        {
+            has_downloaded_code_execution = true;
         }
-        if matches!(program.as_str(), "sh" | "bash" | "zsh" | "fish") {
-            has_shell_consumer = true;
+        if downloaded_program_file(&program, stage_tokens)
+            .is_some_and(|path| downloaded_files.iter().any(|downloaded| downloaded == path))
+        {
+            has_downloaded_code_execution = true;
+        }
+        if let Some((writes_stdout, output_files)) = network_download_effect(&program, stage_tokens)
+        {
+            has_upstream_network_output |= writes_stdout;
+            downloaded_files.extend(output_files);
         }
         let stage = stage_assessment(&program, stage_tokens);
         impact = impact.max(stage.impact);
@@ -332,7 +344,7 @@ pub(super) fn assess_pipeline(
     let readonly_pipeline_evidence =
         policy.readonly_pipeline_executor && validate_readonly_pipeline(command).is_ok();
 
-    if has_network_producer && has_shell_consumer {
+    if has_downloaded_code_execution {
         impact = RiskImpact::High;
         confidence = AssessmentConfidence::High;
         side_effects.push(SideEffectClass::RemoteCodeExecution);
@@ -453,13 +465,18 @@ struct StageAssessment {
 }
 
 fn stage_assessment(program: &str, tokens: &[String]) -> StageAssessment {
-    if matches!(
-        program,
-        "less" | "more" | "man" | "htop" | "ssh" | "scp" | "sftp"
-    ) || matches!(program, "python" | "python3" | "node" | "irb" | "ruby")
-        && !has_eval_arg(tokens)
-        || matches!(program, "docker" | "podman" | "kubectl") && has_tty_arg(tokens)
-    {
+    if has_interpreter_inline_code(program, tokens) {
+        return StageAssessment {
+            impact: RiskImpact::High,
+            confidence: AssessmentConfidence::High,
+            interaction: InteractionRequirement::None,
+            output_stability: OutputStability::PotentiallyLarge,
+            output_exposure: OutputExposure::Normal,
+            side_effects: vec![SideEffectClass::RemoteCodeExecution],
+            reasons: vec!["remote-code-execution"],
+        };
+    }
+    if command_requires_tty(program, tokens) {
         return StageAssessment {
             impact: RiskImpact::Medium,
             confidence: AssessmentConfidence::High,
@@ -645,23 +662,6 @@ fn basename(program: &str) -> &str {
         .rsplit_once('/')
         .map(|(_, name)| name)
         .unwrap_or(program)
-}
-
-fn has_eval_arg(tokens: &[String]) -> bool {
-    tokens
-        .iter()
-        .skip(1)
-        .any(|arg| matches!(arg.as_str(), "-c" | "-e" | "--eval" | "--command"))
-}
-
-fn has_tty_arg(tokens: &[String]) -> bool {
-    tokens.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-it" | "-ti" | "-i" | "-t" | "--interactive" | "--tty"
-        ) || arg.starts_with("--interactive=")
-            || arg.starts_with("--tty=")
-    })
 }
 
 fn top_is_batch_snapshot(tokens: &[String]) -> bool {
