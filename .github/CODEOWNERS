@@ -32,8 +32,8 @@
 /src/ws-ckpt/                           @Ziqi002                    # auto-label: component:ckpt
 /src/blaze/                             @casparant                  # auto-label: component:blaze
 /src/ktuner/                            @jfeng18                    # auto-label: component:ktuner
-/src/tokenless/                         @Forrest-ly @shiloong @ikunkun-sys      # auto-label: component:tokenless
-/src/agent-memory/                      @shiloong @ikunkun-sys      # auto-label: component:memory
+/src/tokenless/                         @Forrest-ly @ikunkun-sys    # auto-label: component:tokenless
+/src/agent-memory/                      @ikunkun-sys                # auto-label: component:memory
 /src/anolisa/                           @kongche-jbw @ikunkun-sys   # auto-label: component:anolisa
 /src/cosh-ng/                           @KaiLongZhou                # auto-label: component:cosh-ng
 /src/cosh-ng/crates/cosh-shell/         @SunnyQjm                   # auto-label: component:cosh-ng
