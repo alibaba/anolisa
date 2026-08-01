@@ -11,7 +11,7 @@ const content = {
   en: {
     badge: 'Agentic OS 1.0',
     lead: 'An operating system layer built for agents.',
-    hook: "Cut 30–70% of your agent's tool-output tokens with one command.",
+    hook: 'Cut 30–70% of your agent’s tool-output tokens with one command.',
     systemScope: 'Just one thing the OS does for your agent — it also runs, recovers, and secures it.',
     statement:
       'The users of operating systems have changed. ANOLISA makes agents first-class participants at the system layer.',
