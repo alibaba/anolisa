@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 
 use super::{Tool, ToolContext, ToolKind, ToolResult};
+
+const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 pub struct ReadFileTool {
     terminal_output_guidance: &'static str,
@@ -86,24 +89,58 @@ impl Tool for ReadFileTool {
             return Ok(ToolResult::error(format!("Not a file: {}", path.display())));
         }
 
-        let content = tokio::fs::read_to_string(&path)
+        let file = tokio::fs::File::open(&path)
             .await
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|e| format!("Failed to inspect {}: {e}", path.display()))?;
+        if metadata.len() > MAX_FILE_BYTES as u64 {
+            return Ok(ToolResult::error(format!(
+                "File exceeds the {} MiB read limit: {}",
+                MAX_FILE_BYTES / (1024 * 1024),
+                path.display()
+            )));
+        }
+
+        // The metadata check avoids reading known-large files, while the
+        // bounded reader also protects against files that grow after stat.
+        let mut reader = file.take((MAX_FILE_BYTES + 1) as u64);
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        if bytes.len() > MAX_FILE_BYTES {
+            return Ok(ToolResult::error(format!(
+                "File exceeds the {} MiB read limit: {}",
+                MAX_FILE_BYTES / (1024 * 1024),
+                path.display()
+            )));
+        }
+        let content = String::from_utf8(bytes).map_err(|error| {
+            format!(
+                "Failed to read {}: file is not valid UTF-8: {}",
+                path.display(),
+                error.utf8_error()
+            )
+        })?;
 
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
 
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-        let end = (offset + limit).min(total);
-        let selected = &lines[offset.min(total)..end];
-
+        let requested_end = offset.saturating_add(limit);
         let mut output = String::new();
-        for (i, line) in selected.iter().enumerate() {
-            let line_num = offset + i + 1;
-            output.push_str(&format!("{line_num}\t{line}\n"));
+        let mut total = 0;
+        for (index, line) in content.lines().enumerate() {
+            total = index + 1;
+            if index >= offset && index < requested_end {
+                output.push_str(&format!("{}\t{line}\n", index + 1));
+            }
         }
 
+        let end = requested_end.min(total);
         if end < total {
             output.push_str(&format!(
                 "\n... ({} more lines, {} total)\n",
@@ -170,6 +207,24 @@ mod tests {
         assert!(result.output.contains("2\tb"));
         assert!(result.output.contains("3\tc"));
         assert!(!result.output.contains("1\ta"));
+    }
+
+    #[tokio::test]
+    async fn rejects_file_larger_than_limit() {
+        let tmp = NamedTempFile::new().unwrap();
+        tmp.as_file().set_len((MAX_FILE_BYTES + 1) as u64).unwrap();
+
+        let tool = ReadFileTool::new();
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": tmp.path().to_str().unwrap()}),
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("10 MiB read limit"));
     }
 
     #[tokio::test]
