@@ -1,5 +1,7 @@
 # Token Optimization (tokenless)
 
+[中文版](../../zh/token-saving/tokenless.md)
+
 tokenless is ANOLISA's token-saving toolkit. Through five complementary strategies — Schema compression, response compression, TOON encoding, command rewriting, and tool-readiness checks — it cuts redundancy from tool definitions, API responses, and command output *before* they enter the LLM context window, reducing both runtime token consumption and retry cost.
 
 - **Schema & response compression**: compresses OpenAI Function Calling tool definitions and API responses, saving ~57% and 26–78% of tokens respectively.
@@ -24,6 +26,14 @@ tokenless is ANOLISA's token-saving toolkit. Through five complementary strategi
 
 ---
 
+## Requirements
+
+- Linux or macOS on x86_64 or arm64 when using the npm package
+- A supported Agent framework for adapter integration: cosh, OpenClaw, Hermes,
+  Qoder, Claude Code, Codex, or Qwen Code
+
+---
+
 ## Installation
 
 ### Via anolisa CLI (recommended)
@@ -42,7 +52,20 @@ sudo dnf install tokenless
 
 The RPM installs to system-level FHS paths: `/usr/bin/tokenless`, `/usr/libexec/anolisa/tokenless/{rtk,toon}`, `/usr/share/anolisa/adapters/tokenless/`, `/usr/share/anolisa/extensions/tokenless/`. `%post` cleans up stale artifacts (pre-FHS layout, legacy `tokenless-openclaw` plugin id, etc.); the cosh extension is auto-discovered by copilot-shell — no manual `settings.json` edit needed.
 
-### Source build (developers)
+### npm package
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+The package installs the matching prebuilt `tokenless`, `rtk`, and `toon`
+binaries for Linux or macOS on x86_64 and arm64. It also installs framework
+adapters under `~/.local/share/anolisa/adapters/tokenless/`.
+
+Use npm when installing Tokenless independently or when an ANOLISA CLI artifact
+is not available for the current platform.
+
+### Source build (developers, Linux only)
 
 ```bash
 git clone https://github.com/alibaba/anolisa
@@ -52,6 +75,9 @@ make setup    # build + install binaries + register all adapters
 ```
 
 Build deps: Rust ≥ 1.89 (edition 2024), just, Git, nodejs+npm (to compile the OpenClaw TS plugin). Runtime deps: python3, jq, bash (RPM Requires). See [Appendix · Install paths](#install-paths).
+
+macOS users should use the npm package; local source builds are supported only
+on Linux.
 
 ---
 

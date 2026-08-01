@@ -1,5 +1,7 @@
 # Agent 记忆（agent-memory）
 
+[English](../../en/token-saving/agent-memory.md)
+
 agent-memory 是 ANOLISA 的文件形态记忆 MCP 服务器，为 AI Agent 提供持久化、可搜索、受沙箱保护的记忆空间。Agent 像操作文件系统一样读写记忆，系统通过 BM25/向量混合检索、自动捕获与召回机制，把相关上下文注入后续对话，从而减少重复沟通并提升任务连贯性。
 
 - **文件形态记忆**：通过 MCP 工具以文件系统语义读写记忆，支持命名空间隔离和路径沙箱。
@@ -7,6 +9,16 @@ agent-memory 是 ANOLISA 的文件形态记忆 MCP 服务器，为 AI Agent 提�
 - **自动捕获与召回**：在对话结束时自动提取观察并去重，在下一轮构建提示时注入相关记忆。
 - **安全注入机制**：对注入 LLM 提示的记忆内容做提示注入检测和转义包装，降低攻击面。
 - **版本化与快照**：可选 git 自动提交 + tar.gz 快照，提供文件级与 mount 级回滚。
+
+需要跨会话保留上下文时使用 Agent Memory。Tokenless 解决的是另一类问题：压缩
+仍需进入当前上下文窗口的内容。
+
+---
+
+## 运行要求
+
+- Linux x86_64 或 aarch64
+- 支持 stdio MCP 服务器的 Agent 运行时
 
 ---
 
@@ -293,7 +305,9 @@ BM25 + 稠密向量混合检索，通过 RRF（Reciprocal Rank Fusion, k=60）�
 
 ### 配置文件
 
-默认位置：`~/.anolisa/memory.toml`。所有 struct 启用 `serde(deny_unknown_fields)`，配置项拼写错误会硬失败。最小配置：
+默认位置：`~/.anolisa/memory.toml`。该文件可选；文件不存在时，Agent Memory
+使用内置默认值。所有 struct 启用 `serde(deny_unknown_fields)`，配置项拼写错误
+会直接导致加载失败。最小配置：
 
 ```toml
 [global]

@@ -59,10 +59,8 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 
 | Document | Component | Description |
 |----------|-----------|-------------|
-| [Tokenless](token-saving/tokenless/QUICKSTART.md) | tokenless | Schema/response compression, command rewriting |
-| [Tokenless User Manual](token-saving/tokenless/user-manual.md) | tokenless | Per-strategy triggers, thresholds, stats and A/B testing |
-| [Agent Memory](token-saving/agent-memory/QUICKSTART.md) | agent-memory | MCP-based persistent file memory |
-| [Agent Memory User Manual](token-saving/agent-memory/user-manual.md) | agent-memory | Full MCP tool reference, search, sovereignty controls |
+| [Tokenless](token-saving/tokenless.md) | tokenless | Compression strategies, thresholds, stats and A/B testing |
+| [Agent Memory](token-saving/agent-memory.md) | agent-memory | Persistent memory, MCP tools, search and sovereignty controls |
 
 ### Runtime (`runtime/`)
 

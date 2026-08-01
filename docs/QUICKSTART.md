@@ -134,8 +134,8 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 
 - [Workspace Checkpoints](user-guide/en/runtime/ws-ckpt.md)
 - [Skill Filesystem](user-guide/en/runtime/skillfs.md)
-- [Token Optimization](user-guide/en/token-saving/tokenless/QUICKSTART.md)
-- [Agent Memory](user-guide/en/token-saving/agent-memory/QUICKSTART.md)
+- [Token Optimization](user-guide/en/token-saving/tokenless.md)
+- [Agent Memory](user-guide/en/token-saving/agent-memory.md)
 
 ### Observability & Security
 

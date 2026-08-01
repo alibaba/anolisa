@@ -141,7 +141,7 @@ tokenless stats summary
 # Check tool environments
 tokenless env-check --all`}</code></pre>
           </div>
-          <SiteLink locale={locale} to="/docs/user-guide/token-saving/tokenless/quickstart" className="primaryButton">
+          <SiteLink locale={locale} to="/docs/user-guide/token-saving/tokenless" className="primaryButton">
             {t.docs}
           </SiteLink>
         </section>

@@ -1,5 +1,7 @@
 # Agent Memory (agent-memory)
 
+[中文版](../../zh/token-saving/agent-memory.md)
+
 agent-memory is ANOLISA's file-form memory MCP server, providing AI agents with a persistent, searchable, sandboxed memory space. Agents read and write memory like a filesystem; the system injects relevant context into subsequent turns via BM25/vector hybrid retrieval and automatic capture/recall, reducing repeated communication and improving task continuity.
 
 - **File-form memory**: read/write memory with filesystem semantics via MCP tools; namespace isolation and path sandboxing.
@@ -7,6 +9,17 @@ agent-memory is ANOLISA's file-form memory MCP server, providing AI agents with 
 - **Auto capture & recall**: automatically extracts observations at conversation end (deduped) and injects relevant memory when building the next prompt.
 - **Safe injection**: prompt-injection detection and escaping for memory content injected into LLM prompts.
 - **Versioning & snapshots**: optional auto git commit + tar.gz snapshots for file-level and mount-level rollback.
+
+Use Agent Memory when context must persist across sessions. Tokenless addresses
+a different part of the workflow by compressing content that still needs to
+enter the current context window.
+
+---
+
+## Requirements
+
+- Linux on x86_64 or aarch64
+- An Agent runtime that supports stdio MCP servers
 
 ---
 
@@ -293,7 +306,9 @@ Every successful tool call appends a JSONL line to `<mount>/.anolisa/audit.log`;
 
 ### Config file
 
-Default location: `~/.anolisa/memory.toml`. All structs enable `serde(deny_unknown_fields)` — typos hard-fail at load. Minimal config:
+Default location: `~/.anolisa/memory.toml`. The file is optional; Agent Memory
+uses built-in defaults when it is absent. All structs enable
+`serde(deny_unknown_fields)` — typos hard-fail at load. Minimal config:
 
 ```toml
 [global]

@@ -85,7 +85,7 @@ Skills，只把用得到的技能放进上下文，[AgentSight](src/agentsight/R
 节省作用于进入上下文的工具响应，而不是整个会话的账单——如何估算具体工作负载
 下的收益，见 [Token-less README](src/tokenless/README_zh.md)。
 
-[开始使用 Token-less →](docs/user-guide/zh/token-saving/tokenless/QUICKSTART.md)
+[查看 Token-less 用户手册 →](docs/user-guide/zh/token-saving/tokenless.md)
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
 

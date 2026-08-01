@@ -1,5 +1,7 @@
 # Token 优化（tokenless）
 
+[English](../../en/token-saving/tokenless.md)
+
 tokenless 是 ANOLISA 的 Token 节省工具包，通过 Schema 压缩、响应压缩、TOON 编码、命令重写和工具就绪检查五条互补策略，在工具定义、API 返回和命令输出进入 LLM 上下文窗口之前削减冗余，从而降低 Agent 运行时的 Token 消耗和重试成本。
 
 - **Schema 与响应压缩**：压缩 OpenAI Function Calling 工具定义和 API 返回结果，分别减少约 57% 和 26–78% 的 Token。
@@ -24,6 +26,14 @@ tokenless 是 ANOLISA 的 Token 节省工具包，通过 Schema 压缩、响应�
 
 ---
 
+## 运行要求
+
+- 通过 npm 安装时支持 Linux 和 macOS 的 x86_64、arm64 架构
+- 使用适配器时，需要 cosh、OpenClaw、Hermes、Qoder、Claude Code、Codex
+  或 Qwen Code 之一
+
+---
+
 ## 安装
 
 ### 通过 anolisa CLI（推荐）
@@ -42,7 +52,19 @@ sudo dnf install tokenless
 
 RPM 安装到系统级 FHS 路径：`/usr/bin/tokenless`、`/usr/libexec/anolisa/tokenless/{rtk,toon}`、`/usr/share/anolisa/adapters/tokenless/`、`/usr/share/anolisa/extensions/tokenless/`。`%post` 会清理旧版残留（pre-FHS 布局、旧 `tokenless-openclaw` 插件 id 等），cosh extension 由 copilot-shell 自动发现，无需手动改 `settings.json`。
 
-### 源码构建（开发者）
+### npm 包
+
+```bash
+npm install -g anolisa-tokenless
+```
+
+npm 包会根据当前平台安装预编译的 `tokenless`、`rtk` 和 `toon` 二进制，
+支持 Linux 和 macOS 的 x86_64、arm64 架构；框架适配器安装到
+`~/.local/share/anolisa/adapters/tokenless/`。
+
+需要独立安装 Tokenless，或当前平台没有 ANOLISA CLI 构建产物时，可使用 npm。
+
+### 源码构建（开发者，仅 Linux）
 
 ```bash
 git clone https://github.com/alibaba/anolisa
@@ -52,6 +74,8 @@ make setup    # 编译 + 安装二进制 + 注册全部适配器
 ```
 
 构建依赖：Rust ≥ 1.89（edition 2024）、just、Git、nodejs+npm（编译 OpenClaw TS 插件）。运行时依赖：python3、jq、bash（RPM Requires）。详见 [附录 · 安装路径](#安装路径)。
+
+macOS 请使用 npm 包；本地源码构建仅支持 Linux。
 
 ---
 

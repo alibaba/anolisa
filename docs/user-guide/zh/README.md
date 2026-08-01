@@ -59,10 +59,8 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 
 | 文档 | 组件 | 说明 |
 |------|------|------|
-| [Token 优化](token-saving/tokenless/QUICKSTART.md) | tokenless | Schema/响应压缩、命令重写 |
-| [Token 优化用户手册](token-saving/tokenless/user-manual.md) | tokenless | 各策略触发条件、阈值、统计与 A/B 测试 |
-| [Agent 记忆](token-saving/agent-memory/QUICKSTART.md) | agent-memory | MCP 持久化文件形态记忆 |
-| [Agent 记忆用户手册](token-saving/agent-memory/user-manual.md) | agent-memory | MCP 工具完整参考、检索与数据主权控制 |
+| [Token 优化](token-saving/tokenless.md) | tokenless | 压缩策略、阈值、统计与 A/B 测试 |
+| [Agent 记忆](token-saving/agent-memory.md) | agent-memory | 持久化记忆、MCP 工具、检索与数据主权控制 |
 
 ### 运行时 `runtime/`
 

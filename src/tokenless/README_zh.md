@@ -49,7 +49,7 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 例如：面板显示压缩率 60%，若工具响应占总消耗 20%，实际节省率为 60% × 20% = **12%**。这也是为何在总消耗 1500 万 Token 的实验中节省量观感偏小——tokenless 只作用于其中约 300 万 Token 的工具响应部分。
 
 > Stash 使压缩**端到端无损**：可适度收紧截断阈值换取更高 inline 节省，需要原文时经 `<<tokenless:KEY>>` 标记取回，不影响正确性。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。
-> 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
+> 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless.md)。
 
 ## 集成路径
 
@@ -94,7 +94,7 @@ tokenless stats diff 42 --json
 Session 总览只包含指标；单记录和 tool-use 报告包含 unified content
 diff。只有相邻 active 阶段的输出与输入内容完全一致时才会串成一条链，
 从而避免重复计算中间阶段的 Token。完整选项和度量限制见
-[用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#统计与效果度量)。
+[用户手册](../../docs/user-guide/zh/token-saving/tokenless.md#统计与效果度量)。
 
 ## 数据库位置
 

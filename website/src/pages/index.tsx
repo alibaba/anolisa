@@ -100,18 +100,18 @@ const scenarios = {
       components: [
         {
           label: 'Tokenless',
-          href: '/docs/user-guide/token-saving/tokenless/quickstart',
+          href: '/docs/user-guide/token-saving/tokenless',
         },
         {
           label: 'Agent Memory',
-          href: '/docs/user-guide/token-saving/agent-memory/quickstart',
+          href: '/docs/user-guide/token-saving/agent-memory',
         },
         {
           label: 'AgentSight',
           href: '/docs/user-guide/agent-observability/agentsight',
         },
       ],
-      href: '/docs/user-guide/token-saving/tokenless/quickstart',
+      href: '/docs/user-guide/token-saving/tokenless',
       accent: 'lime',
     },
     {
@@ -192,18 +192,18 @@ const scenarios = {
       components: [
         {
           label: 'Tokenless',
-          href: '/docs/user-guide/token-saving/tokenless/quickstart',
+          href: '/docs/user-guide/token-saving/tokenless',
         },
         {
           label: 'Agent Memory',
-          href: '/docs/user-guide/token-saving/agent-memory/quickstart',
+          href: '/docs/user-guide/token-saving/agent-memory',
         },
         {
           label: 'AgentSight',
           href: '/docs/user-guide/agent-observability/agentsight',
         },
       ],
-      href: '/docs/user-guide/token-saving/tokenless/quickstart',
+      href: '/docs/user-guide/token-saving/tokenless',
       accent: 'lime',
     },
     {

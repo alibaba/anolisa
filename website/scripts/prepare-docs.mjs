@@ -143,7 +143,15 @@ function makeMdxSafe(markdown) {
     .join('\n');
 }
 
-function frontMatter(document, markdown) {
+function sidebarLabel(document, title, locale) {
+  if (!document.target.startsWith('user-guide/')) return title;
+  if (document.target.endsWith('/quickstart.md')) return locale === 'zh' ? '快速开始' : 'Quickstart';
+  if (document.target.endsWith('/agent-memory.md')) return 'Agent Memory';
+  if (document.target.endsWith('/tokenless.md')) return 'Tokenless';
+  return title;
+}
+
+function frontMatter(document, markdown, locale) {
   const publicPath = publicDocumentPath(document.target);
   const slug = publicPath ? `/${publicPath}` : '/';
   const title = titleFromMarkdown(markdown, path.posix.basename(slug));
@@ -151,7 +159,7 @@ function frontMatter(document, markdown) {
     '---',
     `title: ${JSON.stringify(title)}`,
     `slug: ${JSON.stringify(slug)}`,
-    `sidebar_label: ${JSON.stringify(title)}`,
+    `sidebar_label: ${JSON.stringify(sidebarLabel(document, title, locale))}`,
     `custom_edit_url: ${JSON.stringify(`${repository}/edit/main/${document.source}`)}`,
   ];
   const position = document.position ?? documentPositions[document.target];
@@ -244,7 +252,7 @@ async function prepareLocale(documents, outputRoot, locale) {
     const markdown = makeMdxSafe(await rewriteLinks(sourceMarkdown, document.source));
     const output = path.join(outputRoot, document.target);
     await mkdir(path.dirname(output), {recursive: true});
-    await writeFile(output, `${frontMatter(document, sourceMarkdown)}${markdown}`);
+    await writeFile(output, `${frontMatter(document, sourceMarkdown, locale)}${markdown}`);
   }
   await writeCategories(outputRoot, documents, locale);
 }

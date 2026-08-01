@@ -100,7 +100,6 @@ const config: Config = {
       },
       hideOnScroll: false,
       items: [
-        {to: '/docs', label: 'Docs', position: 'left'},
         {to: '/docs/user-guide', label: 'User Guide', position: 'left'},
         {to: '/docs/developer-guide', label: 'Developer Guide', position: 'left'},
         {to: '/changelog', label: 'Changelog', position: 'left'},
