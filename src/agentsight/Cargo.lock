@@ -222,6 +222,7 @@ dependencies = [
  "actix-cors",
  "actix-web",
  "agentsight-atif",
+ "agentsight-audit",
  "agentsight-enforcement-protocol",
  "agentsight-enforcer",
  "agentsight-opt",
@@ -297,6 +298,19 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agentsight-audit"
+version = "0.1.0"
+dependencies = [
+ "agentsight-enforcement-protocol",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

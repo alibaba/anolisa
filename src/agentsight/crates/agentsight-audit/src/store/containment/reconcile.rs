@@ -2,20 +2,20 @@
 
 use rusqlite::{Connection, params};
 
-use super::super::{SecurityStore, SecurityStoreError, sqlite_time};
+use super::super::{AuditError, AuditStore, sqlite_time};
 use super::{ACTION_COLUMNS, ContainmentRow, containment_action_from_row, containment_row};
-use crate::security::ContainmentAction;
+use crate::ContainmentAction;
 #[cfg(target_os = "linux")]
-use crate::security::{ContainmentFailureStage, ContainmentLifecycle};
+use crate::{ContainmentFailureStage, ContainmentLifecycle};
 
 #[cfg(target_os = "linux")]
 const RECONCILE_CLAIM_LEASE_NS: u64 = 1_000_000_000;
 
 /// One bounded due-row decode outcome.
 #[cfg(target_os = "linux")]
-pub(crate) enum DueContainmentAction {
+pub enum DueContainmentAction {
     /// A valid action ready for claim acquisition.
-    Valid(ContainmentAction),
+    Valid(Box<ContainmentAction>),
     /// A malformed row that must be quarantined by its raw database key.
     Corrupt {
         /// Raw primary key retained even when it is not a valid UUID.
@@ -25,7 +25,7 @@ pub(crate) enum DueContainmentAction {
     },
 }
 
-impl SecurityStore {
+impl AuditStore {
     /// Lists a bounded batch using lifecycle-specific expiry and retry eligibility.
     ///
     /// # Errors
@@ -35,7 +35,7 @@ impl SecurityStore {
         &self,
         now_ns: u64,
         limit: usize,
-    ) -> Result<Vec<ContainmentAction>, SecurityStoreError> {
+    ) -> Result<Vec<ContainmentAction>, AuditError> {
         let conn = self.connection()?;
         due_containment_rows(&conn, now_ns, limit)?
             .into_iter()
@@ -49,11 +49,11 @@ impl SecurityStore {
     ///
     /// Returns a typed database, timestamp, or lock error.
     #[cfg(target_os = "linux")]
-    pub(crate) fn due_containment_candidates(
+    pub fn due_containment_candidates(
         &self,
         now_ns: u64,
         limit: usize,
-    ) -> Result<Vec<DueContainmentAction>, SecurityStoreError> {
+    ) -> Result<Vec<DueContainmentAction>, AuditError> {
         let conn = self.connection()?;
         let rows = due_containment_rows(&conn, now_ns, limit)?;
         Ok(rows
@@ -61,7 +61,7 @@ impl SecurityStore {
             .map(|row| {
                 let action_key = row.0.clone();
                 match containment_action_from_row(row) {
-                    Ok(action) => DueContainmentAction::Valid(action),
+                    Ok(action) => DueContainmentAction::Valid(Box::new(action)),
                     Err(error) => DueContainmentAction::Corrupt {
                         action_key,
                         reason: error.to_string(),
@@ -77,12 +77,12 @@ impl SecurityStore {
     ///
     /// Returns a typed database, timestamp, stored-data, or lock error.
     #[cfg(target_os = "linux")]
-    pub(crate) fn quarantine_containment_action(
+    pub fn quarantine_containment_action(
         &self,
         action_key: &str,
         reason: &str,
         now_ns: u64,
-    ) -> Result<(), SecurityStoreError> {
+    ) -> Result<(), AuditError> {
         let reason = sanitize_corrupt_reason(reason);
         let changed = self.connection()?.execute(
             "UPDATE containment_actions
@@ -93,7 +93,7 @@ impl SecurityStore {
             params![reason, sqlite_time(now_ns)?, action_key],
         )?;
         if changed != 1 {
-            return Err(SecurityStoreError::InvalidData(format!(
+            return Err(AuditError::InvalidData(format!(
                 "corrupt containment action '{action_key}' disappeared during quarantine"
             )));
         }
@@ -108,11 +108,11 @@ impl SecurityStore {
     ///
     /// Returns a typed database, timestamp, or lock error.
     #[cfg(target_os = "linux")]
-    pub(crate) fn claim_containment_reconciliation(
+    pub fn claim_containment_reconciliation(
         &self,
         action: &ContainmentAction,
         now_ns: u64,
-    ) -> Result<Option<ContainmentAction>, SecurityStoreError> {
+    ) -> Result<Option<ContainmentAction>, AuditError> {
         let mut claimed = action.clone();
         let claimed_at_ns = now_ns.max(action.updated_at_ns.saturating_add(1));
         claimed.updated_at_ns = claimed_at_ns;
@@ -156,12 +156,12 @@ impl SecurityStore {
     ///
     /// Returns a typed database, timestamp, unsigned-value, or lock error.
     #[cfg(target_os = "linux")]
-    pub(crate) fn finish_containment_reconciliation(
+    pub fn finish_containment_reconciliation(
         &self,
         action: &ContainmentAction,
         claimed_lifecycle: ContainmentLifecycle,
         claimed_at_ns: u64,
-    ) -> Result<bool, SecurityStoreError> {
+    ) -> Result<bool, AuditError> {
         let changed = self.connection()?.execute(
             "UPDATE containment_actions SET
                  lifecycle_state = ?1,
@@ -192,14 +192,14 @@ impl SecurityStore {
     ///
     /// Returns a typed database, timestamp, or lock error.
     #[cfg(target_os = "linux")]
-    pub(crate) fn begin_containment_cleanup(
+    pub fn begin_containment_cleanup(
         &self,
         action: &ContainmentAction,
         claimed_lifecycle: ContainmentLifecycle,
         claimed_at_ns: u64,
         now_ns: u64,
         reason: String,
-    ) -> Result<Option<ContainmentAction>, SecurityStoreError> {
+    ) -> Result<Option<ContainmentAction>, AuditError> {
         let mut cleanup = action.clone();
         let cleanup_claim_ns = now_ns.max(claimed_at_ns.saturating_add(1));
         cleanup.lifecycle_state = ContainmentLifecycle::Expiring;
@@ -229,7 +229,7 @@ fn due_containment_rows(
     conn: &Connection,
     now_ns: u64,
     limit: usize,
-) -> Result<Vec<ContainmentRow>, SecurityStoreError> {
+) -> Result<Vec<ContainmentRow>, AuditError> {
     let limit = limit.clamp(1, 1_000);
     let mut statement = conn.prepare(&format!(
         "SELECT {ACTION_COLUMNS}

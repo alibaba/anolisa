@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, get, post, web};
+use agentsight_audit::AuditStore;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -16,7 +17,7 @@ use crate::health::{AgentHealthState, AgentHealthStatus, HealthStore};
 use crate::security::{
     ContainmentAction, ContainmentCandidate, ContainmentCoordinator, ContainmentError,
     ContainmentFailureStage, ContainmentLifecycle, ContainmentPlan, ContainmentRequest,
-    SecurityStore, SecurityStoreError,
+    SecurityStoreError,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
@@ -65,7 +66,7 @@ pub(super) async fn containment_plan(
         return unavailable();
     };
     let health_store = Arc::clone(&data.health_store);
-    let security_store = Arc::clone(&data.security_store);
+    let security_store = Arc::clone(data.audit_service.store());
     match web::block(move || {
         let candidates = candidate_snapshot(&health_store, &security_store, case_id)?;
         coordinator
@@ -105,7 +106,7 @@ pub(super) async fn contain_case(
         return unavailable();
     };
     let health_store = Arc::clone(&data.health_store);
-    let security_store = Arc::clone(&data.security_store);
+    let security_store = Arc::clone(data.audit_service.store());
     match web::block(move || {
         let candidates = candidate_snapshot(&health_store, &security_store, case_id)?;
         coordinator
@@ -153,7 +154,7 @@ pub(super) fn stop_reconciler(
 
 fn candidate_snapshot(
     health_store: &Arc<RwLock<HealthStore>>,
-    security_store: &SecurityStore,
+    security_store: &AuditStore,
     case_id: Uuid,
 ) -> Result<Vec<ContainmentCandidate>, OperationError> {
     let detail = security_store
@@ -180,7 +181,7 @@ fn candidate_snapshot(
 
 fn trusted_candidates(
     statuses: Vec<AgentHealthStatus>,
-    security_store: &SecurityStore,
+    security_store: &AuditStore,
     agent_id: &str,
     session_id: Option<&str>,
 ) -> Result<Vec<ContainmentCandidate>, SecurityStoreError> {

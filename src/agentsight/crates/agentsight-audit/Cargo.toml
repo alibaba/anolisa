@@ -1,0 +1,15 @@
+[package]
+name = "agentsight-audit"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+agentsight-enforcement-protocol = { path = "../enforcement-protocol" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }

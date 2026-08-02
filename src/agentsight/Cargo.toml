@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     ".",
+    "crates/agentsight-audit",
     "crates/agentsight-atif",
     "crates/agentsight-enforcer",
     "crates/agentsight-opt",
@@ -57,6 +58,7 @@ crate-type = ["cdylib", "rlib"]
 
 # Cross-platform dependencies (compile on all OSes)
 [dependencies]
+agentsight-audit = { path = "crates/agentsight-audit" }
 agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
 agentsight-opt = { path = "crates/agentsight-opt", optional = true }

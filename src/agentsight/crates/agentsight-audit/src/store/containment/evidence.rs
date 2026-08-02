@@ -3,9 +3,9 @@
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
-use super::super::{SecurityStore, SecurityStoreError, parse_uuid, sqlite_time};
+use super::super::{AuditError, AuditStore, parse_uuid, sqlite_time};
 
-impl SecurityStore {
+impl AuditStore {
     /// Returns the original risk case for a durable containment binding.
     ///
     /// # Errors
@@ -14,7 +14,7 @@ impl SecurityStore {
     pub fn case_id_for_containment_binding(
         &self,
         binding_id: Uuid,
-    ) -> Result<Option<Uuid>, SecurityStoreError> {
+    ) -> Result<Option<Uuid>, AuditError> {
         self.connection()?
             .query_row(
                 "SELECT case_id FROM containment_actions WHERE binding_id = ?1",
@@ -42,7 +42,7 @@ impl SecurityStore {
         risk_score: u8,
         blocked: bool,
         occurred_at_ns: u64,
-    ) -> Result<(), SecurityStoreError> {
+    ) -> Result<(), AuditError> {
         let occurred_at_ns = sqlite_time(occurred_at_ns)?;
         let mut conn = self.connection()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -54,12 +54,10 @@ impl SecurityStore {
             )
             .optional()?
             .ok_or_else(|| {
-                SecurityStoreError::InvalidData(format!(
-                    "containment binding {binding_id} does not exist"
-                ))
+                AuditError::InvalidData(format!("containment binding {binding_id} does not exist"))
             })?;
         if parse_uuid(&action_case)? != case_id {
-            return Err(SecurityStoreError::InvalidData(format!(
+            return Err(AuditError::InvalidData(format!(
                 "containment binding {binding_id} does not belong to risk case {case_id}"
             )));
         }
@@ -78,7 +76,7 @@ impl SecurityStore {
             ],
         )?;
         if changed != 1 {
-            return Err(SecurityStoreError::MissingCase(case_id));
+            return Err(AuditError::MissingCase(case_id));
         }
         let mut next_position: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(position) + 1, 0)
@@ -108,7 +106,7 @@ impl SecurityStore {
                 params![occurred_at_ns, binding_id.to_string(), case_id.to_string()],
             )?;
             if changed != 1 {
-                return Err(SecurityStoreError::InvalidData(format!(
+                return Err(AuditError::InvalidData(format!(
                     "containment binding {binding_id} disappeared during correlation"
                 )));
             }

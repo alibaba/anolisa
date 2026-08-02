@@ -18,6 +18,9 @@ import {
 } from '../utils/apiClient';
 
 type AuditTab = 'overview' | 'sessions' | 'cases' | 'events';
+const CASE_PAGE_SIZE = 10;
+const SESSION_PAGE_SIZE = 20;
+const EVENT_PAGE_SIZE = 50;
 
 const tabs: Array<{ key: AuditTab; label: string }> = [
   { key: 'overview', label: '审计总览' },
@@ -108,13 +111,54 @@ const StatCard: React.FC<{ label: string; value: React.ReactNode; hint: string }
   </div>
 );
 
+const Pagination: React.FC<{
+  offset: number;
+  pageSize: number;
+  total: number;
+  loading: boolean;
+  onChange: (offset: number) => void;
+}> = ({ offset, pageSize, total, loading, onChange }) => {
+  const page = Math.floor(offset / pageSize) + 1;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  return (
+    <div className="flex items-center justify-between border-t border-gray-200 px-5 py-3 text-xs text-gray-500">
+      <span>{offset + 1}–{Math.min(offset + pageSize, total)} / {total}</span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={offset === 0 || loading}
+          onClick={() => onChange(Math.max(0, offset - pageSize))}
+          className="rounded border px-2 py-1 disabled:text-gray-300"
+        >
+          上一页
+        </button>
+        <span>{page}/{pageCount}</span>
+        <button
+          type="button"
+          disabled={offset + pageSize >= total || loading}
+          onClick={() => onChange(offset + pageSize)}
+          className="rounded border px-2 py-1 disabled:text-gray-300"
+        >
+          下一页
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const SystemAuditPage: React.FC = () => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<AuditTab>('overview');
   const [summary, setSummary] = useState<SecuritySummary | null>(null);
   const [cases, setCases] = useState<SecurityRiskCase[]>([]);
+  const [caseTotal, setCaseTotal] = useState(0);
+  const [caseOffset, setCaseOffset] = useState(0);
   const [sessions, setSessions] = useState<SecuritySessionSummary[]>([]);
+  const [sessionTotal, setSessionTotal] = useState(0);
+  const [sessionOffset, setSessionOffset] = useState(0);
   const [events, setEvents] = useState<SecurityEventRecord[]>([]);
+  const [eventTotal, setEventTotal] = useState(0);
+  const [eventOffset, setEventOffset] = useState(0);
   const [selectedCase, setSelectedCase] = useState<SecurityRiskCaseDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -131,19 +175,28 @@ export const SystemAuditPage: React.FC = () => {
     setLoading(true);
     const results = await Promise.allSettled([
       fetchAuditSummary({ limit: 10 }),
-      fetchSecurityCases({ limit: 100, offset: 0 }),
-      fetchAuditSessions({ limit: 100, offset: 0 }),
-      fetchAuditEvents({ limit: 100, offset: 0, include_details: true }),
+      fetchSecurityCases({ limit: CASE_PAGE_SIZE, offset: caseOffset }),
+      fetchAuditSessions({ limit: SESSION_PAGE_SIZE, offset: sessionOffset }),
+      fetchAuditEvents({ limit: EVENT_PAGE_SIZE, offset: eventOffset, include_details: true }),
     ]);
     if (loadRequestVersion.current !== version) return;
     const failures = results.filter((result) => result.status === 'rejected');
     if (results[0].status === 'fulfilled') setSummary(results[0].value.data);
-    if (results[1].status === 'fulfilled') setCases(results[1].value.data.items);
-    if (results[2].status === 'fulfilled') setSessions(results[2].value.data.items);
-    if (results[3].status === 'fulfilled') setEvents(results[3].value.data.items);
+    if (results[1].status === 'fulfilled') {
+      setCases(results[1].value.data.items);
+      setCaseTotal(results[1].value.data.total);
+    }
+    if (results[2].status === 'fulfilled') {
+      setSessions(results[2].value.data.items);
+      setSessionTotal(results[2].value.data.total);
+    }
+    if (results[3].status === 'fulfilled') {
+      setEvents(results[3].value.data.items);
+      setEventTotal(results[3].value.data.total);
+    }
     setError(failures.length ? errorText((failures[0] as PromiseRejectedResult).reason) : '');
     setLoading(false);
-  }, []);
+  }, [caseOffset, eventOffset, sessionOffset]);
 
   useEffect(() => {
     void load();
@@ -213,8 +266,11 @@ export const SystemAuditPage: React.FC = () => {
     }
   };
 
-  const openCases = cases.filter((item) => item.status === 'open').length;
-  const blockedCases = cases.filter((item) => item.blocked).length;
+  const totalCases = summary?.risk_cases_total ?? caseTotal;
+  const openCases = summary?.risk_cases_open ?? 0;
+  const blockedCases = summary?.risk_cases_blocked ?? 0;
+  const casePage = Math.floor(caseOffset / CASE_PAGE_SIZE) + 1;
+  const casePageCount = Math.max(1, Math.ceil(caseTotal / CASE_PAGE_SIZE));
   const sortedEvidence = useMemo(() => (
     selectedCase ? [...selectedCase.evidence].sort((left, right) => (
       left.occurred_at_ns - right.occurred_at_ns
@@ -263,7 +319,7 @@ export const SystemAuditPage: React.FC = () => {
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard label="审计事件" value={summary?.total ?? 0} hint="文件 / 标签 / 网络 / 判定" />
         <StatCard label="关联会话" value={summary?.affected_sessions ?? sessions.length} hint="具备系统行为证据" />
-        <StatCard label="风险案件" value={cases.length} hint="规则关联后形成案件" />
+        <StatCard label="风险案件" value={totalCases} hint="规则关联后形成案件" />
         <StatCard label="待研判" value={openCases} hint="等待安全人员确认" />
         <StatCard label="确认拦截" value={blockedCases} hint="内核已返回拒绝结果" />
       </section>
@@ -322,6 +378,30 @@ export const SystemAuditPage: React.FC = () => {
                 </button>
               ))}
             </div>
+            {caseTotal > CASE_PAGE_SIZE && (
+              <div className="flex items-center justify-between border-t border-gray-200 px-5 py-3 text-xs text-gray-500">
+                <span>{caseOffset + 1}–{Math.min(caseOffset + cases.length, caseTotal)} / {caseTotal}</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={caseOffset === 0 || loading}
+                    onClick={() => setCaseOffset((current) => Math.max(0, current - CASE_PAGE_SIZE))}
+                    className="rounded border px-2 py-1 disabled:text-gray-300"
+                  >
+                    上一页
+                  </button>
+                  <span>{casePage}/{casePageCount}</span>
+                  <button
+                    type="button"
+                    disabled={caseOffset + CASE_PAGE_SIZE >= caseTotal || loading}
+                    onClick={() => setCaseOffset((current) => current + CASE_PAGE_SIZE)}
+                    className="rounded border px-2 py-1 disabled:text-gray-300"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -409,6 +489,15 @@ export const SystemAuditPage: React.FC = () => {
               </tr>)}
             </tbody>
           </table>
+          {sessionTotal > SESSION_PAGE_SIZE && (
+            <Pagination
+              offset={sessionOffset}
+              pageSize={SESSION_PAGE_SIZE}
+              total={sessionTotal}
+              loading={loading}
+              onChange={setSessionOffset}
+            />
+          )}
         </section>
       )}
 
@@ -429,6 +518,15 @@ export const SystemAuditPage: React.FC = () => {
               </tr>)}
             </tbody>
           </table>
+          {eventTotal > EVENT_PAGE_SIZE && (
+            <Pagination
+              offset={eventOffset}
+              pageSize={EVENT_PAGE_SIZE}
+              total={eventTotal}
+              loading={loading}
+              onChange={setEventOffset}
+            />
+          )}
         </section>
       )}
 

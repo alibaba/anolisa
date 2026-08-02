@@ -5,16 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use agentsight_audit::{AuditService, AuditServiceError};
 use agentsight_enforcement_protocol::{
-    DestinationClass, EnforcementStateEvent, EventIdentity, PolicyMode, SecurityEvent,
-    SecurityEventKind,
+    EnforcementStateEvent, EventIdentity, SecurityEvent, SecurityEventKind,
 };
 use thiserror::Error;
 
+use super::SecurityStore;
 use super::delivery::{DeliveryOutcome, retry_delivered_event};
-use super::{
-    RiskCase, RiskCaseStatus, RiskSeverity, SecurityEventFilter, SecurityStore, SecurityStoreError,
-};
 use crate::enforcement::EnforcementClient;
 
 /// Security ingestion and correlation failures.
@@ -22,7 +20,7 @@ use crate::enforcement::EnforcementClient;
 pub enum SecurityCoordinatorError {
     /// Local persistence or query failed.
     #[error(transparent)]
-    Store(#[from] SecurityStoreError),
+    Store(#[from] super::SecurityStoreError),
     /// A decision referenced evidence that has not been persisted.
     #[error("security decision references missing {kind} event {event_id}")]
     MissingEvidence {
@@ -39,10 +37,19 @@ pub enum SecurityCoordinatorError {
     Thread(#[from] std::io::Error),
 }
 
+fn map_audit_error(error: AuditServiceError) -> SecurityCoordinatorError {
+    match error {
+        AuditServiceError::Store(error) => SecurityCoordinatorError::Store(error),
+        AuditServiceError::MissingEvidence { kind, event_id } => {
+            SecurityCoordinatorError::MissingEvidence { kind, event_id }
+        }
+    }
+}
+
 /// AgentSight-owned normalized-event ingestor and risk correlator.
 pub struct SecurityCoordinator {
     client: EnforcementClient,
-    store: Arc<SecurityStore>,
+    audit: Arc<AuditService>,
     stop: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     last_context: Arc<Mutex<Option<EventContext>>>,
@@ -58,9 +65,14 @@ struct EventContext {
 impl SecurityCoordinator {
     /// Creates a coordinator for one local enforcer and security store.
     pub fn new(client: EnforcementClient, store: Arc<SecurityStore>) -> Self {
+        Self::with_service(client, Arc::new(AuditService::new(store.audit_store())))
+    }
+
+    /// Creates a coordinator over the process-wide audit service.
+    pub fn with_service(client: EnforcementClient, audit: Arc<AuditService>) -> Self {
         Self {
             client,
-            store,
+            audit,
             stop: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
             last_context: Arc::new(Mutex::new(None)),
@@ -82,7 +94,7 @@ impl SecurityCoordinator {
             .last_context
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(event_context(&event));
-        ingest_event(&self.store, event)
+        self.audit.ingest(event).map_err(map_audit_error)
     }
 
     /// Starts the reconnecting normalized-event subscription worker.
@@ -101,14 +113,14 @@ impl SecurityCoordinator {
         }
         self.stop.store(false, Ordering::Release);
         let client = self.client.clone();
-        let store = Arc::clone(&self.store);
+        let audit = Arc::clone(&self.audit);
         let stop = Arc::clone(&self.stop);
         let running = Arc::clone(&self.running);
         let last_context = Arc::clone(&self.last_context);
         thread::Builder::new()
             .name("agentsight-security-events".into())
             .spawn(move || {
-                subscription_loop(client, store, &stop, &last_context);
+                subscription_loop(client, audit, &stop, &last_context);
                 running.store(false, Ordering::Release);
             })
             .map_err(|error| {
@@ -123,123 +135,9 @@ impl SecurityCoordinator {
     }
 }
 
-fn ingest_event(
-    store: &SecurityStore,
-    event: SecurityEvent,
-) -> Result<(), SecurityCoordinatorError> {
-    store.insert_event(&event)?;
-    let SecurityEventKind::PolicyDecision(decision) = &event.kind else {
-        return Ok(());
-    };
-    let containment_case = store.case_id_for_containment_binding(event.identity.binding_id)?;
-    if decision.mode == PolicyMode::Observe && containment_case.is_none() {
-        return Ok(());
-    }
-
-    let source = store.event(decision.source_event_id)?.ok_or(
-        SecurityCoordinatorError::MissingEvidence {
-            kind: "source",
-            event_id: decision.source_event_id,
-        },
-    )?;
-    let sink =
-        store
-            .event(decision.sink_event_id)?
-            .ok_or(SecurityCoordinatorError::MissingEvidence {
-                kind: "sink",
-                event_id: decision.sink_event_id,
-            })?;
-    let mut transitions = store
-        .list_events(&SecurityEventFilter {
-            start_ns: Some(source.occurred_at_ns),
-            end_ns: Some(event.occurred_at_ns),
-            event_type: Some("taint_transition".into()),
-            policy_id: Some(decision.policy_id.clone()),
-            binding_id: Some(event.identity.binding_id),
-            limit: 1_000,
-            ..SecurityEventFilter::default()
-        })?
-        .items;
-    transitions.sort_by_key(|item| (item.occurred_at_ns, item.event_id));
-
-    let mut evidence_ids = Vec::with_capacity(transitions.len().saturating_add(3));
-    evidence_ids.push(source.event_id);
-    evidence_ids.extend(transitions.into_iter().map(|item| item.event_id));
-    evidence_ids.push(sink.event_id);
-    evidence_ids.push(event.event_id);
-    if let Some(case_id) = containment_case {
-        store.append_containment_evidence(
-            case_id,
-            event.identity.binding_id,
-            &evidence_ids,
-            decision.risk_score,
-            decision.blocked,
-            event.occurred_at_ns,
-        )?;
-        return Ok(());
-    }
-    let destination_class = match &sink.kind {
-        SecurityEventKind::NetworkAction(network) => network.destination_class,
-        _ => DestinationClass::Unknown,
-    };
-    let severity = if decision.blocked {
-        RiskSeverity::Critical
-    } else if destination_class == DestinationClass::Trusted {
-        RiskSeverity::Medium
-    } else {
-        RiskSeverity::High
-    };
-    let correlation_key = risk_correlation_key(&event, decision, &source, &sink);
-    let case = RiskCase {
-        case_id: event.event_id,
-        correlation_key,
-        policy_id: decision.policy_id.clone(),
-        policy_revision: decision.policy_revision,
-        agent_id: event.identity.agent_id.clone(),
-        session_id: event.identity.session_id.clone(),
-        severity,
-        risk_score: decision.risk_score,
-        status: RiskCaseStatus::Open,
-        blocked: decision.blocked,
-        opened_at_ns: source.occurred_at_ns,
-        updated_at_ns: event.occurred_at_ns,
-        summary: decision.reason.clone(),
-    };
-    store.upsert_case(&case, &evidence_ids)?;
-    Ok(())
-}
-
-fn risk_correlation_key(
-    decision_event: &SecurityEvent,
-    decision: &agentsight_enforcement_protocol::PolicyDecision,
-    source: &SecurityEvent,
-    sink: &SecurityEvent,
-) -> String {
-    const BURST_WINDOW_NS: u64 = 5_000_000_000;
-
-    let source_resource = match &source.kind {
-        SecurityEventKind::FileAction(action) => action.path.as_str(),
-        _ => "unknown-source",
-    };
-    let burst = source.occurred_at_ns / BURST_WINDOW_NS;
-    format!(
-        "burst-v1:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-        decision_event.identity.binding_id,
-        decision.policy_id,
-        decision.policy_revision,
-        source.identity.pid,
-        source.identity.process_start_time,
-        sink.identity.pid,
-        sink.identity.process_start_time,
-        burst,
-        source_resource.len(),
-        source_resource
-    )
-}
-
 fn subscription_loop(
     client: EnforcementClient,
-    store: Arc<SecurityStore>,
+    audit: Arc<AuditService>,
     stop: &AtomicBool,
     last_context: &Mutex<Option<EventContext>>,
 ) {
@@ -249,7 +147,7 @@ fn subscription_loop(
         match client.subscribe_security_events() {
             Ok(mut subscription) => {
                 if disconnected {
-                    record_subscription_state(&store, last_context, true, "subscription_restored");
+                    record_subscription_state(&audit, last_context, true, "subscription_restored");
                     disconnected = false;
                 }
                 loop {
@@ -268,7 +166,7 @@ fn subscription_loop(
                                 &event,
                                 stop,
                                 |candidate| {
-                                    ingest_event(&store, candidate.clone()).map_err(|error| {
+                                    audit.ingest(candidate.clone()).map_err(|error| {
                                         log::error!(
                                             "security event {} ingestion failed: {error}",
                                             candidate.event_id
@@ -277,7 +175,7 @@ fn subscription_loop(
                                     })
                                 },
                                 |_| {
-                                    store.insert_event(&evidence_loss).map(|_| ()).map_err(
+                                    audit.store().insert_event(&evidence_loss).map(|_| ()).map_err(
                                         |error| {
                                             log::error!(
                                                 "failed to persist evidence-loss marker {}: {error}",
@@ -306,7 +204,7 @@ fn subscription_loop(
                             log::warn!("security event subscription disconnected: {error}");
                             if !disconnected {
                                 record_subscription_state(
-                                    &store,
+                                    &audit,
                                     last_context,
                                     false,
                                     "subscription_lost",
@@ -321,7 +219,7 @@ fn subscription_loop(
             Err(error) => {
                 log::warn!("security event subscription failed: {error}");
                 if !disconnected {
-                    record_subscription_state(&store, last_context, false, "subscription_lost");
+                    record_subscription_state(&audit, last_context, false, "subscription_lost");
                     disconnected = true;
                 }
             }
@@ -351,7 +249,7 @@ fn evidence_loss_event(event: &SecurityEvent) -> SecurityEvent {
 }
 
 fn record_subscription_state(
-    store: &SecurityStore,
+    audit: &AuditService,
     last_context: &Mutex<Option<EventContext>>,
     ready: bool,
     code: &str,
@@ -382,7 +280,7 @@ fn record_subscription_state(
             dropped_events: None,
         }),
     };
-    if let Err(error) = store.insert_event(&event) {
+    if let Err(error) = audit.store().insert_event(&event) {
         log::error!("failed to persist security subscription state: {error}");
     }
 }

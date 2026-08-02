@@ -85,7 +85,7 @@ impl Reconciler<'_> {
         let mut corrupt_count = 0;
         for candidate in candidates {
             let action = match candidate {
-                DueContainmentAction::Valid(action) => action,
+                DueContainmentAction::Valid(action) => *action,
                 DueContainmentAction::Corrupt { action_key, reason } => {
                     corrupt_count += 1;
                     if let Err(error) = self.store.quarantine_containment_action(

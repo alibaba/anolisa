@@ -292,7 +292,9 @@ impl ApiFixture {
             ),
             enforcement: None,
             containment,
-            security_store: Arc::clone(&self.store),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                self.store.audit_store(),
+            )),
             security_observability: SecurityObservabilityConfig::default(),
             auth: Arc::clone(&self.auth),
             optimize: None,

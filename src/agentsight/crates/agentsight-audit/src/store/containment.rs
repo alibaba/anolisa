@@ -4,15 +4,13 @@ mod evidence;
 mod reconcile;
 
 #[cfg(target_os = "linux")]
-pub(crate) use reconcile::DueContainmentAction;
+pub use reconcile::DueContainmentAction;
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use uuid::Uuid;
 
-use super::{SecurityStore, SecurityStoreError, parse_status, parse_uuid, sqlite_time, unsigned};
-use crate::security::{
-    ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, RiskCaseStatus,
-};
+use super::{AuditError, AuditStore, parse_status, parse_uuid, sqlite_time, unsigned};
+use crate::{ContainmentAction, ContainmentFailureStage, ContainmentLifecycle, RiskCaseStatus};
 
 const ACTION_COLUMNS: &str =
     "action_id, case_id, binding_id, source_binding_id, agent_id, root_pid,
@@ -42,7 +40,7 @@ pub enum ContainmentActivationResult {
     LostClaim,
 }
 
-impl SecurityStore {
+impl AuditStore {
     /// Inserts one containment action, returning false when any constraint conflict is ignored.
     ///
     /// # Errors
@@ -51,7 +49,7 @@ impl SecurityStore {
     pub fn insert_containment_action(
         &self,
         action: &ContainmentAction,
-    ) -> Result<bool, SecurityStoreError> {
+    ) -> Result<bool, AuditError> {
         let conn = self.connection()?;
         let changed = insert_action(&conn, action)?;
         Ok(changed == 1)
@@ -65,14 +63,14 @@ impl SecurityStore {
     pub fn claim_containment_action(
         &self,
         action: &ContainmentAction,
-    ) -> Result<ContainmentClaimResult, SecurityStoreError> {
+    ) -> Result<ContainmentClaimResult, AuditError> {
         if action.lifecycle_state != ContainmentLifecycle::Pending {
-            return Err(SecurityStoreError::InvalidData(
+            return Err(AuditError::InvalidData(
                 "a containment claim must start pending".into(),
             ));
         }
         if action.source_binding_id.is_none() {
-            return Err(SecurityStoreError::InvalidData(
+            return Err(AuditError::InvalidData(
                 "a new containment claim requires an exact source binding".into(),
             ));
         }
@@ -85,7 +83,7 @@ impl SecurityStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .ok_or(SecurityStoreError::MissingCase(action.case_id))?;
+            .ok_or(AuditError::MissingCase(action.case_id))?;
         let status = parse_status(&status)?;
         if !matches!(status, RiskCaseStatus::Open | RiskCaseStatus::Confirmed) {
             transaction.commit()?;
@@ -96,7 +94,7 @@ impl SecurityStore {
             ContainmentClaimResult::Claimed
         } else {
             let existing = live_action(&transaction, action.case_id)?.ok_or_else(|| {
-                SecurityStoreError::InvalidData(format!(
+                AuditError::InvalidData(format!(
                     "containment claim {} conflicted without a live case action",
                     action.action_id
                 ))
@@ -117,7 +115,7 @@ impl SecurityStore {
         action_id: Uuid,
         claimed_at_ns: u64,
         updated_at_ns: u64,
-    ) -> Result<ContainmentActivationResult, SecurityStoreError> {
+    ) -> Result<ContainmentActivationResult, AuditError> {
         let updated_at_ns = updated_at_ns.max(claimed_at_ns.saturating_add(1));
         let claimed_at_ns = sqlite_time(claimed_at_ns)?;
         let updated_at_ns = sqlite_time(updated_at_ns)?;
@@ -138,9 +136,7 @@ impl SecurityStore {
             )
             .optional()?
             .ok_or_else(|| {
-                SecurityStoreError::InvalidData(format!(
-                    "containment action {action_id} does not exist"
-                ))
+                AuditError::InvalidData(format!("containment action {action_id} does not exist"))
             })?;
         let case_id = parse_uuid(&action.0)?;
         if parse_lifecycle(&action.1)? != ContainmentLifecycle::Pending || action.2 != claimed_at_ns
@@ -155,7 +151,7 @@ impl SecurityStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .ok_or(SecurityStoreError::MissingCase(case_id))?;
+            .ok_or(AuditError::MissingCase(case_id))?;
         let status = parse_status(&status)?;
         if !matches!(status, RiskCaseStatus::Open | RiskCaseStatus::Confirmed) {
             transaction.commit()?;
@@ -179,7 +175,7 @@ impl SecurityStore {
                 params![updated_at_ns, action.0],
             )?;
             if confirmed != 1 {
-                return Err(SecurityStoreError::InvalidData(format!(
+                return Err(AuditError::InvalidData(format!(
                     "risk case {case_id} changed before confirmation"
                 )));
             }
@@ -196,7 +192,7 @@ impl SecurityStore {
     pub fn containment_action(
         &self,
         action_id: Uuid,
-    ) -> Result<Option<ContainmentAction>, SecurityStoreError> {
+    ) -> Result<Option<ContainmentAction>, AuditError> {
         let conn = self.connection()?;
         let mut statement = conn.prepare(&format!(
             "SELECT {ACTION_COLUMNS} FROM containment_actions WHERE action_id = ?1"
@@ -216,7 +212,7 @@ impl SecurityStore {
     pub fn containment_action_by_binding(
         &self,
         binding_id: Uuid,
-    ) -> Result<Option<ContainmentAction>, SecurityStoreError> {
+    ) -> Result<Option<ContainmentAction>, AuditError> {
         self.connection()?
             .query_row(
                 &format!(
@@ -239,7 +235,7 @@ impl SecurityStore {
     pub fn latest_containment_action(
         &self,
         case_id: Uuid,
-    ) -> Result<Option<ContainmentAction>, SecurityStoreError> {
+    ) -> Result<Option<ContainmentAction>, AuditError> {
         let conn = self.connection()?;
         let mut statement = conn.prepare(&format!(
             "SELECT {ACTION_COLUMNS}
@@ -264,7 +260,7 @@ impl SecurityStore {
         &self,
         binding_id: Uuid,
         current_time_ns: u64,
-    ) -> Result<bool, SecurityStoreError> {
+    ) -> Result<bool, AuditError> {
         let current_time_ns = sqlite_time(current_time_ns)?;
         let changed = self.connection()?.execute(
             "UPDATE containment_actions
@@ -290,7 +286,7 @@ impl SecurityStore {
     pub fn update_containment_action(
         &self,
         action: &ContainmentAction,
-    ) -> Result<bool, SecurityStoreError> {
+    ) -> Result<bool, AuditError> {
         let changed = self.connection()?.execute(
             "UPDATE containment_actions SET
                 lifecycle_state = ?1,
@@ -330,7 +326,7 @@ impl SecurityStore {
         &self,
         binding_id: Uuid,
         blocked_at_ns: u64,
-    ) -> Result<bool, SecurityStoreError> {
+    ) -> Result<bool, AuditError> {
         let blocked_at_ns = sqlite_time(blocked_at_ns)?;
         let changed = self.connection()?.execute(
             "UPDATE containment_actions
@@ -346,10 +342,7 @@ impl SecurityStore {
     }
 }
 
-fn insert_action(
-    conn: &Connection,
-    action: &ContainmentAction,
-) -> Result<usize, SecurityStoreError> {
+fn insert_action(conn: &Connection, action: &ContainmentAction) -> Result<usize, AuditError> {
     conn.execute(
         "INSERT INTO containment_actions (
             action_id, case_id, binding_id, source_binding_id, agent_id, root_pid, process_start_time,
@@ -385,10 +378,7 @@ fn insert_action(
     .map_err(Into::into)
 }
 
-fn live_action(
-    conn: &Connection,
-    case_id: Uuid,
-) -> Result<Option<ContainmentAction>, SecurityStoreError> {
+fn live_action(conn: &Connection, case_id: Uuid) -> Result<Option<ContainmentAction>, AuditError> {
     let mut statement = conn.prepare(&format!(
         "SELECT {ACTION_COLUMNS}
          FROM containment_actions
@@ -448,9 +438,7 @@ fn containment_row(row: &Row<'_>) -> rusqlite::Result<ContainmentRow> {
     ))
 }
 
-fn containment_action_from_row(
-    row: ContainmentRow,
-) -> Result<ContainmentAction, SecurityStoreError> {
+fn containment_action_from_row(row: ContainmentRow) -> Result<ContainmentAction, AuditError> {
     Ok(ContainmentAction {
         action_id: parse_uuid(&row.0)?,
         case_id: parse_uuid(&row.1)?,
@@ -477,7 +465,7 @@ fn containment_action_from_row(
         failure_stage: row.13.as_deref().map(parse_failure_stage).transpose()?,
         failure_reason: row.14,
         attempt_count: u32::try_from(row.15)
-            .map_err(|_| SecurityStoreError::InvalidData("attempt_count is out of range".into()))?,
+            .map_err(|_| AuditError::InvalidData("attempt_count is out of range".into()))?,
         next_retry_at_ns: row
             .16
             .map(|value| unsigned(value, "next_retry_at_ns"))
@@ -497,14 +485,14 @@ fn lifecycle_value(value: ContainmentLifecycle) -> &'static str {
     }
 }
 
-fn parse_lifecycle(value: &str) -> Result<ContainmentLifecycle, SecurityStoreError> {
+fn parse_lifecycle(value: &str) -> Result<ContainmentLifecycle, AuditError> {
     match value {
         "pending" => Ok(ContainmentLifecycle::Pending),
         "active" => Ok(ContainmentLifecycle::Active),
         "expiring" => Ok(ContainmentLifecycle::Expiring),
         "expired" => Ok(ContainmentLifecycle::Expired),
         "failed" => Ok(ContainmentLifecycle::Failed),
-        _ => Err(SecurityStoreError::InvalidData(format!(
+        _ => Err(AuditError::InvalidData(format!(
             "unknown containment lifecycle '{value}'"
         ))),
     }
@@ -518,12 +506,12 @@ fn failure_stage_value(value: ContainmentFailureStage) -> &'static str {
     }
 }
 
-fn parse_failure_stage(value: &str) -> Result<ContainmentFailureStage, SecurityStoreError> {
+fn parse_failure_stage(value: &str) -> Result<ContainmentFailureStage, AuditError> {
     match value {
         "attach" => Ok(ContainmentFailureStage::Attach),
         "detach" => Ok(ContainmentFailureStage::Detach),
         "reconcile" => Ok(ContainmentFailureStage::Reconcile),
-        _ => Err(SecurityStoreError::InvalidData(format!(
+        _ => Err(AuditError::InvalidData(format!(
             "unknown containment failure stage '{value}'"
         ))),
     }

@@ -12,19 +12,20 @@ mod secret;
 mod system_audit;
 mod token_savings;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
+use agentsight_audit::AuditService;
 use include_dir::{Dir, include_dir};
 
 use crate::config::ServerAuthConfig;
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
-use crate::security::{ContainmentCoordinator, SecurityCoordinator, SecurityStore};
+use crate::security::{ContainmentCoordinator, SecurityCoordinator};
 use crate::storage::sqlite::InterruptionStore;
 use agentsight_trajectory_collector::TrajectoryStore;
 
@@ -64,8 +65,8 @@ pub struct AppState {
     pub enforcement: Option<Arc<EnforcementCoordinator>>,
     /// Case-level durable containment orchestration.
     pub containment: Option<Arc<ContainmentCoordinator>>,
-    /// AgentSight-owned security events and correlated audit cases.
-    pub security_store: Arc<SecurityStore>,
+    /// AgentSight-owned system-audit application service.
+    pub audit_service: Arc<AuditService>,
     /// agent-sec security observability integration configuration
     pub security_observability: SecurityObservabilityConfig,
     /// Dashboard authentication state
@@ -301,6 +302,14 @@ async fn api_not_found() -> impl Responder {
 
 // ─── Server entry point ───────────────────────────────────────────────────────
 
+fn private_state_dir(storage_path: &Path) -> PathBuf {
+    storage_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("/var/log/sysak/.agentsight"))
+        .join(".agentsight-private")
+}
+
 /// Start the API server
 ///
 /// Binds to the given host:port and serves API endpoints + embedded frontend.
@@ -310,16 +319,16 @@ pub async fn run_server(
     port: u16,
     storage_path: PathBuf,
     auth_config: ServerAuthConfig,
+    audit_retention_days: u64,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
 
-    let state_dir = storage_path
-        .parent()
-        .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"));
+    let state_dir = private_state_dir(&storage_path);
     let security_store = Arc::new(
-        SecurityStore::open_private(state_dir)
+        crate::security::open_private_store(&state_dir)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
+    let audit_service = Arc::new(AuditService::new(security_store.audit_store()));
 
     let evaluation_store = Arc::new(
         EvaluationStore::new_with_path(&storage_path)
@@ -332,14 +341,14 @@ pub async fn run_server(
     let enforcement_client = EnforcementClient::new(enforcement_socket);
     let enforcement = Arc::new(EnforcementCoordinator::new(
         enforcement_client.clone(),
-        EnforcementStore::open_private(state_dir)
+        EnforcementStore::open_private(&state_dir)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     ));
     let enforcement_ingestion = enforcement
         .start_ingestion()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let security_coordinator =
-        SecurityCoordinator::new(enforcement_client, Arc::clone(&security_store));
+        SecurityCoordinator::with_service(enforcement_client, Arc::clone(&audit_service));
     let security_ingestion = match security_coordinator.start() {
         Ok(ingestion) => ingestion,
         Err(error) => {
@@ -452,12 +461,14 @@ pub async fn run_server(
         evaluation_store,
         enforcement: Some(Arc::clone(&enforcement)),
         containment: Some(Arc::clone(&containment)),
-        security_store,
+        audit_service,
         security_observability,
         auth: dashboard_auth.clone(),
         optimize: Some(optimize_state),
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
+    let audit_retention =
+        start_audit_retention(Arc::clone(&data.audit_service), audit_retention_days);
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
     log::info!("AgentSight API server listening on http://{host}:{port}");
@@ -487,6 +498,9 @@ pub async fn run_server(
     {
         Ok(server) => server,
         Err(error) => {
+            if let Some(worker) = audit_retention {
+                worker.abort();
+            }
             containment::stop_reconciler(&containment, containment_reconciler);
             stop_security_ingestion(&security_coordinator, security_ingestion);
             stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
@@ -504,10 +518,41 @@ pub async fn run_server(
 
     let server_result = server.run().await;
 
+    if let Some(worker) = audit_retention {
+        worker.abort();
+    }
     containment::stop_reconciler(&containment, containment_reconciler);
     stop_security_ingestion(&security_coordinator, security_ingestion);
     stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
     server_result
+}
+
+const AUDIT_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+fn start_audit_retention(
+    audit_service: Arc<AuditService>,
+    retention_days: u64,
+) -> Option<actix_web::rt::task::JoinHandle<()>> {
+    (retention_days > 0).then(|| {
+        actix_web::rt::spawn(async move {
+            loop {
+                let now_ns = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                let retention_ns = retention_days.saturating_mul(24 * 60 * 60 * 1_000_000_000);
+                let cutoff_ns = now_ns.saturating_sub(retention_ns);
+                match audit_service.purge_before(cutoff_ns) {
+                    Ok(deleted) if deleted > 0 => {
+                        log::info!("purged {deleted} expired system-audit records");
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("system-audit retention purge failed: {error}"),
+                }
+                actix_web::rt::time::sleep(AUDIT_RETENTION_INTERVAL).await;
+            }
+        })
+    })
 }
 
 fn stop_security_ingestion(
@@ -545,8 +590,8 @@ mod tests {
 
     use super::auth::DashboardAuth;
     use super::{
-        AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes, serve_frontend,
-        serve_frontend_root,
+        AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes,
+        private_state_dir, serve_frontend, serve_frontend_root,
     };
     use crate::config::ServerAuthConfig;
 
@@ -555,6 +600,14 @@ mod tests {
         let config = SecurityObservabilityConfig::default();
 
         assert_eq!(config.timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn private_state_uses_a_dedicated_sibling_directory() {
+        assert_eq!(
+            private_state_dir(std::path::Path::new("/tmp/agentsight.db")),
+            std::path::Path::new("/tmp/.agentsight-private")
+        );
     }
 
     #[test]
@@ -658,7 +711,11 @@ mod tests {
             ),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
             optimize: None,
@@ -682,7 +739,11 @@ mod tests {
             ),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,

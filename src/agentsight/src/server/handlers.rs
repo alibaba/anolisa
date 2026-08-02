@@ -1094,7 +1094,11 @@ mod tests {
             evaluation_store: Arc::clone(&evaluation_store),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1303,7 +1307,11 @@ mod tests {
             interruption_store: None,
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1435,7 +1443,11 @@ mod tests {
             ),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
             optimize: None,
@@ -1537,7 +1549,11 @@ mod tests {
             ),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1678,7 +1694,11 @@ mod tests {
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1704,7 +1724,11 @@ mod tests {
             ),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1768,7 +1792,11 @@ mod tests {
             ),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -2076,9 +2104,11 @@ mod tests {
                     evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
                     enforcement: None,
                     containment: None,
-                    security_store: Arc::new(
-                        crate::security::SecurityStore::open_in_memory().unwrap(),
-                    ),
+                    audit_service: Arc::new(agentsight_audit::AuditService::new(
+                        crate::security::SecurityStore::open_in_memory()
+                            .unwrap()
+                            .audit_store(),
+                    )),
                     security_observability: super::super::SecurityObservabilityConfig {
                         timeout_ms: 0,
                     },
@@ -2531,9 +2561,11 @@ mod tests {
                     ),
                     enforcement: None,
                     containment: None,
-                    security_store: Arc::new(
-                        crate::security::SecurityStore::open_in_memory().unwrap(),
-                    ),
+                    audit_service: Arc::new(agentsight_audit::AuditService::new(
+                        crate::security::SecurityStore::open_in_memory()
+                            .unwrap()
+                            .audit_store(),
+                    )),
                     security_observability: super::super::SecurityObservabilityConfig {
                         timeout_ms: 0,
                     },

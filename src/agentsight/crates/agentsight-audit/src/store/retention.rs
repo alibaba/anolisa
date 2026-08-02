@@ -2,7 +2,7 @@
 
 use rusqlite::{TransactionBehavior, params};
 
-use super::{SecurityStore, SecurityStoreError, sqlite_time};
+use super::{AuditError, AuditStore, sqlite_time};
 
 const PURGEABLE_CASES: &str = "SELECT cases.case_id
      FROM risk_cases AS cases
@@ -18,7 +18,7 @@ const PURGEABLE_CASES: &str = "SELECT cases.case_id
              )
        )";
 
-impl SecurityStore {
+impl AuditStore {
     /// Deletes expired events and complete inactive case graphs before `cutoff_ns`.
     ///
     /// Evidence shared with a retained case and every graph with live containment
@@ -27,7 +27,7 @@ impl SecurityStore {
     /// # Errors
     ///
     /// Returns a typed database, timestamp, or lock error.
-    pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64, SecurityStoreError> {
+    pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64, AuditError> {
         let cutoff_ns = sqlite_time(cutoff_ns)?;
         let mut conn = self.connection()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

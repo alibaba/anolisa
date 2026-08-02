@@ -937,7 +937,11 @@ mod tests {
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
             enforcement: None,
             containment: None,
-            security_store: Arc::new(crate::security::SecurityStore::open_in_memory().unwrap()),
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: crate::server::SecurityObservabilityConfig::default(),
             auth: Arc::new(crate::server::auth::DashboardAuth::init(
                 &crate::config::ServerAuthConfig { enabled: false },

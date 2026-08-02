@@ -43,7 +43,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::sqlite::connection::default_base_path;
 use super::sqlite::{AuditStore, HttpStore, TokenConsumptionStore, TokenStore};
 use crate::analyzer::AnalysisResult;
-use crate::security::SecurityStore;
 
 /// Storage backend type
 #[derive(Debug, Clone, Default)]
@@ -128,7 +127,6 @@ pub struct Storage {
     token_store: TokenStore,
     http_store: HttpStore,
     token_consumption_store: TokenConsumptionStore,
-    security_store: SecurityStore,
     /// Data retention period in days (0 = no limit)
     retention_days: u64,
     /// Auto-purge check interval (every N inserts, 0 = disabled)
@@ -161,15 +159,12 @@ impl Storage {
         let http_store = HttpStore::with_table(&db_path, &config.http_table)?;
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, &config.token_consumption_table)?;
-        let security_store = SecurityStore::open_private(&config.base_path)?;
-
         Ok(Storage {
             backend: StorageBackend::Sqlite,
             audit_store,
             token_store,
             http_store,
             token_consumption_store,
-            security_store,
             retention_days: config.retention_days,
             purge_interval: config.purge_interval,
             insert_count: AtomicU64::new(0),
@@ -196,16 +191,12 @@ impl Storage {
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, "token_consumption")
                 .expect("in-memory token_consumption store should always succeed");
-        let security_store = SecurityStore::open_in_memory()
-            .expect("in-memory security store should always succeed");
-
         Storage {
             backend: StorageBackend::Noop,
             audit_store,
             token_store,
             http_store,
             token_consumption_store,
-            security_store,
             retention_days: 0,
             purge_interval: 0,
             insert_count: AtomicU64::new(0),
@@ -240,11 +231,6 @@ impl Storage {
     /// Get token consumption breakdown storage
     pub fn token_consumption(&self) -> &TokenConsumptionStore {
         &self.token_consumption_store
-    }
-
-    /// Gets local security-event and risk-case storage.
-    pub fn security(&self) -> &SecurityStore {
-        &self.security_store
     }
 
     /// Store an analysis result (automatically routes to correct store)
@@ -321,19 +307,15 @@ impl Storage {
         let consumption_deleted = self.token_consumption_store.purge_before(cutoff_ns)?;
         total_deleted += consumption_deleted;
 
-        let security_deleted = self.security_store.purge_before(cutoff_ns)?;
-        total_deleted += security_deleted;
-
         if total_deleted > 0 {
             log::info!(
-                "Purged {} expired records (retention={}d, audit={}, token={}, http={}, consumption={}, security={})",
+                "Purged {} expired records (retention={}d, audit={}, token={}, http={}, consumption={})",
                 total_deleted,
                 self.retention_days,
                 audit_deleted,
                 token_deleted,
                 http_deleted,
                 consumption_deleted,
-                security_deleted,
             );
         }
 

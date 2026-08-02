@@ -35,23 +35,27 @@ pub(super) async fn summary(
     query: web::Query<AuditQuery>,
 ) -> HttpResponse {
     let filter = event_filter(&query);
-    let summary = match data.security_store.summary_filtered(&filter) {
+    let summary = match data.audit_service.summary(&filter) {
         Ok(summary) => summary,
         Err(error) => return store_error(error),
     };
-    let latest_events = match data.security_store.list_events(&SecurityEventFilter {
+    let latest_events = match data.audit_service.events(&SecurityEventFilter {
         limit: query.limit.unwrap_or(10).clamp(1, 100),
         ..filter.clone()
     }) {
         Ok(page) => page.items,
         Err(error) => return store_error(error),
     };
-    let affected_sessions = match data.security_store.list_sessions(&SecurityEventFilter {
+    let affected_sessions = match data.audit_service.sessions(&SecurityEventFilter {
         limit: 1,
         offset: 0,
         ..filter
     }) {
         Ok(page) => page.total,
+        Err(error) => return store_error(error),
+    };
+    let risk_cases = match data.audit_service.case_summary() {
+        Ok(summary) => summary,
         Err(error) => return store_error(error),
     };
     response(
@@ -67,6 +71,9 @@ pub(super) async fn summary(
             "evidence_loss": summary.evidence_loss_events,
             "affected_sessions": affected_sessions,
             "affected_runs": affected_sessions,
+            "risk_cases_total": risk_cases.total,
+            "risk_cases_open": risk_cases.open,
+            "risk_cases_blocked": risk_cases.blocked,
             "latest_events": latest_events.iter().map(event_view).collect::<Vec<_>>(),
         }),
     )
@@ -78,7 +85,7 @@ pub(super) async fn events(
     data: web::Data<AppState>,
     query: web::Query<AuditQuery>,
 ) -> HttpResponse {
-    match data.security_store.list_events(&event_filter(&query)) {
+    match data.audit_service.events(&event_filter(&query)) {
         Ok(page) => {
             let state = if page.items.is_empty() { "empty" } else { "ok" };
             response(
@@ -104,7 +111,7 @@ pub(super) async fn sessions(
     data: web::Data<AppState>,
     query: web::Query<AuditQuery>,
 ) -> HttpResponse {
-    let page = match data.security_store.list_sessions(&event_filter(&query)) {
+    let page = match data.audit_service.sessions(&event_filter(&query)) {
         Ok(page) => page,
         Err(error) => return store_error(error),
     };
@@ -148,11 +155,11 @@ pub(super) async fn cases(
 ) -> HttpResponse {
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
     let offset = query.offset.unwrap_or(0).max(0);
-    let total = match data.security_store.case_count() {
+    let total = match data.audit_service.case_count() {
         Ok(total) => total,
         Err(error) => return store_error(error),
     };
-    match data.security_store.list_cases(limit, offset) {
+    match data.audit_service.cases(limit, offset) {
         Ok(items) => response(
             StatusCode::OK,
             if items.is_empty() { "empty" } else { "ok" },
@@ -172,8 +179,8 @@ pub(super) async fn case_detail(
         Ok(case_id) => case_id,
         Err(_) => return bad_request("case_id must be a UUID"),
     };
-    match data.security_store.case_detail(case_id) {
-        Ok(detail) => match data.security_store.latest_containment_action(case_id) {
+    match data.audit_service.case(case_id) {
+        Ok(detail) => match data.audit_service.latest_containment(case_id) {
             Ok(action) => response(
                 StatusCode::OK,
                 "found",
@@ -209,10 +216,7 @@ pub(super) async fn review_case(
     if body.status == RiskCaseStatus::Open {
         return bad_request("status must be confirmed, false_positive, accepted_risk, or resolved");
     }
-    match data
-        .security_store
-        .review_case(case_id, body.status, now_ns())
-    {
+    match data.audit_service.review(case_id, body.status, now_ns()) {
         Ok(case) => response(StatusCode::OK, "updated", json!(case)),
         Err(SecurityStoreError::MissingCase(_)) => response(
             StatusCode::NOT_FOUND,
