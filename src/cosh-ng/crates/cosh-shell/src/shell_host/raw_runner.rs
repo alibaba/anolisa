@@ -471,6 +471,16 @@ struct RawModeGuard {
 }
 
 impl RawModeGuard {
+    #[cfg(test)]
+    fn for_test(fd: i32, original_termios: Option<libc::termios>, original_flags: i32) -> Self {
+        Self {
+            fd,
+            original_termios,
+            original_flags,
+            active: true,
+        }
+    }
+
     /// #1932 F4: modifyOtherKeys level 1 makes the terminal report
     /// modifier-carrying editing keys (Shift+Enter -> `CSI 27;2;13~`)
     /// that already sit on the soft-newline whitelist, with zero terminal
@@ -532,6 +542,19 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.active {
+            // Clear O_NONBLOCK temporarily so the cleanup write and termios
+            // restore cannot be lost to EAGAIN. This is necessary even if the
+            // descriptor inherited O_NONBLOCK from the parent process, because
+            // original_flags would then still contain that bit and a plain
+            // restore would leave the fd non-blocking during the write.
+            // The actual original flags are restored after the cleanup.
+            unsafe {
+                libc::fcntl(
+                    self.fd,
+                    libc::F_SETFL,
+                    self.original_flags & !libc::O_NONBLOCK,
+                );
+            }
             if let Some(original) = &self.original_termios {
                 // Withdraw the keyboard negotiation before handing the tty
                 // back (#1932 F4); paired with the enable in activate_fd.
@@ -544,6 +567,8 @@ impl Drop for RawModeGuard {
                     libc::tcsetattr(self.fd, libc::TCSANOW, original);
                 }
             }
+            // Restore the exact flags we inherited, even if they included
+            // O_NONBLOCK.
             unsafe {
                 libc::fcntl(self.fd, libc::F_SETFL, self.original_flags);
             }
@@ -595,6 +620,60 @@ mod tests {
 
         let restored = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         assert_eq!(restored & libc::O_NONBLOCK, original & libc::O_NONBLOCK);
+    }
+
+    #[test]
+    fn raw_mode_guard_disable_write_survives_inherited_nonblocking_full_buffer() {
+        // PoC: inherited O_NONBLOCK + full buffer would lose the disable
+        // sequence to EAGAIN. A pipe gives deterministic "buffer full"; the
+        // guard is built with original_flags containing O_NONBLOCK and a fake
+        // termios so the cleanup write path runs. Without the fix the write
+        // returns EAGAIN; with the fix O_NONBLOCK is cleared, the write blocks
+        // until the drain thread frees space, and the disable sequence is
+        // delivered.
+        use std::thread;
+        use std::time::Duration;
+
+        let (read_fd_owned, write_fd_owned) = nix::unistd::pipe().expect("open pipe");
+        let read_fd = read_fd_owned.as_raw_fd();
+        let write_fd = write_fd_owned.as_raw_fd();
+
+        let original = unsafe { libc::fcntl(write_fd, libc::F_GETFL) };
+        unsafe { libc::fcntl(write_fd, libc::F_SETFL, original | libc::O_NONBLOCK) };
+        let chunk = [0_u8; 8192];
+        while unsafe { libc::write(write_fd, chunk.as_ptr().cast(), chunk.len()) } >= 0 {}
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EAGAIN),
+            "expected EAGAIN when the pipe buffer is full"
+        );
+
+        let fake_termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        let guard =
+            RawModeGuard::for_test(write_fd, Some(fake_termios), original | libc::O_NONBLOCK);
+
+        let drain_handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let mut all = Vec::new();
+            let mut buf = [0_u8; 4096];
+            loop {
+                let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n as usize]);
+            }
+            all
+        });
+
+        drop(guard);
+        drop(write_fd_owned);
+        let drained = drain_handle.join().expect("drain thread");
+        let output = String::from_utf8_lossy(&drained);
+        assert!(
+            output.contains("\x1b[>4;0m"),
+            "disable sequence not found in pipe output: {output:?}"
+        );
     }
 
     fn termios_for_fd(fd: i32) -> libc::termios {
