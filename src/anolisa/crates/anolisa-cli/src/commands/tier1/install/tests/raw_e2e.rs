@@ -4,6 +4,7 @@ use super::super::tests::*;
 
 use anolisa_core::ComponentManifest;
 use anolisa_core::domain::{Installation, LifecycleStatus, OwnedArtifact, ProviderBinding};
+use anolisa_core::download::DownloadError;
 use anolisa_core::state::{
     InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus,
 };
@@ -14,6 +15,32 @@ use crate::commands::common;
 use crate::context::InstallMode;
 use crate::test_support::{TestContextOptions, TestSandbox};
 use tempfile::tempdir;
+
+const JSON_REASON_ENV: &str = "ANOLISA_TEST_MISSING_INDEX_REASON";
+const JSON_BEGIN: &str = "ANOLISA_TEST_JSON_BEGIN";
+const JSON_END: &str = "ANOLISA_TEST_JSON_END";
+
+#[test]
+#[ignore = "invoked as an isolated child by the missing-index regression"]
+fn render_missing_index_error_json_child() {
+    let reason = std::env::var(JSON_REASON_ENV)
+        .expect("missing-index JSON child must be invoked by its parent regression test");
+    let tmp = tempdir().expect("tmpdir");
+    let err = crate::response::CliError::Runtime {
+        command: "install agentsight".to_string(),
+        reason,
+    };
+
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_BEGIN}"), true);
+    crate::output::flush_stdout();
+    let exit_code =
+        crate::response::render_error(&ctx_with_prefix(true, Some(tmp.path().join("sys"))), &err);
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_END}"), true);
+    crate::output::flush_stdout();
+    assert_eq!(exit_code, std::process::ExitCode::from(1));
+}
 
 /// v5 store as the pipeline persisted it for a system-prefix layout.
 fn load_v5_store(layout: &FsLayout) -> StateStore {
@@ -106,6 +133,122 @@ fn install_dry_run_does_not_download_the_artifact() {
         cached_names.iter().any(|name| name.ends_with("meta.toml")),
         "dry-run must fetch the lightweight contract; cache entries: {cached_names:?}"
     );
+}
+
+#[test]
+fn install_reports_missing_local_repository_index() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    let index_path = repo_root.join("v1/index.toml");
+    std::fs::remove_dir_all(&repo_root).expect("remove repository directory");
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect_err("missing repository index must fail");
+    let reason = err.reason();
+
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert_eq!(err.exit_code(), 1);
+    assert_eq!(err.command(), "install agentsight");
+    assert!(
+        reason.contains(&index_path.display().to_string()),
+        "missing-index diagnostic must identify {index_path:?}; got: {reason}"
+    );
+    assert!(
+        reason.contains("repo.toml"),
+        "missing-index diagnostic must name repo.toml; got: {reason}"
+    );
+    assert!(
+        reason.contains("--repo <URL>"),
+        "missing-index diagnostic must name the one-off override; got: {reason}"
+    );
+    assert!(
+        !reason.contains("failed to fetch distribution index"),
+        "missing-index diagnostic must not retain the generic wrapper; got: {reason}"
+    );
+
+    // Run this test executable as an isolated child so the production renderer's
+    // stdout can be asserted without replacing process-global output in-process.
+    let child_module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let child_test = format!("{child_module}::render_missing_index_error_json_child");
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([child_test.as_str(), "--exact", "--ignored", "--nocapture"])
+        .env(JSON_REASON_ENV, &reason)
+        .output()
+        .expect("run isolated JSON renderer child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "JSON renderer child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let (_, after_begin) = stdout
+        .split_once(JSON_BEGIN)
+        .expect("child stdout must contain the JSON start marker");
+    let (json, _) = after_begin
+        .split_once(JSON_END)
+        .expect("child stdout must contain the JSON end marker");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json.trim()).expect("rendered error must be valid JSON");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["schema_version"], crate::response::SCHEMA_VERSION);
+    assert_eq!(parsed["command"], "install agentsight");
+    assert_eq!(parsed["error"]["code"], "EXECUTION_FAILED");
+    assert_eq!(parsed["error"]["reason"], reason);
+    let error = parsed["error"]
+        .as_object()
+        .expect("rendered error payload must be an object");
+    assert!(!error.contains_key("hint"));
+}
+
+#[test]
+fn install_preserves_non_not_found_index_fetch_error() {
+    let tmp = tempdir().expect("tmpdir");
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let index_url = format!("file://{}", index_path.display());
+    let download_error = DownloadError::Io {
+        path: index_path,
+        source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "index access denied"),
+    };
+    let rendered_download_error = download_error.to_string();
+    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+
+    assert_eq!(
+        err.reason(),
+        format!("failed to fetch distribution index {index_url}: {rendered_download_error}"),
+        "non-NotFound I/O errors must retain the generic diagnostic"
+    );
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert_eq!(err.exit_code(), 1);
+    assert!(!err.reason().contains("repo.toml"));
+    assert!(!err.reason().contains("--repo <URL>"));
+}
+
+#[test]
+fn install_preserves_not_found_away_from_index_path() {
+    let tmp = tempdir().expect("tmpdir");
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let other_path = tmp.path().join("cache/downloads");
+    let index_url = format!("file://{}", index_path.display());
+    let download_error = DownloadError::Io {
+        path: other_path,
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "cache path missing"),
+    };
+    let rendered_download_error = download_error.to_string();
+    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+
+    assert_eq!(
+        err.reason(),
+        format!("failed to fetch distribution index {index_url}: {rendered_download_error}"),
+        "NotFound away from the index path must retain the generic diagnostic"
+    );
+    assert!(!err.reason().contains("repo.toml"));
+    assert!(!err.reason().contains("--repo <URL>"));
 }
 
 #[test]

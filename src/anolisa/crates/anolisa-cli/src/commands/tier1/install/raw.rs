@@ -26,6 +26,32 @@ use crate::response::CliError;
 use super::COMMAND;
 use super::render::{artifact_ext, artifact_type_wire, repo_config_err};
 use super::types::*;
+
+pub(super) fn index_fetch_error(index_url: &str, err: DownloadError) -> CliError {
+    match err {
+        DownloadError::Io {
+            ref path,
+            ref source,
+        } if source.kind() == std::io::ErrorKind::NotFound
+            && index_url
+                .strip_prefix("file://")
+                .is_some_and(|expected| path.as_path() == Path::new(expected)) =>
+        {
+            CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!(
+                    "local raw repository index not found at {}; check the raw repository URL in repo.toml or, if supplied, the one-off --repo <URL> override",
+                    path.display()
+                ),
+            }
+        }
+        err => CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!("failed to fetch distribution index {index_url}: {err}"),
+        },
+    }
+}
+
 pub(crate) fn resolve_raw(
     ctx: &CliContext,
     layout: &FsLayout,
@@ -47,10 +73,7 @@ pub(crate) fn resolve_raw(
     let cache = DownloadCache::new(layout.cache_dir.clone());
     let downloaded_index = cache
         .fetch(&index_url, None)
-        .map_err(|err| CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!("failed to fetch distribution index {index_url}: {err}"),
-        })?;
+        .map_err(|err| index_fetch_error(&index_url, err))?;
     // The unfiltered index is kept for error attribution: a pinned version
     // that only ships non-installable artifact types must be reported as
     // "published but not installable", not as unpublished.
