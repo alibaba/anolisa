@@ -183,7 +183,7 @@ fn build_template(
             let directory = root.join("hooks");
             fs::create_dir_all(&directory).map_err(scaffold_write_error)?;
             let hook = directory.join("guard.sh");
-            fs::write(&hook, "#!/bin/sh\nexit 0\n").map_err(scaffold_write_error)?;
+            fs::write(&hook, "#!/bin/sh\nprintf '%s\\n' '{}'\n").map_err(scaffold_write_error)?;
             set_executable(&hook)?;
             fields.insert(
                 "hooks".to_string(),
@@ -314,6 +314,21 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_template_emits_valid_pass_through_json() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("example.hook");
+        scaffold_extension(&target, ExtensionTemplate::Hook).unwrap();
+
+        let output = std::process::Command::new(target.join("hooks/guard.sh"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let parsed: crate::hook::HookOutput = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(parsed.decision.is_none());
     }
 
     #[test]

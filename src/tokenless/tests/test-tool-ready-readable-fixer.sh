@@ -12,7 +12,7 @@ FIXER="$TEST_DIR/tokenless-env-fix.sh"
 MARKER="$TEST_DIR/fixer-called"
 
 cat > "$SPEC" <<'EOF'
-{"TestMissing":{"required":[{"binary":"tokenless-missing-for-test","package":"tokenless-missing-for-test","manager":"rpm"}],"recommended":[],"permissions":[]}}
+{"TestReady":{"required":[],"recommended":[],"permissions":[]},"TestMissing":{"required":[{"binary":"tokenless-missing-for-test","package":"tokenless-missing-for-test","manager":"rpm"}],"recommended":[],"permissions":[]}}
 EOF
 
 cat > "$FIXER" <<'EOF'
@@ -24,6 +24,27 @@ cat >/dev/null
 touch "$TOKENLESS_FIX_MARKER"
 EOF
 chmod 0644 "$FIXER"
+
+EMPTY_PATH="$TEST_DIR/empty-path"
+mkdir "$EMPTY_PATH"
+NO_JQ_OUTPUT=$(PATH="$EMPTY_PATH" /bin/bash "$HOOK" </dev/null)
+[ "$NO_JQ_OUTPUT" = '{}' ]
+
+PASSTHROUGH_OUTPUT=$(
+    echo '{"tool_name":"TestReady","tool_input":{"command":"test"}}' \
+        | TOKENLESS_TOOL_READY_SPEC="$SPEC" \
+          TOKENLESS_ENV_FIX_SCRIPT="$FIXER" \
+          bash "$HOOK"
+)
+[ "$PASSTHROUGH_OUTPUT" = '{}' ]
+
+UNKNOWN_TOOL_OUTPUT=$(
+    echo '{"tool_name":"UnknownTool","tool_input":{}}' \
+        | TOKENLESS_TOOL_READY_SPEC="$SPEC" \
+          TOKENLESS_ENV_FIX_SCRIPT="$FIXER" \
+          bash "$HOOK"
+)
+[ "$UNKNOWN_TOOL_OUTPUT" = '{}' ]
 
 OUTPUT=$(
     echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' \

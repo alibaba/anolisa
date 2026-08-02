@@ -533,11 +533,11 @@ test_tool_ready() {
     fi
 
     # ==========================================
-    # 6.21 tool-ready hook: READY (silent exit)
+    # 6.21 tool-ready hook: READY (protocol pass-through)
     # ==========================================
-    log_info "Test 6.21: tool-ready hook — READY silent exit"
+    log_info "Test 6.21: tool-ready hook — READY protocol pass-through"
     local ready_out=$(echo '{"tool_name":"Shell","tool_input":{"command":"ls"}}' | bash "$READY_SCRIPT" 2>&1)
-    [ -z "$ready_out" ] && log_pass "tool-ready READY produces no output" || log_fail "tool-ready READY unexpected output: $ready_out"
+    [ "$ready_out" = '{}' ] && log_pass "tool-ready READY emits pass-through JSON" || log_fail "tool-ready READY unexpected output: $ready_out"
 
     # ==========================================
     # 6.22 tool-ready hook: NOT_READY + Skip retry
