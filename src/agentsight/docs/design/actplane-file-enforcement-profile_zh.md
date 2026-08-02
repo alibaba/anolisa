@@ -54,6 +54,25 @@ revision 不匹配、源码校验失败或补丁不匹配，脚本会给出可�
 
 ## 已验证闭环
 
+### Pinned runtime 重启边界
+
+AgentSight 会复用 `/sys/fs/bpf/actplane/v1` 下 pinned 的 ActPlane map 和
+link。仅清理策略状态并不会消费已经写入 pinned ring buffer 的记录；旧
+domain 事件可能耗尽新 enforcer 的轮询预算，延迟当前违规事件的交付。
+
+因此，enforcer 按以下顺序准备由其独占的 singleton runtime：
+
+1. 获取 ActPlane runtime lock，并保护 enforcer 进程；
+2. 清理旧策略和 capability 状态；
+3. 在创建实时 binding registry 前排空有限的 pinned event queue；
+4. 启动实时 poller，然后才报告 backend ready。
+
+先清理 capability 状态可以避免旧 binding 在 drain 期间持续产生事件。
+无法打开或排空 ring buffer 时，backend 初始化必须失败；如果不能证明事件流
+从干净的 ownership boundary 开始，服务就不能接受策略请求。每次重装 pin
+tree 会破坏 singleton 生命周期，而只忽略未知 domain ID 仍会让旧记录阻塞在
+新事件之前，因此这两种方案都不采用。
+
 隔离的端到端验证使用 `127.0.0.1:17400` 上的 AgentSight、独立 UDS 和独立
 bpffs root，未改动 7396 端口上的现有服务。验证覆盖以下顺序：
 

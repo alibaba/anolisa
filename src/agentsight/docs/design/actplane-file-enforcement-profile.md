@@ -62,6 +62,28 @@ to the mock backend.
 
 ## Verified Closure
 
+### Pinned runtime restart boundary
+
+AgentSight reuses ActPlane maps and links pinned under
+`/sys/fs/bpf/actplane/v1`. Policy cleanup alone does not consume records that
+were already committed to the pinned ring buffer, so obsolete domain events
+could otherwise exhaust the new enforcer's polling budget and delay current
+violations.
+
+The enforcer therefore prepares an exclusively owned singleton in this order:
+
+1. acquire the ActPlane runtime lock and protect the enforcer process;
+2. clear stale policy and capability state;
+3. drain the finite pinned event queue before creating the live binding registry;
+4. start the live poller, then report the backend ready.
+
+Clearing capability state before the drain prevents old bindings from producing
+an unbounded stream. Failure to open or drain the ring buffer fails backend
+initialization: the service must not accept policy requests when it cannot prove
+that event delivery starts at a clean ownership boundary. Reinstalling the pin
+tree and merely ignoring unknown domain IDs were rejected because the former is
+destructive and the latter leaves stale records ahead of live violations.
+
 The isolated end-to-end validation used AgentSight on `127.0.0.1:17400`, a
 dedicated UDS, and a dedicated bpffs root, leaving the existing service on port
 7396 untouched. It verified the following sequence:

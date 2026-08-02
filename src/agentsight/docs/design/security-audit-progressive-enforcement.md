@@ -296,6 +296,24 @@ The case view must answer:
 3. Which evidence and temporal relationship caused the decision?
 4. Which Agent, session, process tree, resource, and destination were affected?
 
+### Notify path and retry deduplication
+
+The credential-exfiltration profile uses complementary kernel paths. BPF-LSM
+`file_open` records credential reads and propagates taint, while BPF-LSM
+`socket_connect` evaluates deny rules. Observe and audit decisions are emitted
+by the notify-only `sys_enter_connect` path so they remain visible without
+blocking. The notify path does not emit a second event for enforce mode, and the
+profile does not enable the verifier-heavy file-open exit tracepoint.
+
+One short exfiltration burst produces one case even when a client retries
+several resolved addresses. The correlation key contains the binding, policy
+revision, source resource, source and sink process identities, and a five-second
+occurrence bucket; destination addresses are deliberately excluded. Every
+immutable event and evidence link remains stored in order. Observe mode stores
+facts without opening a case, audit opens an unblocked case, and enforce opens a
+blocked critical case. Replayed event IDs remain idempotent, while incomplete
+source or sink evidence remains a typed ingestion error.
+
 ## Storage and Query Surface
 
 The current untagged audit payload remains focused on LLM and process actions.
