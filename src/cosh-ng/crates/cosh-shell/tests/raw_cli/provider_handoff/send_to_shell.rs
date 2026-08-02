@@ -415,3 +415,50 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         "{output}"
     );
 }
+
+#[test]
+fn raw_cli_send_to_shell_command_triggers_trusted_project_hook() {
+    let fixture = temp_shell_home("send-to-shell-project-hook");
+    let project = fixture.join("project");
+    let hooks_dir = project.join(".cosh/hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    write_executable(
+        &hooks_dir.join("project-guard.sh"),
+        "#!/bin/sh\n# cosh-hook: project-guard\n# match-commands: git\nprintf '{\"hook_id\":\"project-guard\",\"severity\":\"warning\",\"title\":\"PROJECT GUARD SEND TO SHELL\",\"description\":\"project hook fired\",\"suggestion\":\"review against project policy\"}'\n",
+    );
+    let trust_store = fixture.join("trusted-project-hooks");
+    fs::write(
+        &trust_store,
+        format!(
+            "# cosh-shell trusted project hook roots\n{}\n",
+            project.display()
+        ),
+    )
+    .unwrap();
+
+    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+        "fake",
+        &[],
+        &[(
+            "COSH_SHELL_PROJECT_TRUST_STORE",
+            trust_store.to_str().unwrap(),
+        )],
+        &project,
+        vec![
+            (
+                b"?? provider interactive failure\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (
+                b"/send-to-shell handoff-1\n".to_vec(),
+                Duration::from_millis(2_500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(4_000)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&fixture);
+
+    assert!(output.contains("Sending to shell"), "{output}");
+    assert!(output.contains("$ git status"), "{output}");
+    assert!(output.contains("PROJECT GUARD SEND TO SHELL"), "{output}");
+}
