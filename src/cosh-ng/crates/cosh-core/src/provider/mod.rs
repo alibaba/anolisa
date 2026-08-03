@@ -2,6 +2,7 @@ pub mod mock;
 pub mod openai_compat;
 pub mod profile;
 pub mod sysom;
+pub mod token_limits;
 
 use std::pin::Pin;
 

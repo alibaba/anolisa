@@ -21,7 +21,8 @@ use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
 use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
 use crate::provider::{
-    ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
+    token_limits::model_max_output_tokens, ContentGenerator, GenerateConfig, GenerateEvent,
+    Message, MAX_TOOL_CALL_INDEX,
 };
 use crate::tool::ask_user_question;
 use crate::tool::{SessionWorkspace, ToolContext, ToolKind, ToolRegistry, ToolResult};
@@ -444,7 +445,7 @@ impl CoshCore {
         let skill_summaries = self.tools.skill_summaries().await;
         let generate_config = GenerateConfig {
             model: self.model.clone(),
-            max_tokens: 4096,
+            max_tokens: model_max_output_tokens(&self.model).unwrap_or(4096),
             temperature: None,
             // Usage reporting feeds compaction thresholds; the stream adapter
             // guarantees Usage is delivered before MessageEnd.

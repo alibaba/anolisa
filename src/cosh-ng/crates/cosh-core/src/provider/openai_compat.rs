@@ -103,10 +103,11 @@ impl OpenAICompatProvider {
         config: &GenerateConfig,
     ) -> Value {
         let max_tokens_field = self.profile.max_tokens_field();
+        let max_tokens = config.max_tokens;
         let mut body = serde_json::json!({
             "model": config.model,
             "messages": messages,
-            max_tokens_field: config.max_tokens,
+            max_tokens_field: max_tokens,
             "stream": true,
         });
 
@@ -1122,6 +1123,33 @@ mod tests {
         let body = provider.build_request_body(&[], &[], &config);
         assert!(body.get("max_completion_tokens").is_some());
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn build_request_respects_caller_max_tokens_for_recognized_model() {
+        // Regression: provider must not override the caller's max_tokens
+        // even when the model is recognized.  The compaction summarizer sets
+        // 2048 for qwen3.7-max; the provider must send 2048, not 65536.
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        let config = GenerateConfig {
+            model: "qwen3.7-max".to_string(),
+            max_tokens: 2_048,
+            ..Default::default()
+        };
+        let body = provider.build_request_body(&[], &[], &config);
+        assert_eq!(body["max_tokens"], 2_048);
+    }
+
+    #[test]
+    fn build_request_uses_config_max_tokens_for_unknown_model() {
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        let config = GenerateConfig {
+            model: "unknown-model".to_string(),
+            max_tokens: 4096,
+            ..Default::default()
+        };
+        let body = provider.build_request_body(&[], &[], &config);
+        assert_eq!(body["max_tokens"], 4096);
     }
 
     #[test]
