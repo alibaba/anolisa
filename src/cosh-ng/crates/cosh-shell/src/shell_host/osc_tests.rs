@@ -57,6 +57,49 @@ fn routing_markers_require_matching_attempt_generation() {
 }
 
 #[test]
+fn intercept_marker_sensitive_flag_reaches_routing_metadata() {
+    let mut parser = parser_for_test("routing-sensitive");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"session_id\":\"routing-sensitive\",\"command\":\"<redacted sensitive command>\",\"cwd\":\"/tmp\",\"generation\":1}\x07")
+        .expect("feed preexec");
+    parser
+        .feed("\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-sensitive\",\"command\":\"帮我安装下openclaw,模型使用qwen3.8-max,API Key: sk-fbaa6\",\"reason\":\"natural_language\",\"generation\":1,\"top_level_missing\":true,\"sensitive\":true}\x07".as_bytes())
+        .expect("feed sensitive intercept");
+
+    let intercept = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::UserInputIntercepted)
+        .expect("sensitive intercept event");
+    // The raw input still reaches the agent path in memory; only durable
+    // sinks (journal) redact it, keyed off the sensitive routing flag.
+    assert!(intercept
+        .input
+        .as_deref()
+        .is_some_and(|input| input.contains("sk-fbaa6")));
+    assert!(intercept.routing.as_ref().is_some_and(|routing| {
+        routing.sensitive && routing.top_level_missing && routing.proven
+    }));
+}
+
+#[test]
+fn intercept_marker_without_sensitive_field_defaults_to_not_sensitive() {
+    let mut parser = parser_for_test("routing-legacy");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-legacy\",\"command\":\"/skills detail\",\"reason\":\"slash\",\"cwd\":\"/tmp\"}\x07")
+        .expect("feed legacy intercept");
+
+    let intercept = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::UserInputIntercepted)
+        .expect("legacy intercept event");
+    // Legacy markers (no sensitive field, no top-level-missing provenance)
+    // keep the pre-#2138 shape: no routing metadata at all.
+    assert!(intercept.routing.is_none());
+}
+
+#[test]
 fn trusted_history_file_marker_is_private_and_observed() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&observed);

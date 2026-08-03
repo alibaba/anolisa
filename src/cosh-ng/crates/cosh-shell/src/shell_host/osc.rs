@@ -686,7 +686,7 @@ impl OscParser {
         cwd: Option<String>,
         reason: &str,
     ) {
-        self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false);
+        self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false, false);
     }
 
     pub(super) fn push_control_event(&mut self, input: &str) {

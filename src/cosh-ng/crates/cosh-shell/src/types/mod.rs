@@ -363,6 +363,26 @@ fn context_binding_from_hint(hint: &str) -> Option<AgentContextBinding> {
     }
 }
 
+/// In-band marker for requests whose input the shell-side secret gate
+/// flagged sensitive (#2138). `__cosh_` hints never reach provider
+/// prompts; durable sinks (personalization activity store) key off it
+/// to redact the whole input field instead of trusting sanitizer
+/// regexes to re-detect every shell-gate form.
+pub(crate) const SENSITIVE_INPUT_HINT: &str = "__cosh_sensitive_input=true";
+
+pub(crate) fn mark_request_sensitive_input(request: &mut AgentRequest) {
+    if !request_has_sensitive_input(request) {
+        request.context_hints.push(SENSITIVE_INPUT_HINT.to_string());
+    }
+}
+
+pub(crate) fn request_has_sensitive_input(request: &AgentRequest) -> bool {
+    request
+        .context_hints
+        .iter()
+        .any(|hint| hint == SENSITIVE_INPUT_HINT)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionSelectionMode {

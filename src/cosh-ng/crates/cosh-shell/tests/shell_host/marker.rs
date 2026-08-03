@@ -427,7 +427,10 @@ fn shell_host_bash_sensitive_missing_emits_raw_free_provenance() {
         .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
         .unwrap_or_else(|| panic!("routing provenance: {:?}", output.events));
 
-    assert_eq!(routing.component.as_deref(), Some("ambiguous"));
+    // Post-#2138 the sensitive gate no longer short-circuits ahead of intent
+    // classification: `--token=...` vetoes to intent=command, which keeps the
+    // native error and emits raw-free provenance with the sensitive flag.
+    assert_eq!(routing.component.as_deref(), Some("command"));
     assert!(routing.routing.as_ref().is_some_and(|metadata| {
         metadata.generation == 1
             && metadata.top_level_missing
@@ -441,10 +444,78 @@ fn shell_host_bash_sensitive_missing_emits_raw_free_provenance() {
     assert!(String::from_utf8_lossy(&output.terminal_output).contains("command not found"));
 }
 
+/// #2138: natural-language input carrying a secret routes to the agent like
+/// regular NL (intercept event emitted, sensitive routing flag set) instead
+/// of being silently vetoed to the native command-not-found error. The
+/// harness returns journal-redacted events, so the intercept input must be
+/// the whole-field redaction and the raw key must never appear (V3); the raw
+/// text reaching the in-memory agent path is anchored in osc_tests.
 #[test]
-fn shell_host_missing_cksum_fails_closed_without_sensitive_provenance() {
+fn shell_host_sensitive_natural_language_routes_to_agent_with_flag() {
+    let issue_input = "帮我安装下openclaw,模型使用qwen3.8-max,API Key: sk-fbaa6";
+    let mut shells = Vec::new();
+    if bash_supports_command_not_found_handler() {
+        shells.push("bash");
+    }
+    if Command::new("zsh").arg("--version").output().is_ok() {
+        shells.push("zsh");
+    }
+    for shell in shells {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-{shell}-sensitive-nl-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let config = ShellHostConfig::new(format!("{shell}-sensitive-nl"), &work_dir);
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line(issue_input)])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(issue_input)])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        assert!(
+            !terminal.contains("command not found") && !terminal.contains("未找到命令"),
+            "{shell}: {terminal}"
+        );
+        let intercept = output
+            .events
+            .iter()
+            .find(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.component.as_deref() == Some("natural_language")
+            })
+            .unwrap_or_else(|| panic!("{shell}: sensitive NL intercept: {:?}", output.events));
+        assert_eq!(intercept.input.as_deref(), Some("<redacted>"), "{shell}");
+        assert!(
+            intercept
+                .routing
+                .as_ref()
+                .is_some_and(|routing| routing.sensitive && routing.top_level_missing),
+            "{shell}: {intercept:?}"
+        );
+        assert!(
+            !format!("{:?}", output.events).contains("sk-fbaa6"),
+            "{shell}: {:?}",
+            output.events
+        );
+        let journal = std::fs::read_to_string(&output.journal_path).unwrap();
+        assert!(!journal.contains("sk-fbaa6"), "{shell}: {journal}");
+    }
+}
+
+#[test]
+fn shell_host_missing_cksum_keeps_raw_free_sensitive_provenance() {
+    // Post-#2138 the sensitive path shares the regular literal-first-word
+    // identity check and no longer depends on the cksum fingerprint, so a
+    // broken cksum only degrades the unsafe (invalid UTF-8) path. Sensitive
+    // provenance must still be emitted, raw-free, with the native error.
     let input = "missing_sensitive_cli --token=secretvalue";
-    let mut shells = vec!["bash"];
+    let mut shells = Vec::new();
+    if bash_supports_command_not_found_handler() {
+        shells.push("bash");
+    }
     if Command::new("zsh").arg("--version").output().is_ok() {
         shells.push("zsh");
     }
@@ -484,14 +555,20 @@ fn shell_host_missing_cksum_fails_closed_without_sensitive_provenance() {
         assert!(output.events.iter().any(|event| {
             event.kind == ShellEventKind::CommandFailed && event.exit_code == Some(127)
         }));
+        let routing = output
+            .events
+            .iter()
+            .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
+            .unwrap_or_else(|| panic!("{shell}: routing provenance: {:?}", output.events));
+        assert_eq!(routing.component.as_deref(), Some("command"), "{shell}");
         assert!(
-            !output
-                .events
-                .iter()
-                .any(|event| event.kind == ShellEventKind::CommandRoutingObserved),
-            "{shell}: {:?}",
-            output.events
+            routing.routing.as_ref().is_some_and(|metadata| {
+                metadata.top_level_missing && metadata.sensitive && !metadata.unsafe_input
+            }),
+            "{shell}: {routing:?}"
         );
+        assert!(routing.input.is_none(), "{shell}");
+        assert!(routing.command.is_none(), "{shell}");
         assert!(
             !format!("{:?}", output.events).contains("secretvalue"),
             "{shell}: {:?}",
@@ -1955,6 +2032,73 @@ fn shell_host_bash_missing_path_natural_language_intercepts() {
     );
 }
 
+/// #2138 review round 2: the missing-path route (#1919) must not keep its
+/// own secret veto — a slash-bearing NL prompt carrying a key intercepts
+/// like the CNF route, with the sensitive routing flag and the journal
+/// whole-field redaction (raw key never reaches durable evidence).
+#[test]
+fn shell_host_bash_sensitive_missing_path_natural_language_intercepts() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-sensitive-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let mut config = ShellHostConfig::new("missing-path-sensitive-nl", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt =
+        "你读一下，并安装这个skill：/nonexistent-cosh-1919-probe/SKILL.md API Key: sk-fbaa6";
+    let output =
+        run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
+
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "sensitive missing-path natural-language intercept: {:?}",
+                output.events
+            )
+        });
+    // The harness returns journal-redacted events: the sensitive flag must
+    // trigger the whole-field redaction and no correlation exists (the
+    // command never started, so top_level_missing stays false).
+    assert_eq!(intercept.input.as_deref(), Some("<redacted>"));
+    assert!(
+        intercept
+            .routing
+            .as_ref()
+            .is_some_and(|routing| routing.sensitive && !routing.top_level_missing),
+        "{intercept:?}"
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        !terminal.contains("No such file or directory"),
+        "{terminal}"
+    );
+    assert!(
+        !format!("{:?}", output.events).contains("sk-fbaa6"),
+        "{:?}",
+        output.events
+    );
+    let journal = std::fs::read_to_string(&output.journal_path).unwrap();
+    assert!(!journal.contains("sk-fbaa6"), "{journal}");
+}
+
 #[test]
 fn routing_c1_cnf_han_tier_a_routes_to_agent() {
     for shell in ["bash", "zsh"] {
@@ -2673,8 +2817,11 @@ fn routing_c2_valid_quoted_command_and_inner_whitespace_keep_their_owners() {
 }
 
 // Issue #1919 fail-closed counterproofs: the missing-path branch must never
-// fire for existing paths (I1/D6), plain-English typo paths (I2/D3), or
-// secret-bearing input (I3) — bash native behavior stays byte-identical.
+// fire for existing paths (I1/D6) or plain-English typo paths (I2/D3) —
+// bash native behavior stays byte-identical. (The former I3 secret
+// counterproof is retired by #2138: secret-bearing missing-path NL now
+// intercepts with the sensitive flag, anchored in
+// shell_host_bash_sensitive_missing_path_natural_language_intercepts.)
 #[test]
 fn shell_host_bash_missing_path_counterproofs_stay_native() {
     if Command::new("bash").arg("--version").output().is_err() {
@@ -2728,13 +2875,11 @@ fn shell_host_bash_missing_path_counterproofs_stay_native() {
     let existing_data = format!("{} 帮我读一下", data_path.display());
     let dangling_input = format!("{} 帮我读一下", dangling_path.display());
     let opaque_input = format!("{} 帮我读一下", opaque_file.display());
-    let secret_input = "打开./conf-1919.toml password=secretvalue";
     let output = run_scripted_bash(
         &config,
         &[
             ScriptedInput::user_line(existing_exec.clone()),
             ScriptedInput::user_line("/usr/bin/nonexistent-cosh-1919-probe"),
-            ScriptedInput::user_line(secret_input),
             ScriptedInput::user_line(existing_data.clone()),
             ScriptedInput::user_line(dangling_input.clone()),
             ScriptedInput::user_line(opaque_input.clone()),

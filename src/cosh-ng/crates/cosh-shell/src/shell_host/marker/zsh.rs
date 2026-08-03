@@ -117,9 +117,10 @@ _cosh_emit_intercept_marker() {
   local input="$1"
   local reason="$2"
   local top_level_missing="${3:-false}"
+  local sensitive="${4:-false}"
   local timestamp
   timestamp="$(_cosh_now_ms)"
-  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s}\a' \
+  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s,"sensitive":%s}\a' \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
@@ -127,7 +128,8 @@ _cosh_emit_intercept_marker() {
     "$(_cosh_json_escape "$input")" \
     "$(_cosh_json_escape "$reason")" \
     "${_COSH_ATTEMPT_GENERATION:-0}" \
-    "$top_level_missing"
+    "$top_level_missing" \
+    "$sensitive"
 }
 _cosh_emit_top_level_missing_marker() {
   local intent="$1"
@@ -370,8 +372,6 @@ _cosh_begin_attempt() {
   _COSH_ATTEMPT_TOKEN_FINGERPRINT=
   if _cosh_command_has_secret "$input"; then
     _COSH_ATTEMPT_SENSITIVE=1
-    _COSH_ATTEMPT_TOKEN_FINGERPRINT="$(_cosh_token_fingerprint "$top_token")" || _COSH_ATTEMPT_ACTIVE=0
-    return 0
   fi
   _cosh_utf8_han_status "$input"
   utf8_status=$?
@@ -431,7 +431,7 @@ command_not_found_handler() {
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
-  if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
+  if [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
     local command_fingerprint
     command_fingerprint="$(_cosh_token_fingerprint "$command")"
     if [[ -z "$command_fingerprint"
@@ -441,10 +441,8 @@ command_not_found_handler() {
     fi
     _COSH_ATTEMPT_ACTIVE=0
     local sensitive=false
-    local unsafe=false
     [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
-    [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]] && unsafe=true
-    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" "$unsafe"
+    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" true
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
@@ -459,23 +457,25 @@ command_not_found_handler() {
     return $?
   fi
   _COSH_ATTEMPT_ACTIVE=0
+  local sensitive=false
+  [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
   local reason
   if reason="$(_cosh_should_intercept_unknown "$command" "$original" "$(($# + 1))")"; then
-    _cosh_emit_intercept_marker "$original" "$reason"
+    _cosh_emit_intercept_marker "$original" "$reason" false "$sensitive"
     return 0
   fi
   local intent
   intent="$(_cosh_classify_missing "$original" "$command")"
   if [[ "$intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
     if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
-      _cosh_emit_top_level_missing_marker "$intent" false false
+      _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
       _cosh_delegate_zsh_command_not_found "$command" "$@"
       return $?
     fi
-    _cosh_emit_intercept_marker "$original" "natural_language" true
+    _cosh_emit_intercept_marker "$original" "natural_language" true "$sensitive"
     return 0
   fi
-  _cosh_emit_top_level_missing_marker "$intent" false false
+  _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
   _cosh_delegate_zsh_command_not_found "$command" "$@"
   return $?
 }
@@ -525,7 +525,9 @@ _cosh_preexec_marker() {
     fi
     local reason
     if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
-      _cosh_emit_intercept_marker "$command" "$reason"
+      local intercept_sensitive=false
+      _cosh_command_has_secret "$command" && intercept_sensitive=true
+      _cosh_emit_intercept_marker "$command" "$reason" false "$intercept_sensitive"
       return 1
     fi
     _cosh_begin_attempt "$command" "$first_word" "$expansion_drift"

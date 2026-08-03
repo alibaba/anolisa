@@ -14,6 +14,7 @@ pub use implementation::{
 
 #[allow(unused_imports)]
 pub(crate) use implementation::{
+    mark_request_sensitive_input, request_has_sensitive_input,
     request_is_analysis_only_continuation, set_request_context_binding, AgentContextBinding,
     BuiltinFactRecord, BuiltinFindingFacts, EvaluatedHookFinding, HighMemoryProcessFacts,
     HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,

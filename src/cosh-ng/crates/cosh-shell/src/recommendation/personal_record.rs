@@ -6,9 +6,9 @@ use crate::types::{
 
 use super::personal_model::{
     ActivityContext, ActivityOutcome, ActivityPayload, ActivityRecord, ActivitySource,
-    AgentRequestBindingKind, ShellActivityOrigin, ToolCategory,
+    AgentRequestBindingKind, RedactionKind, RedactionReport, ShellActivityOrigin, ToolCategory,
 };
-use super::personal_sanitize::{sanitize_agent_request, sanitize_shell_command};
+use super::personal_sanitize::{sanitize_agent_request, sanitize_shell_command, SanitizedText};
 
 pub(crate) fn shell_command_record(
     block: &CommandBlock,
@@ -73,7 +73,23 @@ pub(crate) fn agent_request_record(
         AgentContextBinding::ControlProtocolEvidence
         | AgentContextBinding::ShellHandoffContinuation => return None,
     };
-    let sanitized = sanitize_agent_request(request.user_input.as_deref()?).ok()?;
+    let user_input = request.user_input.as_deref()?;
+    // The shell-side secret gate flagged this input sensitive: redact the
+    // whole field (journal precedent, #2138) instead of trusting the
+    // sanitizer regexes to re-detect every shell-gate form (`sk-fbaa6`
+    // is below the opaque-token minimum length).
+    let sanitized = if crate::types::request_has_sensitive_input(request) {
+        SanitizedText {
+            text: "<redacted>".to_string(),
+            report: RedactionReport {
+                replacements: vec![RedactionKind::Secret],
+                truncated: false,
+                sanitizer_version: 1,
+            },
+        }
+    } else {
+        sanitize_agent_request(user_input).ok()?
+    };
 
     Some(ActivityRecord {
         activity_id: activity_id.to_string(),

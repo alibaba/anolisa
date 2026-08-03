@@ -191,9 +191,10 @@ _cosh_emit_intercept_marker() {
   local input="$1"
   local reason="$2"
   local top_level_missing="${3:-false}"
+  local sensitive="${4:-false}"
   local timestamp
   timestamp="$(_cosh_now_ms)"
-  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s}\a' \
+  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s,"sensitive":%s}\a' \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
@@ -201,7 +202,8 @@ _cosh_emit_intercept_marker() {
     "$(_cosh_json_escape "$input")" \
     "$(_cosh_json_escape "$reason")" \
     "${_COSH_ATTEMPT_GENERATION:-0}" \
-    "$top_level_missing"
+    "$top_level_missing" \
+    "$sensitive"
 }
 _cosh_emit_top_level_missing_marker() {
   local intent="$1"
@@ -246,13 +248,14 @@ _cosh_is_slash_control_candidate() {
 # natural_language verdict on a provably-ENOENT path intercepts (dangling
 # symlinks and permission-opaque paths keep their native 126/127 errors),
 # everything else keeps the native bash error byte-identical to the
-# pre-fix behavior.
+# pre-fix behavior. Secret-bearing lines are not vetoed here (#2138):
+# both callers compute the sensitive flag, scrub history, and mark the
+# intercept so durable sinks redact the whole input field.
 _cosh_should_intercept_missing_path() {
   local first_word="$1"
   local command="$2"
   [[ "$first_word" == */* ]] || return 1
   [[ "${_COSH_AI_ENABLED:-1}" == 1 ]] || return 1
-  ! _cosh_command_has_secret "$command" || return 1
   _cosh_path_provably_missing "$first_word" || return 1
   local intent
   intent="$(_cosh_classify_missing "$command" "$first_word" missing_path)"
@@ -428,8 +431,6 @@ _cosh_begin_attempt() {
   _COSH_ATTEMPT_TOKEN_FINGERPRINT=
   if _cosh_command_has_secret "$input"; then
     _COSH_ATTEMPT_SENSITIVE=1
-    _COSH_ATTEMPT_TOKEN_FINGERPRINT="$(_cosh_token_fingerprint "$top_token")" || _COSH_ATTEMPT_ACTIVE=0
-    return 0
   fi
   _cosh_utf8_han_status "$input"
   utf8_status=$?
@@ -489,7 +490,7 @@ command_not_found_handle() {
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
   fi
-  if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
+  if [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
     local command_fingerprint
     command_fingerprint="$(_cosh_token_fingerprint "$command")"
     if [[ -z "$command_fingerprint"
@@ -499,10 +500,8 @@ command_not_found_handle() {
     fi
     _COSH_ATTEMPT_ACTIVE=0
     local sensitive=false
-    local unsafe=false
     [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
-    [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]] && unsafe=true
-    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" "$unsafe"
+    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" true
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
   fi
@@ -517,23 +516,25 @@ command_not_found_handle() {
     return $?
   fi
   _COSH_ATTEMPT_ACTIVE=0
+  local sensitive=false
+  [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
   local reason
   if reason="$(_cosh_should_intercept_unknown "$command" "$original" "$(($# + 1))")"; then
-    _cosh_emit_intercept_marker "$original" "$reason"
+    _cosh_emit_intercept_marker "$original" "$reason" false "$sensitive"
     return 0
   fi
   local intent
   intent="$(_cosh_classify_missing "$original" "$command")"
   if [[ "$intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
     if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
-      _cosh_emit_top_level_missing_marker "$intent" false false
+      _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
       _cosh_delegate_bash_command_not_found "$command" "$@"
       return $?
     fi
-    _cosh_emit_intercept_marker "$original" "natural_language" true
+    _cosh_emit_intercept_marker "$original" "natural_language" true "$sensitive"
     return 0
   fi
-  _cosh_emit_top_level_missing_marker "$intent" false false
+  _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
   _cosh_delegate_bash_command_not_found "$command" "$@"
   return $?
 }
@@ -688,15 +689,17 @@ _cosh_preexec_marker() {
         fallback_first_word="${fallback_command%%[[:space:]]*}"
         fallback_argc=2
       fi
+      local fallback_sensitive=false
+      _cosh_command_has_secret "$fallback_command" && fallback_sensitive=true
       local fallback_reason
       if fallback_reason="$(_cosh_should_intercept_unknown "$fallback_first_word" "$fallback_command" "$fallback_argc")"; then
-        _cosh_emit_intercept_marker "$fallback_command" "$fallback_reason"
+        _cosh_emit_intercept_marker "$fallback_command" "$fallback_reason" false "$fallback_sensitive"
         _COSH_AT_PROMPT=0
         eval "$active_debug_trap" 2>/dev/null || true
         return 1
       fi
       if _cosh_should_intercept_missing_path "$fallback_first_word" "$fallback_command"; then
-        _cosh_emit_intercept_marker "$fallback_command" "natural_language"
+        _cosh_emit_intercept_marker "$fallback_command" "natural_language" false "$fallback_sensitive"
         _COSH_AT_PROMPT=0
         eval "$active_debug_trap" 2>/dev/null || true
         return 1
@@ -727,22 +730,27 @@ _cosh_preexec_marker() {
           first_word="${command%%[[:space:]]*}"
           argc=2
         fi
+        local intercept_sensitive=false
+        _cosh_command_has_secret "$command" && intercept_sensitive=true
         local reason
         if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
           # Intercepted lines return 1 before the secret redaction below
           # ever runs, so scrub credential-bearing entries here or the raw
           # text would persist in native history (routed slash submissions
           # enter history via readline before the trap fires).
-          if _cosh_command_has_secret "$command"; then
+          if [[ "$intercept_sensitive" == true ]]; then
             builtin history -d "$history_no" 2>/dev/null || true
           fi
-          _cosh_emit_intercept_marker "$command" "$reason"
+          _cosh_emit_intercept_marker "$command" "$reason" false "$intercept_sensitive"
           _COSH_AT_PROMPT=0
           eval "$active_debug_trap" 2>/dev/null || true
           return 1
         fi
         if _cosh_should_intercept_missing_path "$first_word" "$command"; then
-          _cosh_emit_intercept_marker "$command" "natural_language"
+          if [[ "$intercept_sensitive" == true ]]; then
+            builtin history -d "$history_no" 2>/dev/null || true
+          fi
+          _cosh_emit_intercept_marker "$command" "natural_language" false "$intercept_sensitive"
           _COSH_AT_PROMPT=0
           eval "$active_debug_trap" 2>/dev/null || true
           return 1
