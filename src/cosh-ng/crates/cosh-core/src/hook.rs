@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use regex::Regex;
-use serde::de::{value::MapAccessDeserializer, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{HookDefinition, HooksConfig};
@@ -56,64 +55,13 @@ pub struct HookInput {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct HookOutput {
-    #[serde(rename = "continue")]
-    pub should_continue: Option<bool>,
-    #[serde(alias = "stopReason")]
-    pub stop_reason: Option<String>,
-    #[serde(alias = "suppressOutput")]
-    pub suppress_output: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_present_string")]
     pub decision: Option<String>,
     pub reason: Option<String>,
     #[serde(alias = "systemMessage")]
     pub system_message: Option<String>,
     #[serde(alias = "hookSpecificOutput")]
     pub hook_specific_output: Option<Value>,
-}
-
-fn deserialize_present_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    String::deserialize(deserializer).map(Some)
-}
-
-struct ObjectOnlyHookOutput(HookOutput);
-
-impl<'de> Deserialize<'de> for ObjectOnlyHookOutput {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ObjectVisitor;
-
-        impl<'de> Visitor<'de> for ObjectVisitor {
-            type Value = ObjectOnlyHookOutput;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a hook output JSON object")
-            }
-
-            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                HookOutput::deserialize(MapAccessDeserializer::new(map)).map(ObjectOnlyHookOutput)
-            }
-        }
-
-        deserializer.deserialize_map(ObjectVisitor)
-    }
-}
-
-fn decode_hook_output(raw: &[u8]) -> Option<HookOutput> {
-    // Decode from the original bytes so invalid UTF-8 and duplicate fields
-    // remain protocol errors instead of being normalized before validation.
-    serde_json::from_slice::<ObjectOnlyHookOutput>(raw)
-        .ok()
-        .map(|output| output.0)
 }
 
 // ─── Aggregated Results ──────────────────────────────────────────────
@@ -970,33 +918,16 @@ impl HookSystem {
 
         match exit_code {
             0 => {
-                // Exit 0 claims the hook ran successfully, so its stdout must
-                // follow the hook JSON protocol. Anything else — blank,
-                // truncated, or mixed with debug text — fails closed instead
-                // of silently passing the protected action through.
-                match decode_hook_output(&output.stdout) {
-                    Some(output)
-                        if classify_hook_decision(output.decision.as_deref())
-                            != HookDecisionClass::Invalid =>
-                    {
-                        Self::redact_hook_output(output)
-                    }
-                    Some(_) | None => {
-                        // Neither the serde error nor the raw stdout may be
-                        // logged: both can carry fragments of sensitive
-                        // hook output.
-                        tracing::warn!(
-                            target: "cosh_hook",
-                            "Hook '{safe_command}' exited 0 but its stdout violates the hook JSON protocol; \
-                             failing closed with a block decision"
-                        );
-                        HookOutput {
-                            decision: Some("block".to_string()),
-                            reason: Some(INVALID_HOOK_OUTPUT_REASON.to_string()),
-                            ..Default::default()
-                        }
-                    }
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let trimmed = stdout.trim();
+                if trimmed.is_empty() {
+                    return HookOutput::default();
                 }
+                let output = serde_json::from_str::<HookOutput>(trimmed).unwrap_or_else(|e| {
+                    tracing::warn!(target: "cosh_hook", "Failed to parse output from '{safe_command}': {e}");
+                    HookOutput::default()
+                });
+                Self::redact_hook_output(output)
             }
             2 => {
                 // System block via exit code 2
@@ -1007,7 +938,8 @@ impl HookSystem {
                     } else {
                         stderr.trim().to_string()
                     }),
-                    ..Default::default()
+                    system_message: None,
+                    hook_specific_output: None,
                 })
             }
             _ => {
@@ -1022,9 +954,6 @@ impl HookSystem {
     }
 
     fn redact_hook_output(mut output: HookOutput) -> HookOutput {
-        output.stop_reason = output
-            .stop_reason
-            .map(|value| crate::redaction::redact_text(&value));
         output.reason = output
             .reason
             .map(|value| crate::redaction::redact_text(&value));
@@ -1217,35 +1146,13 @@ pub fn merge_json_pub(a: Value, b: Value) -> Value {
 
 // ─── Decision Aggregation Primitives ─────────────────────────────────
 
-const INVALID_HOOK_OUTPUT_REASON: &str =
-    "Hook output violates the hook JSON protocol; blocking for safety";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HookDecisionClass {
-    Passthrough,
-    Block,
-    Ask,
-    Allow,
-    Invalid,
-}
-
-fn classify_hook_decision(raw: Option<&str>) -> HookDecisionClass {
-    match raw {
-        None | Some("") => HookDecisionClass::Passthrough,
-        Some("block") | Some("deny") | Some("reject") => HookDecisionClass::Block,
-        Some("ask") => HookDecisionClass::Ask,
-        Some("approve") | Some("allow") => HookDecisionClass::Allow,
-        Some(_) => HookDecisionClass::Invalid,
-    }
-}
-
 /// Fold a raw hook output decision string into the running `HookDecision`.
 ///
 /// Priority (highest wins): Block > Ask > Allow > Passthrough.
 /// "reject" is treated as equivalent to "block"/"deny" (used by Stop hooks).
 fn fold_decision(current: HookDecision, raw: Option<&str>, reason: Option<String>) -> HookDecision {
-    match classify_hook_decision(raw) {
-        HookDecisionClass::Block => {
+    match raw {
+        Some("block") | Some("deny") | Some("reject") => {
             // Preserve the first non-empty block reason; don't let a later
             // hook without a reason overwrite an existing detailed message.
             match (&current, &reason) {
@@ -1253,19 +1160,15 @@ fn fold_decision(current: HookDecision, raw: Option<&str>, reason: Option<String
                 _ => HookDecision::Block(reason.unwrap_or_else(|| "Blocked by hook".to_string())),
             }
         }
-        HookDecisionClass::Ask => match current {
+        Some("ask") => match current {
             HookDecision::Block(_) => current,
             _ => HookDecision::Ask,
         },
-        HookDecisionClass::Allow => match current {
+        Some("approve") | Some("allow") => match current {
             HookDecision::Passthrough => HookDecision::Allow,
             _ => current,
         },
-        HookDecisionClass::Passthrough => current,
-        HookDecisionClass::Invalid => match current {
-            HookDecision::Block(_) => current,
-            _ => HookDecision::Block(INVALID_HOOK_OUTPUT_REASON.to_string()),
-        },
+        _ => current,
     }
 }
 
@@ -1374,7 +1277,7 @@ mod tests {
     #[test]
     fn parse_hook_output_block() {
         let json = r#"{"decision":"block","reason":"unsafe command"}"#;
-        let out = decode_hook_output(json.as_bytes()).unwrap();
+        let out: HookOutput = serde_json::from_str(json).unwrap();
         assert_eq!(out.decision.as_deref(), Some("block"));
         assert_eq!(out.reason.as_deref(), Some("unsafe command"));
     }
@@ -1383,48 +1286,16 @@ mod tests {
     fn parse_hook_output_allow_with_patch() {
         let json =
             r#"{"decision":"allow","hook_specific_output":{"tool_input":{"safe_mode":true}}}"#;
-        let out = decode_hook_output(json.as_bytes()).unwrap();
+        let out: HookOutput = serde_json::from_str(json).unwrap();
         assert_eq!(out.decision.as_deref(), Some("allow"));
         let patch = out.hook_specific_output.unwrap();
         assert_eq!(patch["tool_input"]["safe_mode"], true);
     }
 
     #[test]
-    fn parse_hook_output_accepts_camel_case_aliases() {
-        let json = r#"{"continue":false,"stopReason":"stop","suppressOutput":true,"systemMessage":"notice","hookSpecificOutput":{"additionalContext":"context"}}"#;
-        let out = decode_hook_output(json.as_bytes()).unwrap();
-        assert_eq!(out.should_continue, Some(false));
-        assert_eq!(out.stop_reason.as_deref(), Some("stop"));
-        assert_eq!(out.suppress_output, Some(true));
-        assert_eq!(out.system_message.as_deref(), Some("notice"));
-        assert_eq!(
-            out.hook_specific_output.unwrap()["additionalContext"],
-            "context"
-        );
-    }
-
-    #[test]
-    fn hook_decision_classification_matches_protocol() {
-        for (raw, expected) in [
-            (None, HookDecisionClass::Passthrough),
-            (Some(""), HookDecisionClass::Passthrough),
-            (Some("block"), HookDecisionClass::Block),
-            (Some("deny"), HookDecisionClass::Block),
-            (Some("reject"), HookDecisionClass::Block),
-            (Some("ask"), HookDecisionClass::Ask),
-            (Some("approve"), HookDecisionClass::Allow),
-            (Some("allow"), HookDecisionClass::Allow),
-            (Some("blok"), HookDecisionClass::Invalid),
-        ] {
-            assert_eq!(classify_hook_decision(raw), expected, "{raw:?}");
-        }
-    }
-
-    #[test]
     fn hook_output_is_redacted_before_aggregation() {
         let secret = "short-hook-secret";
         let output = HookOutput {
-            stop_reason: Some(format!("token={secret}")),
             decision: Some("block".to_string()),
             reason: Some(format!("password={secret}")),
             system_message: Some(format!("Bearer {secret}")),
@@ -1432,13 +1303,11 @@ mod tests {
                 "additionalContext": format!("api_key={secret}"),
                 "tool_input": {"token": secret}
             })),
-            ..Default::default()
         };
 
         let output = HookSystem::redact_hook_output(output);
         let serialized = format!(
-            "{} {} {} {}",
-            output.stop_reason.as_deref().unwrap_or_default(),
+            "{} {} {}",
             output.reason.as_deref().unwrap_or_default(),
             output.system_message.as_deref().unwrap_or_default(),
             output
@@ -1635,134 +1504,6 @@ mod tests {
             .fire_pre_tool_use("s1", "/tmp", "tool-1", "any", &serde_json::json!({}), None)
             .await;
         assert_eq!(result.decision, HookDecision::Block("blocked".to_string()));
-    }
-
-    async fn pre_tool_use_result_for(command: &str) -> PreToolUseResult {
-        let config = HooksConfig {
-            enabled: true,
-            pre_tool_use: vec![HookDefinition {
-                command: command.to_string(),
-                name: Some("protocol-probe".to_string()),
-                matcher: None,
-                timeout: Some(5000),
-                sequential: None,
-                env: Default::default(),
-            }],
-            ..Default::default()
-        };
-        let sys = HookSystem::from_config(&config);
-        sys.fire_pre_tool_use(
-            "s1",
-            "/tmp",
-            "tool-1",
-            "shell",
-            &serde_json::json!({}),
-            None,
-        )
-        .await
-    }
-
-    fn expect_fail_closed_block(result: PreToolUseResult) {
-        match &result.decision {
-            HookDecision::Block(reason) => {
-                assert!(reason.to_lowercase().contains("json"), "{reason}");
-            }
-            other => panic!("expected a fail-closed Block, got {other:?}"),
-        }
-        assert!(result.tool_input_patch.is_none());
-        assert_eq!(result.notifications.len(), 1);
-        assert_eq!(result.notifications[0].decision.as_deref(), Some("block"));
-    }
-
-    #[tokio::test]
-    async fn exit_zero_debug_text_stdout_fails_closed() {
-        let result = pre_tool_use_result_for("echo 'debug: not json'").await;
-        // Raw stdout must not leak into the user-visible block reason.
-        if let HookDecision::Block(reason) = &result.decision {
-            assert!(!reason.contains("debug: not json"), "{reason}");
-        }
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_truncated_json_stdout_fails_closed() {
-        let result = pre_tool_use_result_for("printf '%s' '{\"decision\":\"block\"'").await;
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_unknown_decision_fails_closed() {
-        let result = pre_tool_use_result_for("echo '{\"decision\":\"blok\"}'").await;
-        // Do not expose rejected protocol values through the block reason.
-        if let HookDecision::Block(reason) = &result.decision {
-            assert!(!reason.contains("blok"), "{reason}");
-        }
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_unknown_field_fails_closed() {
-        let result = pre_tool_use_result_for("echo '{\"decison\":\"block\"}'").await;
-        // Do not expose rejected protocol keys through the block reason.
-        if let HookDecision::Block(reason) = &result.decision {
-            assert!(!reason.contains("decison"), "{reason}");
-        }
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_array_stdout_fails_closed() {
-        let result = pre_tool_use_result_for("echo '[null,null,null,null,null,null,null]'").await;
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_non_utf8_stdout_fails_closed() {
-        let result = pre_tool_use_result_for(
-            r#"python3 -c 'import sys; sys.stdout.buffer.write(b"{\"reason\":\"\xff\"}")'"#,
-        )
-        .await;
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_null_decision_fails_closed() {
-        let result = pre_tool_use_result_for("echo '{\"decision\":null}'").await;
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_duplicate_decision_fails_closed() {
-        let result =
-            pre_tool_use_result_for("echo '{\"decision\":\"block\",\"decision\":\"\"}'").await;
-        expect_fail_closed_block(result);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_empty_or_blank_stdout_fails_closed() {
-        for command in ["printf ''", "printf '   \\n\\t  '"] {
-            let result = pre_tool_use_result_for(command).await;
-            expect_fail_closed_block(result);
-        }
-    }
-
-    #[tokio::test]
-    async fn exit_zero_empty_object_stays_passthrough() {
-        let result = pre_tool_use_result_for("echo '{}'").await;
-        assert_eq!(result.decision, HookDecision::Passthrough);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_empty_decision_stays_passthrough() {
-        let result = pre_tool_use_result_for("echo '{\"decision\":\"\"}'").await;
-        assert_eq!(result.decision, HookDecision::Passthrough);
-    }
-
-    #[tokio::test]
-    async fn exit_zero_valid_block_json_keeps_its_reason() {
-        let result =
-            pre_tool_use_result_for("echo '{\"decision\":\"block\",\"reason\":\"policy\"}'").await;
-        assert_eq!(result.decision, HookDecision::Block("policy".to_string()));
     }
 
     // ===== Task 1: matcher 双向工具名兼容 =====
@@ -2037,7 +1778,6 @@ mod tests {
                     },
                 },
             }])),
-            ..Default::default()
         };
 
         let output = HookSystem::redact_hook_output(output);
@@ -2064,7 +1804,6 @@ mod tests {
             hook_specific_output: Some(serde_json::json!({
                 "api_key": "leaked-value",
             })),
-            ..Default::default()
         };
 
         let output = HookSystem::redact_hook_output(output);
@@ -2425,7 +2164,7 @@ mod tests {
             enabled: true,
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
-                command: r#"python3 -c 'import sys,json; print(json.dumps({"suppressOutput": True, "hookSpecificOutput": {"updatedToolResponse": "compressed!", "additionalContext": "env-hint"}}))'"#.to_string(),
+                command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "compressed!", "additionalContext": "env-hint"}}))'"#.to_string(),
                 name: Some("compressor".to_string()),
                 matcher: None,
                 timeout: Some(5000),

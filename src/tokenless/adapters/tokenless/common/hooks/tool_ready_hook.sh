@@ -5,19 +5,18 @@
 # Hook event: PreToolUse (matcher: "" — matches all tools)
 # Requires: jq
 #
-# Design: fail-open. Skipped checks emit a valid pass-through hook response.
+# Design: fail-open. If jq is missing or any phase fails, exit 0 silently.
 #
 # Four-Phase Flow:
 #   Phase 1 — LOOKUP:   Find tool in config dictionary. Not found → skip.
-#   Phase 2 — CHECK:    Scan system readiness. All ready → pass through.
-#   Phase 3 — FIX:      Auto-install missing deps. Success → pass through.
+#   Phase 2 — CHECK:    Scan system readiness. All ready → continue silently.
+#   Phase 3 — FIX:      Auto-install missing deps. Success → continue silently.
 #   Phase 4 — FEEDBACK: Fix failed. Inject additionalContext → "Skip retry".
 
 set -euo pipefail
 
 VERBOSE="${TOKENLESS_VERBOSE:-}"
 log_v() { [ -n "$VERBOSE" ] && echo "[tokenless:ready] $1" >&2 || true; }
-pass_through() { printf '%s\n' '{}'; exit 0; }
 
 USER_HOME="${HOME:-}"
 case "$USER_HOME" in
@@ -26,7 +25,7 @@ case "$USER_HOME" in
 esac
 
 # --- Dependency check (fail-open) ---
-if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; pass_through; fi
+if ! command -v jq &>/dev/null; then log_v "jq not found, skipping"; exit 0; fi
 
 # --- File trust validation ---
 # User-writable paths must be owned by current user and not world-writable.
@@ -135,7 +134,7 @@ for candidate in \
 done
 
 # --- Read input (fail-open) ---
-if ! INPUT=$(cat); then pass_through; fi
+INPUT=$(cat || { exit 0; })
 
 # ============================================================================
 # Phase 1: LOOKUP — Find tool in config dictionary
@@ -143,9 +142,9 @@ if ! INPUT=$(cat); then pass_through; fi
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo '')
 log_v "Phase 1 LOOKUP: tool_name=$TOOL_NAME"
-if [ -z "$TOOL_NAME" ]; then pass_through; fi
+if [ -z "$TOOL_NAME" ]; then exit 0; fi
 
-if [ ! -f "$SPEC_FILE" ]; then log_v "spec file not found, skipping"; pass_through; fi
+if [ ! -f "$SPEC_FILE" ]; then log_v "spec file not found, skipping"; exit 0; fi
 
 # Resolve: aliases reverse lookup → exact key → case-insensitive fallback
 # Each spec entry has an "aliases" array listing tool names from all agent
@@ -177,7 +176,7 @@ fi
 
 if [ -z "$SPEC_KEY" ]; then
     log_v "Phase 1: $TOOL_NAME not in spec dict → skip"
-    pass_through
+    exit 0
 fi
 log_v "Phase 1: $TOOL_NAME → $SPEC_KEY found in spec dict"
 
@@ -430,8 +429,8 @@ if $IS_READY && [ "$missing_count_rec" -gt 0 ]; then
 fi
 
 if $IS_READY && ! $IS_PARTIAL; then
-    log_v "Phase 2 CHECK: $TOOL_NAME → READY, pass-through"
-    pass_through
+    log_v "Phase 2 CHECK: $TOOL_NAME → READY, silent pass"
+    exit 0
 fi
 if $IS_PARTIAL; then
     log_v "Phase 2 CHECK: $TOOL_NAME → PARTIAL (recommended missing: ${RECOMMENDED_MISSING_LIST})"
@@ -451,7 +450,7 @@ if [ "$missing_count" -gt 0 ] \
     && [ -n "$FIX_SCRIPT" ] \
     && [ -r "$FIX_SCRIPT" ] \
     && is_trusted_file "$FIX_SCRIPT"; then
-    echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all >/dev/null 2>&1 || true
+    echo "$MISSING_DEP_JSONS" | bash "$FIX_SCRIPT" fix-all 2>/dev/null || true
     hash -r 2>/dev/null || true
 
     # Re-scan to check if fix succeeded
@@ -499,7 +498,7 @@ if [ "$missing_count" -gt 0 ] \
     fi
 
     if [ -z "$STILL_MISSING" ] && ! $HAS_VERSION_LOW && [ -z "$PERM_MISSING" ]; then
-        pass_through
+        exit 0
     fi
 
     # After fix, re-check readiness
@@ -513,7 +512,7 @@ if [ "$missing_count" -gt 0 ] \
             "hookEventName": "PreToolUse",
             "additionalContext": $context
           }
-        }' || pass_through
+        }' || exit 0
         exit 0
     fi
 fi
@@ -532,7 +531,7 @@ if $IS_PARTIAL && ! $HAS_REQUIRED_MISSING && ! $HAS_VERSION_LOW && [ -z "$PERM_M
         "hookEventName": "PreToolUse",
         "additionalContext": $context
       }
-    }' || pass_through
+    }' || exit 0
     exit 0
 fi
 
@@ -561,4 +560,4 @@ jq -n --arg context "$DIAG_MSG" --arg reason "$DIAG_MSG" '{
     "hookEventName": "PreToolUse",
     "additionalContext": $context
   }
-}' || pass_through
+}' || exit 0
