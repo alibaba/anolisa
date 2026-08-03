@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.8.0
+
+- Added COSH_SESSION_ID export for subprocess and MCP correlation. (#1491)
+- Fixed hook process tree termination on timeout and cancellation. (#1585)
+- Updated docs to centralize user guides and add docs lint CI. (#1586)
+- Fixed cosh-switch to reuse compatible cosh-ng authentication. (#1951)
+
 ## 2.7.0
 
 - Added `/ktuner` command with consent-gated, opt-in first-run check and trusted-path resolver. (#1279)
