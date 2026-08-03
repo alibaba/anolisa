@@ -507,6 +507,83 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 }
 
 #[test]
+fn raw_cli_cosh_core_failed_host_executed_preserves_redacted_stderr() {
+    let home = temp_shell_home("cosh-core-host-executed-redacted-stderr");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-redacted-stderr","model":"cosh-core-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-core-provider-redacted-stderr*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-redacted-stderr","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"(python3 /definitely-missing/install_openclaw.py --api-key redaction-regression-secret --cookie cookie-regression-secret --model-id qwen-test; printf \"%s%s%s%s%s\\n\" \"--cookie \" \"cookie-output-\" \"secret \" \"xox\" \"c-123456789012345\" >&2; exit 2)"},"tool_use_id":"toolu-redacted-stderr"}}'
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    case "$response" in
+      *'"behavior":"host_executed_shell"'*'<redacted sensitive command>'*"can't open file"*'--cookie <redacted>'*'"exit_code":2'*) ;;
+      *)
+        printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-redacted-stderr","is_error":true,"result":"host result omitted redacted stderr"}'
+        exit 1
+        ;;
+    esac
+    case "$response" in
+      *cookie-output-secret*|*xoxc-123456789012345*)
+        printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-redacted-stderr","is_error":true,"result":"host result leaked output credential"}'
+        exit 1
+        ;;
+    esac
+    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-redacted-stderr","message":{"content":[{"type":"text","text":"FAILED STDERR EVIDENCE RECEIVED"}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-redacted-stderr","is_error":false,"result":"done"}'
+    exit 0
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-redacted-stderr","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &[],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-core-provider-redacted-stderr\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"\n".to_vec(), Duration::from_millis(2_000)),
+            (b"/debug session\n".to_vec(), Duration::from_millis(6_000)),
+            (b"true\n".to_vec(), Duration::from_millis(500)),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("FAILED STDERR EVIDENCE RECEIVED"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("host result omitted redacted stderr"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("host result leaked output credential"),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_cosh_core_host_executed_long_command_continues_same_turn() {
     let home = temp_shell_home("cosh-core-host-executed-long");
     let bin_dir = home.join("bin");
