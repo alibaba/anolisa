@@ -91,7 +91,7 @@ impl Tool for SkillTool {
                 match self.manager.load(name).await {
                     Some(skill) => {
                         let base_dir_hint = format!(
-                            "\nBase directory for this skill: {}",
+                            "\nBase directory for this skill: {}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.",
                             skill.base_dir.display()
                         );
                         Ok(ToolResult::success(format!(
@@ -203,6 +203,9 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.output.contains("You are demo"));
         assert!(result.output.contains("Base directory for this skill:"));
+        assert!(result
+            .output
+            .contains("ALWAYS resolve absolute paths from this base directory"));
     }
 
     #[tokio::test]
