@@ -737,13 +737,15 @@ _cosh_preexec_marker() {
       local display_command="$command"
       if _cosh_is_handoff_wrapper "$command"; then
         display_command="$(_cosh_unwrap_handoff_command "$command")"
-        _COSH_HANDOFF_ACTIVE=1
         _COSH_HANDOFF_HISTORY_NO="$history_no"
-        _cosh_apply_handoff_pager_policy
-        # The token is consumed only by the line whose unwrapped text matches
-        # the staged request: a user-typed bypass-prefixed line racing ahead
-        # must not steal the pending handoff's claim (#2142 review).
+        # Handoff treatment (active flag, pager policy, token) applies only
+        # when the unwrapped text matches the staged request: a user-typed
+        # bypass-prefixed line racing ahead must not steal the claim, and its
+        # precmd must not see the active flag and clear the staged sidecars
+        # the real handoff line is about to consume (#2142 review).
         if _cosh_is_pending_handoff_command "$display_command"; then
+          _COSH_HANDOFF_ACTIVE=1
+          _cosh_apply_handoff_pager_policy
           _cosh_load_handoff_token
           _cosh_clear_handoff_request
         fi

@@ -49,7 +49,9 @@ Lifecycle rule: **only consumption clears the staged files.** Unrelated
 branches (a queued command racing ahead of the handoff, and that command's
 precmd) must leave the sidecars alone — the Rust transport owns cleanup for
 abandoned handoffs. A user-typed `COSH_SHELL_HANDOFF_BYPASS=1` line whose text
-does not match the staged request does not load the token.
+does not match the staged request receives no handoff treatment at all —
+no active flag, no pager policy, no token — so neither its preexec nor its
+precmd can disturb the staged claim.
 
 ### Claim (OscParser + activity)
 
