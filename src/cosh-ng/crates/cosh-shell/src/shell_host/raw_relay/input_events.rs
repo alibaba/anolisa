@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::raw_input::RawInputEvent;
 
-use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker};
+use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker, RESTORE_CURSOR, SAVE_CURSOR};
 
 /// Terminal display columns of candidate echo bytes: ANSI escape sequences
 /// are zero-width; other content is measured per Unicode width (CJK = 2).
@@ -139,14 +139,14 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     write!(output, "\x1b[K")?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
-                        write!(output, "\x1b[s\x1b[2m {hint}\x1b[0m\x1b[u")?;
+                        write!(output, "{SAVE_CURSOR}\x1b[2m {hint}\x1b[0m{RESTORE_CURSOR}")?;
                     }
                     *native_candidate_echoed_len = candidate_display_columns(&input);
                 } else {
                     write!(output, "\r\x1b[2K{prompt}")?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
-                        write!(output, "\x1b[s\x1b[2m {hint}\x1b[0m\x1b[u")?;
+                        write!(output, "{SAVE_CURSOR}\x1b[2m {hint}\x1b[0m{RESTORE_CURSOR}")?;
                     }
                 }
                 output.flush()?;
