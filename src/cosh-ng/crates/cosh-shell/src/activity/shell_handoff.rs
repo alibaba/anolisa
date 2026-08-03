@@ -246,7 +246,21 @@ fn shell_handoff_block_matches_request(
     block: &CommandBlock,
     request: &ShellHandoffRequest,
 ) -> bool {
-    // Shell markers are second-granular, so compare representable seconds.
+    // Token claim first (#2142): a block carrying the request's one-time
+    // claim token is the handoff's own command no matter how the marker
+    // script rewrote its reported text (secret redaction, unsafe input).
+    if !request.token.is_empty()
+        && block
+            .audit_identity
+            .as_ref()
+            .and_then(|audit| audit.handoff_token.as_deref())
+            == Some(request.token.as_str())
+    {
+        return true;
+    }
+    // Text fallback for blocks produced by marker scripts that predate the
+    // token sidecar. Shell markers are second-granular, so compare
+    // representable seconds.
     let started_at_or_after_request = block.started_at_ms / 1_000 >= request.created_at_ms / 1_000;
     block.command == request.command
         && block.origin == expected_handoff_origin(request)

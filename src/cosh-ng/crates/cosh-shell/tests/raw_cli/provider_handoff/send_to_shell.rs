@@ -129,6 +129,131 @@ fn raw_cli_missing_send_to_shell_uses_zh_language_env() {
     assert!(!output.contains("bash: /send-to-shell"), "{output}");
 }
 
+// Repro for the install-openclaw silent-stop report: an approved handoff
+// whose command carries a secret (`--api-key "sk-..."`) is redacted to
+// `<redacted sensitive command>` by the preexec marker, so the tracked
+// closure path can never match the command block and the untracked
+// fallback is vetoed by the observed CommandStarted. The
+// host_executed_shell result is then never delivered and the provider
+// waits forever. This test asserts the desired behavior (result
+// delivered), so it FAILS on the buggy code and becomes the regression
+// test once fixed.
+#[test]
+fn raw_cli_approved_shell_handoff_with_secret_delivers_host_executed_result() {
+    let home = temp_shell_home("cosh-core-handoff-secret");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-handoff-secret","model":"cosh-core-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-core-handoff-secret*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-secret","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"echo installed --api-key \"sk-test-cosh-repro-1234\""},"tool_use_id":"toolu-handoff-secret"}}'
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
+      case "$response" in
+        *'"behavior":"host_executed_shell"'*'"exit_code":0'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-handoff-secret","message":{"content":[{"type":"text","text":"HANDOFF SECRET HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-secret","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-handoff-secret","is_error":true,"result":"missing secret host_executed_shell result"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-secret","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &[],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-core-handoff-secret\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(3_000)),
+        ],
+    );
+    // #2142 acceptance: no durable surface may retain the plaintext secret.
+    // The scripted cosh-core under bin/ is the only legitimate holder (it is
+    // test fixture input, not a session artifact).
+    assert!(
+        home.join(".copilot-shell").is_dir(),
+        "durable surfaces moved out of HOME; the leak sweep below would go blind"
+    );
+    let leaks = files_containing(&home, "sk-test-cosh-repro-1234", &bin_dir);
+    let _ = fs::remove_dir_all(&home);
+    assert!(
+        leaks.is_empty(),
+        "plaintext secret persisted to durable surfaces: {leaks:?}"
+    );
+
+    assert!(output.contains("Mode set to trust."), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
+    assert!(output.contains("Bash tool sent to shell"), "{output}");
+    assert!(
+        output.contains("HANDOFF SECRET HOSTEXEC RECEIVED"),
+        "host_executed_shell result was never delivered back to the provider \
+         for a secret-bearing approved handoff: {output}"
+    );
+    assert!(
+        !output.contains("missing secret host_executed_shell result"),
+        "{output}"
+    );
+}
+
+/// Recursively lists files under `root` (excluding `exclude` subtree) whose
+/// bytes contain `needle` — the #2142 redaction-unchanged acceptance sweep
+/// over journal / output refs / history / audit in the session HOME.
+fn files_containing(
+    root: &std::path::Path,
+    needle: &str,
+    exclude: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut hits = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.starts_with(exclude) {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(bytes) = fs::read(&path) {
+                if bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+                {
+                    hits.push(path);
+                }
+            }
+        }
+    }
+    hits
+}
+
 #[test]
 fn raw_cli_approved_shell_handoff_command_not_found_does_not_intercept() {
     let home = temp_shell_home("cosh-core-handoff-command-not-found");

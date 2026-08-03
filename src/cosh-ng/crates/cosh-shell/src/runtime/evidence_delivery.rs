@@ -219,7 +219,7 @@ fn deliver_shell_result_for_request(
         llm_content,
         return_display: None,
         metadata: HostExecutedShellMetadata {
-            command: redact_provider_command_text(&evidence.command),
+            command: evidence.provider_command.clone(),
             status: evidence.status.to_string(),
             exit_code: evidence.exit_code,
             signal: None,
@@ -345,6 +345,7 @@ pub(crate) fn record_readonly_compound_completion(
         shell_session_id: request.session_id.clone(),
         command_block_id: format!("readonly-compound-{}", request.id),
         command: command.to_string(),
+        provider_command: redact_provider_command_text(command),
         cwd: cwd.clone(),
         end_cwd: cwd,
         status,
@@ -409,7 +410,7 @@ fn host_executed_shell_result_from_view(
         llm_content,
         return_display: None,
         metadata: HostExecutedShellMetadata {
-            command: redact_provider_command_text(&evidence.command),
+            command: evidence.provider_command.clone(),
             status: evidence.status.to_string(),
             exit_code: evidence.exit_code,
             signal: None,

@@ -45,6 +45,44 @@ fn write_handoff_pager_policy(path: &Path, policy: ImplicitPagerPolicy) -> io::R
     }
 }
 
+/// Sidecar carrying the one-time claim token (#2142). The marker script reads
+/// it from the preexec hook and echoes the value back in the marker JSON, so
+/// the OSC parser can claim the command block without relying on the possibly
+/// redacted command text.
+fn handoff_token_file(handoff_request_file: &Path) -> std::path::PathBuf {
+    let mut path = handoff_request_file.as_os_str().to_os_string();
+    path.push(".token");
+    std::path::PathBuf::from(path)
+}
+
+fn write_handoff_token(path: &Path, token: &str) -> io::Result<()> {
+    if token.is_empty() {
+        // Requests deserialized from before #2142 carry no token; a previous
+        // handoff's sidecar must never leak into such a handoff.
+        return match std::fs::remove_file(path) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(token.as_bytes())?;
+    // `mode` only applies at creation; an existing sidecar keeps its old
+    // permissions without this.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// Stages the request file and its policy sidecar as one unit. The marker treats
 /// the request file as proof that the next command is an approved handoff, so a
 /// half-prepared pair must never outlive a failure — including a failure of the
@@ -67,6 +105,7 @@ fn stage_handoff_files_uncleaned(
     request: &ShellHandoffRequest,
 ) -> io::Result<()> {
     write_handoff_request(handoff_request_file, &request.command)?;
+    write_handoff_token(&handoff_token_file(handoff_request_file), &request.token)?;
     write_handoff_pager_policy(
         &handoff_pager_policy_file(handoff_request_file),
         request.implicit_pager_policy,
@@ -76,6 +115,7 @@ fn stage_handoff_files_uncleaned(
 fn clear_handoff_files(handoff_request_file: &Path) {
     let _ = std::fs::remove_file(handoff_request_file);
     let _ = std::fs::remove_file(handoff_pager_policy_file(handoff_request_file));
+    let _ = std::fs::remove_file(handoff_token_file(handoff_request_file));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -242,8 +282,8 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_handoff_files, handoff_pager_policy_file, stage_handoff_files, ImplicitPagerPolicy,
-        ShellHandoffRequest,
+        clear_handoff_files, handoff_pager_policy_file, handoff_token_file, stage_handoff_files,
+        ImplicitPagerPolicy, ShellHandoffRequest,
     };
     use std::path::{Path, PathBuf};
 
@@ -304,11 +344,20 @@ mod tests {
         std::fs::create_dir(&request_file).expect("blocking directory");
         let sidecar = handoff_pager_policy_file(&request_file);
         std::fs::write(&sidecar, b"").expect("stale sidecar");
+        let token_file = handoff_token_file(&request_file);
+        std::fs::write(&token_file, b"stale-token").expect("stale token sidecar");
 
         let error = stage_handoff_files(&request_file, &request(ImplicitPagerPolicy::Disable))
             .expect_err("request write must fail");
 
         assert!(!sidecar.exists(), "{error}: stale sidecar must be cleared");
+        // A failed staging must never leave a previous handoff's token behind:
+        // the marker would echo it and the parser would associate the wrong
+        // claim with the next handoff.
+        assert!(
+            !token_file.exists(),
+            "{error}: stale token sidecar must be cleared"
+        );
     }
 
     #[test]
@@ -320,6 +369,52 @@ mod tests {
 
         assert!(!request_file.exists());
         assert!(!handoff_pager_policy_file(&request_file).exists());
+        assert!(!handoff_token_file(&request_file).exists());
+    }
+
+    #[test]
+    fn staging_writes_the_claim_token_sidecar_with_owner_only_permissions() {
+        let dir = work_dir("token");
+        let request_file = dir.join("shell-handoff-request");
+        let token_file = handoff_token_file(&request_file);
+        let request = request(ImplicitPagerPolicy::Inherit);
+
+        stage_handoff_files(&request_file, &request).expect("staged");
+
+        assert_eq!(
+            std::fs::read_to_string(&token_file).expect("token sidecar"),
+            request.token,
+            "the marker reads the claim token from this sidecar"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_file)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "token sidecar must be owner-only");
+        }
+
+        clear_handoff_files(&request_file);
+        assert!(!token_file.exists(), "clear must remove the token sidecar");
+    }
+
+    #[test]
+    fn staging_a_tokenless_legacy_request_clears_a_stale_token_sidecar() {
+        let dir = work_dir("legacy-token");
+        let request_file = dir.join("shell-handoff-request");
+        let token_file = handoff_token_file(&request_file);
+        std::fs::write(&token_file, b"stale-token").expect("stale sidecar");
+
+        let mut legacy = request(ImplicitPagerPolicy::Inherit);
+        legacy.token = String::new();
+        stage_handoff_files(&request_file, &legacy).expect("staged");
+
+        assert!(
+            !token_file.exists(),
+            "a pre-#2142 request must not inherit a previous handoff's token"
+        );
     }
 
     #[test]
@@ -327,6 +422,11 @@ mod tests {
         assert_eq!(
             handoff_pager_policy_file(Path::new("/tmp/work/shell-handoff-request")),
             PathBuf::from("/tmp/work/shell-handoff-request.no-pager"),
+            "the marker derives this path from COSH_HANDOFF_REQUEST_FILE"
+        );
+        assert_eq!(
+            handoff_token_file(Path::new("/tmp/work/shell-handoff-request")),
+            PathBuf::from("/tmp/work/shell-handoff-request.token"),
             "the marker derives this path from COSH_HANDOFF_REQUEST_FILE"
         );
     }

@@ -25,6 +25,14 @@ pub fn redact_provider_command_text(command: &str) -> String {
     truncate_provider_command(redact_sensitive_text(command).0)
 }
 
+/// Provider-facing text for a handoff command the provider itself authored
+/// (#2142 D-6): the original text already sits in the model transcript, so
+/// re-redacting it here only breaks result-to-call correlation. Length is
+/// still bounded; durable surfaces keep the redacted form.
+pub fn truncate_provider_authored_command_text(command: &str) -> String {
+    truncate_provider_command(command.to_string())
+}
+
 fn truncate_provider_command(mut command: String) -> String {
     const MARKER: &str = " ... <truncated>";
     if command.len() <= PROVIDER_COMMAND_MAX_BYTES {

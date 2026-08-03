@@ -1125,3 +1125,173 @@ fn raw_relay_zsh_history_records_original_handoff_command() {
         "{terminal}"
     );
 }
+
+/// #2142 review (kongche P1): a queued unrelated command reaching preexec —
+/// and, crucially, its precmd — between handoff staging and the handoff line
+/// itself must not destroy the request/token sidecars. The handoff command
+/// carries a secret, so after redaction the token echo is the only thing
+/// keeping the block attributable; before the lifecycle fix the unrelated
+/// precmd deleted both sidecars and the block downgraded to UserInteractive.
+#[test]
+fn raw_relay_bash_secret_handoff_survives_a_command_ahead_race() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let secret_command = r#"echo installed --api-key "sk-test-race-2142""#;
+    let request = ShellHandoffRequest::new(
+        secret_command,
+        format!("$ {secret_command}"),
+        "approved_provider_shell_tool",
+        "user",
+        "approval-race",
+        "run-race",
+        1,
+    )
+    .expect("handoff request");
+    let token = request.token.clone();
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-handoff-race-work-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("bash-handoff-race-test", &work_dir);
+    config.native_mode = false;
+    let mut pending = Some(request);
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(1_500)),
+            RawRelayAction::line("sleep 1"),
+            RawRelayAction::wait(Duration::from_millis(4_000)),
+            RawRelayAction::line("echo after-race"),
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        move |events, _| {
+            // Stage the handoff only while the unrelated command is running,
+            // so its precmd fires between staging and the handoff line.
+            let sleep_started = events.iter().any(|event| {
+                event.kind == ShellEventKind::CommandStarted
+                    && event.command.as_deref() == Some("sleep 1")
+            });
+            if !sleep_started {
+                return Ok(RawObserverAction::Continue);
+            }
+            match pending.take() {
+                Some(request) => Ok(RawObserverAction::EmitToPty(request)),
+                None => Ok(RawObserverAction::Continue),
+            }
+        },
+    )
+    .expect("raw relay bash handoff race");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("after-race"), "{terminal}");
+
+    let ledger = ledger_from_output(&output);
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.origin == cosh_shell::types::CommandOrigin::ProviderTool)
+        .unwrap_or_else(|| {
+            panic!(
+                "secret handoff block must keep ProviderTool despite the race; blocks={:?} terminal={terminal}",
+                ledger
+                    .blocks
+                    .iter()
+                    .map(|block| (block.command.clone(), block.origin))
+                    .collect::<Vec<_>>()
+            )
+        });
+    // Redaction still applies to the durable text; the token carried the claim.
+    assert_eq!(block.command, "<redacted sensitive command>", "{terminal}");
+    assert_eq!(
+        block
+            .audit_identity
+            .as_ref()
+            .and_then(|audit| audit.handoff_token.as_deref()),
+        Some(token.as_str()),
+        "{terminal}"
+    );
+}
+
+/// zsh mirror of the command-ahead race above.
+#[test]
+fn raw_relay_zsh_secret_handoff_survives_a_command_ahead_race() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let secret_command = r#"echo installed --api-key "sk-test-race-2142""#;
+    let request = ShellHandoffRequest::new(
+        secret_command,
+        format!("$ {secret_command}"),
+        "approved_provider_shell_tool",
+        "user",
+        "approval-race",
+        "run-race",
+        1,
+    )
+    .expect("handoff request");
+    let token = request.token.clone();
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-handoff-race-work-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("zsh-handoff-race-test", &work_dir);
+    config.native_mode = false;
+    let input = DelayedInput::new(vec![
+        (b"sleep 1\n".to_vec(), Duration::from_millis(1_500)),
+        (b"echo after-race\n".to_vec(), Duration::from_millis(5_500)),
+        (b"exit\n".to_vec(), Duration::from_millis(700)),
+    ]);
+    let mut pending = Some(request);
+    let output =
+        run_raw_relay_zsh_with_output_control(&config, input, Vec::new(), move |events, _| {
+            let sleep_started = events.iter().any(|event| {
+                event.kind == ShellEventKind::CommandStarted
+                    && event.command.as_deref() == Some("sleep 1")
+            });
+            if !sleep_started {
+                return Ok(RawObserverAction::Continue);
+            }
+            match pending.take() {
+                Some(request) => Ok(RawObserverAction::EmitToPty(request)),
+                None => Ok(RawObserverAction::Continue),
+            }
+        })
+        .expect("raw relay zsh handoff race");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("after-race"), "{terminal}");
+
+    let ledger = ledger_from_output(&output);
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.origin == cosh_shell::types::CommandOrigin::ProviderTool)
+        .unwrap_or_else(|| {
+            panic!(
+                "secret handoff block must keep ProviderTool despite the race; blocks={:?} terminal={terminal}",
+                ledger
+                    .blocks
+                    .iter()
+                    .map(|block| (block.command.clone(), block.origin))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(block.command, "<redacted sensitive command>", "{terminal}");
+    assert_eq!(
+        block
+            .audit_identity
+            .as_ref()
+            .and_then(|audit| audit.handoff_token.as_deref()),
+        Some(token.as_str()),
+        "{terminal}"
+    );
+}

@@ -101,7 +101,13 @@ _cosh_emit_marker() {
   local path_trusted="${4:-false}"
   local timestamp
   timestamp="$(_cosh_now_ms)"
-  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s}\a' \
+  # Optional handoff-claim fragment (#2142): only approved-handoff preexec
+  # lines carry a token, every other marker stays byte-identical.
+  local handoff_fragment=""
+  if [[ -n "${_COSH_HANDOFF_TOKEN:-}" ]]; then
+    handoff_fragment=",\"handoff\":\"$(_cosh_json_escape "$_COSH_HANDOFF_TOKEN")\""
+  fi
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s}\a' \
     "$(_cosh_json_escape "$event")" \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
@@ -111,7 +117,8 @@ _cosh_emit_marker() {
     "$exit_status" \
     "$(_cosh_json_escape "$PATH")" \
     "$path_trusted" \
-    "${_COSH_ATTEMPT_GENERATION:-0}"
+    "${_COSH_ATTEMPT_GENERATION:-0}" \
+    "$handoff_fragment"
 }
 _cosh_emit_intercept_marker() {
   local input="$1"
@@ -203,6 +210,22 @@ _cosh_clear_handoff_request() {
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
      && -f "${COSH_HANDOFF_REQUEST_FILE}.no-pager" ]]; then
     rm -f -- "${COSH_HANDOFF_REQUEST_FILE}.no-pager" 2>/dev/null || true
+  fi
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
+     && -f "${COSH_HANDOFF_REQUEST_FILE}.token" ]]; then
+    rm -f -- "${COSH_HANDOFF_REQUEST_FILE}.token" 2>/dev/null || true
+  fi
+}
+# One-time claim token for the approved handoff (#2142). Staged by the Rust
+# transport next to the request file; carried back on the preexec/precmd
+# markers so the parser can claim the command block even when the reported
+# command text is redacted. Missing sidecar leaves the token empty, which
+# keeps the marker JSON byte-identical to the pre-token format.
+_cosh_load_handoff_token() {
+  _COSH_HANDOFF_TOKEN=""
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
+     && -f "${COSH_HANDOFF_REQUEST_FILE}.token" ]]; then
+    _COSH_HANDOFF_TOKEN="$(cat -- "${COSH_HANDOFF_REQUEST_FILE}.token" 2>/dev/null)" || _COSH_HANDOFF_TOKEN=""
   fi
 }
 # Implicit-pager policy for one approved handoff. The sidecar file is written by
@@ -502,16 +525,32 @@ _cosh_preexec_marker() {
     display_command="$(_cosh_unwrap_handoff_command "$command")"
     _COSH_HANDOFF_ACTIVE=1
     _cosh_apply_handoff_pager_policy
+    # The token is consumed only by the line whose unwrapped text matches
+    # the staged request: a user-typed bypass-prefixed line racing ahead
+    # must not steal the pending handoff's claim (#2142 review).
+    if _cosh_is_pending_handoff_command "$display_command"; then
+      _cosh_load_handoff_token
+      _cosh_clear_handoff_request
+    fi
     if _cosh_command_has_secret "$display_command"; then
       display_command="<redacted sensitive command>"
     fi
     _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
   elif _cosh_is_pending_handoff_command "$command"; then
     _COSH_HANDOFF_ACTIVE=1
+    _cosh_load_handoff_token
     _cosh_apply_handoff_pager_policy
-  else
+    # Consume-then-clear: the claim is single-shot, and clearing here
+    # (not in unrelated branches) is what keeps it alive across
+    # command-ahead races.
     _cosh_clear_handoff_request
+  else
+    # Deliberately no _cosh_clear_handoff_request here: an unrelated
+    # command racing ahead of an approved handoff must leave the staged
+    # request/token sidecars for the handoff line that follows; the Rust
+    # transport owns cleanup for abandoned handoffs (#2142 review).
     unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
+    unset _COSH_HANDOFF_TOKEN 2>/dev/null || true
     unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
     local command_word_source="$command"
     while [[ "$command_word_source" == ' '* || "$command_word_source" == $'\t'* ]]; do
@@ -545,11 +584,20 @@ _cosh_precmd_marker() {
   setopt NO_PROMPT_SP 2>/dev/null || true
   _cosh_apply_internal_recovery
   _cosh_add_handoff_history
-  _cosh_clear_handoff_request
+  # Only the handoff's own prompt boundary may clear the staged files: an
+  # unrelated command finishing while a handoff is still pending must not
+  # destroy the request/token sidecars it is about to consume (#2142 review).
+  if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]]; then
+    _cosh_clear_handoff_request
+  fi
   _cosh_restore_handoff_pager_policy
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _COSH_ATTEMPT_ACTIVE=0
+  # The precmd marker still carries the handoff token (#2142): it closes the
+  # same command the preexec claimed. Cleared right after so the following
+  # prompt_ready and ordinary markers stay token-free.
   _cosh_emit_marker "precmd" "" "$exit_status" false
+  unset _COSH_HANDOFF_TOKEN 2>/dev/null || true
   # Only claim prompt readiness while this remains the final precmd hook.
   # Hooks appended later may still emit output or block before zsh paints.
   if [[ "${precmd_functions[-1]:-}" == "_cosh_precmd_marker" ]]; then

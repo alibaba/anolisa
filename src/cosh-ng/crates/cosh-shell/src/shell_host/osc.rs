@@ -1,5 +1,11 @@
-// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs.
+// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs;
+// the pending-handoff claim slot (#2142) is owned by osc/handoff_claim.rs.
+mod handoff_claim;
 mod routing;
+
+use handoff_claim::{
+    claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
+};
 
 use std::collections::HashSet;
 use std::io;
@@ -91,13 +97,6 @@ pub(super) struct OscParser {
 }
 
 #[derive(Debug, Clone)]
-struct PendingCommandOrigin {
-    command: String,
-    origin: CommandOrigin,
-    audit_identity: ShellCommandAuditIdentity,
-}
-
-#[derive(Debug, Clone)]
 struct PendingHandoffEcho {
     command: Vec<u8>,
     replacement: Vec<u8>,
@@ -157,15 +156,7 @@ impl OscParser {
     }
 
     pub(super) fn register_pending_handoff_origin(&mut self, request: &ShellHandoffRequest) {
-        self.pending_command_origin = Some(PendingCommandOrigin {
-            command: request.command.clone(),
-            origin: command_origin_from_handoff_request(request),
-            audit_identity: ShellCommandAuditIdentity {
-                run_id: request.run_id.clone(),
-                request_id: request.request_id.clone(),
-                tool_use_id: request.tool_use_id.clone(),
-            },
-        });
+        self.pending_command_origin = Some(pending_origin_for_request(request));
     }
 
     pub(super) fn feed(&mut self, data: &[u8]) -> io::Result<()> {
@@ -273,7 +264,11 @@ impl OscParser {
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
-                let (origin, audit_identity) = self.consume_pending_command_origin(&command);
+                let (origin, audit_identity) = claim_pending_command_origin(
+                    &mut self.pending_command_origin,
+                    &command,
+                    marker.handoff.as_deref(),
+                );
                 self.current = Some(CurrentCommand {
                     id: command_id.clone(),
                     command: command.clone(),
@@ -428,20 +423,6 @@ impl OscParser {
         }
         if let Some(observer) = &self.history_file_observer {
             observer.observe(path);
-        }
-    }
-
-    fn consume_pending_command_origin(
-        &mut self,
-        command: &str,
-    ) -> (CommandOrigin, Option<ShellCommandAuditIdentity>) {
-        let Some(pending) = self.pending_command_origin.take() else {
-            return (CommandOrigin::UserInteractive, None);
-        };
-        if pending.command == command {
-            (pending.origin, Some(pending.audit_identity))
-        } else {
-            (CommandOrigin::Unknown, None)
         }
     }
 
@@ -864,6 +845,9 @@ struct Marker {
     sensitive: Option<bool>,
     #[serde(rename = "unsafe")]
     unsafe_input: Option<bool>,
+    /// Handoff claim token echoed back by the marker script (#2142); absent
+    /// on every marker outside an approved handoff's preexec/precmd pair.
+    handoff: Option<String>,
 }
 
 fn command_finished_event(
@@ -939,17 +923,6 @@ fn normalize_absolute_path(value: &str) -> Option<String> {
         }
     }
     Some(normalized.to_string_lossy().into_owned())
-}
-
-fn command_origin_from_handoff_request(request: &ShellHandoffRequest) -> CommandOrigin {
-    match request.source.as_str() {
-        "send_to_shell" => CommandOrigin::UserSendToShell,
-        "user_analysis_action" => CommandOrigin::UserAnalysisAction,
-        "approved_provider_shell_tool" => CommandOrigin::ProviderTool,
-        "approved_fallback" => CommandOrigin::AgentHandoff,
-        "validation" => CommandOrigin::ShellInternal,
-        _ => CommandOrigin::Unknown,
-    }
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

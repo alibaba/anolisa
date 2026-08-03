@@ -58,6 +58,11 @@ pub struct ShellCommandAuditIdentity {
     pub request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    /// One-time handoff claim token echoed back by the marker script (#2142).
+    /// Lets handoff closure match on identity instead of the possibly
+    /// redacted command text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
