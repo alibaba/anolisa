@@ -360,6 +360,15 @@ if [ -f "$OPENCLAW_CFG" ] && command -v jq &>/dev/null; then
         rm -f "${OPENCLAW_CFG}.tmp" 2>/dev/null || true
     fi
 fi
+# Remove stale user-manual doc files from pre-migration RPMs (<= 0.6.x).
+# The docs migration (0.7.0) moved user manuals to the repository-level
+# docs/user-guide tree. RPM should remove old %doc files on upgrade, but
+# when both old and new packages are installed concurrently (e.g. rpm -ivh
+# instead of rpm -Uvh), the stale doc files persist. Clean them up here.
+rm -f "%{_docdir}/tokenless/tokenless-user-manual-en.md" 2>/dev/null || true
+rm -f "%{_docdir}/tokenless/tokenless-user-manual-zh.md" 2>/dev/null || true
+rm -f "%{_docdir}/tokenless/tokenless-user-manual-cn.md" 2>/dev/null || true
+
 hash -r 2>/dev/null || true
 
 %preun
