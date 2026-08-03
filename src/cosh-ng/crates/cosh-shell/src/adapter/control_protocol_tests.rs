@@ -401,6 +401,7 @@ fn serialize_host_executed_shell_result_format() {
             redaction_status: "bounded".to_string(),
             approval_id: Some("req-1".to_string()),
             tool_use_id: Some("toolu-1".to_string()),
+            input_wait: None,
         },
     };
     let s = serialize_host_executed_shell_result("ctrl-1", &result);
@@ -442,6 +443,57 @@ fn serialize_host_executed_shell_result_format() {
         v["response"]["response"]["result"]["metadata"].get("provider_visible_chars"),
         None
     );
+    // #2161: no input-wait facts => the field is omitted entirely.
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"].get("input_wait"),
+        None
+    );
+}
+
+#[test]
+fn serialize_host_executed_shell_result_input_wait_forms() {
+    let mut result = HostExecutedShellResult {
+        llm_content: "ShellCommandCompleted evidence".to_string(),
+        return_display: None,
+        metadata: HostExecutedShellMetadata {
+            command: "bash repro.sh".to_string(),
+            status: "completed".to_string(),
+            exit_code: 130,
+            signal: None,
+            cwd: "/tmp".to_string(),
+            end_cwd: "/tmp".to_string(),
+            duration_ms: 121_000,
+            output_ref: None,
+            redaction_status: "bounded".to_string(),
+            approval_id: Some("req-1".to_string()),
+            tool_use_id: Some("toolu-1".to_string()),
+            input_wait: Some(HostExecutedInputWait {
+                waited_secs: 120,
+                interrupted: true,
+            }),
+        },
+    };
+    // Interrupted form: detected + waited + reason.
+    let v: Value =
+        serde_json::from_str(&serialize_host_executed_shell_result("ctrl-1", &result)).unwrap();
+    let facts = &v["response"]["response"]["result"]["metadata"]["input_wait"];
+    assert_eq!(facts["detected"], true);
+    assert_eq!(facts["waited_secs"], 120);
+    assert_eq!(facts["interrupted"], true);
+    assert_eq!(facts["reason"], "input-wait-timeout");
+
+    // Answered form: detected without interrupt carries no reason.
+    result.metadata.input_wait = Some(HostExecutedInputWait {
+        waited_secs: 7,
+        interrupted: false,
+    });
+    let v: Value =
+        serde_json::from_str(&serialize_host_executed_shell_result("ctrl-2", &result)).unwrap();
+    let facts = &v["response"]["response"]["result"]["metadata"]["input_wait"];
+    assert_eq!(facts["detected"], true);
+    assert_eq!(facts["waited_secs"], 7);
+    assert_eq!(facts["interrupted"], false);
+    assert_eq!(facts.get("reason"), None);
 }
 
 #[test]

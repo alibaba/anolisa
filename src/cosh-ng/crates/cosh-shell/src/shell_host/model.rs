@@ -8,6 +8,8 @@ use nix::pty::Winsize;
 use crate::input::InputClassifier;
 use crate::types::{ShellEnvironmentSnapshot, ShellEvent};
 
+use super::raw_relay::interactive_sentinel::InputWaitStatus;
+
 #[derive(Clone)]
 pub(super) struct ShellEnvironmentObserver(
     Arc<dyn Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static>,
@@ -73,6 +75,16 @@ pub struct ShellHostConfig {
     pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
     pub raw_action_watchdog: Duration,
+    /// #2161: shared input-wait episode clock. The relay's interactive
+    /// sentinel marks/clears it; the runtime controller reads it to drive
+    /// the `shell.input_wait_timeout_secs` interrupt. Clone the handle
+    /// before handing the config to the runner.
+    pub(crate) input_wait_status: InputWaitStatus,
+    /// #2025/#2161: language for the relay-rendered input-wait hint card.
+    pub(crate) hint_language: crate::config::Language,
+    /// #2161: mirrors `shell.input_wait_timeout_secs` so the hint card can
+    /// forecast the auto-interrupt (0 = disabled, no forecast line).
+    pub(crate) input_wait_timeout_secs: u64,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
 }
@@ -93,6 +105,9 @@ impl ShellHostConfig {
             slash_via_shell: slash_via_shell_default(),
             env_overrides: Vec::new(),
             raw_action_watchdog: Duration::from_secs(120),
+            input_wait_status: InputWaitStatus::default(),
+            hint_language: crate::config::Language::default(),
+            input_wait_timeout_secs: 120,
             shell_environment_observer: None,
             shell_history_file_observer: None,
         }

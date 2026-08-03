@@ -176,12 +176,17 @@ mod tests {
             MessageId::ApprovalRiskPhraseSystemControl as usize,
             MessageId::AgentGovernanceHookDecisionUnspecified as usize + 1
         );
+        // The #2025/#2161 input-wait segment now owns the tail.
         assert_eq!(
-            MessageId::ApprovalRiskPhraseSystemControl as usize,
-            MessageId::ALL.len() - 2
+            MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
+            MessageId::ApprovalIrrecoverableWarningLine as usize + 1
         );
         assert_eq!(
-            MessageId::ApprovalIrrecoverableWarningLine as usize,
+            MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
+            MessageId::ALL.len() - 10
+        );
+        assert_eq!(
+            MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
             MessageId::ALL.len() - 1
         );
     }

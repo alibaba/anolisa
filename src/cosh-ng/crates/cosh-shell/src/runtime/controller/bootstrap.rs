@@ -118,6 +118,11 @@ pub(crate) fn run_raw(
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     inline_state.shell_session_id = Some(config.session_id.clone());
+    // #2161: share the relay-side input-wait clock and productized timeout.
+    inline_state.input_wait_status = config.input_wait_status.clone();
+    inline_state.input_wait_timeout = (cosh_config.input_wait_timeout_secs > 0)
+        .then(|| std::time::Duration::from_secs(cosh_config.input_wait_timeout_secs));
+    config.input_wait_timeout_secs = cosh_config.input_wait_timeout_secs;
     inline_state.audit = Some(crate::journal::audit::ShellAuditRecorder::initialize(
         config.session_id.clone(),
     ));
@@ -185,6 +190,8 @@ pub(crate) fn run_raw(
     inline_state.language = parse_language_setting(&cosh_config.language)
         .map(resolve_language_setting)
         .unwrap_or_default();
+    // #2025: the relay renders the input-wait hint card itself.
+    config.hint_language = inline_state.language;
     match cosh_config.analysis_mode.as_str() {
         "auto" => inline_state.analysis_mode = AnalysisMode::Auto,
         "manual" => inline_state.analysis_mode = AnalysisMode::Manual,

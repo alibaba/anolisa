@@ -71,6 +71,21 @@ impl ShellHandoffState {
         true
     }
 
+    /// #2161 input-wait timeout: marks the front emitted handoff as
+    /// interrupted once. Unlike [`Self::mark_timeout_interrupt_if_elapsed`]
+    /// the clock lives outside (the sentinel's input-wait episode), so this
+    /// only guards "emitted + not already interrupted".
+    pub(crate) fn mark_input_wait_interrupt(&mut self) -> bool {
+        let Some(handoff) = self.pending.front_mut() else {
+            return false;
+        };
+        if handoff.emitted_at.is_none() || handoff.timeout_interrupt_sent {
+            return false;
+        }
+        handoff.timeout_interrupt_sent = true;
+        true
+    }
+
     #[cfg(test)]
     pub(crate) fn approved_is_empty(&self) -> bool {
         self.approved.is_empty()

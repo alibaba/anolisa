@@ -130,6 +130,17 @@ pub(crate) struct InlineState {
     pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
     pub(crate) prompt_draft_seq: u64,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
+    /// #2161: shared clock written by the relay's interactive sentinel;
+    /// read here to drive the input-wait interrupt.
+    pub(crate) input_wait_status: crate::shell_host::InputWaitStatus,
+    /// #2161: `shell.input_wait_timeout_secs` (None/0 = disabled).
+    pub(crate) input_wait_timeout: Option<Duration>,
+    /// #2161: waited duration captured at interrupt time, rendered as a
+    /// notice panel once the foreground is idle again.
+    pub(crate) pending_input_wait_timeout_notice: Option<Duration>,
+    /// #2161: per-approval input-wait facts (max waited + interrupted),
+    /// consumed into the host_executed_shell result on delivery.
+    pub(crate) input_wait_facts: HashMap<String, crate::adapter::HostExecutedInputWait>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
     pub(crate) personalization: PersonalizationState,

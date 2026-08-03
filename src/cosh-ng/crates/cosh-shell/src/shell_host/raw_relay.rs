@@ -14,7 +14,7 @@ use crate::raw_input::{
     update_input_mode, update_locked_input_mode, RawInputEvent, RawInputMode, RawObserverAction,
     UserPtyInputGeneration,
 };
-use crate::types::{ShellEvent, ShellEventKind};
+use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
 
 use super::osc::{DisplayCutKind, OscParser};
 use super::prompt_replay::{
@@ -24,12 +24,16 @@ use super::prompt_replay::{
 mod eof_shutdown;
 mod input_events;
 mod input_readiness;
+pub(super) mod interactive_sentinel;
 mod pty_emit;
 mod terminal_recovery;
 mod terminal_size;
 
 use input_events::{candidate_display_columns, drain_raw_input_events};
 use input_readiness::RawInputReadinessProbe;
+use interactive_sentinel::{
+    emit_interactive_hint_if_waiting, InputWaitStatus, InteractiveHintKind, SentinelThrottle,
+};
 use pty_emit::resolve_pty_emit;
 #[cfg(test)]
 use pty_emit::restore_prompt_display_before_handoff;
@@ -72,6 +76,9 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     recovery_request_file: &Path,
     handoff_request_file: &Path,
     watchdog: Option<&RawActionWatchdog>,
+    input_wait_status: &InputWaitStatus,
+    hint_i18n: &crate::i18n::I18n,
+    input_wait_timeout_secs: u64,
 ) -> io::Result<bool>
 where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
@@ -86,6 +93,10 @@ where
     let mut input_readiness = RawInputReadinessProbe::from_env();
     let mut driver_completed_at = None;
     let mut eof_shutdown = None;
+    // #2025: interactive sentinel state — sampling throttle plus the hint
+    // kind already shown for the current agent-handoff episode.
+    let mut sentinel_throttle = SentinelThrottle::new();
+    let mut sentinel_shown: Option<InteractiveHintKind> = None;
     // #1932 F4: ask the outer terminal to report modifier-carrying editing
     // keys (modifyOtherKeys level 1, e.g. Shift+Enter -> CSI 27;2;13~).
     // Written on the ordered output path after startup rendering settled;
@@ -159,6 +170,11 @@ where
                 Ok(0) => break,
                 Ok(n) => {
                     last_pty_output = Some(Instant::now());
+                    sentinel_throttle.note_output();
+                    // Output resumed => the foreground is no longer sitting
+                    // on a read; the input-wait timeout clock restarts on
+                    // the next eligible sample (#2161 clear-on-activity).
+                    input_wait_status.clear();
                     parser.feed(&buffer[..n])?;
                     // Relay-side events sent before a PTY write (e.g. the
                     // synthetic prompt-repaint arm) must land before the
@@ -331,6 +347,18 @@ where
             return Ok(eof_shutdown.is_some());
         }
         advance_eof_shutdown(&mut eof_shutdown)?;
+        emit_interactive_hint_if_waiting(
+            master.as_raw_fd(),
+            child.id() as i32,
+            parser,
+            output,
+            &mut sentinel_throttle,
+            &mut sentinel_shown,
+            input_wait_status,
+            hint_i18n,
+            input_wait_timeout_secs,
+            last_winsize.ws_col,
+        )?;
         if let Some(watchdog) = watchdog {
             if watchdog.expired(driver_completed_at) {
                 child.kill()?;

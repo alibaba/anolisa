@@ -185,3 +185,25 @@ macro_rules! approval_system_control_ids {
         );
     };
 }
+
+// #2025/#2161 input-wait hint card + timeout notice. Appended as a
+// trailing segment so every pre-existing discriminant stays stable
+// (the fieldless enum is a registered runtime interface).
+macro_rules! input_wait_hint_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ApprovalShellHandoffInputWaitTimeoutTitle,
+            ApprovalShellHandoffInputWaitTimeoutExceededBody,
+            ApprovalShellHandoffInputWaitTimeoutInterruptBody,
+            ShellInputWaitHintTitle,
+            ShellInputWaitHintPasswordBody,
+            ShellInputWaitHintPagerBody,
+            ShellInputWaitHintRawInteractiveBody,
+            ShellInputWaitHintStdinWaitBody,
+            ShellInputWaitHintGuidanceBody,
+            ShellInputWaitHintTimeoutForecastBody,
+        );
+    };
+}

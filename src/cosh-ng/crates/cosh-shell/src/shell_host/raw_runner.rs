@@ -353,6 +353,9 @@ where
         &session.recovery_request_file,
         &session.handoff_request_file,
         watchdog.as_ref(),
+        &config.input_wait_status,
+        &crate::i18n::I18n::new(config.hint_language),
+        config.input_wait_timeout_secs,
     )?;
     let display_start = session.parser.display.len();
     session.parser.flush_pending();

@@ -235,6 +235,12 @@ fn deliver_shell_result_for_request(
             redaction_status: redaction_status.to_string(),
             approval_id: evidence.approval_id.clone(),
             tool_use_id: tool_use_id.map(ToString::to_string),
+            // #2161: consume the input-wait facts recorded by the runtime
+            // controller for this approval; absent = field omitted.
+            input_wait: evidence
+                .approval_id
+                .as_ref()
+                .and_then(|approval_id| state.input_wait_facts.remove(approval_id)),
         },
     };
     let delivered = match state.agent_run.active.as_mut() {
@@ -426,6 +432,7 @@ fn host_executed_shell_result_from_view(
             redaction_status: view.redaction_status.to_string(),
             approval_id: evidence.approval_id.clone(),
             tool_use_id: handoff.tool_use_id.clone(),
+            input_wait: None,
         },
     }
 }

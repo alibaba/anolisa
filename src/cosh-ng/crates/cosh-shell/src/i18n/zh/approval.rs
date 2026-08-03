@@ -89,6 +89,22 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalShellHandoffTimeoutInterruptBody => {
             "已向前台 PTY 发送中断；正在等待 shell evidence。"
         }
+        MessageId::ApprovalShellHandoffInputWaitTimeoutTitle => "命令等待输入超时",
+        MessageId::ApprovalShellHandoffInputWaitTimeoutExceededBody => {
+            "前台命令等待键盘输入超过 {seconds} 秒无人应答（input_wait_timeout_secs）。"
+        }
+        MessageId::ApprovalShellHandoffInputWaitTimeoutInterruptBody => {
+            "已中断该命令（等同 Ctrl+C）；Agent 将收到结果并可改用非交互方式重试。"
+        }
+        MessageId::ShellInputWaitHintTitle => "⏳ 命令正在等待输入",
+        MessageId::ShellInputWaitHintPasswordBody => "命令正在等待密码/隐藏输入。",
+        MessageId::ShellInputWaitHintPagerBody => "输出正被分页器查看，按 q 退出后继续。",
+        MessageId::ShellInputWaitHintRawInteractiveBody => "交互式程序正在等待键盘输入。",
+        MessageId::ShellInputWaitHintStdinWaitBody => "命令正在等待键盘输入/确认。",
+        MessageId::ShellInputWaitHintGuidanceBody => "可直接键入回复，或按 Ctrl+C 中断该命令。",
+        MessageId::ShellInputWaitHintTimeoutForecastBody => {
+            "等待输入 {seconds} 秒无人应答将自动中断。"
+        }
         MessageId::ApprovalReceiptKindToolRequest => "tool 请求",
         MessageId::ApprovalReceiptKindShellCommandRequest => "shell 命令请求",
         MessageId::ApprovalReceiptKindBashTool => "Bash tool",

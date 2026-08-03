@@ -214,6 +214,12 @@ adapter_default = "cosh-core"
 analysis_mode = "smart"
 # Approval mode (recommend | auto | trust)
 approval_mode = "auto"
+# Seconds an agent-approved foreground command may wait for terminal
+# input before it is interrupted (0 = never interrupt). Only waits backed
+# by kernel evidence count: password prompts, pagers and plain stdin
+# reads on the session tty. Fullscreen TUIs (vi, top) are exempt, and so
+# are pipeline reads (e.g. `... | cat`). Default: 120.
+input_wait_timeout_secs = 120
 ```
 
 ## Audit Configuration
@@ -246,6 +252,7 @@ max_disk_bytes = 1073741824
 | `COSH_LOG` | Log level (global) | `logging.level` |
 | `RUST_LOG` | Rust log filter | — |
 | `COSH_SHELL_ADAPTER` | Shell adapter | `shell.adapter_default` |
+| `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Input-wait timeout (seconds) | `shell.input_wait_timeout_secs` |
 | `COSH_SHELL_DEBUG` | Maps to debug level | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell language | — |
 | `COSH_AUDIT_DIR` | Unified audit storage root | — |

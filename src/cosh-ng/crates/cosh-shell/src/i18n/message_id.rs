@@ -102,4 +102,5 @@ collect_message_ids!([
     agent_recovery_retry_ids,
     hook_notification_ids,
     approval_system_control_ids,
+    input_wait_hint_ids,
 ],);

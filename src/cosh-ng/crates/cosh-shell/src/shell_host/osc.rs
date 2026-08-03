@@ -1,8 +1,11 @@
 // Owner: shell_host. Routing marker handling is isolated in osc/routing.rs;
-// the pending-handoff claim slot (#2142) is owned by osc/handoff_claim.rs.
+// the pending-handoff claim slot (#2142) is owned by osc/handoff_claim.rs;
+// alt-screen tracking (#2025) is owned by osc/alt_screen.rs.
+mod alt_screen;
 mod handoff_claim;
 mod routing;
 
+use alt_screen::AltScreenTracker;
 use handoff_claim::{
     claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
 };
@@ -98,6 +101,8 @@ pub(super) struct OscParser {
     /// invalidation barrier; a fresh command-less prompt report
     /// (`ShellReady`) re-arms it.
     pty_input_barrier_pushed: bool,
+    /// #2025: alternate-screen tracking, owned by osc/alt_screen.rs.
+    alt_screen: AltScreenTracker,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +147,7 @@ impl OscParser {
             history_file_observer: None,
             main_prompt_gate: crate::raw_input::MainPromptGate::default(),
             pty_input_barrier_pushed: false,
+            alt_screen: AltScreenTracker::default(),
         }
     }
 
@@ -477,8 +483,21 @@ impl OscParser {
         if data.is_empty() {
             return;
         }
+        self.alt_screen.observe(&data);
         self.display.extend_from_slice(&data);
         self.append_clean(&data);
+    }
+
+    /// #2025: whether the foreground application currently owns the
+    /// alternate screen (fullscreen TUI classification input).
+    pub(crate) fn alt_screen_active(&self) -> bool {
+        self.alt_screen.active()
+    }
+
+    /// #2025: origin of the command currently tracked between preexec and
+    /// precmd, used by the interactive sentinel's trigger gate.
+    pub(super) fn active_command_origin(&self) -> Option<CommandOrigin> {
+        self.current.as_ref().map(|current| current.origin)
     }
 
     fn filter_pending_handoff_echo(&mut self, data: &[u8]) -> Vec<u8> {

@@ -101,6 +101,32 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalShellHandoffTimeoutInterruptBody => {
             "Sent interrupt to foreground PTY; waiting for shell evidence."
         }
+        MessageId::ApprovalShellHandoffInputWaitTimeoutTitle => "Command input-wait timeout",
+        MessageId::ApprovalShellHandoffInputWaitTimeoutExceededBody => {
+            "Foreground command waited for keyboard input over {seconds}s with no answer (input_wait_timeout_secs)."
+        }
+        MessageId::ApprovalShellHandoffInputWaitTimeoutInterruptBody => {
+            "Interrupted the command (like Ctrl+C); the agent receives the result and can retry non-interactively."
+        }
+        MessageId::ShellInputWaitHintTitle => "⏳ Command is waiting for input",
+        MessageId::ShellInputWaitHintPasswordBody => {
+            "The command is waiting for a password/hidden input."
+        }
+        MessageId::ShellInputWaitHintPagerBody => {
+            "Output is being paged; press q to quit the pager and continue."
+        }
+        MessageId::ShellInputWaitHintRawInteractiveBody => {
+            "An interactive program is waiting for keyboard input."
+        }
+        MessageId::ShellInputWaitHintStdinWaitBody => {
+            "The command is waiting for keyboard input/confirmation."
+        }
+        MessageId::ShellInputWaitHintGuidanceBody => {
+            "Type a reply directly, or press Ctrl+C to interrupt the command."
+        }
+        MessageId::ShellInputWaitHintTimeoutForecastBody => {
+            "Auto-interrupts after {seconds}s of unanswered input-wait."
+        }
         MessageId::ApprovalReceiptKindToolRequest => "tool request",
         MessageId::ApprovalReceiptKindShellCommandRequest => "shell command request",
         MessageId::ApprovalReceiptKindBashTool => "Bash tool",

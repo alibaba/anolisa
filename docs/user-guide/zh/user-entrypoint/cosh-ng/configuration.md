@@ -196,6 +196,11 @@ adapter_default = "cosh-core"
 analysis_mode = "smart"
 # 审批模式（recommend | auto | trust）
 approval_mode = "auto"
+# Agent 批准的前台命令等待终端输入超过该秒数后被打断（0 = 从不打断）。
+# 仅内核证据支撑的等待计时：会话 tty 上的密码提示、分页器与普通 stdin
+# 读取。全屏 TUI（vi、top）豁免，管道读取（如 `... | cat`）同样豁免。
+# 默认：120。
+input_wait_timeout_secs = 120
 ```
 
 ## 审计配置
@@ -227,6 +232,7 @@ max_disk_bytes = 1073741824
 | `COSH_LOG` | 日志级别（全局） | `logging.level` |
 | `RUST_LOG` | Rust 日志过滤 | — |
 | `COSH_SHELL_ADAPTER` | Shell 适配器 | `shell.adapter_default` |
+| `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | 输入等待超时（秒） | `shell.input_wait_timeout_secs` |
 | `COSH_SHELL_DEBUG` | 映射为 debug 级别 | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell 语言 | — |
 | `COSH_AUDIT_DIR` | 统一审计存储根目录 | — |

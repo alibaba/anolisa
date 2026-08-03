@@ -54,6 +54,11 @@ fn apply_env_overrides(config: &mut CoshConfig) {
     if let Ok(v) = std::env::var("COSH_SHELL_APPROVAL_MODE") {
         config.approval_mode = v;
     }
+    if let Ok(v) = std::env::var("COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS") {
+        if let Ok(secs) = v.trim().parse::<u64>() {
+            config.input_wait_timeout_secs = secs;
+        }
+    }
     if let Ok(v) = std::env::var("COSH_SHELL_DEFAULT_SHELL") {
         config.shell_default = v;
     }

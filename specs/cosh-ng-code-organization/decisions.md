@@ -128,3 +128,23 @@ Revisit trigger: if a second consumer beyond approval drain/sweep needs
 lifecycle bookkeeping, or the per-domain `ControlState` split lands,
 move the ledger into that extracted state module together with its
 host field.
+
+## D18: interactive-sentinel hint card renders inside shell_host (owner note)
+
+The #2025 interactive sentinel (`shell_host/raw_relay/interactive_sentinel.rs`)
+builds and emits its one-shot hint card itself — hand-assembled ANSI
+border, width clipping and i18n copy — instead of routing through the
+`ui/` renderer like the sibling #2161 timeout notice
+(`runtime/controller/input_wait.rs`, which goes through
+`RatatuiInlineRenderer::write_notice_panel`). The exception exists
+because the card must be spliced into the raw PTY byte relay at a
+precise stream position: the relay owns the display buffer, the
+alt-screen state and the in-stream timing (card + prompt-tail redraw
+must land between two output chunks), none of which are visible to the
+inline renderer, and handing the relay's byte stream to `ui/` would
+reverse the allowed dependency direction. The card model (kind →
+message IDs) stays declarative and the copy lives in `i18n/`.
+
+Removal condition: if a second in-stream card appears in `shell_host`,
+extract a shared presentation helper (e.g. `types/` card model +
+byte-emitting formatter) and move both emitters onto it.

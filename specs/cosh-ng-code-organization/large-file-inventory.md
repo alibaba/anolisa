@@ -39,7 +39,7 @@ new over-threshold file appears that is not listed here.
 | 855 | `src/activity/runtime_render.rs` | activity | Activity rendering; pre-existing. Split per-panel renderers. |
 | 853 | `src/i18n/en.rs` | i18n | English catalog; pre-existing. Partition by message domain. |
 | 823 | `src/i18n/zh.rs` | i18n | Chinese catalog; pre-existing. Partition by message domain. |
-| 805 | `src/shell_host/osc.rs` | shell_host | OSC sequence handling; pre-existing. Split sequence kinds. |
+| 1027 | `src/shell_host/osc.rs` | shell_host | OSC sequence handling; pre-existing over the 1000-line growth bar (main baseline 1008, ledger previously stale at 805). The #2025 alt-screen tracker lives in `osc/alt_screen.rs`; this file only carries the field and delegating accessors — split priority raised. Split sequence kinds. |
 | 788 | `src/runtime/shell_evidence.rs` | runtime | Shell evidence runtime; pre-existing. Extract capture from rendering. |
 | 786 | `src/tools/display.rs` | tools | Tool display formatting; pre-existing. Split per-tool formatters. |
 | 778 | `src/ui/agent_render/activity.rs` | ui | Activity card rendering; pre-existing. Split per-activity renderers. |

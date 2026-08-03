@@ -12,6 +12,9 @@ use super::events::ShellEventSnapshot;
 use super::terminal::CrLfWriter;
 
 mod bootstrap;
+mod input_wait;
+
+use input_wait::input_wait_timeout_recovery_action;
 
 pub(crate) use bootstrap::{
     run_adapter_demo, run_demo, run_host_demo, run_interactive, run_interactive_demo, run_raw,
@@ -69,6 +72,11 @@ fn render_raw_inline_events<W: Write>(
     let shell_busy = shell_has_active_foreground_command(snapshot.events());
     if let Some(action) =
         shell_handoff_timeout_recovery_action(inline_state, shell_busy, &mut terminal_output)?
+    {
+        return Ok(action);
+    }
+    if let Some(action) =
+        input_wait_timeout_recovery_action(inline_state, shell_busy, &mut terminal_output)?
     {
         return Ok(action);
     }
