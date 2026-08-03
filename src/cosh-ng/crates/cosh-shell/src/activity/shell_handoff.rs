@@ -55,7 +55,12 @@ pub(crate) fn close_untracked_shell_handoffs(
         let block = CommandBlock {
             id: format!("untracked-{}", handoff_request.approval_id),
             session_id: ready.session_id.clone(),
-            command: handoff_request.command.clone(),
+            // Durable-surface text: the tracked path receives the marker's
+            // already-redacted report, but this synthetic block is built from
+            // the request's original command, so it must be redacted here or
+            // the secret would flow into evidence and the activity detail
+            // (#2142 review R5).
+            command: crate::evidence::redact_sensitive_text(&handoff_request.command).0,
             origin: expected_handoff_origin(handoff_request),
             cwd: cwd.clone(),
             end_cwd: cwd,
@@ -125,7 +130,7 @@ pub(crate) fn close_untracked_shell_handoffs(
                 evidence.recovery_reason.unwrap_or("<none>"),
                 evidence.command_block_id,
                 evidence.command,
-                handoff_request.exact_preview,
+                crate::evidence::redact_sensitive_text(&handoff_request.exact_preview).0,
                 handoff_request.preview_hash,
                 handoff_request.actor,
                 handoff_request.source,
@@ -217,7 +222,7 @@ pub(crate) fn record_approved_shell_handoff_blocks(
                 evidence.command,
                 evidence.cwd,
                 evidence.end_cwd,
-                handoff_request.exact_preview,
+                crate::evidence::redact_sensitive_text(&handoff_request.exact_preview).0,
                 handoff_request.preview_hash,
                 handoff_request.actor,
                 handoff_request.source,
@@ -246,20 +251,20 @@ fn shell_handoff_block_matches_request(
     block: &CommandBlock,
     request: &ShellHandoffRequest,
 ) -> bool {
-    // Token claim first (#2142): a block carrying the request's one-time
-    // claim token is the handoff's own command no matter how the marker
-    // script rewrote its reported text (secret redaction, unsafe input).
-    if !request.token.is_empty()
-        && block
-            .audit_identity
-            .as_ref()
-            .and_then(|audit| audit.handoff_token.as_deref())
-            == Some(request.token.as_str())
+    // An explicit token on the block decides alone (#2142 review R5): two
+    // approved handoffs for the identical command can sit in the pending
+    // queue, and a text/origin/time fallback would associate the block
+    // carrying the *second* request's token with the *first* request,
+    // mis-pairing results and leaving the second request hanging.
+    if let Some(block_token) = block
+        .audit_identity
+        .as_ref()
+        .and_then(|audit| audit.handoff_token.as_deref())
     {
-        return true;
+        return !request.token.is_empty() && block_token == request.token;
     }
-    // Text fallback for blocks produced by marker scripts that predate the
-    // token sidecar. Shell markers are second-granular, so compare
+    // Text fallback only for blocks produced by marker scripts that predate
+    // the token sidecar. Shell markers are second-granular, so compare
     // representable seconds.
     let started_at_or_after_request = block.started_at_ms / 1_000 >= request.created_at_ms / 1_000;
     block.command == request.command

@@ -133,6 +133,14 @@ pub(super) fn resolve_pty_emit<W: Write>(
     recovery_request_file: &Path,
     handoff_request_file: &Path,
 ) -> io::Result<RawObserverAction> {
+    // #2142 R4: a command-less prompt boundary expired an unclaimed handoff
+    // (the runtime closes it as untracked at the same boundary). Remove the
+    // staged request/token sidecars so the plaintext command and the claim
+    // token cannot outlive the closed handoff and be adopted by a later
+    // same-text user command.
+    if parser.take_expired_handoff_staging() {
+        clear_handoff_files(handoff_request_file);
+    }
     match action {
         RawObserverAction::EmitToPty(request) => {
             emit_to_pty(

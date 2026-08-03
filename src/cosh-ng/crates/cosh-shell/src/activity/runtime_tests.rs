@@ -3152,3 +3152,192 @@ fn activity_records_terminal_output_read_misroute_for_fenced_fallback() {
         .detail
         .contains("recommended_action: fenced_cosh_request_output"));
 }
+
+// #2142 review R5: a block carrying an explicit handoff token must decide by
+// that token alone. Two approved handoffs for the identical command sit in
+// the queue; the block claimed with the *second* request's token must not be
+// text-matched against the *first* (front) request.
+#[test]
+fn block_with_another_requests_token_does_not_close_the_front_handoff() {
+    let mut state = InlineState::default();
+    let command = "echo twin-handoff";
+    let mut requests = Vec::new();
+    for (approval, run) in [("req-a", "run-a"), ("req-b", "run-b")] {
+        let request = ShellHandoffRequest::new(
+            command,
+            format!("$ {command}"),
+            "approved_provider_shell_tool",
+            "user",
+            approval,
+            run,
+            0,
+        )
+        .expect("handoff request");
+        requests.push(request.clone());
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request);
+    }
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit first handoff");
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(1)
+        .expect("emit second handoff");
+    let block = CommandBlock {
+        id: "cmd-second".to_string(),
+        session_id: "session-1".to_string(),
+        command: command.to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1,
+        ended_at_ms: 10,
+        duration_ms: 9,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: Some(crate::types::ShellCommandAuditIdentity {
+            run_id: "run-b".to_string(),
+            request_id: None,
+            tool_use_id: None,
+            handoff_token: Some(requests[1].token.clone()),
+        }),
+    };
+
+    let ids = record_approved_shell_handoff_blocks(&mut state, &[block]);
+
+    // The front (first) handoff stays pending: the tokened block belongs to
+    // the second request and must not be mis-paired by the text fallback.
+    assert!(ids.is_empty(), "{ids:?}");
+    let front = state
+        .control
+        .shell_handoff()
+        .pending_front()
+        .expect("first handoff still pending");
+    assert_eq!(front.request().approval_id, "req-a");
+}
+
+// #2142 review R5: the activity detail is a durable surface; the request
+// preview is built from the original command text and must never carry the
+// plaintext secret once a secret-bearing handoff closes normally.
+#[test]
+fn shell_handoff_activity_detail_redacts_the_secret_preview() {
+    let mut state = InlineState::default();
+    let command = r#"deploy --api-key "sk-live-secret-value""#;
+    let request = ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        "approved_provider_shell_tool",
+        "user",
+        "req-secret",
+        "run-secret",
+        0,
+    )
+    .expect("handoff request");
+    let token = request.token.clone();
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit pending handoff");
+    let block = CommandBlock {
+        id: "cmd-secret".to_string(),
+        session_id: "session-1".to_string(),
+        command: "<redacted sensitive command>".to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1,
+        ended_at_ms: 10,
+        duration_ms: 9,
+        exit_code: 1,
+        status: CommandStatus::Failed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: Some(crate::types::ShellCommandAuditIdentity {
+            run_id: "run-secret".to_string(),
+            request_id: None,
+            tool_use_id: None,
+            handoff_token: Some(token),
+        }),
+    };
+
+    let ids = record_approved_shell_handoff_blocks(&mut state, &[block]);
+
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == ids[0])
+        .expect("activity row");
+    assert!(
+        !row.detail.contains("sk-live-secret-value"),
+        "activity detail leaked the plaintext secret: {}",
+        row.detail
+    );
+    assert!(
+        row.detail.contains("preview:"),
+        "preview line disappeared entirely: {}",
+        row.detail
+    );
+}
+
+// The untracked closure writes the same preview into its activity row.
+#[test]
+fn untracked_shell_handoff_activity_detail_redacts_the_secret_preview() {
+    let mut state = InlineState::default();
+    let command = r#"deploy --api-key "sk-live-secret-value""#;
+    let request = ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        "approved_provider_shell_tool",
+        "user",
+        "req-secret-untracked",
+        "run-secret-untracked",
+        0,
+    )
+    .expect("handoff request");
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit pending handoff");
+    let events = vec![untracked_test_event(ShellEventKind::ShellReady, None)];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == ids[0])
+        .expect("activity row");
+    assert!(
+        !row.detail.contains("sk-live-secret-value"),
+        "untracked activity detail leaked the plaintext secret: {}",
+        row.detail
+    );
+}

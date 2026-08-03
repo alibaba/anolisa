@@ -63,7 +63,22 @@ exclusive:
    survives (a wrong token on identical text is a replayed/forged claim);
 3. no token + exact text match → claim (pre-protocol marker scripts);
 4. no token + no match → `UserInteractive`, slot survives (an unrelated
-   preexec cannot burn the handoff's slot).
+   preexec cannot burn the handoff's slot);
+5. a command-less prompt boundary (`ShellReady`) expires an unclaimed slot —
+   the same boundary where the runtime closes the handoff as untracked —
+   and signals the relay to remove the staged sidecars, so a later
+   same-text user command cannot adopt the closed handoff's identity or
+   read its plaintext command.
+
+Closure matching (`shell_handoff_block_matches_request`) mirrors the
+exclusivity: a block carrying any explicit `handoff_token` is decided by
+token equality alone (two queued handoffs for the identical command must not
+cross-pair via the text fallback); the text+origin+timestamp fallback exists
+only for blocks without a token.
+
+Durable-surface rule: the activity detail's `preview` and the untracked
+closure's synthetic block command are redacted before they leave the handoff
+path — evidence/journal/activity never carry the request's plaintext.
 
 The claimed identity travels as `ShellCommandAuditIdentity.handoff_token`
 through `ShellEvent` → `CommandBlock`; `shell_handoff_block_matches_request`

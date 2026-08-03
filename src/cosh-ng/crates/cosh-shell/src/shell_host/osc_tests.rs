@@ -1175,6 +1175,53 @@ fn mismatched_handoff_token_is_not_rescued_by_identical_command_text() {
     );
 }
 
+// #2142 R4: a command-less prompt boundary is where the runtime closes an
+// unclaimed handoff as untracked; the parser must expire the pending claim
+// slot there and raise the staging-expiry flag, so a later user command with
+// the same text can neither adopt the closed handoff's identity nor be
+// misattributed to it.
+#[test]
+fn shell_ready_expires_an_unclaimed_pending_handoff_slot() {
+    let mut parser = parser_for_test("untracked-expiry");
+    let request = crate::types::ShellHandoffRequest::new(
+        "echo handoff-target",
+        "$ echo handoff-target",
+        "approved_provider_shell_tool",
+        "user",
+        "req-untracked",
+        "run-untracked",
+        0,
+    )
+    .expect("handoff request");
+    parser.register_pending_handoff_origin(&request);
+    assert!(!parser.take_expired_handoff_staging(), "fresh staging");
+    parser.register_pending_handoff_origin(&request);
+
+    // Command-less precmd: the preexec marker was lost, the shell is back at
+    // a prompt, and the runtime closes the handoff as untracked here.
+    feed_precmd(&mut parser, 0);
+
+    assert!(
+        parser.take_expired_handoff_staging(),
+        "expiry flag must ask the relay to clear the staged sidecars"
+    );
+    assert!(!parser.take_expired_handoff_staging(), "single shot");
+
+    // The same text typed later by the user is ordinary input: no origin
+    // adoption, no audit identity, no token.
+    feed_preexec(&mut parser, "echo handoff-target");
+    let event = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("command started");
+    assert_eq!(
+        event.command_origin,
+        Some(crate::types::CommandOrigin::UserInteractive)
+    );
+    assert!(event.audit_identity.is_none(), "no stale identity adoption");
+}
+
 fn feed_preexec(parser: &mut OscParser, command: &str) {
     let marker = format!(
         "\x1b]1337;COSH;{{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":{command_json},\"cwd\":\"/tmp\"}}\x07",

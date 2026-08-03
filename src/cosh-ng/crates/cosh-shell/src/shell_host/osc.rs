@@ -83,6 +83,10 @@ pub(super) struct OscParser {
     synthetic_prompt_repaint_armed: bool,
     pub(super) captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
+    /// Raised when a command-less prompt boundary expired an unclaimed
+    /// pending handoff (#2142 R4); the relay consumes it and removes the
+    /// staged request/token sidecars the shell never claimed.
+    expired_handoff_staging: bool,
     pending_handoff_echo: Option<PendingHandoffEcho>,
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
@@ -131,6 +135,7 @@ impl OscParser {
             synthetic_prompt_repaint_armed: false,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
+            expired_handoff_staging: false,
             pending_handoff_echo: None,
             shell_environment_snapshot: None,
             environment_observer: None,
@@ -157,6 +162,14 @@ impl OscParser {
 
     pub(super) fn register_pending_handoff_origin(&mut self, request: &ShellHandoffRequest) {
         self.pending_command_origin = Some(pending_origin_for_request(request));
+        // Fresh staging supersedes any stale expiry signal.
+        self.expired_handoff_staging = false;
+    }
+
+    /// Consumes the "an unclaimed handoff expired at a prompt boundary" flag
+    /// (#2142 R4); the relay clears the staged sidecar files in response.
+    pub(super) fn take_expired_handoff_staging(&mut self) -> bool {
+        std::mem::take(&mut self.expired_handoff_staging)
     }
 
     pub(super) fn feed(&mut self, data: &[u8]) -> io::Result<()> {
@@ -305,6 +318,15 @@ impl OscParser {
                     // PTY-input invalidation barrier: the cwd carried
                     // here supersedes any earlier barrier.
                     self.pty_input_barrier_pushed = false;
+                    // A command-less prompt boundary is exactly where the
+                    // runtime closes an unclaimed handoff as untracked
+                    // (#2142 review R4). Expire the pending claim slot and
+                    // ask the relay to remove the staged sidecars, so a later
+                    // same-text user command can neither adopt the closed
+                    // handoff's identity nor read its plaintext command.
+                    if self.pending_command_origin.take().is_some() {
+                        self.expired_handoff_staging = true;
+                    }
                     self.events.push(ShellEvent {
                         kind: ShellEventKind::ShellReady,
                         session_id,
