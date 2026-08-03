@@ -564,12 +564,14 @@ esac
         ..test_adapter()
     };
 
-    let first = adapter.list_sessions("/tmp").expect("first session page");
+    let first = adapter
+        .list_sessions("/tmp", false)
+        .expect("first session page");
     let second = adapter
-        .list_sessions_page("/tmp", 100, first.next_cursor.as_deref())
+        .list_sessions_page("/tmp", 100, first.next_cursor.as_deref(), false)
         .expect("second session page");
     let third = adapter
-        .list_sessions_page("/tmp", 100, second.next_cursor.as_deref())
+        .list_sessions_page("/tmp", 100, second.next_cursor.as_deref(), false)
         .expect("third session page");
     let _ = std::fs::remove_file(&script);
 

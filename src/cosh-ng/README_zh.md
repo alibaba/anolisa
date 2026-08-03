@@ -77,7 +77,8 @@ cosh-shell --resume <session-id> # 选择已知的 provider 会话
 ```
 
 在 cosh-shell 中，可使用 `/session` 浏览会话、`/session list` 复制完整会话
-ID，并通过 `/session status` 查看已选择和已激活的身份。`/session new`
+ID、`/session list --all` 列出同一存储根下所有工作空间的会话，并通过
+`/session status` 查看已选择和已激活的身份。`/session new`
 （或 `/new`）会与当前 provider 对话分离，使下一次 Agent 请求开启全新对话，
 而无需重启 Shell；`/session clear ...` 会在确认后清理旧记录。会话恢复会还原
 模型可见的对话上下文，但不会伪装成已恢复历史终端证据。`/session compact`

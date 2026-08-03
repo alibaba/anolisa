@@ -15,7 +15,7 @@ use super::io::{
     MAX_SESSION_FILE_BYTES,
 };
 use super::listing::{
-    collect_list_page, entry_is_after_cursor, format_list_cursor, parse_list_cursor,
+    collect_list_page, entry_is_after_cursor, format_list_cursor, parse_list_cursor, ListCursor,
 };
 use super::scoped::ScopedStorage;
 use super::summary::{
@@ -285,6 +285,11 @@ impl SessionStore {
 
     /// Lists a bounded page of newest-first session summaries.
     ///
+    /// When `all_workspaces` is true, aggregates sessions from every
+    /// workspace-scoped store under the persistence root; sessions whose
+    /// recorded workspace differs from the requested scope are returned with
+    /// [`SessionHealth::ScopeMismatch`].
+    ///
     /// # Errors
     ///
     /// Returns [`SessionError::Io`] when the scoped directory cannot be read.
@@ -292,8 +297,22 @@ impl SessionStore {
         &self,
         limit: usize,
         cursor: Option<&str>,
+        all_workspaces: bool,
     ) -> Result<(Vec<SessionSummary>, Option<String>), SessionError> {
         let cursor = cursor.map(parse_list_cursor).transpose()?;
+        let limit = limit.clamp(1, MAX_LIST_LIMIT);
+        if all_workspaces {
+            self.list_all_workspaces(limit, cursor)
+        } else {
+            self.list_current_workspace(limit, cursor)
+        }
+    }
+
+    fn list_current_workspace(
+        &self,
+        limit: usize,
+        cursor: Option<ListCursor>,
+    ) -> Result<(Vec<SessionSummary>, Option<String>), SessionError> {
         let directory = self.scoped.directory(false)?;
         let mut entries = match directory.as_ref() {
             Some(directory) => self.scoped.entries(directory)?,
@@ -306,7 +325,91 @@ impl SessionStore {
         for legacy in &self.legacy_dirs {
             collect_legacy_list_entries(legacy, &mut seen_ids, &mut entries)?;
         }
-        entries.sort_by(|left, right| {
+        Self::sort_entries(&mut entries);
+        self.page_entries(&entries, directory.as_ref(), limit, cursor)
+    }
+
+    fn list_all_workspaces(
+        &self,
+        limit: usize,
+        cursor: Option<ListCursor>,
+    ) -> Result<(Vec<SessionSummary>, Option<String>), SessionError> {
+        let root = self.base_dir.parent().ok_or_else(|| SessionError::Io {
+            operation: "resolve session root",
+            path: self.base_dir.clone(),
+            message: "scoped base directory has no parent".to_string(),
+        })?;
+
+        // Collect lightweight (path, entry) tuples from every workspace-scoped
+        // directory first, then sort and page so only the target page is read
+        // and deserialized. Unreadable workspace directories are skipped so a
+        // single damaged or permission-denied scope cannot break the entire
+        // --all listing.
+        let mut all_entries = Vec::new();
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), None));
+            }
+            Err(error) => return Err(io_error("list session roots", root, error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| io_error("read session root entry", root, error))?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.len() != 24 || !name_str.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let scoped = match ScopedStorage::new(path.clone()) {
+                Ok(scoped) => scoped,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cosh_session",
+                        "skip unreadable workspace {}: {}",
+                        path.display(),
+                        error
+                    );
+                    continue;
+                }
+            };
+            let directory = match scoped.directory(false) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cosh_session",
+                        "skip unreadable workspace {}: {}",
+                        path.display(),
+                        error
+                    );
+                    continue;
+                }
+            };
+            let Some(directory) = directory else {
+                continue;
+            };
+            match scoped.entries(&directory) {
+                Ok(entries) => {
+                    for list_entry in entries {
+                        all_entries.push((path.clone(), list_entry));
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cosh_session",
+                        "skip unreadable workspace {}: {}",
+                        path.display(),
+                        error
+                    );
+                    continue;
+                }
+            }
+        }
+
+        all_entries.sort_by(|(_, left), (_, right)| {
             right
                 .modified_at_ms
                 .cmp(&left.modified_at_ms)
@@ -314,15 +417,75 @@ impl SessionStore {
         });
 
         let start = match cursor.as_ref() {
+            Some(cursor) => all_entries
+                .iter()
+                .position(|(_, entry)| entry_is_after_cursor(entry, cursor))
+                .unwrap_or(all_entries.len()),
+            None => 0,
+        };
+        let limit = limit.clamp(1, MAX_LIST_LIMIT);
+        let mut page = Vec::with_capacity(limit);
+        let mut examined_end = start.min(all_entries.len());
+        for (workspace_path, entry) in all_entries.iter().skip(start) {
+            examined_end = examined_end.saturating_add(1);
+
+            // Open the directory handle lazily and only for entries that fall
+            // on the target page. This keeps fd usage O(1) instead of
+            // O(total sessions), avoiding EMFILE when many workspaces are
+            // present.
+            let scoped = match ScopedStorage::new(workspace_path.clone()) {
+                Ok(scoped) => scoped,
+                Err(_) => continue,
+            };
+            let directory = match scoped.directory(false) {
+                Ok(directory) => directory,
+                Err(_) => continue,
+            };
+            let Some(directory) = directory else {
+                continue;
+            };
+            if let Some(summary) = self.scoped_entry_summary(&directory, entry) {
+                page.push(summary);
+                if page.len() == limit {
+                    break;
+                }
+            }
+        }
+        let next_cursor = (examined_end < all_entries.len())
+            .then(|| {
+                all_entries
+                    .get(examined_end.saturating_sub(1))
+                    .map(|(_, entry)| format_list_cursor(entry))
+            })
+            .flatten();
+        Ok((page, next_cursor))
+    }
+
+    fn sort_entries(entries: &mut [super::listing::ListEntry]) {
+        entries.sort_by(|left, right| {
+            right
+                .modified_at_ms
+                .cmp(&left.modified_at_ms)
+                .then_with(|| left.session_id.as_str().cmp(right.session_id.as_str()))
+        });
+    }
+
+    fn page_entries(
+        &self,
+        entries: &[super::listing::ListEntry],
+        directory: Option<&File>,
+        limit: usize,
+        cursor: Option<ListCursor>,
+    ) -> Result<(Vec<SessionSummary>, Option<String>), SessionError> {
+        let start = match cursor.as_ref() {
             Some(cursor) => entries
                 .iter()
                 .position(|entry| entry_is_after_cursor(entry, cursor))
                 .unwrap_or(entries.len()),
             None => 0,
         };
-        let limit = limit.clamp(1, MAX_LIST_LIMIT);
-        let (page, examined_end) = collect_list_page(&entries, start, limit, |entry| {
-            self.list_entry_summary(directory.as_ref(), entry)
+        let (page, examined_end) = collect_list_page(entries, start, limit, |entry| {
+            self.list_entry_summary(directory, entry)
         });
         let next_cursor = (examined_end < entries.len())
             .then(|| {
@@ -332,6 +495,27 @@ impl SessionStore {
             })
             .flatten();
         Ok((page, next_cursor))
+    }
+
+    /// Summarizes one scoped entry without legacy fallback.
+    ///
+    /// Used for cross-workspace listing where legacy sessions are intentionally
+    /// not aggregated across workspace boundaries.
+    fn scoped_entry_summary(
+        &self,
+        directory: &File,
+        entry: &super::listing::ListEntry,
+    ) -> Option<SessionSummary> {
+        match self.read_scoped_session_bytes_from(directory, &entry.session_id) {
+            Ok((content, _)) => {
+                Some(self.summary_from_bytes(&entry.session_id, &content, entry.modified_at_ms))
+            }
+            Err(SessionError::NotFound { .. }) => None,
+            Err(SessionError::Corrupt { .. }) => {
+                Some(self.corrupt_summary(&entry.session_id, entry.modified_at_ms))
+            }
+            Err(_) => None,
+        }
     }
 
     /// Summarizes one listed entry from scoped storage or its legacy fallback.
@@ -449,6 +633,47 @@ impl SessionStore {
         content: &str,
         modified_at_ms: u64,
     ) -> Result<PersistedSession, SessionError> {
+        let mut session = self.parse_raw_session(session_id, content, modified_at_ms)?;
+        if session.workspace_scope != self.workspace_scope {
+            return Err(SessionError::ScopeMismatch {
+                session_id: session_id.to_string(),
+                expected: self.workspace_scope.clone(),
+                actual: session.workspace_scope,
+            });
+        }
+        // Envelopes are redacted at persist time; redacting again on load
+        // keeps externally written or pre-redaction files equally safe.
+        crate::redaction::redact_messages(&mut session.messages);
+        // Bound untrusted model metadata to the summary budget so resume
+        // cannot replay an oversized string into init payloads or provider
+        // state that the 256-byte summary bound already refuses to carry.
+        session.model = bounded_summary_text(&session.model, MAX_SUMMARY_MODEL_BYTES);
+        // Raise the durable revision floor from the stored projection *before*
+        // sanitization can drop it. Pre-`compaction_revision` envelopes carry
+        // the clock only inside the projection, and a projection about to be
+        // rejected still proves that its revision was published once.
+        if let Some(state) = session.compaction.as_ref() {
+            session.compaction_revision = session.compaction_revision.max(state.revision);
+        }
+        // A damaged or out-of-contract projection degrades to the complete
+        // transcript instead of failing the load; the transcript is always a
+        // safe effective context. The revision clock survives regardless, so
+        // the next commit cannot reuse a revision that was already published.
+        if let Some(state) = session.compaction.take() {
+            session.compaction = crate::compaction::sanitize_loaded_state(state, &session.messages);
+        }
+        Ok(session)
+    }
+
+    /// Parses a session envelope without workspace-scope validation or the
+    /// post-processing steps (redaction, model bounding, compaction repair)
+    /// that are only safe for sessions that will be resumed in this workspace.
+    fn parse_raw_session(
+        &self,
+        session_id: &ProviderSessionId,
+        content: &str,
+        modified_at_ms: u64,
+    ) -> Result<PersistedSession, SessionError> {
         let value: serde_json::Value =
             serde_json::from_str(content).map_err(|error| SessionError::Corrupt {
                 session_id: session_id.to_string(),
@@ -500,35 +725,6 @@ impl SessionStore {
                 session_id: session_id.to_string(),
                 message: "filename and envelope session IDs differ".to_string(),
             });
-        }
-        if session.workspace_scope != self.workspace_scope {
-            return Err(SessionError::ScopeMismatch {
-                session_id: session_id.to_string(),
-                expected: self.workspace_scope.clone(),
-                actual: session.workspace_scope,
-            });
-        }
-        let mut session = session;
-        // Envelopes are redacted at persist time; redacting again on load
-        // keeps externally written or pre-redaction files equally safe.
-        crate::redaction::redact_messages(&mut session.messages);
-        // Bound untrusted model metadata to the summary budget so resume
-        // cannot replay an oversized string into init payloads or provider
-        // state that the 256-byte summary bound already refuses to carry.
-        session.model = bounded_summary_text(&session.model, MAX_SUMMARY_MODEL_BYTES);
-        // Raise the durable revision floor from the stored projection *before*
-        // sanitization can drop it. Pre-`compaction_revision` envelopes carry
-        // the clock only inside the projection, and a projection about to be
-        // rejected still proves that its revision was published once.
-        if let Some(state) = session.compaction.as_ref() {
-            session.compaction_revision = session.compaction_revision.max(state.revision);
-        }
-        // A damaged or out-of-contract projection degrades to the complete
-        // transcript instead of failing the load; the transcript is always a
-        // safe effective context. The revision clock survives regardless, so
-        // the next commit cannot reuse a revision that was already published.
-        if let Some(state) = session.compaction.take() {
-            session.compaction = crate::compaction::sanitize_loaded_state(state, &session.messages);
         }
         Ok(session)
     }
@@ -694,17 +890,17 @@ impl SessionStore {
                 schema_version: Some(version),
                 health: SessionHealth::Incompatible,
             },
-            Err(SessionError::ScopeMismatch { actual, .. }) => SessionSummary {
-                session_id: session_id.clone(),
-                workspace_scope: bounded_summary_text(&actual, MAX_SUMMARY_WORKSPACE_BYTES),
-                created_at_ms: modified_at_ms,
-                updated_at_ms: modified_at_ms,
-                model: None,
-                message_count: 0,
-                first_prompt: None,
-                schema_version: Some(CURRENT_SCHEMA_VERSION),
-                health: SessionHealth::ScopeMismatch,
-            },
+            Err(SessionError::ScopeMismatch { .. }) => {
+                // A foreign workspace session is still visible in --all; show
+                // its real metadata so the picker row matches local sessions.
+                match self.parse_raw_session(session_id, content, modified_at_ms) {
+                    Ok(mut session) => {
+                        crate::redaction::redact_messages(&mut session.messages);
+                        summary_from_session(&session, SessionHealth::ScopeMismatch)
+                    }
+                    Err(_) => self.corrupt_summary(session_id, modified_at_ms),
+                }
+            }
             Err(_) => self.corrupt_summary(session_id, modified_at_ms),
         }
     }

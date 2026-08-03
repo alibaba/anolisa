@@ -78,8 +78,9 @@ cosh-shell --resume <session-id> # Select a known provider session
 ```
 
 Inside cosh-shell, use `/session` to browse sessions, `/session list` to copy
-complete session IDs, and `/session status` to inspect selected and active
-identities. `/session new` (or `/new`) detaches the current provider
+complete session IDs, `/session list --all` to list sessions across every
+workspace under the same storage root, and `/session status` to inspect selected
+and active identities. `/session new` (or `/new`) detaches the current provider
 conversation so the next Agent request starts fresh without restarting the
 shell; `/session clear ...` removes old entries after confirmation.
 `/session compact` summarizes any complete conversation prefix in the
