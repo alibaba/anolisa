@@ -143,6 +143,7 @@ pub(crate) struct InlineState {
     pub(crate) input_wait_facts: HashMap<String, crate::adapter::HostExecutedInputWait>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
+    pub(crate) startup_auth: StartupAuthState,
     pub(crate) personalization: PersonalizationState,
     pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
 }
@@ -206,6 +207,70 @@ impl StartupHealthState {
                 self.rendered = true;
             }
         }
+    }
+}
+
+/// Background probe of the effective AI credential state, resolved via
+/// cosh-core at bootstrap so the startup banner can hint `/auth` without
+/// blocking first paint. Fail-quiet: an error, timeout, or missing probe
+/// leaves `resolved` at `None` and nothing is shown.
+///
+/// Lifecycle: the `Default` state (no probe, no verdict) is the safe
+/// state — every consumer treats it as "not unconfigured", so an
+/// `InlineState` built without bootstrap wiring can never trigger the
+/// hint. Bootstrap installs `pending` only for the CoshCore adapter
+/// with AI enabled and the banner on; a successful `/auth` credential
+/// change resets the state to `Default` so no stale verdict outlives
+/// the credentials it described.
+#[derive(Default)]
+pub(crate) struct StartupAuthState {
+    pub(crate) pending: Option<mpsc::Receiver<Option<bool>>>,
+    pub(crate) resolved: Option<bool>,
+}
+
+impl StartupAuthState {
+    pub(crate) fn wait_ready(&mut self, timeout: Duration) {
+        if self.resolved.is_some() {
+            return;
+        }
+        let Some(receiver) = &self.pending else {
+            return;
+        };
+        match receiver.recv_timeout(timeout) {
+            Ok(resolved) => {
+                self.resolved = resolved;
+                self.pending = None;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.pending = None;
+            }
+        }
+    }
+
+    pub(crate) fn poll_ready(&mut self) {
+        if self.resolved.is_some() {
+            return;
+        }
+        let Some(receiver) = &self.pending else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(resolved) => {
+                self.resolved = resolved;
+                self.pending = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+            }
+        }
+    }
+
+    /// True only when the authority explicitly reported "no usable
+    /// credentials"; uncertainty never shows the hint.
+    pub(crate) fn ai_unconfigured(&self) -> bool {
+        self.resolved == Some(false)
     }
 }
 

@@ -215,8 +215,14 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     Ok(())
 }
 
-fn clear_observed_model_after_provider_change(state: &mut InlineState) {
+pub(super) fn clear_observed_model_after_provider_change(state: &mut InlineState) {
     state.personalization.foreground_model = None;
+    // Credentials just changed: drop the startup probe verdict so the
+    // no-auth surfaces re-resolve instead of trusting a pre-change
+    // snapshot (a stale `Some(false)` would keep suppressing the
+    // recommendation disclosure for the rest of the session).
+    state.startup_auth.pending = None;
+    state.startup_auth.resolved = None;
 }
 
 fn clear_observed_model_after_provider_delete(

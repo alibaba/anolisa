@@ -176,17 +176,24 @@ mod tests {
             MessageId::ApprovalRiskPhraseSystemControl as usize,
             MessageId::AgentGovernanceHookDecisionUnspecified as usize + 1
         );
-        // The #2025/#2161 input-wait segment now owns the tail.
+        // The #2025/#2161 input-wait segment follows the system-control
+        // segment; tail ownership assertions move with each appended segment.
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
             MessageId::ApprovalIrrecoverableWarningLine as usize + 1
         );
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
-            MessageId::ALL.len() - 10
+            MessageId::ALL.len() - 11
         );
         assert_eq!(
             MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
+            MessageId::ALL.len() - 2
+        );
+        // The #2068 startup auth-hint segment is the current tail; tail
+        // ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::StartupAuthHintLine as usize,
             MessageId::ALL.len() - 1
         );
     }

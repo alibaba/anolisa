@@ -184,6 +184,20 @@ pub(crate) fn run_raw(
         inline_state.startup_health.pending =
             Some(spawn_startup_health_scan(cosh_config.health.clone()));
     }
+    // The credential probe only feeds startup-banner surfaces; without a
+    // banner it would just cost an extra cosh-core process per launch.
+    if cosh_config.ai_enabled && crate::runtime::startup::startup_banner_enabled() {
+        if let AdapterInstance::CoshCore(core) = &adapter {
+            let core = core.clone();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            inline_state.startup_auth.pending = Some(receiver);
+            let _ = std::thread::Builder::new()
+                .name("cosh-startup-auth-probe".to_string())
+                .spawn(move || {
+                    let _ = sender.send(core.ai_configured().ok());
+                });
+        }
+    }
     let hook_feedback = load_hook_feedback_preferences();
     inline_state.hooks.feedback = hook_feedback.feedback;
     inline_state.hooks.noisy_groups = hook_feedback.noisy_groups;

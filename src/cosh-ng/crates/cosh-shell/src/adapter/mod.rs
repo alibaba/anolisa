@@ -16,6 +16,7 @@ mod control_protocol;
 #[cfg(test)]
 mod control_protocol_tests;
 mod cosh_core;
+mod cosh_core_auth;
 mod cosh_core_process;
 mod cosh_core_registry;
 #[cfg(test)]

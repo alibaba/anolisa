@@ -103,4 +103,5 @@ collect_message_ids!([
     hook_notification_ids,
     approval_system_control_ids,
     input_wait_hint_ids,
+    startup_auth_hint_ids,
 ],);

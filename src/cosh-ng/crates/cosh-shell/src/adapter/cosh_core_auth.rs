@@ -1,8 +1,17 @@
-use crate::adapter::CoshCoreAdapter;
+//! Effective AI credential state resolved through the cosh-core registry.
 
-pub(crate) fn current_ai_configured(adapter: &CoshCoreAdapter) -> Result<bool, String> {
-    let value = adapter.registry_query("auth", "state", serde_json::Value::Null)?;
-    auth_state_is_configured(&value)
+use super::CoshCoreAdapter;
+
+impl CoshCoreAdapter {
+    /// Returns whether the active provider has usable credentials.
+    ///
+    /// cosh-core owns the per-provider semantics (env vars, user/system
+    /// config layering, ECS RAM role exemption); this only transports the
+    /// resolved boolean, so provider additions never touch the shell side.
+    pub(crate) fn ai_configured(&self) -> Result<bool, String> {
+        let value = self.registry_query("auth", "state", serde_json::Value::Null)?;
+        auth_state_is_configured(&value)
+    }
 }
 
 fn auth_state_is_configured(value: &serde_json::Value) -> Result<bool, String> {
@@ -12,6 +21,8 @@ fn auth_state_is_configured(value: &serde_json::Value) -> Result<bool, String> {
     {
         return Ok(!required);
     }
+    // Legacy fallback for cores that predate `effective_auth_required`:
+    // mirrors the builtin provider shapes and is intentionally frozen.
     let active = value
         .get("active_provider")
         .and_then(serde_json::Value::as_str)
@@ -101,6 +112,17 @@ mod tests {
         });
 
         assert_eq!(auth_state_is_configured(&env_only), Ok(true));
+    }
+
+    #[test]
+    fn recognizes_effective_auth_required_as_unconfigured() {
+        let unconfigured = serde_json::json!({
+            "active_provider": "dashscope",
+            "saved_providers": [],
+            "effective_auth_required": true
+        });
+
+        assert_eq!(auth_state_is_configured(&unconfigured), Ok(false));
     }
 
     #[test]

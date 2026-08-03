@@ -28,7 +28,7 @@ new over-threshold file appears that is not listed here.
 |------:|------|-------|---------------------|
 | 1717 | `src/ui/agent_render/health.rs` | ui | Health banner rendering; pre-existing. Split per-severity renderers. |
 | 1628 | `src/diagnostics/health/collectors.rs` | diagnostics | Per-subsystem collectors; pre-existing. Split by collector family. |
-| 861 | `src/runtime/state.rs` | runtime | Central inline state; approval state extracted to `approval_state.rs` (main baseline 850, back under the 1000-line growth bar). The #1940 approval-terminal-state fix adds the `approval_ledger` field plus two accessors, which co-locate with their `ControlState` host. Continue per-domain splits. |
+| 928 | `src/runtime/state.rs` | runtime | Central inline state; approval state extracted to `approval_state.rs` (main baseline 871, back under the 1000-line growth bar). The #1940 approval-terminal-state fix adds the `approval_ledger` field plus two accessors, which co-locate with their `ControlState` host. The #2068 startup auth hint adds the `StartupAuthState` probe holder next to its `StartupHealthState` sibling. Continue per-domain splits. |
 | 912 | `src/evidence/output_policy.rs` | evidence | Output excerpt policy; pre-existing. Split bounding from classification. |
 | 906 | `src/adapter/fake.rs` | adapter | Test fake adapter; pre-existing. Split scripted-scenario builders. |
 | 952 | `src/ui/agent_render/approval.rs` | ui | Approval card rendering; action-row rendering extracted to `approval_actions.rs` (turn consent, #1773); irrecoverable warning extracted to `approval_warning.rs` and reason-line rendering to `approval_reason.rs` (#2064). Split per-card-kind renderers next. |
