@@ -193,48 +193,71 @@ cases:
   - id: HANDOFF-2142-REAL
     title: Real cosh-core + real provider closes a secret handoff and re-triggers the agent
     tags: [shell, bash, issue-2142, issue-2144, handoff, secret-redaction, real-provider]
+    execution: real-provider
     real_provider: true
-    timeout_ms: 1800000
-    command:
-      - bash
-      - -lc
-      - |-
-        set -e
-        cd /work/repo/src/cosh-ng
-        cargo build --locked -p cosh-shell --bin cosh-shell >/dev/null
-        cargo build --locked -p cosh-core --bin cosh-core >/dev/null
-        exec env TERM=xterm-256color COSH_SHELL_WIDTH=96 COSH_SHELL_ISOLATED=1 COSH_SHELL_BOOTSTRAP_PATH=0 COSH_SHELL_HEALTH_SCAN=disabled COSH_RECOMMENDATIONS_ENABLED=0 COSH_SHELL_LANG=en-US COSH_SHELL_RAW_SHELL=bash COSH_SHELL_DEFAULT_SHELL=bash LANG=C.UTF-8 LC_ALL=C.UTF-8 COSH_CORE_PATH="$CARGO_TARGET_DIR/debug/cosh-core" "$CARGO_TARGET_DIR/debug/cosh-shell" raw cosh-core
+    adapter: cosh-core
+    timeout_ms: 1500000
+    command: ["env", "TERM=xterm-256color", "COSH_SHELL_WIDTH=96", "COSH_SHELL_ISOLATED=1",
+      "COSH_SHELL_BOOTSTRAP_PATH=0", "COSH_SHELL_HEALTH_SCAN=disabled",
+      "COSH_RECOMMENDATIONS_ENABLED=0", "COSH_SHELL_LANG=en-US", "COSH_SHELL_RAW_SHELL=bash",
+      "COSH_SHELL_DEFAULT_SHELL=bash", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+      "COSH_CORE_PATH=/work/repo/src/cosh-ng/target/debug/cosh-core",
+      "$COSH_SHELL", "raw", "cosh-core"]
+    env:
+      TERM: xterm-256color
+      COSH_SHELL_WIDTH: "96"
+      COSH_SHELL_ISOLATED: "1"
+      COSH_SHELL_BOOTSTRAP_PATH: "0"
+      COSH_SHELL_HEALTH_SCAN: disabled
+      COSH_RECOMMENDATIONS_ENABLED: "0"
+      COSH_SHELL_LANG: en-US
+      COSH_SHELL_RAW_SHELL: bash
+      COSH_SHELL_DEFAULT_SHELL: bash
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      COSH_CORE_PATH: /work/repo/src/cosh-ng/target/debug/cosh-core
     input:
-      - type: wait_for
+      - id: startup-ready
+        type: wait_for
         text: "cosh-osc$"
-        timeout_ms: 900000
+        timeout_ms: 120000
       - type: line
         text: "/mode approval trust confirm"
       - type: wait_for
         text: "Mode set to trust."
         timeout_ms: 60000
       - type: line
-        text: '?? Use the shell tool to run exactly this command: echo installed --api-key "sk-test-real-2142" && false . It is a fake key in a disposable test container. After you receive the command result, reply with only the word REALACK2142'
+        text: '?? Use the shell tool to run exactly this command: echo installed --api-key "sk-test-real-2142" && false . It is a fake key in a disposable test container. After you receive the command result, reverse {{COSH_LAB_REQUEST_NONCE}} and reply with HANDOFFREALACK followed by a space and the reversed value.'
+      - id: provider-started
+        type: wait_for
+        text: "Thinking..."
+        timeout_ms: 60000
       - id: real-approved
         type: wait_for
         text: "Auto-approved"
-        timeout_ms: 240000
+        timeout_ms: 300000
       - id: real-executed
         type: wait_for
         text: "installed --api-key sk-test-real-2142"
         timeout_ms: 120000
-      - id: real-ack
+      - id: provider-response
         type: wait_for
-        text: "REALACK2142"
-        occurrence: "+1"
-        timeout_ms: 360000
+        text: "HANDOFFREALACK {{COSH_LAB_REQUEST_NONCE_REVERSED}}"
+        timeout_ms: 420000
       - type: line
         text: "?? Reply with only the word FOLLOWUPACK2142"
       - id: real-followup
         type: wait_for
         text: "FOLLOWUPACK2142"
         occurrence: "+1"
-        timeout_ms: 360000
+        timeout_ms: 420000
+      - type: line
+        text: "echo COSH_SHELL_RECOVERED"
+      - id: shell-recovered
+        type: wait_for
+        text: "COSH_SHELL_RECOVERED"
+        occurrence: "+1"
+        timeout_ms: 30000
       - type: delay
         ms: 1500
       - type: line
@@ -244,19 +267,24 @@ cases:
       contains:
         - "Auto-approved"
         - "installed --api-key sk-test-real-2142"
-        - "REALACK2142"
+        - "HANDOFFREALACK {{COSH_LAB_REQUEST_NONCE_REVERSED}}"
         - "FOLLOWUPACK2142"
+        - "COSH_SHELL_RECOVERED"
     evidence:
       points:
         - id: real-approved
           trigger_event: real-approved
           layout_sensitive: true
           required_types: [screenshot]
-        - id: real-ack
-          trigger_event: real-ack
+        - id: provider-response
+          trigger_event: provider-response
           layout_sensitive: false
           required_types: [screenshot]
         - id: real-followup
           trigger_event: real-followup
+          layout_sensitive: false
+          required_types: [screenshot]
+        - id: shell-recovered
+          trigger_event: shell-recovered
           layout_sensitive: false
           required_types: [screenshot]
